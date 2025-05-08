@@ -1,5 +1,7 @@
+from datetime import datetime, UTC
 import json
 import redis
+
 
 class EigsepRedis:
 
@@ -19,7 +21,7 @@ class EigsepRedis:
 
     def add_metadata(self, key, value):
         """
-        Add metadata to Redis.
+        Add metadata to Redis. Automatically adds a timestamp.
 
         Parameters
         ----------
@@ -29,7 +31,8 @@ class EigsepRedis:
             Metadata value.
 
         """
-        return self.r.hset("metadata", key, json.dumps(value))
+        d = {"value": value, "ts": datetime.now(tz=UTC).isoformat()}
+        return self.r.hset("metadata", key, json.dumps(d))
 
     def get_metadata(self, key=None):
         """
@@ -57,11 +60,11 @@ class EigsepRedis:
         ----------
         key : str
             Data key.
-        data : bytes
+        value : bytes
             Data value.
 
         """
-        return self.r.set(key, data)
+        return self.r.set(key, value)
 
     def get_raw(self, key):
         """
