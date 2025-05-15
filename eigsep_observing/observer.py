@@ -94,7 +94,6 @@ class EigObserver:
 
         self.cfg = cfg
         self.redis = EigsepRedis()
-        self.sw_network = SwitchNetwork(serport=cfg.pico_id["switch"])
 
         if self._use_vna:
             self.init_vna()  # XXX does this do anything?
@@ -110,25 +109,40 @@ class EigObserver:
         """
         pass
 
-    def set_mode(self, mode, update_redis=True):
-        self.logger.info(f"Switching to {mode} mode")
-        # XXX need to put some list into redis of all the modes in the file
-        if update_redis:
-            self.redis.add_metadata(
-        self.sw_network.switch(mode, verbose=False)
-        self.mode = mode
-        if "VNA" in mode:  # XXX or whatever we call the modes
-            self.observe_vna()
-        pass
-
-    def observe_vna(self, timeout=300):
+    def set_mode(self, mode):
         """
-        VNA observations.
+        Switch observing mode with RF switches.
+
+        Parameters
+        ----------
+        mode : str
+            Observing mode. Either ``sky'', ``load'', ``noise'' for 
+            correlations, or ``vna_ant''  or ``vna_rec'' for
+            S11 measurements with the VNA.
+        
+        """
+        self.logger.info(f"Switching to {mode} mode")
+        self.redis.add_metadata("obs_mode", mode)
+        # XXX send switch command to PANDA
+        # some redis command to set the mode
+        # XXX
+        self.mode = mode
+        if "vna" in mode:  # XXX or whatever we call the modes
+            self.observe_vna(mode)
+
+    def observe_vna(self, mode, timeout=300):
+        """
+        VNA observations. Performs OSL calibration measurements and
+        measurment of the device(s) under test.
 
         Send START to VNA, wait for COMPLETE message.
 
         Parameters
         ----------
+        mode : str
+            The mode to set. Either ``vna_ant'' or ``vna_rec''. The former
+            case measures S11 of antenna, load, and noise source. The latter
+            uses less power and measures S11 of the receiver.
         timeout : int
             The time in seconds to wait for the VNA to complete.
 
@@ -150,6 +164,11 @@ class EigObserver:
                 return 1
             time.sleep(1)
 
+    # XXX
+    def rotate_motors(self, motors):
+        raise NotImplementedError
+
+    # XXX how to handle motors?
     def observe(
         self,
         pairs=None,
