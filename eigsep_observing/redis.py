@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+import datetime
 import json
 import redis
 
@@ -45,6 +45,8 @@ class EigsepRedis:
             payload = json.dumps(value).encode("utf-8")
         # hash (for live updates)
         self.r.hset("metadata", key, payload)
+        ts = datetime.utcnow().isoformat()
+        self.r.hset("metadata", f"{key}_ts", ts)
         # stream (for file header)
         stream_key = f"stream:{key}"
         self.r.xadd(
@@ -107,7 +109,6 @@ class EigsepRedis:
                 self.streams[stream] = eid
             redis_hdr[stream] = out
         return redis_hdr
-
 
     def add_raw(self, key, value):
         """
