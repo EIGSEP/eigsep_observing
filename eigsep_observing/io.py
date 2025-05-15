@@ -37,7 +37,7 @@ def write_file(fname, data, header):
 
 class File:
 
-    def __init__(self, save_dir, pairs, ntimes, header):
+    def __init__(self, save_dir, pairs, ntimes, header, redis=None):
         """
         Initialize the File object.
 
@@ -51,24 +51,26 @@ class File:
             Number of time steps to accumulate per file.
         header : dict
             Header information to be written to the file.
+        redis : EigsepRedis
+            Redis server to pull more header information from.
 
         """
         self.save_dir = save_dir
         self.ntimes = ntimes
         self.pairs = pairs
         self.header = header
+        self.redis = redis
 
         acc_bins = header["acc_bins"]
         nchan = header["nchan"]
         dtype = header["dtype"]
 
+        self.header["redis"] = None  # placeholder, set in corr_write
         self.data = {}
         for p in pairs:
             shape = data_shape(ntimes, acc_bins, nchan, cross=len(p) > 1)
             self.data[p] = np.zeros(shape, dtype=dtype)
 
-        self.acc_cnt = np.zeros(ntimes, dtype=dtype)
-        self.obs_mode = np.empty(ntimes, dtype=str)
         self._counter = 0
 
     def __len__(self):
@@ -81,10 +83,10 @@ class File:
         """
         for p in self.pairs:
             self.data[p].fill(0)
-        self.acc_cnt.fill(0)
+        self.header["redis"] = None
         self._counter = 0
 
-    def add_data(self, data, cnt, mode="sky"):
+    def add_data(self, data):
         """
         Populate the data arrays with the given data.
 
@@ -92,12 +94,7 @@ class File:
         ----------
         data : dict
             Dictionary of data arrays to be added for one time step.
-        cnt : int
-            Current accumulation count.
-        mode : str
-            Observing mode, either ``sky'', ``noise'', or ``load''. Added
-            to the header.
-
+        
         Returns
         -------
         str
@@ -108,8 +105,6 @@ class File:
         for p, d in data.items():
             arr = self.data[p]
             arr[self._counter] = d
-            self.acc_cnt[self._counter] = cnt
-            self.obs_mode[self._counter] = mode
         self._counter += 1
         if self._counter == self.ntimes:
             return self.corr_write()
@@ -131,14 +126,11 @@ class File:
             Filename where the data was written.
 
         """
-        # XXX
-        # need to write acc cnt and obs mode to the file
-        # XXX
-        :q
-        :q
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = Path(self.save_dir) / f"corr_{date}.h5"
+        if self.redis is not None:
+            self.header["redis"] = self.redis.get_header()
         write_file(fname, self.data, self.header)
         self.reset()
         return fname

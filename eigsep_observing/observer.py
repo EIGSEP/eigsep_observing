@@ -1,17 +1,65 @@
+from itertools import cycle
 import logging
-from . import EigsepRedis
+import queue
+import time
+from threading import Event, Thread
+
+from switch_network import SwitchNetwork
+
+from . import EigsepRedis, io
+from .config import default_obs_config
+
+
+def make_schedule(switch_schedule):
+    """
+    Create a schedule for switching between VNA and SNAP observing. This
+    creates a cycle object that can iterate indefinitely over the switch
+    schedule.
+
+    Parameters
+    ----------
+    switch_schedule : dict
+        The switch schedule used for observing. A dictionary with keys
+        `vna'', ``snap_repeat'', ``sky'', ``load'', and ``noise''. The
+        first two keys specify the number of measurements with the VNA and
+        the SNAP respectivtly. When measuring PSDs with the SNAP, the
+        ``sky'', ``load'', and ``noise'' keys specify the number of
+        measurements to take for each state.
+
+    Returns
+    -------
+    schedule : cycle
+        A cycle object that iterates over the switch schedule. The schedule
+        is a list of tuples, where each tuple contains the state and the
+        number of measurements to take.
+
+    Notes
+    -----
+    Defaults are 0 for all states, except for ``snap_repeat'', which is 1.
+
+    """
+    n_vna = switch_schedule.get("vna", 0)
+    if n_vna > 0:
+        schedule = [("vna", n_vna)]
+    else:
+        schedule = []
+    block = [(k, switch_schedule.get(k, 0)) for k in ("sky", "load", "noise")]
+    block = [x for x in block if x[1] > 0]
+    n_repeat = switch_schedule.get("snap_repeat", 1)
+    if n_repeat > 0:
+        schedule += n_repeat * block
+    return cycle(schedule)
 
 
 class EigObserver:
 
     def __init__(
         self,
+        cfg=default_obs_config,
         fpga=None,
-        sensors=None,
-        switch_schedule=None,  # XXX default switch schedule
         logger=None,
     ):
-        """`
+        """
         Main controll class for Eigsep observing. This code is meant to run
         on the Raspberry Pi. It uses EigsepFpga to initialize observing
         with the SNAP correlator and communicates with the LattePanda in the
@@ -20,59 +68,39 @@ class EigObserver:
 
         Parameters
         ----------
+        cfg : eigsep_observing.config.ObsConfig
+            The configuration object to use for observing. This is a
+            data class specifying the sensors and switch schedule to use.
         fpga : EigsepFpga
             The EigsepFpga object to use for observing.
-        sensors : list of Sensor
-            The list of Sensor objects to use for observing.
-        switch_schedule : dict
-            The switch schedule to use for observing. This is a dictionary
-            with keys ``vna'', ``load'', ``noise'', and ``sky''. The values
-            represents the number of measurements to take for each state.
 
         """
         if logger is None:
             logger = logging.getLogger(__name__)
             logger.setLevel(logging.DEBUG)
         self.logger = logger
-
-        self.switch_schedule = switch_schedule
-        if self.switch_schedule["vna"] > 0:
-            use_vna = True
-            self._mode = "vna"
-        if (
-            self.switch_schedule["load"] > 0
-            or self.switch_schedule["noise"] > 0
-            or self.switch_schedule["sky"] > 0
-        ):
-            use_snap = True
-            self._mode = "snap"
-        if use_vna and use_snap:
-            self._mode = "both"
-
+        self._use_vna = cfg.switch_schedule.get("vna", 0) > 0
         self.fpga = fpga
         if self.fpga is None:
             self.logger.warning(
                 "No Fpga instance. Running isolated VNA measurements. "
             )
+            cfg.switch_schedule["snap_repeat"] = 0  # no SNAP observing
 
-            self._mode = "vna"
-            if not use_vna:
+            if self._use_vna:
                 raise ValueError(
-                    "In isolated VNA mode, but `use_vna`` is False. "
+                    "In isolated VNA mode, but no VNA measurements "
                 )
 
+        self.cfg = cfg
         self.redis = EigsepRedis()
-        self.sensors = sensors
-        self.use_vna = use_vna
+        self.sw_network = SwitchNetwork(serport=cfg.pico_id["switch"])
 
-        if sensors is not None:
+        if self._use_vna:
+            self.init_vna()  # XXX does this do anything?
+
+        if self.cfg.sensors is not None:
             self.init_sensors()
-
-        # if switching:
-        #    self.init_switching()
-
-        # if use_vna:
-        #    self.init_vna()
 
     def init_sensors(self):
         """
@@ -82,32 +110,48 @@ class EigObserver:
         """
         pass
 
-    def init_switching(self):
-        """
-        Use Redis to initialize observing with swtiching. Got to have a switch
-        schedule going. The state absolutely needs to be in the header.
-        """
-        # XXX here we need to set self.SwitchingSchedule or some config
+    def set_mode(self, mode, update_redis=True):
+        self.logger.info(f"Switching to {mode} mode")
+        # XXX need to put some list into redis of all the modes in the file
+        if update_redis:
+            self.redis.add_metadata(
+        self.sw_network.switch(mode, verbose=False)
+        self.mode = mode
+        if "VNA" in mode:  # XXX or whatever we call the modes
+            self.observe_vna()
         pass
 
-    def set_mode(self, mode):
-        # XXX need to update redis!
-        # self.mode = mode
-        pass
-
-    def _observe_vna(self):
+    def observe_vna(self, timeout=300):
         """
         VNA observations.
 
-        """
-        pass
+        Send START to VNA, wait for COMPLETE message.
 
-    def _observe_snap(self):
-        pass
+        Parameters
+        ----------
+        timeout : int
+            The time in seconds to wait for the VNA to complete.
+
+        Returns
+        -------
+        int
+            Exit code. 0 if sucessful, 1 if timeout.
+
+        """
+        # send start
+        # redis set VNA_START
+        tstart = time.time()
+        while True:
+            # redis get VNA_COMPLETE
+            # if VNA_COMPLETE:
+            #    return 0
+            if time.time() - tstart > timeout:
+                self.logger.warning("VNA timed out.")
+                return 1
+            time.sleep(1)
 
     def observe(
         self,
-        schedule,  # XXX set default schedule to sky obs, no switch!
         pairs=None,
         timeout=10,
         update_redis=True,
@@ -125,24 +169,22 @@ class EigObserver:
         3. An all of the above case, where we regularly switch between
         VNA measurements and SNAP measurements.
 
-        """
-        if mode == "vna":
-            return self._observe_vna()
+        Parameters
+        ----------
+        pairs : list
+            The list of pairs to observe. If None, all pairs will be
+            observed.
+        timeout : int
+            The time in seconds to wait for data from the correlator.
+        update_redis : bool
+            Push data to Redis.
+        write_files : bool
+            Write data to files.
 
+
+        """
         if pairs is None:
             pairs = self.fpga.autos + self.fpga.crosses
-
-        # switch to load and noise source based on switch schedule
-        # schedule sets 1, 1, N
-        # switch load
-        # observe one spectrum (load)
-        # switch noise source
-        # observe one spectrum (noise source)
-        # switch back to sky
-        # observe N spectra (sky)
-
-        # pause observing, write file etc
-        # switch to VNA mode
 
         self.fpga.queue = queue.Queue(maxsize=0)
         self.fpga.pause_event = Event()
@@ -163,10 +205,10 @@ class EigObserver:
                 pairs,
                 self.fpga.cfg.ntimes,
                 self.fpga.metadata,
+                redis=self.redis,
             )
 
-        # XXX
-        # self.schedule = cycle
+        self.schedule_cycle = make_schedule(self.cfg.switch_schedule)
         remaining = -1  # initialize remaining to trigger first switch
         while not self.fpga.stop_event.is_set():
             if remaining <= 0:
@@ -177,13 +219,9 @@ class EigObserver:
                         _ = self.fpga.queue.get_nowait()
                     except queue.Empty:
                         break
-                mode, remaining = next(self.schedule)
+                mode, remaining = next(self.schedule_cycle)
                 self.logging.info(f"Switching to {mode} mode")
                 self.set_mode(mode)
-                if mode == "vna":
-                    self.observe_vna()
-                    remaining -= 1
-                    continue
                 self.fpga.pause_event.clear()
             try:
                 d = self.fpga.queue.get(block=True, timeout=timeout)
@@ -198,12 +236,19 @@ class EigObserver:
                     self.logger.info("Stopping observing.")
                     break
                 continue
-            # XXX update redis and write to file
             data = d["data"]
             cnt = d["cnt"]
             if update_redis:
                 self.fpga.update_redis(data, cnt)
             if write_files:
-                filename = self.file.add_data(data, cnt, mode=self.mode)
+                filename = self.file.add_data(data)
+                if filename is not None:
+                    self.logger.info(f"Writing file {filename}")
             remaining -= 1
+        if self.file is not None:
+            if len(self.file) > 0:
+                self.logger.info("Writing short final file.")
+                self.file.corr_write()
 
+        thd.join()
+        self.logger.info("Observing complete.")
