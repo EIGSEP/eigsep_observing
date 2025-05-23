@@ -4,8 +4,6 @@ import queue
 import time
 from threading import Event, Thread
 
-from switch_network import SwitchNetwork
-
 from . import EigsepRedis, io
 from .config import default_obs_config
 
@@ -95,9 +93,6 @@ class EigObserver:
         self.cfg = cfg
         self.redis = EigsepRedis()
 
-        if self._use_vna:
-            self.init_vna()  # XXX does this do anything?
-
         if self.cfg.sensors is not None:
             self.init_sensors()
 
@@ -111,58 +106,105 @@ class EigObserver:
 
     def set_mode(self, mode):
         """
-        Switch observing mode with RF switches.
+        Switch observing mode with RF switches and start VNA observing if
+        needed.
 
         Parameters
         ----------
         mode : str
             Observing mode. Either ``sky'', ``load'', ``noise'' for 
-            correlations, or ``vna_ant''  or ``vna_rec'' for
-            S11 measurements with the VNA.
+            correlations, or ``ant''  or ``rec'' for S11 measurements with 
+            the VNA.
+
+        Raises
+        ------
+        ValueError
+            If the mode is not one of the valid modes.
         
         """
-        self.logger.info(f"Switching to {mode} mode")
-        self.redis.add_metadata("obs_mode", mode)
-        # XXX send switch command to PANDA
-        # some redis command to set the mode
-        # XXX
-        self.mode = mode
-        if "vna" in mode:  # XXX or whatever we call the modes
-            self.observe_vna(mode)
+        if mode in ("ant", "rec"):
+            self.logger.info(f"Switching to VNA mode, measuring {mode}")
+            try:
+                self.observe_vna(mode)
+            except ValueError as e:
+                self.logger.error(f"VNA error: {e}")
+                raise
+            except TimeoutError:
+                self.logger.error("VNA timeout. Check connection.")
+            except RuntimeError as e:
+                self.logger.error(f"Unexpected status: {e}")
+        elif mode in ("sky", "load", "noise"):
+            self.logger.info(f"Switching to {mode} measurements")
+            if mode == "sky":
+                redis_cmd = "switch:RFANT"
+            elif mode == "load":
+                redis_cmd = "switch:RFLOAD"
+            elif mode == "noise":
+                redis_cmd = "switch:RFN"
+            self.redis.send_ctrl(f"switch:{mode}")
+        else:
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be one of "
+                "'sky', 'load', 'noise', 'ant', or 'rec'."
+            )
+
 
     def observe_vna(self, mode, timeout=300):
         """
         VNA observations. Performs OSL calibration measurements and
         measurment of the device(s) under test.
 
-        Send START to VNA, wait for COMPLETE message.
-
         Parameters
         ----------
         mode : str
-            The mode to set. Either ``vna_ant'' or ``vna_rec''. The former
-            case measures S11 of antenna, load, and noise source. The latter
+            The mode to set. Either ``ant'' or ``rec''. The former
+            case measures S11 of antenna and noise source. The latter
             uses less power and measures S11 of the receiver.
         timeout : int
             The time in seconds to wait for the VNA to complete.
 
-        Returns
-        -------
-        int
-            Exit code. 0 if sucessful, 1 if timeout.
+        Raises
+        ------
+        ValueError
+            If the mode is not one of the valid VNA commands.
+        TimeoutError
+            If the VNA does not complete within the timeout period.
+        RuntimeError
+            If the VNA returns an error status.
 
         """
-        # send start
-        # redis set VNA_START
+        cmd = f"vna:{mode}"
+        if cmd not in self.redis.vna_commands:
+            raise ValueError(f"Invalid VNA command: {cmd}".)
+
+        kwargs = {
+            "ip": self.cfg.vna_ip,
+            "port": self.cfg.vna_port,
+            "timeout": self.cfg.vna_timeout,
+            "fstart": self.cfg.vna_fstart,
+            "fstop": self.cfg.vna_fstop,
+            "npoints": self.cfg.vna_npoints,
+            "ifbw": self.cfg.vna_ifbw,
+            "power_dBm": self.cfg.vna_power[mode],
+        }
+
+        self.redis.send_ctrl(cmd, **kwargs)
         tstart = time.time()
         while True:
-            # redis get VNA_COMPLETE
-            # if VNA_COMPLETE:
-            #    return 0
-            if time.time() - tstart > timeout:
-                self.logger.warning("VNA timed out.")
-                return 1
-            time.sleep(1)
+            entry_id, status = self.redis.read_status()
+            if status == "VNA_TIMEOUT" or time.time() - tstart > timeout:
+                raise TimeoutError
+            if status is None:
+                if entry_id is None:
+                    self.logger.debug("No message yet. Waiting.")
+                else:
+                    self.logger.warning("Invalid status. Waiting.")
+                time.sleep(1)
+                continue
+            if status != "VNA_COMPLETE":
+                raise RuntimeError(f"VNA error, status: {status}")
+            self.logger.info("VNA observation complete.")
+            return
 
     # XXX
     def rotate_motors(self, motors):
@@ -239,7 +281,6 @@ class EigObserver:
                     except queue.Empty:
                         break
                 mode, remaining = next(self.schedule_cycle)
-                self.logging.info(f"Switching to {mode} mode")
                 self.set_mode(mode)
                 self.fpga.pause_event.clear()
             try:
