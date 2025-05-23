@@ -25,6 +25,67 @@ class EigsepRedis:
         self.r = redis.Redis(host=host, port=port, decode_responses=True)
         self.maxlen = maxlen
         self.streams = {}  # stream name, val is last id read
+        self.streams["stream:status"] = "0-0"
+        self.streams["stream:ctrl"] = "0-0"
+
+    @property
+    def ctrl_commands(self):
+        """
+        Return allowed control commnands.
+
+        Returns
+        -------
+        commands : dict
+            Dictonary of commands. Key is the command type: "switch" for 
+            controlling RF switches or "VNA" for initiating VNA observations.
+            Values is a list of allowed commands for that type.
+
+        """
+        commands = {
+            "switch": [
+                # s11 measurements
+                "switch:VNAO",  # open cal standard
+                "switch:VNAS",  # short cal standard
+                "switch:VNAL",  # load cal standard
+                "switch:VNAANT",  # antenna
+                "switch:VNAN", # noise source
+                "switch:VNARF", # receiver
+                # snap observing
+                "switch:RFN", # noise source
+                "switch:RFLOAD",  # load
+                "switch:RFANT",  # antenna
+            ],
+            "VNA": [
+                "vna:ant",  # antenna
+                "vna:rec",  # receiver
+            ],
+        }
+
+    @property
+    def switch_commands(self):
+        """
+        Return allowed RF switch commands.
+
+        Returns
+        -------
+        commands : list
+            List of allowed RF switch commands.
+
+        """
+        return self.ctrl_commands["switch"]
+
+    @property
+    def vna_commands(self):
+        """
+        Return allowed VNA commands.
+
+        Returns
+        -------
+        commands : list
+            List of allowed VNA commands.
+
+        """
+        return self.ctrl_commands["VNA"]
 
     def add_metadata(self, key, value):
         """
@@ -92,6 +153,12 @@ class EigsepRedis:
             value is a list of data values.
 
         """
+        # XXX
+        # this runs on the Pi, so self.streams is NOT updated!!
+        # need to know what streams exist!
+        # XXX also need to INIT the stream-id dict with 0-0
+        # XXX also need to be non-blocking in the way that if a sensor
+        # stop sending data we just put empty values in the header:w
         if stream_key is None:
             streams = self.streams
         else:
@@ -135,3 +202,108 @@ class EigsepRedis:
 
         """
         return self.r.get(key, encoding=None)
+
+    def send_status(self, status):
+        """
+        Publish status message to Redis. Used by client.
+
+        Status must be a string, either ``VNA_COMPLETE'', ``VNA_ERROR'' or
+        ``VNA_TIMEOUT''. Timeout is only used in case of timeout (obviously),
+        other errors get flagged as ``VNA_ERROR''.
+
+        Parameters
+        ----------
+        status : str
+            Status message.
+
+        """
+        self.r.xadd("stream:status", {"status": status}, maxlen=self.maxlen)
+
+    def read_status(self):
+        """
+        Read status stream from Redis. Used by server.
+
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        status : str
+            Status message. If None, no message was received.
+
+        """
+        msg = self.r.xread(
+            {"stream:status": self.streams["stream:status"]}, block=0, count=1
+        )
+        if not msg:
+            return None, None
+        entry_id, status_dict = msg[1][0]  # since count=1, it's a list of 1
+        self.streams["stream:status"] = entry_id  # update the stream id
+        status = status_dict.get("status")
+        return entry_id, status
+
+    def send_ctrl(self, cmd, **kwargs):
+        """
+        Stream control message to Redis. Used by server.
+
+        Parameters
+        ----------
+        cmd : str
+            Command to execute.
+        kwargs : dict
+            Additional arguments for the command.
+
+        Raises
+        ------
+        ValueError
+            If the command is not in the list of allowed commands as defined
+            by the property ``control_commands''.
+
+        """
+        if cmd not in self.switch_commands and cmd not in self.vna_commands:
+            raise ValueError(f"Command {cmd} not allowed.")
+        payload = {"cmd": cmd}
+        if kwargs:
+            payload["kwargs"] = kwargs
+        self.r.xadd("stream:ctrl", {"msg": json.dumps(payload)})
+
+    def read_ctrl(self):
+        """
+        Read control stream from Redis. Used on client (Panda).
+
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        cmd : tuple of (str, dict)
+            Len 2 tuple with the first element being the command to execute
+            and the second element being a dictionary of keyword arguments.
+            If None, no message was received or the message was not
+            properly formatted.
+            
+        Notes
+        -----
+        This is a non-blocking call so it will not wait for a message.
+        No message is received if entry_id is None. If the message is not
+        properly formatted, cmd is None.
+
+        """
+        # this is non-blocking
+        msg = self.r.xread(
+            {"stream:ctrl": self.streams["stream:ctrl"]}, block=0, count=1
+        )
+        if not msg:
+            return None, None
+        # msg is stream_name, entries
+        entries = msg[1]
+        entry_id, dat = entries[0]  # since count=1, it's a list of 1
+        self.streams["stream:ctrl"] = entry_id  # update the stream id
+        # dat is a dict with key msg
+        raw = dat.get("msg")
+        try:
+            msg = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return entry_id, None
+        # msg is a dict with keys cmd and kwargs
+        cmd = msg.get("cmd")
+        kwargs = msg.get("kwargs")
+        return entry_id, (cmd, kwargs)
