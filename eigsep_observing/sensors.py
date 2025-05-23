@@ -40,7 +40,7 @@ class Sensor:
         -------
         data : dict
             Dictionary containing the sensor data.
-        
+
         """
         raise NotImplementedError("Subclasses should implement this method.")
 
@@ -55,10 +55,9 @@ class Sensor:
             Redis client instance.
         sleep : float
             Sleep time between reads in seconds.
-            
+
         """
         while True:
             data = self.grab_data()
             redis.add_metadata(self.name, data)
             time.sleep(sleep)
-

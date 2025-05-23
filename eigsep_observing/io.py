@@ -1,10 +1,60 @@
 import datetime
-import hp5y
+import h5py
 import json
 import numpy as np
 from pathlib import Path
 
 from eigsep_corr import utils
+
+# XXX from chatgpt, not implemented yet
+def write_hdf5(filename, data_array, header: dict, streams: dict):
+    """
+    filename   : path to output .h5
+    data_array : your main numpy array of shape (n_ints, n_bins, …)
+    header     : {key: scalar or short list} to write as attrs
+    streams    : {stream_name: List[ (ts, v1, v2, …), … ] }
+    """
+    raise NotImplementedError("This function is not implemented yet.")
+    with h5py.File(filename, "w") as f:
+        # 1) main dataset
+        ds = f.create_dataset("rf_data", data=data_array,
+                              compression="gzip", chunks=True)
+
+        # 2) write header attrs
+        for key, val in header.items():
+            # h5py can handle ints, floats, strings, and small lists/arrays
+            # If val is a list/tuple, turn into numpy array
+            if isinstance(val, (list, tuple)):
+                val = np.array(val)
+            ds.attrs[key] = val
+
+        # 3) create a metadata group for your time-series
+        meta_grp = f.create_group("metadata")
+
+        for name, records in streams.items():
+            # records: List of (ts, v1, v2, …)
+            if not records:
+                continue
+
+            # Convert to a structured NumPy array:
+            # e.g. streams["accel"] = [(ts1, ax1, ay1, az1), ...]
+            first = records[0]
+            nfields = len(first)
+            # Build dtype: first field 'ts' as float (seconds since epoch),
+            # others 'v0','v1',...
+            dt = np.dtype([("ts", "f8")] +
+                          [(f"v{i}", "f8") for i in range(1, nfields)])
+            arr = np.empty(len(records), dtype=dt)
+            for i, rec in enumerate(records):
+                arr[i] = rec  # tuple will map to fields
+            # Write as a dataset
+            meta_grp.create_dataset(
+                name,
+                data=arr,
+                compression="gzip",
+                maxshape=(None,),      # allow appending if desired
+                chunks=True
+            )
 
 
 def data_shape(ntimes, acc_bins, nchan, cross=False):
@@ -94,7 +144,7 @@ class File:
         ----------
         data : dict
             Dictionary of data arrays to be added for one time step.
-        
+
         Returns
         -------
         str

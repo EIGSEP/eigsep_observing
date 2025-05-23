@@ -36,7 +36,7 @@ class EigsepRedis:
         Returns
         -------
         commands : dict
-            Dictonary of commands. Key is the command type: "switch" for 
+            Dictonary of commands. Key is the command type: "switch" for
             controlling RF switches or "VNA" for initiating VNA observations.
             Values is a list of allowed commands for that type.
 
@@ -48,10 +48,10 @@ class EigsepRedis:
                 "switch:VNAS",  # short cal standard
                 "switch:VNAL",  # load cal standard
                 "switch:VNAANT",  # antenna
-                "switch:VNAN", # noise source
-                "switch:VNARF", # receiver
+                "switch:VNAN",  # noise source
+                "switch:VNARF",  # receiver
                 # snap observing
-                "switch:RFN", # noise source
+                "switch:RFN",  # noise source
                 "switch:RFLOAD",  # load
                 "switch:RFANT",  # antenna
             ],
@@ -60,6 +60,7 @@ class EigsepRedis:
                 "vna:rec",  # receiver
             ],
         }
+        return commands
 
     @property
     def switch_commands(self):
@@ -279,7 +280,7 @@ class EigsepRedis:
             and the second element being a dictionary of keyword arguments.
             If None, no message was received or the message was not
             properly formatted.
-            
+
         Notes
         -----
         This is a non-blocking call so it will not wait for a message.

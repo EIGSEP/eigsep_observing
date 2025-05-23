@@ -112,15 +112,15 @@ class EigObserver:
         Parameters
         ----------
         mode : str
-            Observing mode. Either ``sky'', ``load'', ``noise'' for 
-            correlations, or ``ant''  or ``rec'' for S11 measurements with 
+            Observing mode. Either ``sky'', ``load'', ``noise'' for
+            correlations, or ``ant''  or ``rec'' for S11 measurements with
             the VNA.
 
         Raises
         ------
         ValueError
             If the mode is not one of the valid modes.
-        
+
         """
         if mode in ("ant", "rec"):
             self.logger.info(f"Switching to VNA mode, measuring {mode}")
@@ -141,13 +141,12 @@ class EigObserver:
                 redis_cmd = "switch:RFLOAD"
             elif mode == "noise":
                 redis_cmd = "switch:RFN"
-            self.redis.send_ctrl(f"switch:{mode}")
+            self.redis.send_ctrl(redis_cmd)
         else:
             raise ValueError(
                 f"Invalid mode: {mode}. Must be one of "
                 "'sky', 'load', 'noise', 'ant', or 'rec'."
             )
-
 
     def observe_vna(self, mode, timeout=300):
         """
@@ -175,7 +174,7 @@ class EigObserver:
         """
         cmd = f"vna:{mode}"
         if cmd not in self.redis.vna_commands:
-            raise ValueError(f"Invalid VNA command: {cmd}".)
+            raise ValueError(f"Invalid VNA command: {cmd}.")
 
         kwargs = {
             "ip": self.cfg.vna_ip,

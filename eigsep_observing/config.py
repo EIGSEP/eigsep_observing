@@ -91,15 +91,15 @@ class ObsConfig:
         }
     )
 
-    vna_ip : str = "127.0.0.1"
-    vna_port : int = 5025
-    vna_timeout : int = 1000  # in seconds
-    vna_fstart : float = 1e6  # in Hz
-    vna_fstop : float = 250e6  # in Hz
-    vna_npoints : int = 1000
-    vna_ifbw : float = 100 # in Hz
+    vna_ip: str = "127.0.0.1"
+    vna_port: int = 5025
+    vna_timeout: int = 1000  # in seconds
+    vna_fstart: float = 1e6  # in Hz
+    vna_fstop: float = 250e6  # in Hz
+    vna_npoints: int = 1000
+    vna_ifbw: float = 100  # in Hz
     # power in dBm
-    vna_power : dict[str, float] = field(
+    vna_power: dict[str, float] = field(
         default_factory=lambda: {
             "ant": 0,
             "rec": -40,

@@ -1,4 +1,7 @@
 import logging
+import threading
+import time
+
 
 class PandaClient:
 
@@ -53,7 +56,7 @@ class PandaClient:
 
     def read_ctrl(self):
         """
-        Read commands that set switching and S11 observing. Executes the 
+        Read commands that set switching and S11 observing. Executes the
         commands and sends acknowledgements back to the Redis server.
 
         Notes
@@ -84,9 +87,11 @@ class PandaClient:
                     # XXX calibrate osl, measure ant/noise at 0 dBm
                     # basically just get the flags for the vna script
                     # flags = some stuff
+                    pass
                 elif mode == "rec":
                     # XXX calibrate osl, measure rec at 0 dBm
                     # falgs = some stuff
+                    pass
                 else:
                     self.logger.warning(f"Unknown VNA mode: {mode}")
                     continue
@@ -98,6 +103,3 @@ class PandaClient:
             else:
                 self.logger.warning(f"Unknown command: {cmd}")
                 continue
-
-
-
