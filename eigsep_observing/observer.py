@@ -77,7 +77,6 @@ class EigObserver:
             logger = logging.getLogger(__name__)
             logger.setLevel(logging.DEBUG)
         self.logger = logger
-        self._use_vna = cfg.switch_schedule.get("vna", 0) > 0
         self.fpga = fpga
         if self.fpga is None:
             self.logger.warning(
@@ -85,9 +84,9 @@ class EigObserver:
             )
             cfg.switch_schedule["snap_repeat"] = 0  # no SNAP observing
 
-            if self._use_vna:
+            if not self.cfg.use_vna:
                 raise ValueError(
-                    "In isolated VNA mode, but no VNA measurements "
+                    "No Fpga instance provided and VNA not used."
                 )
 
         self.cfg = cfg
@@ -180,6 +179,7 @@ class EigObserver:
             "ip": self.cfg.vna_ip,
             "port": self.cfg.vna_port,
             "timeout": self.cfg.vna_timeout,
+            "save_dir": self.cfg.vna_save_dir,
             "fstart": self.cfg.vna_fstart,
             "fstop": self.cfg.vna_fstop,
             "npoints": self.cfg.vna_npoints,

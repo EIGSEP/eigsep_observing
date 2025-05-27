@@ -105,6 +105,14 @@ class ObsConfig:
             "rec": -40,
         }
     )
+    vna_save_dir: str = "media/eigsep/T7/s11_data"
+
+    @property
+    def use_vna(self) -> bool:
+        """
+        Whether to use the VNA for this observation.
+        """
+        return self.switch_schedule.get("vna", 0) > 0
 
 
 default_obs_config = ObsConfig()
