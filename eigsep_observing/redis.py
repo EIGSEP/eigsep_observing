@@ -220,6 +220,36 @@ class EigsepRedis:
         """
         self.r.xadd("stream:status", {"status": status}, maxlen=self.maxlen)
 
+    def send_vna_complete(self):
+        """
+        Send VNA complete status to Redis. Used by client.
+
+        This is a convenience method that sends the ``VNA_COMPLETE'' status
+        message.
+
+        """
+        self.send_status("VNA_COMPLETE")
+
+    def send_vna_error(self):
+        """
+        Send VNA error status to Redis. Used by client.
+
+        This is a convenience method that sends the ``VNA_ERROR'' status
+        message.
+
+        """
+        self.send_status("VNA_ERROR")
+
+    def send_vna_timeout(self):
+        """
+        Send VNA timeout status to Redis. Used by client.
+
+        This is a convenience method that sends the ``VNA_TIMEOUT'' status
+        message.
+
+        """
+        self.send_status("VNA_TIMEOUT")
+
     def read_status(self):
         """
         Read status stream from Redis. Used by server.
