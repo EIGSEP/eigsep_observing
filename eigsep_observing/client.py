@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 
+from . import io
 
 class PandaClient:
 
@@ -22,7 +23,8 @@ class PandaClient:
         redis : EigsepRedis
             The Redis server object to push data to and read commands from.
         switch_nw : switch_network.SwitchNetwork
-            The switch network object to control the switches.
+            The switch network object to control the switches. Needed for
+            switching during VNA measurements.
 
         """
         if logger is None:
@@ -32,6 +34,7 @@ class PandaClient:
         self.redis = redis
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.switch_nw = switch_nw
+        self.vna = None
 
     def add_sensor(self, sensor):
         """
@@ -53,6 +56,69 @@ class PandaClient:
         )
         thd.start()
         self.sensors[sensor.name] = (sensor, thd)
+
+    @property
+    def vna_initialized(self):
+        return self.vna is not None
+
+    def measure_s11(self, mode, **kwargs):
+        """
+        Measure S11 with the VNA and write the results to file. The directory
+        where the results are saved is set by the ``save_dir'' attribute of 
+        the VNA instance.
+
+        Parameters
+        ----------
+        mode : str
+            The mode of operation, either ``ant'' for antenna or ``rec'' for
+            receiver.
+        kwargs : dict
+            Additional keyword arguments for the VNA measurement. Passed to
+            the VNA setup method.
+
+        Raises
+        ------
+        ValueError
+            If the mode is not ``ant'' or ``rec''.
+
+        Notes
+        -----
+        This function does all the switching needed for the VNA measurement,
+        including to OSL calibrators. There's no option to skip the
+        calibration.
+
+        """
+        if mode not in ["ant", "rec"]:
+            raise ValueError(
+                f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'."
+            )
+        ip = kwargs.pop("ip", None)
+        port = kwargs.pop("port", None)
+        timeout = kwargs.pop("timeout", None)
+        save_dir = kwargs.pop("save_dir", None)
+        if not self.vna_initialized:
+            self.logger.info("VNA not initialized. Initializing now.")
+            vna = VNA(
+                ip=ip,
+                port=port,
+                timeout=timeout,
+                save_dir=save_dir,
+            )
+            self.vna = vna
+        setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
+        _ = self.vna.setup(**setup_kwargs)
+        osl_s11 = self.vna.measure_osl(snw=self.switch_nw)
+        if mode == "ant":
+            s11 = self.vna.measure_ant(measure_noise=True)
+        else:  # mode is rec
+            s11 = self.vna.measure_rec()
+        # XXX need to save to file here, osl_s11 and s11 are dictionaries
+        # something like:
+        # fname: save_dir + mode + date + time + ".s11"
+        # header containing vna metadata, vna.metadata
+        # XXX header needs to also pull the box orientation
+        #io.write_s11_file(fname, data, header, cal_data=osl_s11)
+        raise NotImplementedError("No file save yet")
 
     def read_ctrl(self):
         """
@@ -77,29 +143,23 @@ class PandaClient:
                 continue
             cmd, kwargs = msg
             if cmd in self.redis.switch_commands:
+                if self.switch_nw is None:
+                    raise RuntimeError(
+                        "Switch network not initialized. Cannot execute "
+                        "switch commands."
+                    )
                 mode = cmd.split(":")[1]
                 path = self.switch_nw.paths[mode]
-                self.switch_nw.switch(path, update_redis=True)
-            # XXX this need to also do all switching for VNA (in the elif)
+                self.switch_nw.switch(path)
             elif cmd in self.redis.vna_commands:
                 mode = cmd.split(":")[1]
-                if mode == "ant":
-                    # XXX calibrate osl, measure ant/noise at 0 dBm
-                    # basically just get the flags for the vna script
-                    # flags = some stuff
-                    pass
-                elif mode == "rec":
-                    # XXX calibrate osl, measure rec at 0 dBm
-                    # falgs = some stuff
-                    pass
-                else:
+                try:
+                    self.measure_s11(mode, **kwargs)
+                except ValueError:
                     self.logger.warning(f"Unknown VNA mode: {mode}")
+                    self.redis.send_vna_error()
                     continue
-                # XXX
-                # subrpocess.run(VNA SCRIPT, flags)
-                # make sure it's blocking
-                # XXX send VNA COMPLETED to redis
-                # also where to put the data? XXX
+                self.redis.send_vna_complete()
             else:
                 self.logger.warning(f"Unknown command: {cmd}")
                 continue
