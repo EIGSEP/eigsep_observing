@@ -55,20 +55,7 @@ class ObsConfig:
 
     """
 
-    # XXX not sure yet what to do here
-    sensors: list[str] = field(
-        default_factory=lambda: [
-            "imu_az",
-            "imu_el",
-            "therm_load",
-            "therm_lna",
-            "therm_vna_load",
-            "peltier",
-            "lidar",
-        ]
-    )
-    # XXX this is an alternative
-    pico_id: dict[str, str] = field(
+    sensors: dict[str, str] = field(
         default_factory=lambda: {
             "imu_az": "/dev/pico_imu_az",
             "imu_el": "/dev/pico_imu_el",
@@ -77,9 +64,9 @@ class ObsConfig:
             "therm_vna_load": "/dev/pico_therm_vna_load",
             "peltier": "/dev/pico_peltier",
             "lidar": "/dev/pico_lidar",
-            "switch": "/dev/pico_switch",
         }
     )
+    switch_pico: str = "/dev/pico_switch"
 
     switch_schedule: dict[str, int] = field(
         default_factory=lambda: {
@@ -111,8 +98,35 @@ class ObsConfig:
     def use_vna(self) -> bool:
         """
         Whether to use the VNA for this observation.
+
+        Returns
+        -------
+        bool
+            True if the VNA should be used, False otherwise.
+
         """
         return self.switch_schedule.get("vna", 0) > 0
+
+    @property
+    def use_switches(self) -> bool:
+        """
+        Whether to use the switches for this observation. This is true if
+        we use the VNA or at least two modes of sky/load/noise.
+
+        Returns
+        -------
+        bool
+            True if the switches should be used, False otherwise.
+
+        """
+        if self.use_vna:
+            return True
+        nmodes = 0
+        for k in ["sky", "load", "noise"]:
+            if self.switch_schedule.get(k, 0) > 0:
+                nmodes += 1
+        return nmodes > 1
+
 
 
 default_obs_config = ObsConfig()

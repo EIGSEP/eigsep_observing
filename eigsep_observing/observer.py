@@ -92,16 +92,11 @@ class EigObserver:
         self.cfg = cfg
         self.redis = EigsepRedis()
 
-        if self.cfg.sensors is not None:
-            self.init_sensors()
-
-    def init_sensors(self):
-        """
-        Use Redis to initialize observing with senors. Need to send START
-        command to get pico scripts running and make the observe function
-        ready to pick up the data stream and place into the header.
-        """
-        pass
+        picos = {}
+        for name, pico in self.cfg.sensors.items():
+            picos[name] = pico
+        picos["switch"] = self.cfg.switch_pico
+        self.redis.send_ctrl("init:picos", **picos)
 
     def set_mode(self, mode):
         """

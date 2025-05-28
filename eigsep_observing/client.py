@@ -1,7 +1,7 @@
 import logging
 import threading
 import time
-
+from switch_network import SwitchNetwork
 from . import io
 
 class PandaClient:
@@ -22,9 +22,6 @@ class PandaClient:
         ----------
         redis : EigsepRedis
             The Redis server object to push data to and read commands from.
-        switch_nw : switch_network.SwitchNetwork
-            The switch network object to control the switches. Needed for
-            switching during VNA measurements.
 
         """
         if logger is None:
@@ -33,10 +30,81 @@ class PandaClient:
         self.logger = logger
         self.redis = redis
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
-        self.switch_nw = switch_nw
+        self.switch_nw = None
         self.vna = None
 
-    def add_sensor(self, sensor):
+        try:
+            self.read_init_commands()
+        except TimeoutError:
+            self.logger.error(
+                "No initialization commands received within the timeout."
+                "Check Redis connection."
+            )
+            raise
+
+        if self.sensors:
+            self.logger.info(
+                f"Starting {len(self.sensors)} sensor threads."
+            )
+            for sensor, thd in self.sensors.values():
+                thd.start()
+
+    def read_init_commands(self, timeout=60):
+        """
+        Read initialization commands from Redis. This is used to set up the
+        switch network and sensors before starting the main loop.
+
+        Parameters
+        ----------
+        timeout : int
+            The maximum time to wait for initialization commands in seconds.
+            Default is 60 seconds.
+
+        Raises
+        ------
+        TimeoutError
+            If no initialization commands are received within the timeout.
+
+        """
+        time_start = time.time()
+        while True:
+            if time.time() - time_start > timeout:
+                raise TimeoutError(
+                    "No initialization commands received within the timeout."
+                )
+            entry_id, msg = self.redis.read_ctrl()
+            if entry_id is None:  # no message
+                self.logger.debug("No message received. Waiting.")
+                time.sleep(1)
+                continue
+            if msg is None:  # invalid message
+                self.logger.warning("Invalid message received.")
+                continue
+            cmd, pico_ids = msg
+            if cmd not in self.redis.init_commands:
+                self.logger.warning(f"Unknown command: {cmd}")
+                continue
+        # pico_ids a dictionary
+        switch_pico = pico_ids.pop("switch_pico", None)
+        if switch_pico is not None:
+            self.logger.info(
+                f"Initializing switch network with pico {switch_pico}."
+            )
+            # uses default gpios, paths, timeout
+            self.switch_nw = SwitchNetwork(
+                serport=switch_pico, logger=self.logger, redis=self.redis
+            )
+        else:
+            self.logger.warning(
+                "No switch pico provided. No switch network initialized."
+            )
+        for sensor_name, sensor_pico in pico_ids.items():
+            self.logger.info(
+                f"Adding sensor {sensor_name} with pico {sensor_pico}."
+            )
+            self.add_sensor(sensor_name, sensor_pico)
+
+    def add_sensor(self, sensor_name, sensor_pico, sleep_time=1):
         """
         Add a sensor to the client. Spawns a thread that reads data from the
         sensor and pushes to redis.
@@ -45,16 +113,21 @@ class PandaClient:
         ----------
         sensor : Sensor
             The sensor to add.
+        sleep_time : float
+            The time to sleep between reads from the sensor. Default is 1
+            second.
 
         """
+        sensor = Sensor(sensor_name, sensor_pico)
         if sensor.name in self.sensors:
             self.logger.warning(f"Sensor {sensor.name} already added.")
             return
-        # XXX add args/kwargs if needed
         thd = threading.Thread(
-            target=sensor.read, args=(self.redis), daemon=True
+            target=sensor.read,
+            args=(self.redis),
+            kwargs={"sleep": sleep_time},
+            daemon=True,
         )
-        thd.start()
         self.sensors[sensor.name] = (sensor, thd)
 
     @property
@@ -122,14 +195,8 @@ class PandaClient:
 
     def read_ctrl(self):
         """
-        Read commands that set switching and S11 observing. Executes the
+        Read control commands from Redis. Executes the
         commands and sends acknowledgements back to the Redis server.
-
-        Notes
-        -----
-        Commands received are strings, either containing ``switch'' or ``VNA''.
-        The former indicates a switch command, the latter indicates observing
-        with the VNA.
 
         """
         while True:

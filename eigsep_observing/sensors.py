@@ -10,7 +10,7 @@ PICO_IDS = {
     "therm_vna_load": "/dev/pico_therm_vna_load",
     "peltier": "/dev/pico_peltier",
     "lidar": "/dev/pico_lidar",
-    "switches": "/dev/pico_swtch",
+    "switches": "/dev/pico_switch",
 }
 
 

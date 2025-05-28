@@ -31,14 +31,14 @@ class EigsepRedis:
     @property
     def ctrl_commands(self):
         """
-        Return allowed control commnands.
+        Return allowed control commands. See also the property 
+        ``all_commands'' which returns the same information in a flat list.
 
         Returns
         -------
         commands : dict
-            Dictonary of commands. Key is the command type: "switch" for
-            controlling RF switches or "VNA" for initiating VNA observations.
-            Values is a list of allowed commands for that type.
+            Dictonary of commands. Key is the command type. Values is a list 
+            of allowed commands for that type.
 
         """
         commands = {
@@ -59,8 +59,41 @@ class EigsepRedis:
                 "vna:ant",  # antenna
                 "vna:rec",  # receiver
             ],
+            # set pico device names
+            "init": [
+                "init:picos",
+            ],
         }
         return commands
+
+    @property
+    def all_commands(self):
+        """
+        Return all allowed commands.
+
+        Returns
+        -------
+        commands : list
+            List of all allowed commands.
+
+        """
+        commands = []
+        for cmd_list in self.ctrl_commands.values():
+            commands.extend(cmd_list)
+        return commands
+
+    @property
+    def init_commands(self):
+        """
+        Return allowed initialization commands.
+
+        Returns
+        -------
+        commands : list
+            List of allowed initialization commands.
+
+        """
+        return self.ctrl_commands["init"]
 
     @property
     def switch_commands(self):
@@ -290,7 +323,7 @@ class EigsepRedis:
             by the property ``control_commands''.
 
         """
-        if cmd not in self.switch_commands and cmd not in self.vna_commands:
+        if cmd not in self.all_commands:
             raise ValueError(f"Command {cmd} not allowed.")
         payload = {"cmd": cmd}
         if kwargs:
