@@ -2,7 +2,7 @@ import logging
 import threading
 import time
 from switch_network import SwitchNetwork
-from . import io
+from . import io, sensors
 
 class PandaClient:
 
@@ -111,14 +111,24 @@ class PandaClient:
 
         Parameters
         ----------
-        sensor : Sensor
-            The sensor to add.
+        sensor_name : str
+            Name of the sensor. Must be in sensors.SENSOR_CLASSES.
+        sensor_pico : str
+            Serial port of the pico that controls the sensor.
         sleep_time : float
             The time to sleep between reads from the sensor. Default is 1
             second.
 
         """
-        sensor = Sensor(sensor_name, sensor_pico)
+        try:
+            sensor_cls = sensors.SENSOR_CLASSES[sensor_name]
+        except KeyError:
+            self.logger.error(
+                f"Unknown sensor name: {sensor_name}. "
+                "Must be in sensors.SENSOR_CLASSES."
+            )
+            return
+        sensor = sensor_cls(sensor_name, sensor_pico)
         if sensor.name in self.sensors:
             self.logger.warning(f"Sensor {sensor.name} already added.")
             return

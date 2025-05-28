@@ -1,17 +1,4 @@
-import numpy as np
 import time
-
-# serial port names for the pico sensors
-PICO_IDS = {
-    "imu_az": "/dev/pico_imu_az",
-    "imu_el": "/dev/pico_imu_el",
-    "therm_load": "/dev/pico_therm_load",
-    "therm_lna": "/dev/pico_therm_lna",
-    "therm_vna_load": "/dev/pico_therm_vna_load",
-    "peltier": "/dev/pico_peltier",
-    "lidar": "/dev/pico_lidar",
-    "switches": "/dev/pico_switch",
-}
 
 
 class Sensor:
@@ -61,3 +48,38 @@ class Sensor:
             data = self.grab_data()
             redis.add_metadata(self.name, data)
             time.sleep(sleep)
+
+
+class ImuSensor(Sensor):
+
+    def grab_data(self):
+        return
+
+
+class ThermSensor(Sensor):
+
+    def grab_data(self):
+        return
+
+
+class PeltierSensor(Sensor):
+
+    def grab_data(self):
+        return
+
+
+class LidarSensor(Sensor):
+
+    def grab_data(self):
+        return
+
+
+SENSOR_CLASSES = {
+    "imu_az": ImuSensor,
+    "imu_el": ImuSensor,
+    "therm_load": ThermSensor,
+    "therm_lna": ThermSensor,
+    "therm_vna_load": ThermSensor,
+    "peltier": PeltierSensor,
+    "lidar": LidarSensor,
+}
