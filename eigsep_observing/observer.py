@@ -84,10 +84,8 @@ class EigObserver:
             )
             cfg.switch_schedule["snap_repeat"] = 0  # no SNAP observing
 
-            if not self.cfg.use_vna:
-                raise ValueError(
-                    "No Fpga instance provided and VNA not used."
-                )
+            if not cfg.use_vna:
+                raise ValueError("No Fpga instance provided and VNA not used.")
 
         self.cfg = cfg
         self.redis = EigsepRedis()
