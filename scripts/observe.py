@@ -4,8 +4,6 @@ import logging
 from eigsep_corr.fpga import add_args
 from eigsep_corr.config import CorrConfig
 
-USE_REF = True  # use synth to generate adc clock from 10 MHz
-USE_NOISE = False  # use digital noise instead of ADC data
 LOG_LEVEL = logging.DEBUG
 
 parser = argparse.ArgumentParser(
@@ -18,6 +16,8 @@ args = parser.parse_args()
 cfg = CorrConfig(
     snap_ip="10.10.10.13",
     sample_rate=500,
+    use_ref=True,
+    use_noise=False,
     fpg_file=args.fpg_file,
     fpg_version=(2, 3),
     adc_gain=4,
@@ -36,11 +36,6 @@ cfg = CorrConfig(
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=LOG_LEVEL)
-
-if USE_REF:
-    ref = 10
-else:
-    ref = None
 
 if args.dummy_mode:
     logger.warning("Running in DUMMY mode")
@@ -62,7 +57,6 @@ else:
     fpga = EigsepFpga(
         cfg=cfg,
         program=program,
-        ref=ref,
         logger=logger,
         force_program=force_program,
     )
@@ -77,17 +71,7 @@ if args.initialize_fpga:
 fpga.check_version()
 
 # set input
-fpga.noise.set_seed(stream=None, seed=0)
-if USE_NOISE:
-    fpga.logger.warning("Switching to noise input")
-    fpga.inp.use_noise(stream=None)
-    fpga.sync.arm_noise()
-    for i in range(3):
-        fpga.sync.sw_sync()
-    fpga.logger.info("Synchronized noise.")
-else:
-    fpga.logger.info("Switching to ADC input")
-    fpga.inp.use_adc(stream=None)
+fpga.set_input()
 
 # synchronize
 if args.sync:
