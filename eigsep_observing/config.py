@@ -12,6 +12,8 @@ class CorrConfig:
 
     snap_ip: str = "10.10.10.13"
     sample_rate: float = 500  # in MHz
+    use_ref: bool = True  # use synth on snap to generate adc clock
+    use_noise: bool = False  # use digital noise instead of ADC data
     fpg_file: str = str(
         (
             Path(DATA_PATH) / "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg"
@@ -126,7 +128,6 @@ class ObsConfig:
             if self.switch_schedule.get(k, 0) > 0:
                 nmodes += 1
         return nmodes > 1
-
 
 
 default_obs_config = ObsConfig()
