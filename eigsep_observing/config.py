@@ -97,6 +97,19 @@ class ObsConfig:
     vna_save_dir: str = "media/eigsep/T7/s11_data"
 
     @property
+    def use_snap(self) -> bool:
+        """
+        Whether to use the SNAP correlator for this observation.
+
+        Returns
+        -------
+        bool
+            True if the SNAP correlator should be used, False otherwise.
+
+        """
+        return self.switch_schedule.get("snap_repeat", 0) > 0
+
+    @property
     def use_vna(self) -> bool:
         """
         Whether to use the VNA for this observation.
