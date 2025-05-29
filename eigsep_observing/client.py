@@ -1,8 +1,12 @@
 import logging
 import threading
 import time
+
+from cmt_vna import VNA
 from switch_network import SwitchNetwork
+
 from . import io, sensors
+
 
 class PandaClient:
 
@@ -43,9 +47,7 @@ class PandaClient:
             raise
 
         if self.sensors:
-            self.logger.info(
-                f"Starting {len(self.sensors)} sensor threads."
-            )
+            self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
             for sensor, thd in self.sensors.values():
                 thd.start()
 
@@ -147,7 +149,7 @@ class PandaClient:
     def measure_s11(self, mode, **kwargs):
         """
         Measure S11 with the VNA and write the results to file. The directory
-        where the results are saved is set by the ``save_dir'' attribute of 
+        where the results are saved is set by the ``save_dir'' attribute of
         the VNA instance.
 
         Parameters
@@ -200,7 +202,7 @@ class PandaClient:
         # fname: save_dir + mode + date + time + ".s11"
         # header containing vna metadata, vna.metadata
         # XXX header needs to also pull the box orientation
-        #io.write_s11_file(fname, data, header, cal_data=osl_s11)
+        # io.write_s11_file(fname, data, header, cal_data=osl_s11)
         raise NotImplementedError("No file save yet")
 
     def read_ctrl(self):
