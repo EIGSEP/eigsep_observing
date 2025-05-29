@@ -1,4 +1,5 @@
 import logging
+from pathlib import Path
 import threading
 import time
 
@@ -197,13 +198,18 @@ class PandaClient:
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
-        # XXX need to save to file here, osl_s11 and s11 are dictionaries
-        # something like:
-        # fname: save_dir + mode + date + time + ".s11"
-        # header containing vna metadata, vna.metadata
-        # XXX header needs to also pull the box orientation
-        # io.write_s11_file(fname, data, header, cal_data=osl_s11)
-        raise NotImplementedError("No file save yet")
+        save_dir = Path(self.vna.save_dir) / Path(mode)
+        header = self.vna.metadata
+        header["mode"] = mode
+        # XXX update header with box orientation
+        # XXX
+        io.write_s11_file(
+            s11,
+            cal_data=osl_s11,
+            fname=None,
+            save_dir=save_dir,
+            header=header,
+        )
 
     def read_ctrl(self):
         """

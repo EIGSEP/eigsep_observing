@@ -6,6 +6,7 @@ from pathlib import Path
 
 from eigsep_corr import utils
 
+
 # XXX from chatgpt, not implemented yet
 def write_hdf5(filename, data_array, header: dict, streams: dict):
     """
@@ -17,8 +18,9 @@ def write_hdf5(filename, data_array, header: dict, streams: dict):
     raise NotImplementedError("This function is not implemented yet.")
     with h5py.File(filename, "w") as f:
         # 1) main dataset
-        ds = f.create_dataset("rf_data", data=data_array,
-                              compression="gzip", chunks=True)
+        ds = f.create_dataset(
+            "rf_data", data=data_array, compression="gzip", chunks=True
+        )
 
         # 2) write header attrs
         for key, val in header.items():
@@ -42,8 +44,9 @@ def write_hdf5(filename, data_array, header: dict, streams: dict):
             nfields = len(first)
             # Build dtype: first field 'ts' as float (seconds since epoch),
             # others 'v0','v1',...
-            dt = np.dtype([("ts", "f8")] +
-                          [(f"v{i}", "f8") for i in range(1, nfields)])
+            dt = np.dtype(
+                [("ts", "f8")] + [(f"v{i}", "f8") for i in range(1, nfields)]
+            )
             arr = np.empty(len(records), dtype=dt)
             for i, rec in enumerate(records):
                 arr[i] = rec  # tuple will map to fields
@@ -52,8 +55,8 @@ def write_hdf5(filename, data_array, header: dict, streams: dict):
                 name,
                 data=arr,
                 compression="gzip",
-                maxshape=(None,),      # allow appending if desired
-                chunks=True
+                maxshape=(None,),  # allow appending if desired
+                chunks=True,
             )
 
 
@@ -70,7 +73,7 @@ def data_shape(ntimes, acc_bins, nchan, cross=False):
 
 def write_file(fname, data, header):
     """
-    Write data to a file.
+    Write correlation data to a file.
 
     Parameters
     ----------
@@ -85,11 +88,53 @@ def write_file(fname, data, header):
     raise NotImplementedError("This function is not implemented yet.")
 
 
+def write_s11_file(
+    data, cal_data=None, fname=None, save_dir=Path("."), header=None
+):
+    """
+    Write S11 measurement data to a file.
+
+    SAVE data which is a dict of one/two numpy arrays.
+    AND SAVE OSL if available (cal_data).
+
+    Need the orientation of the box in the header.
+
+    Parameters
+    ----------
+    data : dict
+        Dictionary containing S11 measurement data arrays.
+    cal_data : dict
+        Dictionary containing calibration data arrays, with keys 'open',
+        'short', and 'load'.
+    fname : Path or str
+        Filename where the data will be written. If not provided, a
+        timestamped filename will be generated.
+    save_dir : Path or str
+        Directory where the data will be saved. Must be able to
+        instantiate a Path object. Ignored if ``fname'' is an absolute path.
+    header : dict
+        File header information to be written.
+
+    """
+    if fname is None:
+        date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        file_path = Path(save_dir) / f"s11_{date}.h5"
+    else:
+        fname = Path(fname)
+        if not fname.is_absolute():
+            file_path = Path(save_dir) / fname
+        else:
+            file_path = fname
+     # XXX here
+     # write_hdf5()
+     raise NotImplementedError("This function is not implemented yet.")
+
+
 class File:
 
     def __init__(self, save_dir, pairs, ntimes, header, redis=None):
         """
-        Initialize the File object.
+        Initialize the File object for saving correlation data.
 
         Parameters
         ----------
@@ -184,3 +229,20 @@ class File:
         write_file(fname, self.data, self.header)
         self.reset()
         return fname
+
+class S11File:
+
+    def __init__(self, vna, redis=None):
+        """
+        Initialize the S11File object for saving S11 measurement data.
+
+        Parameters
+        ----------
+        vna : cmt_vna.VNA
+            VNA object to pull data from.
+        redis : EigsepRedis, optional
+            Redis server to pull more header information from.
+
+        """
+        self.vna = vna
+        self.redis = redis
