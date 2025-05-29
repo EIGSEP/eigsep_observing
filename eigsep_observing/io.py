@@ -229,21 +229,3 @@ class File:
         write_file(fname, self.data, self.header)
         self.reset()
         return fname
-
-
-class S11File:
-
-    def __init__(self, vna, redis=None):
-        """
-        Initialize the S11File object for saving S11 measurement data.
-
-        Parameters
-        ----------
-        vna : cmt_vna.VNA
-            VNA object to pull data from.
-        redis : EigsepRedis, optional
-            Redis server to pull more header information from.
-
-        """
-        self.vna = vna
-        self.redis = redis
