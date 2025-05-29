@@ -24,20 +24,55 @@ class EigsepRedis:
         """
         self.r = redis.Redis(host=host, port=port, decode_responses=True)
         self.maxlen = maxlen
-        self.streams = {}  # stream name, val is last id read
-        self.streams["stream:status"] = "0-0"
-        self.streams["stream:ctrl"] = "0-0"
+        # XXX need to know what streams exist!
+        self.ctrl_streams = {
+            "stream:status": "0-0",  # status stream
+            "stream:ctrl": "0-0",  # control stream
+        }
+
+    def reset(self):
+        """
+        Reset the Redis client. This clears all data streams and control
+        streams.
+
+        Notes
+        -----
+        This is a destructive operation and will remove all data from Redis.
+        Use with caution!
+
+        """
+        self.r.flushdb()
+
+    @property
+    def data_streams(self):
+        """
+        Dictionary of data streams. The keys are the stream names and
+        the values are the last entry id read from the stream.
+
+        Returns
+        -------
+        data_streams : dict
+
+        """
+        stream_names = self.r.smembers("data_stream_list")
+        stream_ids = self.r.hgetall("data_streams")
+        data_streams = {}
+        for stream in stream_names:
+            # get the last entry id for the stream
+            last_id = stream_ids.get(stream, "0-0")
+            data_streams[stream] = last_id
+        return data_streams
 
     @property
     def ctrl_commands(self):
         """
-        Return allowed control commands. See also the property 
+        Return allowed control commands. See also the property
         ``all_commands'' which returns the same information in a flat list.
 
         Returns
         -------
         commands : dict
-            Dictonary of commands. Key is the command type. Values is a list 
+            Dictonary of commands. Key is the command type. Values is a list
             of allowed commands for that type.
 
         """
@@ -150,8 +185,8 @@ class EigsepRedis:
             maxlen=self.maxlen,
             approximate=True,
         )
-        if stream_key not in self.streams:
-            self.streams[stream_key] = "0-0"  # start of stream
+        # add the stream to the data streams if not already present
+        self.r.sadd("data_stream_list", stream_key)
 
     def get_live_metadata(self, key=None):
         """
@@ -177,8 +212,9 @@ class EigsepRedis:
 
         Parameters
         ----------
-        stream_key : str
-            Redis stream key. If None, return all streams.
+        stream_key : str or list of str
+            Redis stream key. If a list, return the requested streams.
+            If None, return all streams.
 
         Returns
         -------
@@ -187,18 +223,18 @@ class EigsepRedis:
             value is a list of data values.
 
         """
-        # XXX
-        # this runs on the Pi, so self.streams is NOT updated!!
-        # need to know what streams exist!
-        # XXX also need to INIT the stream-id dict with 0-0
-        # XXX also need to be non-blocking in the way that if a sensor
-        # stop sending data we just put empty values in the header:w
         if stream_key is None:
-            streams = self.streams
+            streams = self.data_streams
         else:
-            streams = {stream_key: self.streams[stream_key]}
+            if isinstance(stream_key, str):
+                stream_key = [stream_key]
+            streams = {
+                k: self.data_streams[k]
+                for k in stream_key
+                if k in self.data_streams
+            }
 
-        resp = self.r.xread(streams, block=0)
+        resp = self.r.xread(streams)  # non-blocking read
         redis_hdr = {}
         for stream, dat in resp:
             out = []
@@ -207,7 +243,7 @@ class EigsepRedis:
                 value = json.loads(d["value"])
                 out.append(value)
                 # update the stream id
-                self.streams[stream] = eid
+                self.r.hset("data_streams", stream, eid)
             redis_hdr[stream] = out
         return redis_hdr
 
@@ -296,12 +332,14 @@ class EigsepRedis:
 
         """
         msg = self.r.xread(
-            {"stream:status": self.streams["stream:status"]}, block=0, count=1
+            {"stream:status": self.ctrl_streams["stream:status"]},
+            block=0,
+            count=1,
         )
         if not msg:
             return None, None
         entry_id, status_dict = msg[1][0]  # since count=1, it's a list of 1
-        self.streams["stream:status"] = entry_id  # update the stream id
+        self.ctrl_streams["stream:status"] = entry_id  # update the stream id
         status = status_dict.get("status")
         return entry_id, status
 
@@ -353,14 +391,14 @@ class EigsepRedis:
         """
         # this is non-blocking
         msg = self.r.xread(
-            {"stream:ctrl": self.streams["stream:ctrl"]}, block=0, count=1
+            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, block=0, count=1
         )
         if not msg:
             return None, None
         # msg is stream_name, entries
         entries = msg[1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        self.streams["stream:ctrl"] = entry_id  # update the stream id
+        self.ctrl_streams["stream:ctrl"] = entry_id  # update the stream id
         # dat is a dict with key msg
         raw = dat.get("msg")
         try:
