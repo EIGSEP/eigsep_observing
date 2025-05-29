@@ -125,9 +125,9 @@ def write_s11_file(
             file_path = Path(save_dir) / fname
         else:
             file_path = fname
-     # XXX here
-     # write_hdf5()
-     raise NotImplementedError("This function is not implemented yet.")
+    # XXX here
+    # write_hdf5()
+    raise NotImplementedError("This function is not implemented yet.")
 
 
 class File:
@@ -229,6 +229,7 @@ class File:
         write_file(fname, self.data, self.header)
         self.reset()
         return fname
+
 
 class S11File:
 
