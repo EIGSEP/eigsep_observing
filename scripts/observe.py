@@ -1,19 +1,33 @@
+"""
+Observing script for Eigsep observing, using SNAP correlator,
+a VNA, Dicke switching, and motor rotations. This script runs on the main
+single board computer.
+"""
+
 import argparse
 import logging
+from pathlib import Path
 
 from eigsep_corr.fpga import add_args
-from eigsep_corr.config import CorrConfig
+from eigsep_observing.config import CorrConfig, ObsConfig
+from eigsep_observing import EigObserver
 
 LOG_LEVEL = logging.DEBUG
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=LOG_LEVEL)
 
+# command line arguments
 parser = argparse.ArgumentParser(
     description="Eigsep Observer",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 add_args(parser)
 args = parser.parse_args()
+save_dir = Path(args.save_dir).resolve()
+vna_save_dir = save_dir / "s11_data"
 
-cfg = CorrConfig(
+# SNAP config
+corr_cfg = CorrConfig(
     snap_ip="10.10.10.13",
     sample_rate=500,
     use_ref=True,
@@ -30,18 +44,50 @@ cfg = CorrConfig(
     pam_atten={"0": (8, 8), "1": (8, 8), "2": (8, 8)},
     pol_delay={"01": 0, "23": 0, "45": 0},
     nchan=1024,
-    save_dir=args.save_dir,
+    save_dir=str(save_dir),
     ntimes=args.ntimes,
 )
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=LOG_LEVEL)
+# observing config
+obs_cfg = ObsConfig(
+    sensors={
+        "imu_az": "/dev/pico_imu_az",
+        "imu_el": "/dev/pico_imu_el",
+        "therm_load": "/dev/pico_therm_load",
+        "therm_lna": "/dev/pico_therm_lna",
+        "therm_vna_load": "/dev/pico_therm_vna_load",
+        "peltier": "/dev/pico_peltier",
+        "lidar": "/dev/pico_lidar",
+    },
+    switch_pico="/dev/pico_switch",
+    switch_schedule={
+        "vna": 1,
+        "snap_repeat": 1200,
+        "sky": 100,
+        "load": 100,
+        "noise": 100,
+    },
+    vna_ip="127.0.0.1",
+    vna_port=5025,
+    vna_timeout=1000,
+    vna_fstart=1e6,
+    vna_fstop=250e6,
+    vna_npoints=1000,
+    vna_ifbw=100,
+    vna_power={"amt": 0, "rec": -40},
+    vna_save_dir=str(vna_save_dir),
+)
+
+if not obs_cfg.use_snap:
+    error_msg = "SNAP correlator is not configured for observing."
+    logger.error(error_msg)
+    raise RuntimeError(error_msg)
 
 if args.dummy_mode:
     logger.warning("Running in DUMMY mode")
     from eigsep_corr.testing import DummyEigsepFpga
 
-    fpga = DummyEigsepFpga(ref=ref, logger=logger)
+    fpga = DummyEigsepFpga(logger=logger)
 else:
     from eigsep_corr.fpga import EigsepFpga
 
@@ -55,31 +101,27 @@ else:
         program = False
         force_program = False
     fpga = EigsepFpga(
-        cfg=cfg,
+        cfg=corr_cfg,
         program=program,
         logger=logger,
         force_program=force_program,
     )
 
-
+# initialize the FPGA
 if args.initialize_adc:
     fpga.initialize_adc()
-
 if args.initialize_fpga:
     fpga.initialize_fpga()
-
 fpga.check_version()
-
-# set input
 fpga.set_input()
-
-# synchronize
 if args.sync:
     fpga.synchronize(delay=0, update_redis=args.update_redis)
 
-logger.info("Observing ...")
+
+observer = EigObserver(fpga, cfg=obs_cfg, logger=logger)
+logger.info("Observing.")
 try:
-    fpga.observe(
+    observer.observe(
         pairs=None,
         timeout=10,
         update_redis=args.update_redis,
@@ -88,4 +130,4 @@ try:
 except KeyboardInterrupt:
     logger.info("Exiting.")
 finally:
-    fpga.end_observing()
+    observer.end_observing()
