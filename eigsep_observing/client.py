@@ -201,8 +201,7 @@ class PandaClient:
         save_dir = Path(self.vna.save_dir) / Path(mode)
         header = self.vna.metadata
         header["mode"] = mode
-        # XXX update header with box orientation
-        # XXX
+        header["redis"] = self.redis.get_header()
         io.write_s11_file(
             s11,
             cal_data=osl_s11,
