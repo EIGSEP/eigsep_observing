@@ -138,8 +138,9 @@ class File:
 
         Parameters
         ----------
-        save_dir : str
-            Directory where the data will be saved.
+        save_dir : Path or str
+            Directory where the data will be saved. Must be able to
+            instantiate a Path object.
         pairs : list
             List of correlation pairs to write.
         ntimes : int
@@ -150,7 +151,7 @@ class File:
             Redis server to pull more header information from.
 
         """
-        self.save_dir = save_dir
+        self.save_dir = Path(save_dir)
         self.ntimes = ntimes
         self.pairs = pairs
         self.header = header
@@ -223,7 +224,7 @@ class File:
         """
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = Path(self.save_dir) / f"corr_{date}.h5"
+            fname = self.save_dir / f"corr_{date}.h5"
         if self.redis is not None:
             self.header["redis"] = self.redis.get_header()
         write_file(fname, self.data, self.header)
