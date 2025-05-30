@@ -34,7 +34,7 @@ class CorrConfig:
         default_factory=lambda: {"01": 0, "23": 0, "45": 0}
     )
     nchan: int = 1024
-    save_dir: str = "media/eigsep/T7/data"
+    save_dir: str = "/media/eigsep/T7/data"
     ntimes: int = 60  # number of times per file
 
 
@@ -94,7 +94,7 @@ class ObsConfig:
             "rec": -40,
         }
     )
-    vna_save_dir: str = "media/eigsep/T7/s11_data"
+    vna_save_dir: str = "/media/eigsep/T7/data/s11_data"
 
     @property
     def use_snap(self) -> bool:
