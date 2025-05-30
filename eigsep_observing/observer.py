@@ -51,12 +51,7 @@ def make_schedule(switch_schedule):
 
 class EigObserver:
 
-    def __init__(
-        self,
-        cfg=default_obs_config,
-        fpga=None,
-        logger=None,
-    ):
+    def __init__(self, fpga, cfg=default_obs_config, logger=None):
         """
         Main controll class for Eigsep observing. This code is meant to run
         on the Raspberry Pi. It uses EigsepFpga to initialize observing
@@ -66,11 +61,11 @@ class EigObserver:
 
         Parameters
         ----------
+        fpga : EigsepFpga
+            The EigsepFpga object to use for observing.
         cfg : eigsep_observing.config.ObsConfig
             The configuration object to use for observing. This is a
             data class specifying the sensors and switch schedule to use.
-        fpga : EigsepFpga
-            The EigsepFpga object to use for observing.
 
         """
         if logger is None:
@@ -78,15 +73,6 @@ class EigObserver:
             logger.setLevel(logging.DEBUG)
         self.logger = logger
         self.fpga = fpga
-        if self.fpga is None:
-            self.logger.warning(
-                "No Fpga instance. Running isolated VNA measurements. "
-            )
-            cfg.switch_schedule["snap_repeat"] = 0  # no SNAP observing
-
-            if not cfg.use_vna:
-                raise ValueError("No Fpga instance provided and VNA not used.")
-
         self.cfg = cfg
         self.redis = EigsepRedis()
 
@@ -211,16 +197,10 @@ class EigObserver:
         write_files=True,
     ):
         """
-        Start observing. Different schedules are allowed:
-
-        1. Isolated SNAP correlator observing, like before.
-        2. Isolated VNA observing.
-
-        The first two cases may both include sensor readings and motor
-        rotations. SNAP observing could also include switching.
-
-        3. An all of the above case, where we regularly switch between
-        VNA measurements and SNAP measurements.
+        Start observing, reading data from the correlator and optionally
+        the VNA. This method implements automatic switching between
+        observing modes according to the switch schedule. Metadata is
+        pushed and collected from Redis, and data is written to files.
 
         Parameters
         ----------
@@ -304,3 +284,6 @@ class EigObserver:
 
         thd.join()
         self.logger.info("Observing complete.")
+
+    def end_observing(self):
+        self.fpga.end_observing()
