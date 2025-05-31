@@ -177,7 +177,7 @@ class EigsepRedis:
         self.r.hset("metadata", key, payload)
         ts = datetime.utcnow().isoformat()
         self.r.hset("metadata", f"{key}_ts", ts)
-        # stream (for file header)
+        # stream (for file metadata)
         stream_key = f"stream:{key}"
         self.r.xadd(
             stream_key,
@@ -190,7 +190,8 @@ class EigsepRedis:
 
     def get_live_metadata(self, key=None):
         """
-        Get metadata from Redis.
+        Get live metadata from Redis, i.e. the current values stored
+        in the metadata hash.
 
         Parameters
         ----------
@@ -206,9 +207,9 @@ class EigsepRedis:
         else:
             return m[key]
 
-    def get_header(self, stream_key=None):
+    def get_metadata(self, stream_key=None):
         """
-        Populate file header from redis stream.
+        Get all metadata from redis stream for file writing.
 
         Parameters
         ----------
