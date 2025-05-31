@@ -1,5 +1,6 @@
 import datetime
 import json
+import numpy as np
 import redis
 
 
@@ -24,7 +25,6 @@ class EigsepRedis:
         """
         self.r = redis.Redis(host=host, port=port, decode_responses=True)
         self.maxlen = maxlen
-        # XXX need to know what streams exist!
         self.ctrl_streams = {
             "stream:status": "0-0",  # status stream
             "stream:ctrl": "0-0",  # control stream
@@ -245,7 +245,7 @@ class EigsepRedis:
                 out.append(value)
                 # update the stream id
                 self.r.hset("data_streams", stream, eid)
-            redis_hdr[stream] = out
+            redis_hdr[stream] = np.array(out)
         return redis_hdr
 
     def add_raw(self, key, value):
