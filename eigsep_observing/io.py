@@ -1,68 +1,50 @@
 import datetime
 import h5py
-import json
 import numpy as np
 from pathlib import Path
 
-from eigsep_corr import utils
 
-
-# XXX from chatgpt, not implemented yet
-def write_hdf5(filename, data_array, header: dict, streams: dict):
+def build_dtype(dtype, endian):
     """
-    filename   : path to output .h5
-    data_array : your main numpy array of shape (n_ints, n_bins, …)
-    header     : {key: scalar or short list} to write as attrs
-    streams    : {stream_name: List[ (ts, v1, v2, …), … ] }
+    Build a NumPy dtype based on the given type and endianness.
+
+    Parameters
+    ----------
+    dtype : str
+        Data type to use, e.g., 'float32', 'complex64'.
+    endian : str
+        Endianness. Either '>' for big-endian or '<' for little-endian.
+
+    Returns
+    -------
+    np.dtype
+        The constructed NumPy dtype.
+
     """
-    raise NotImplementedError("This function is not implemented yet.")
-    with h5py.File(filename, "w") as f:
-        # 1) main dataset
-        ds = f.create_dataset(
-            "rf_data", data=data_array, compression="gzip", chunks=True
-        )
-
-        # 2) write header attrs
-        for key, val in header.items():
-            # h5py can handle ints, floats, strings, and small lists/arrays
-            # If val is a list/tuple, turn into numpy array
-            if isinstance(val, (list, tuple)):
-                val = np.array(val)
-            ds.attrs[key] = val
-
-        # 3) create a metadata group for your time-series
-        meta_grp = f.create_group("metadata")
-
-        for name, records in streams.items():
-            # records: List of (ts, v1, v2, …)
-            if not records:
-                continue
-
-            # Convert to a structured NumPy array:
-            # e.g. streams["accel"] = [(ts1, ax1, ay1, az1), ...]
-            first = records[0]
-            nfields = len(first)
-            # Build dtype: first field 'ts' as float (seconds since epoch),
-            # others 'v0','v1',...
-            dt = np.dtype(
-                [("ts", "f8")] + [(f"v{i}", "f8") for i in range(1, nfields)]
-            )
-            arr = np.empty(len(records), dtype=dt)
-            for i, rec in enumerate(records):
-                arr[i] = rec  # tuple will map to fields
-            # Write as a dataset
-            meta_grp.create_dataset(
-                name,
-                data=arr,
-                compression="gzip",
-                maxshape=(None,),  # allow appending if desired
-                chunks=True,
-            )
+    return np.dtype(dtype).newbyteorder(endian)
 
 
 def data_shape(ntimes, acc_bins, nchan, cross=False):
     """
     Expected shape of data array.
+
+    Parameters
+    ----------
+    ntimes : int
+        Number of integrations.
+    acc_bins : int
+        Number of accumulation bins. Usually 2 (for even/odd spectra).
+    nchan : int
+        Number of frequency channels.
+    cross : bool
+        Data represents cross-correlations. If True, the data has both
+        real and imaginary parts. False means auto-correlations, which
+        only have real parts.
+
+    Returns
+    -------
+    tuple
+        Shape of the data array as a tuple (ntimes, spec_len).
 
     """
     spec_len = acc_bins * nchan
@@ -71,25 +53,64 @@ def data_shape(ntimes, acc_bins, nchan, cross=False):
     return (ntimes, spec_len)
 
 
-def write_file(fname, data, header):
+def write_hdf5(fname, data, header, metadata=None):
     """
-    Write correlation data to a file.
+    Write data to an HDF5 file.
 
     Parameters
     ----------
-    fname : str
+    fname : str or Path
         Filename where the data will be written.
     data : dict
         Dictionary of data arrays to be written.
     header : dict
-        Header information to be written to the file.
+        Header information to be written to the file. This specifies
+        static configuration, settings, etc. Values are expected to be
+        primarily strings or numbers, but may also include small
+        arrays, lists, or dictionaries. If a value is a dictionary,
+        it must contain only simple types (strings, numbers).
+    metadata : dict
+        Additional metadata. Usually numpy arrays or lists, e.g.,
+        sensor readings, timestamps, etc.
+
+    Raises
+    ------
+    TypeError
+        If the header contains unsupported types.
 
     """
-    raise NotImplementedError("This function is not implemented yet.")
+    with h5py.File(fname, "w") as f:
+        # data
+        data_grp = f.create_group("data")
+        for key, value in data.items():
+            data_grp.create_dataset(key, data=value)
+        # header
+        header_grp = f.create_group("header")
+        for key, value in header.items():
+            if isinstance(value, (str, int, float)):
+                header_grp.attrs[key] = value
+            elif isinstance(value, (list, np.ndarray)):
+                header_grp.create_dataset(key, data=value)
+            elif isinstance(value, dict):
+                sub_grp = header_grp.create_group(key)
+                for sub_key, sub_value in value.items():
+                    sub_grp.attrs[sub_key] = sub_value
+            else:
+                raise TypeError(f"Unsupported header type: {type(value)}")
+        # metadata
+        if metadata is not None:
+            metadata_grp = f.create_group("metadata")
+            for key, value in metadata.items():
+                metadata_grp.create_dataset(key, data=np.asarray(value))
 
 
 def write_s11_file(
-    data, cal_data=None, fname=None, save_dir=Path("."), header=None
+    data,
+    header,
+    metadata=None,
+    cal_data=None,
+    fname=None,
+    save_dir=Path("."),
 ):
     """
     Write S11 measurement data to a file.
@@ -102,7 +123,14 @@ def write_s11_file(
     Parameters
     ----------
     data : dict
-        Dictionary containing S11 measurement data arrays.
+        Dictionary containing S11 measurement data arrays. Keys specify
+        the DUT, usually 'ant' or 'rec'.
+    header : dict
+        Static header information to be written, specifying the
+        VNA settings.
+    metadata : dict
+        Additional metadata to be written to the file, such as
+        sensor readings, timestamps, etc.
     cal_data : dict
         Dictionary containing calibration data arrays, with keys 'open',
         'short', and 'load'.
@@ -112,8 +140,6 @@ def write_s11_file(
     save_dir : Path or str
         Directory where the data will be saved. Must be able to
         instantiate a Path object. Ignored if ``fname'' is an absolute path.
-    header : dict
-        File header information to be written.
 
     """
     if fname is None:
@@ -125,9 +151,11 @@ def write_s11_file(
             file_path = Path(save_dir) / fname
         else:
             file_path = fname
-    # XXX here
-    # write_hdf5()
-    raise NotImplementedError("This function is not implemented yet.")
+    if cal_data:
+        for k, v in cal_data.items():
+            key = f"cal:{k}"  # prefix calibration data keys
+            data[key] = v
+    write_hdf5(file_path, data, header, metadata=metadata)
 
 
 class File:
@@ -159,12 +187,11 @@ class File:
 
         acc_bins = header["acc_bins"]
         nchan = header["nchan"]
-        dtype = header["dtype"]
+        dtype = build_dtype(*header["dtype"])
 
-        self.header["redis"] = None  # placeholder, set in corr_write
         self.data = {}
         for p in pairs:
-            shape = data_shape(ntimes, acc_bins, nchan, cross=len(p) > 1)
+            shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
             self.data[p] = np.zeros(shape, dtype=dtype)
 
         self._counter = 0
@@ -179,12 +206,12 @@ class File:
         """
         for p in self.pairs:
             self.data[p].fill(0)
-        self.header["redis"] = None
         self._counter = 0
 
     def add_data(self, data):
         """
-        Populate the data arrays with the given data.
+        Populate the data arrays with the given data. The data is expected
+        to be of the dtype specified in the header.
 
         Parameters
         ----------
@@ -206,6 +233,37 @@ class File:
             return self.corr_write()
         return None
 
+    def reshape_data(self, avg_even_odd=True):
+        """
+        Reshape data to the form (ntimes, nchan). From the SNAP, the
+        even and odd spectra follow each other, here we split them
+        and optionally average them. Moreover, cross-correlation data
+        is explictly converted to complex numbers.
+
+        Parameters
+        ----------
+        avg_even_odd : bool
+            If True, average the even and odd spectra.
+
+        Returns
+        -------
+        reshaped : dict
+            Dictionary of reshaped data arrays.
+
+        """
+        reshaped = {}
+        for p, arr in self.data.items():
+            # place even/odd on last axis
+            arr = arr.reshape(self.ntimes, -1, 2, order="F")
+            if avg_even_odd:
+                arr = arr.mean(axis=2)
+            if len(p) > 1:  # cross-correlation
+                real = arr[:, ::2]
+                imag = arr[:, 1::2]
+                arr = real + 1j * imag
+            reshaped[p] = arr
+        return reshaped
+
     def corr_write(self, fname=None):
         """
         Write the data to a file.
@@ -225,8 +283,8 @@ class File:
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
-        if self.redis is not None:
-            self.header["redis"] = self.redis.get_header()
-        write_file(fname, self.data, self.header)
+        metadata = self.redis.get_metadata()
+        data = self.reshape_data(avg_even_odd=True)
+        write_hdf5(fname, data, self.header, metadata=metadata)
         self.reset()
         return fname
