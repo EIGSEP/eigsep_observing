@@ -24,6 +24,7 @@ class CorrConfig:
     fft_shift: int = 0x055
     corr_acc_len: int = 2**28  # increment corr_acc_cnt by ~1/second
     corr_scalar: int = 2**9  # 8 bits after binary point so 2**9 = 1
+    # note that corr_word and dtype must be consistent with each other
     corr_word: int = 4  # 4 bytes per word
     dtype: tuple[str, str] = ("int32", ">")  # dtype, endian
     acc_bins: int = 2
