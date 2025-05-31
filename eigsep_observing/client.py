@@ -204,11 +204,11 @@ class PandaClient:
         metadata = self.redis.get_header()
         io.write_s11_file(
             s11,
+            header,
+            metadata=metadata,
             cal_data=osl_s11,
             fname=None,
             save_dir=save_dir,
-            header=header,
-            metadata=metadata,
         )
 
     def read_ctrl(self):
