@@ -193,21 +193,22 @@ class PandaClient:
             self.vna = vna
         setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         _ = self.vna.setup(**setup_kwargs)
-        osl_s11 = self.vna.measure_osl(snw=self.switch_nw)
+        osl_s11 = self.vna.measure_OSL(snw=self.switch_nw)
         if mode == "ant":
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
         save_dir = Path(self.vna.save_dir) / Path(mode)
-        header = self.vna.metadata
+        header = self.vna.header
         header["mode"] = mode
-        header["redis"] = self.redis.get_header()
+        metadata = self.redis.get_header()
         io.write_s11_file(
             s11,
             cal_data=osl_s11,
             fname=None,
             save_dir=save_dir,
             header=header,
+            metadata=metadata,
         )
 
     def read_ctrl(self):
