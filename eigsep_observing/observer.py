@@ -237,7 +237,7 @@ class EigObserver:
                 self.fpga.cfg.save_dir,
                 pairs,
                 self.fpga.cfg.ntimes,
-                self.fpga.metadata,
+                self.fpga.header,
                 redis=self.redis,
             )
 
@@ -268,12 +268,14 @@ class EigObserver:
                     self.logger.info("Stopping observing.")
                     break
                 continue
-            data = d["data"]
+            data = d["data"]  # data is a dict with bytes
             cnt = d["cnt"]
             if update_redis:
-                self.fpga.update_redis(data, cnt)
+                self.fpga.update_redis(data, cnt)  # push bytes to Redis
             if write_files:
-                filename = self.file.add_data(data)
+                # unpack data from bytes for writing to file
+                unpacked_data = self.fpga.unpack_data(data)
+                filename = self.file.add_data(unpacked_data)
                 if filename is not None:
                     self.logger.info(f"Writing file {filename}")
             remaining -= 1
