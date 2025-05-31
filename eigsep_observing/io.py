@@ -53,6 +53,42 @@ def data_shape(ntimes, acc_bins, nchan, cross=False):
     return (ntimes, spec_len)
 
 
+def reshape_data(data, avg_even_odd=True):
+    """
+    Reshape data to the form (ntimes, nchan). From the SNAP, the
+    even and odd spectra follow each other, here we split them
+    and optionally average them. Moreover, cross-correlation data
+    is explictly converted to complex numbers.
+
+    Parameters
+    ----------
+    data : dict
+        Dictionary of data arrays to be reshaped. Keys specify the
+        correlation pairs.
+    avg_even_odd : bool
+        If True, average the even and odd spectra.
+
+    Returns
+    -------
+    reshaped : dict
+        Dictionary of reshaped data arrays.
+
+    """
+    reshaped = {}
+    for p, arr in data.items():
+        # place even/odd on last axis
+        ntimes = arr.shape[0]
+        arr = arr.reshape(ntimes, -1, 2, order="F")
+        if avg_even_odd:
+            arr = arr.mean(axis=2)
+        if len(p) > 1:  # cross-correlation
+            real = arr[:, ::2]
+            imag = arr[:, 1::2]
+            arr = real + 1j * imag
+        reshaped[p] = arr
+    return reshaped
+
+
 def write_hdf5(fname, data, header, metadata=None):
     """
     Write data to an HDF5 file.
@@ -102,6 +138,40 @@ def write_hdf5(fname, data, header, metadata=None):
             metadata_grp = f.create_group("metadata")
             for key, value in metadata.items():
                 metadata_grp.create_dataset(key, data=np.asarray(value))
+
+
+def read_hdf5(fname):
+    """
+    Read data from an HDF5 file.
+
+    Parameters
+    ----------
+    fname : str or Path
+        Filename from which to read the data.
+
+    Returns
+    -------
+    data : dict
+        Dictionary of data arrays read from the file.
+    header : dict
+        Header information read from the file.
+    metadata : dict
+        Metadata read from the file, if available.
+
+    """
+    with h5py.File(fname, "r") as f:
+        data = {k: np.array(v) for k, v in f["data"].items()}
+        # header
+        header_grp = f["header"]
+        header = {k: v for k, v in header_grp.attrs.items()}
+        for name, obj in header_grp.items():
+            if isinstance(obj, h5py.Group):
+                header[name] = {k: v for k, v in obj.attrs.items()}
+            else:
+                header[name] = np.array(obj)
+        # metadata
+        metadata = {k: np.array(v) for k, v in f.get("metadata", {}).items()}
+    return data, header, metadata
 
 
 def write_s11_file(
@@ -156,6 +226,38 @@ def write_s11_file(
             key = f"cal:{k}"  # prefix calibration data keys
             data[key] = v
     write_hdf5(file_path, data, header, metadata=metadata)
+
+
+def read_s11_file(fname):
+    """
+    Read S11 measurement data from a file.
+
+    Parameters
+    ----------
+    fname : str or Path
+        Filename from which to read the data.
+
+    Returns
+    -------
+    data : dict
+        Dictionary of S11 measurement data arrays read from the file.
+    cal_data : dict
+        Dictionary of calibration data arrays read from the file, with
+        keys 'open', 'short', and 'load'. If no calibration data is
+        available, this will be an empty dictionary.
+    header : dict
+        Header information read from the file.
+    metadata : dict
+        Metadata read from the file, if available.
+
+    """
+    data, header, metadata = read_hdf5(fname)
+    # filter out calibration data keys
+    cal_keys = [k for k in data.keys() if k.startswith("cal:")]
+    cal_data = {}
+    for k in cal_keys:
+        cal_data[k[4:]] = data.pop(k)  # remove 'cal:' prefix
+    return data, cal_data, header, metadata
 
 
 class File:
@@ -233,37 +335,6 @@ class File:
             return self.corr_write()
         return None
 
-    def reshape_data(self, avg_even_odd=True):
-        """
-        Reshape data to the form (ntimes, nchan). From the SNAP, the
-        even and odd spectra follow each other, here we split them
-        and optionally average them. Moreover, cross-correlation data
-        is explictly converted to complex numbers.
-
-        Parameters
-        ----------
-        avg_even_odd : bool
-            If True, average the even and odd spectra.
-
-        Returns
-        -------
-        reshaped : dict
-            Dictionary of reshaped data arrays.
-
-        """
-        reshaped = {}
-        for p, arr in self.data.items():
-            # place even/odd on last axis
-            arr = arr.reshape(self.ntimes, -1, 2, order="F")
-            if avg_even_odd:
-                arr = arr.mean(axis=2)
-            if len(p) > 1:  # cross-correlation
-                real = arr[:, ::2]
-                imag = arr[:, 1::2]
-                arr = real + 1j * imag
-            reshaped[p] = arr
-        return reshaped
-
     def corr_write(self, fname=None):
         """
         Write the data to a file.
@@ -284,7 +355,7 @@ class File:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
         metadata = self.redis.get_metadata()
-        data = self.reshape_data(avg_even_odd=True)
+        data = reshape_data(self.data, avg_even_odd=True)
         write_hdf5(fname, data, self.header, metadata=metadata)
         self.reset()
         return fname
