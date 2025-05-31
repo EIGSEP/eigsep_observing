@@ -1,65 +1,120 @@
-"""Tests for eigsep_corr.io"""
-import copy
-import os
-import pytest
 import numpy as np
+from pathlib import Path
+import tempfile
 
-from eigsep_corr import io
+from eigsep_observing import io
+
+# header to use for testing, mimics EigsepFpga().header
+HEADER = {
+    "dtype": ("int32", ">"),
+    "acc_bins": 2,
+    "nchan": 1024,
+    "fgp_file": "fpg_files/eigsep_fengine.fpg",
+    "fpg_version": (0, 0),
+    "corr_acc_len": 2**28,
+    "corr_scalar": 2**9,
+    "pol01_delay": 0,
+    "pol23_delay": 0,
+    "pol45_delay": 0,
+    "fft_shift": 0x00FF,
+    "sample_rate": 500e6,
+    "gain": 4,
+    "pam_atten": {0: 8, 1: 8, 2: 8},
+    "sync_time": 1748732903.4203713,
+}
+
+# metadata to use for testing, mimics output of EigsepRedis.get_metadata
+METADATA = {
+    "acc_cnt": np.arange(60),
+    "updated_unix": np.array([881494457.8234632, 1748734379.905014]),
+    "updated_date": np.array(
+        ["2025-05-31T16:35:48.324275", "1999-12-03T06:37:00.134234"]
+    ),
+    "obs_mode": np.array(["VNAO", "VNAS", "VNAL", "VNAANT", "RFN"]),
+    "temp_lna": np.linspace(30, 60, 60) + 273.15,
+    "temp_vna_load": np.linspace(20, 40, 60) + 273.15,
+    "temp_load": np.linspace(10, 20, 60) + 273.15,
+    "az_imu": np.array([[0, 10, -30], [0, 20, -40], [0, 30, -50]]),
+    "el_imu": np.array([[0, 10, -30], [0, 20, -40], [0, 30, -50]]),
+    "az_motor": np.arange(100) * 1.8,
+    "el_motor": np.arange(100) * 1.8,
+}
 
 
-class TestFileIO:
-    def test_pack_unpack_header(self):
-        h1 = io.DEFAULT_HEADER
-        buf = io.pack_raw_header(h1)
-        h2 = io.unpack_raw_header(buf)
-        assert h2["data_start"] % 8 == 0
-        for k, v in h1.items():
-            if type(v) is tuple or type(v) is list:
-                assert tuple(v) == tuple(h2[k])
-            elif type(v) is dict:
-                for _k, _v in v.items():
-                    assert tuple(_v) == tuple(h2[k][_k])
-            elif type(v) is np.ndarray:
-                np.testing.assert_allclose(v, h2[k])
-            else:
-                assert v == h2[k]
+def generate_data(reshape=True):
+    """
+    Generate random data for the tests.
 
-    def test_pack_unpack_raw_data(self):
-        dt = io.build_dtype("int32", ">")
-        d1 = np.ones((10, 2, 1024, 1), dtype=dt)
-        buf = io.pack_raw_data(d1)
-        d2 = io.unpack_raw_data(buf, '0')
-        np.testing.assert_allclose(d1, d2)
-        d1 = np.ones((10, 2, 1024, 2), dtype=dt)
-        buf = io.pack_raw_data(d1)
-        d2 = io.unpack_raw_data(buf, '02')
-        np.testing.assert_allclose(d1, d2)
+    Parameters
+    ----------
+    reshape : bool
+        Use the `io.reshape_data` function to reshape the data.
 
-    def test_pack_unpack_data(self):
-        h = copy.deepcopy(io.DEFAULT_HEADER)
-        pairs = h["pairs"]
-        d1 = {p: np.ones((10, 2, 1024, 1)) if len(p) == 1 else np.ones((10, 2, 1024, 2)) for p in pairs}
-        buf = io.pack_data(d1, h)
-        d2 = io.unpack_data(buf, h)
-        for k, v in d1.items():
-            np.testing.assert_allclose(v, d2[k])
+    Returns
+    -------
+    data : dict
+        Dictionary containing the generated data.
 
-    def test_write_read_file(self, tmp_path):
-        filename = tmp_path / "test.eig"
-        h1 = copy.deepcopy(io.DEFAULT_HEADER)
-        pairs = h1["pairs"]
-        d1 = {p: np.ones((len(h1["acc_cnt"]), 2, 1024, 1)) if len(p) == 1 else np.ones((len(h1["acc_cnt"]), 2, 1024, 2)) for p in pairs}
-        io.write_file(filename, h1, d1)
-        h2, d2 = io.read_file(filename)
-        for k, v in d1.items():
-            np.testing.assert_allclose(v, d2[k])
-        for k, v in h1.items():
-            if type(v) is tuple or type(v) is list:
-                assert tuple(v) == tuple(h2[k])
-            elif type(v) is dict:
-                for _k, _v in v.items():
-                    assert tuple(_v) == tuple(h2[k][_k])
-            elif type(v) is np.ndarray:
-                np.testing.assert_allclose(v, h2[k])
-            else:
-                assert v == h2[k]
+    """
+    rng = np.random.default_rng(1420)
+    dtype = io.build_dtype("int32", ">")
+    data_min = np.iinfo(dtype).min
+    data_max = np.iinfo(dtype).max
+    ntimes = 60
+    nchan = 1024
+    autos = [str(i) for i in range(6)]
+    cross = ["02", "04", "13", "15", "24", "35"]
+    data = {}
+    for k in autos:
+        shape = io.data_shape(ntimes, 2, nchan)
+        data[k] = rng.integers(0, high=data_max, size=shape, dtype=dtype)
+    for k in cross:
+        shape = io.data_shape(ntimes, 2, nchan, cross=True)
+        data[k] = rng.integers(
+            data_min, high=data_max, size=shape, dtype=dtype
+        )
+    if reshape:
+        data = io.reshape_data(data)
+    return data
+
+
+def test_build_dtype():
+    # big endian 32-bit integer
+    dt1 = np.dtype(">i4")
+    dt2 = io.build_dtype("int32", ">")
+    assert dt1 == dt2
+    # little endian 32-bit integer
+    dt1 = np.dtype("<i4")
+    dt2 = io.build_dtype("int32", "<")
+    assert dt1 == dt2
+    # common types
+    for byte in [1, 2, 4, 8]:
+        for typ in ["int", "float", "complex"]:
+            for endian in ["<", ">", "="]:
+                dt1 = np.dtype(f"{endian}{typ}{byte}")
+                bits = byte * 8
+                dt2 = io.build_dtype(f"{typ}{bits}", endian)
+                assert dt1 == dt2
+
+
+def test_reshape_data():
+    raise NotImplementedError("Test for reshape_data is not implemented yet.")
+
+
+def test_write_read_hdf5():
+    data = generate_data(reshape=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filename = Path(tmpdir) / "test.h5"
+        io.write_hdf5(filename, data, HEADER)
+        assert filename.exists()
+        read_data, read_header, read_meta = io.read_hdf5(filename)
+        assert read_data == data
+        assert read_header == HEADER
+        assert read_meta == {}
+
+        # test with metadata
+        io.write_hdf5(filename, data, HEADER, metadata=METADATA)
+        read_data, read_header, read_meta = io.read_hdf5(filename)
+        assert read_data == data
+        assert read_header == HEADER
+        assert read_meta == METADATA
