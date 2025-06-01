@@ -19,7 +19,7 @@ HEADER = {
     "fft_shift": 0x00FF,
     "sample_rate": 500e6,
     "gain": 4,
-    "pam_atten": {0: 8, 1: 8, 2: 8},
+    "pam_atten": {"0": 8, "1": 8, "2": 8},
     "sync_time": 1748732903.4203713,
 }
 
@@ -41,7 +41,7 @@ METADATA = {
 }
 
 
-def generate_data(reshape=True):
+def generate_data(reshape=True, return_time_freq=False):
     """
     Generate random data for the tests.
 
@@ -49,17 +49,27 @@ def generate_data(reshape=True):
     ----------
     reshape : bool
         Use the `io.reshape_data` function to reshape the data.
+    return_time_freq : bool
+        Return the number of time and frequency bins in the data.
 
     Returns
     -------
     data : dict
         Dictionary containing the generated data.
+    ntimes : int
+        Number of time step in the data. Returned only if
+        `return_time_freq' is True.
+    nchan : int
+        Number of frequency channels in the data. Returned only if
+        `return_time_freq' is True.
 
     """
     rng = np.random.default_rng(1420)
     dtype = io.build_dtype("int32", ">")
-    data_min = np.iinfo(dtype).min
-    data_max = np.iinfo(dtype).max
+    # need to use native dtype for the data generation
+    native_dtype = io.build_dtype("int32", "=")
+    data_min = np.iinfo(native_dtype).min
+    data_max = np.iinfo(native_dtype).max
     ntimes = 60
     nchan = 1024
     autos = [str(i) for i in range(6)]
@@ -67,14 +77,21 @@ def generate_data(reshape=True):
     data = {}
     for k in autos:
         shape = io.data_shape(ntimes, 2, nchan)
-        data[k] = rng.integers(0, high=data_max, size=shape, dtype=dtype)
+        data[k] = rng.integers(
+            0, high=data_max, size=shape, dtype=native_dtype
+        )
     for k in cross:
         shape = io.data_shape(ntimes, 2, nchan, cross=True)
         data[k] = rng.integers(
-            data_min, high=data_max, size=shape, dtype=dtype
+            data_min, high=data_max, size=shape, dtype=native_dtype
         )
+    # swap to specified dtype
+    for k in data:
+        data[k] = data[k].astype(dtype)
     if reshape:
         data = io.reshape_data(data)
+    if return_time_freq:
+        return data, ntimes, nchan
     return data
 
 
@@ -88,18 +105,58 @@ def test_build_dtype():
     dt2 = io.build_dtype("int32", "<")
     assert dt1 == dt2
     # common types
-    for byte in [1, 2, 4, 8]:
-        for typ in ["int", "float", "complex"]:
-            for endian in ["<", ">", "="]:
-                dt1 = np.dtype(f"{endian}{typ}{byte}")
+    for typ in ["int", "float", "complex"]:
+        for endian in ["<", ">", "="]:
+            for byte in [4, 8]:
+                if typ == "complex":
+                    byte *= 2  # complex types have double the byte size
+                dt1 = np.dtype(f"{endian}{typ[0]}{byte}")
                 bits = byte * 8
                 dt2 = io.build_dtype(f"{typ}{bits}", endian)
                 assert dt1 == dt2
 
 
 def test_reshape_data():
-    raise NotImplementedError("Test for reshape_data is not implemented yet.")
-
+    # generate data like it is received from the SNAP
+    data, ntimes, nchan = generate_data(reshape=False, return_time_freq=True)
+    reshaped_data = io.reshape_data(data, avg_even_odd=False)
+    for k in data:
+        assert k in reshaped_data
+        assert reshaped_data[k].shape == (ntimes, nchan, 2)
+        if len(k) == 1:  # autocorrelations
+            assert data[k].shape == (ntimes, nchan * 2)
+            even = data[k][:, :nchan]
+            odd = data[k][:, nchan:]
+            np.testing.assert_array_equal(even, reshaped_data[k][:, :, 0])
+            np.testing.assert_array_equal(odd, reshaped_data[k][:, :, 1])
+            assert reshaped_data[k].dtype == data[k].dtype
+        else:
+            assert data[k].shape == (ntimes, nchan * 2 * 2)
+            even = data[k][:, :2*nchan]
+            odd = data[k][:, 2*nchan:]
+            for i, spec in enumerate([even, odd]):
+                real = spec[:, ::2]
+                imag = spec[:, 1::2]
+                cdata = real + 1j * imag
+                np.testing.assert_array_equal(cdata, reshaped_data[k][:, :, i])
+    # test with averaging even and odd time steps
+    reshaped_data = io.reshape_data(data, avg_even_odd=True)
+    for k in data:
+        assert k in reshaped_data
+        assert reshaped_data[k].shape == (ntimes, nchan)
+        if len(k) == 1:
+            even = data[k][:, :nchan]
+            odd = data[k][:, nchan:]
+            avg = np.mean([even, odd], axis=0)
+            np.testing.assert_array_equal(avg, reshaped_data[k])
+        else:
+            even = data[k][:, :2*nchan]
+            odd = data[k][:, 2*nchan:]
+            avg = np.mean([even, odd], axis=0)
+            real = avg[:, ::2]
+            imag = avg[:, 1::2]
+            cdata = real + 1j * imag
+            np.testing.assert_array_equal(cdata, reshaped_data[k])
 
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
@@ -108,13 +165,23 @@ def test_write_read_hdf5():
         io.write_hdf5(filename, data, HEADER)
         assert filename.exists()
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        assert read_data == data
-        assert read_header == HEADER
+        assert set(data) == set(read_data)
+        for k in data:
+            np.testing.assert_array_equal(data[k], read_data[k])
+        assert set(read_header) == set(HEADER)
+        for k in HEADER:
+            np.testing.assert_array_equal(HEADER[k], read_header[k])
         assert read_meta == {}
 
         # test with metadata
         io.write_hdf5(filename, data, HEADER, metadata=METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        assert read_data == data
-        assert read_header == HEADER
-        assert read_meta == METADATA
+        assert set(data) == set(read_data)
+        for k in data:
+            np.testing.assert_array_equal(data[k], read_data[k])
+        assert set(read_header) == set(HEADER)
+        for k in HEADER:
+            np.testing.assert_array_equal(HEADER[k], read_header[k])
+        assert set(read_meta) == set(METADATA)
+        for k in METADATA:
+            np.testing.assert_array_equal(METADATA[k], read_meta[k])
