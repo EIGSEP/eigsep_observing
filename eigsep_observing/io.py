@@ -209,11 +209,6 @@ def write_s11_file(
     """
     Write S11 measurement data to a file.
 
-    SAVE data which is a dict of one/two numpy arrays.
-    AND SAVE OSL if available (cal_data).
-
-    Need the orientation of the box in the header.
-
     Parameters
     ----------
     data : dict
@@ -245,11 +240,12 @@ def write_s11_file(
             file_path = Path(save_dir) / fname
         else:
             file_path = fname
+    all_data = data.copy()
     if cal_data:
         for k, v in cal_data.items():
             key = f"cal:{k}"  # prefix calibration data keys
-            data[key] = v
-    write_hdf5(file_path, data, header, metadata=metadata)
+            all_data[key] = v
+    write_hdf5(file_path, all_data, header, metadata=metadata)
 
 
 def read_s11_file(fname):
