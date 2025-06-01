@@ -125,8 +125,16 @@ def write_hdf5(fname, data, header, metadata=None):
         for key, value in header.items():
             if isinstance(value, (str, int, float)):
                 header_grp.attrs[key] = value
-            elif isinstance(value, (list, np.ndarray)):
-                header_grp.create_dataset(key, data=value)
+            elif isinstance(value, (list, tuple, np.ndarray)):
+                arr = np.asarray(value)
+                if arr.dtype.kind == "U":  # string type
+                    header_grp.create_dataset(
+                        key,
+                        data=arr.astype(object),
+                        dtype=h5py.string_dtype(encoding="utf-8"),
+                    )
+                else:
+                    header_grp.create_dataset(key, data=arr)
             elif isinstance(value, dict):
                 sub_grp = header_grp.create_group(key)
                 for sub_key, sub_value in value.items():
@@ -137,7 +145,15 @@ def write_hdf5(fname, data, header, metadata=None):
         if metadata is not None:
             metadata_grp = f.create_group("metadata")
             for key, value in metadata.items():
-                metadata_grp.create_dataset(key, data=np.asarray(value))
+                arr = np.asarray(value)
+                if arr.dtype.kind == "U":  # string type
+                    metadata_grp.create_dataset(
+                        key,
+                        data=arr.astype(object),
+                        dtype=h5py.string_dtype(encoding="utf-8"),
+                    )
+                else:
+                    metadata_grp.create_dataset(key, data=arr)
 
 
 def read_hdf5(fname):
@@ -168,9 +184,17 @@ def read_hdf5(fname):
             if isinstance(obj, h5py.Group):
                 header[name] = {k: v for k, v in obj.attrs.items()}
             else:
-                header[name] = np.array(obj)
+                if obj.dtype.kind in ("S", "O"):  # string type
+                    header[name] = obj.asstr()[()]
+                else:
+                    header[name] = obj[()]
         # metadata
-        metadata = {k: np.array(v) for k, v in f.get("metadata", {}).items()}
+        metadata = {}
+        for k, v in f.get("metadata", {}).items():
+            if v.dtype.kind in ("S", "O"):
+                metadata[k] = v.asstr()[()]
+            else:
+                metadata[k] = v[()]
     return data, header, metadata
 
 
