@@ -1,3 +1,4 @@
+import datetime
 import numpy as np
 from pathlib import Path
 import tempfile
@@ -39,6 +40,29 @@ METADATA = {
     "az_motor": np.arange(100) * 1.8,
     "el_motor": np.arange(100) * 1.8,
 }
+
+S11_HEADER = {
+    "fstart": 1e6,
+    "fstop": 250e6,
+    "npoints": 1000,
+    "ifbw": 100,
+    "power_dBm": 0,
+    "freqs": np.linspace(1e6, 250e6, 1000),
+    "mode": "ant",
+}
+
+
+def compare_dicts(dict1, dict2):
+    """
+    Compare two dictionaries containing numpy arrays for equality.
+    """
+    assert set(dict1) == set(dict2), "Dictionaries have different keys."
+    for key in dict1:
+        np.testing.assert_array_equal(
+            dict1[key],
+            dict2[key],
+            err_msg=f"Arrays for key '{key}' are not equal.",
+        )
 
 
 def generate_data(reshape=True, return_time_freq=False):
@@ -95,6 +119,39 @@ def generate_data(reshape=True, return_time_freq=False):
     return data
 
 
+def generate_s11_data(cal=False):
+    """
+    Generate random S11 data for the tests.
+
+    Parameters
+    ----------
+    cal : bool
+        If True, generate calibration data as well.
+
+    Returns
+    -------
+    data : dict
+        Dictionary containing the generated S11 data.
+    cal_data : dict or None
+        Dictionary containing the generated calibration data. Only returned
+        if ``cal'' is True.
+
+    """
+    rng = np.random.default_rng(1420)
+    npoints = S11_HEADER["npoints"]
+    data = {
+        "ant": rng.normal(size=npoints) + 1j * rng.normal(size=npoints),
+        "noise": rng.normal(size=npoints) + 1j * rng.normal(size=npoints),
+    }
+    if not cal:
+        return data
+
+    cal_data = {}
+    for k in ["VNAO", "VNAS", "VNAL"]:
+        cal_data[k] = rng.normal(size=npoints) + 1j * rng.normal(size=npoints)
+    return data, cal_data
+
+
 def test_build_dtype():
     # big endian 32-bit integer
     dt1 = np.dtype(">i4")
@@ -132,8 +189,8 @@ def test_reshape_data():
             assert reshaped_data[k].dtype == data[k].dtype
         else:
             assert data[k].shape == (ntimes, nchan * 2 * 2)
-            even = data[k][:, :2*nchan]
-            odd = data[k][:, 2*nchan:]
+            even = data[k][:, : 2 * nchan]
+            odd = data[k][:, 2 * nchan :]
             for i, spec in enumerate([even, odd]):
                 real = spec[:, ::2]
                 imag = spec[:, 1::2]
@@ -150,13 +207,14 @@ def test_reshape_data():
             avg = np.mean([even, odd], axis=0)
             np.testing.assert_array_equal(avg, reshaped_data[k])
         else:
-            even = data[k][:, :2*nchan]
-            odd = data[k][:, 2*nchan:]
+            even = data[k][:, : 2 * nchan]
+            odd = data[k][:, 2 * nchan :]
             avg = np.mean([even, odd], axis=0)
             real = avg[:, ::2]
             imag = avg[:, 1::2]
             cdata = real + 1j * imag
             np.testing.assert_array_equal(cdata, reshaped_data[k])
+
 
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
@@ -165,23 +223,40 @@ def test_write_read_hdf5():
         io.write_hdf5(filename, data, HEADER)
         assert filename.exists()
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        assert set(data) == set(read_data)
-        for k in data:
-            np.testing.assert_array_equal(data[k], read_data[k])
-        assert set(read_header) == set(HEADER)
-        for k in HEADER:
-            np.testing.assert_array_equal(HEADER[k], read_header[k])
+        compare_dicts(data, read_data)
+        compare_dicts(HEADER, read_header)
         assert read_meta == {}
 
         # test with metadata
         io.write_hdf5(filename, data, HEADER, metadata=METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        assert set(data) == set(read_data)
-        for k in data:
-            np.testing.assert_array_equal(data[k], read_data[k])
-        assert set(read_header) == set(HEADER)
-        for k in HEADER:
-            np.testing.assert_array_equal(HEADER[k], read_header[k])
-        assert set(read_meta) == set(METADATA)
-        for k in METADATA:
-            np.testing.assert_array_equal(METADATA[k], read_meta[k])
+        compare_dicts(data, read_data)
+        compare_dicts(HEADER, read_header)
+        compare_dicts(METADATA, read_meta)
+
+
+def test_write_read_s11_file():
+    data, cal_data = generate_s11_data(cal=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # no filename, should create one automatically
+        io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
+        # check that the file was created
+        now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        # might be off by a second, so we use glob to find the file
+        assert len(list(Path(tmpdir).glob(f"s11_{now[:-2]}*.h5"))) == 1
+        # create a filename manually
+        filename = Path(tmpdir) / "test_s11.h5"
+        io.write_s11_file(
+            data,
+            S11_HEADER,
+            metadata=METADATA,
+            cal_data=cal_data,
+            fname=filename,
+        )
+        assert filename.exists()
+        read = io.read_s11_file(filename)
+        read_data, read_cal_data, read_header, read_meta = read
+        compare_dicts(data, read_data)
+        compare_dicts(cal_data, read_cal_data)
+        compare_dicts(S11_HEADER, read_header)
+        compare_dicts(METADATA, read_meta)
