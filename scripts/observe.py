@@ -7,6 +7,7 @@ single board computer.
 import argparse
 import logging
 from pathlib import Path
+import subprocess
 
 from eigsep_corr.fpga import add_args
 from eigsep_observing.config import CorrConfig, ObsConfig
@@ -15,6 +16,10 @@ from eigsep_observing import EigObserver
 LOG_LEVEL = logging.DEBUG
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=LOG_LEVEL)
+
+# panda config
+PANDA_USERNAME = "eigsep"
+CLIENT_PATH = "/home/eigsep/eigsep_observing/scripts/client.py"  # on panda
 
 # command line arguments
 parser = argparse.ArgumentParser(
@@ -50,6 +55,8 @@ corr_cfg = CorrConfig(
 
 # observing config
 obs_cfg = ObsConfig(
+    pi_ip="10.10.10.10",
+    panda_ip="10.10.10.12",
     sensors={
         "imu_az": "/dev/pico_imu_az",
         "imu_el": "/dev/pico_imu_el",
@@ -121,6 +128,15 @@ if args.sync:
 observer = EigObserver(fpga, cfg=obs_cfg, logger=logger)
 # clear redis at the start of observing
 observer.redis.reset()
+# start the client
+observer.start_client()
+subprocess.run(
+    [
+        "ssh",
+        f"{PANDA_USERNAME}@{obs_cfg.panda_ip}",
+        "nohup python3 {CLIENT_PATH} > client.log 2>&1 &",
+    ]
+)
 logger.info("Observing.")
 try:
     observer.observe(
