@@ -21,7 +21,7 @@ parser = argparse.ArgumentParser(
     description="Eigsep Observer",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-add_args(parser)
+add_args(parser, eig_observing=True)
 args = parser.parse_args()
 save_dir = Path(args.save_dir).resolve()
 vna_save_dir = save_dir / "s11_data"
@@ -119,6 +119,8 @@ if args.sync:
 
 
 observer = EigObserver(fpga, cfg=obs_cfg, logger=logger)
+# clear redis at the start of observing
+observer.redis.reset()
 logger.info("Observing.")
 try:
     observer.observe(
