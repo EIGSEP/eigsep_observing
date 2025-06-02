@@ -260,3 +260,69 @@ def test_write_read_s11_file():
         compare_dicts(cal_data, read_cal_data)
         compare_dicts(S11_HEADER, read_header)
         compare_dicts(METADATA, read_meta)
+
+
+def test_file():
+    # test the File class
+    temp_dir = tempfile.TemporaryDirectory()
+    save_dir = Path(temp_dir.name)
+    autos = [str(i) for i in range(6)]
+    cross = ["02", "04", "13", "15", "24", "35"]
+    pairs = autos + cross
+    ntimes = 60
+    test_file = io.File(save_dir, pairs, ntimes, HEADER, redis=None)
+
+    # __init__
+    assert test_file.save_dir.resolve() == save_dir.resolve()
+    assert test_file.pairs == pairs
+    assert test_file.ntimes == ntimes
+    assert test_file.header == HEADER
+    assert test_file.redis is None
+
+    assert list(test_file.data.keys()) == pairs
+    dtype = io.build_dtype(*HEADER["dtype"])
+    for p in pairs:
+        if len(p) == 1:
+            shape = io.data_shape(ntimes, 2, 1024)
+        else:
+            shape = io.data_shape(ntimes, 2, 1024, cross=True)
+        d = test_file.data[p]
+        assert d.shape == shape
+        assert d.dtype == dtype
+        np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
+
+    assert test_file._counter == 0
+
+    # add_data
+    data = generate_data(reshape=False)
+    for i in range(ntimes - 1):
+        to_add = {p: d[i] for p, d in data.items()}
+        fname = test_file.add_data(to_add)
+        assert fname is None  # None until the file is full
+        assert test_file._counter == i + 1
+        for p in pairs:
+            assert np.array_equal(test_file.data[p][i], to_add[p])
+    to_add = {p: d[-1] for p, d in data.items()}
+    fname = test_file.add_data(to_add)
+    assert fname is not None  # should return the filename
+    # reset has been called
+    assert test_file._counter == 0
+    for p in pairs:
+        if len(p) == 1:
+            shape = io.data_shape(ntimes, 2, 1024)
+        else:
+            shape = io.data_shape(ntimes, 2, 1024, cross=True)
+        d = test_file.data[p]
+        assert d.shape == shape
+        assert d.dtype == dtype
+        np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
+
+    # corr_write has been called by add_data
+    assert Path(fname).exists()
+    # check that the data is written correctly
+    read_data, read_header, read_meta = io.read_hdf5(fname)
+    compare_dicts(io.reshape_data(data, avg_even_odd=True), read_data)
+    compare_dicts(HEADER, read_header)
+    assert read_meta == {}
+
+    temp_dir.cleanup()
