@@ -1,5 +1,40 @@
-from eigsep_observing.config import ObsConfig
+from eigsep_observing.config import CorrConfig, ObsConfig
 
+def test_inttime():
+    # defaults
+    sample_rate = 500
+    corr_acc_len = 2**26
+    acc_bins = 2
+    ntimes = 240
+    cfg = CorrConfig(
+        sample_rate=sample_rate,
+        corr_acc_len=corr_acc_len,
+        acc_bins=acc_bins,
+        ntimes=ntimes,
+    )
+    t0 = cfg.inttime
+    assert cfg.file_time == ntimes * cfg.inttime
+    # double sample rate
+    cfg.sample_rate = 2 * sample_rate
+    assert cfg.inttime == t0 / 2
+    assert cfg.file_time == ntimes * cfg.inttime
+    # change corr_acc_len
+    cfg.sample_rate = sample_rate
+    cfg.corr_acc_len = 4 * corr_acc_len
+    assert cfg.inttime == t0 * 4
+    assert cfg.file_time == ntimes * cfg.inttime
+    # change acc_bins
+    cfg.corr_acc_len = corr_acc_len
+    cfg.acc_bins = 1
+    assert cfg.inttime == t0 / 2
+    assert cfg.file_time == ntimes * cfg.inttime
+    # change ntimes
+    cfg.acc_bins = acc_bins
+    for ntimes in [30, 60, 120, 240, 480]:
+        cfg.ntimes = ntimes
+        assert cfg.file_time == ntimes * cfg.inttime
+
+# test ObsConfig
 switch_schedule = {
     "vna": 1,
     "snap_repeat": 1200,
