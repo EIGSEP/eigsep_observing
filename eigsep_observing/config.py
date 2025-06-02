@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from eigsep_corr.data import DATA_PATH
+from eigsep_corr.utils import calc_inttime
 
 
 @dataclass
@@ -22,7 +24,7 @@ class CorrConfig:
     fpg_version: tuple[int, int] = (2, 3)  # major, minor
     adc_gain: float = 4
     fft_shift: int = 0x055
-    corr_acc_len: int = 2**28  # increment corr_acc_cnt by ~1/second
+    corr_acc_len: int = 2**26  # increment corr_acc_cnt by ~4/second
     corr_scalar: int = 2**9  # 8 bits after binary point so 2**9 = 1
     # note that corr_word and dtype must be consistent with each other
     corr_word: int = 4  # 4 bytes per word
@@ -36,7 +38,37 @@ class CorrConfig:
     )
     nchan: int = 1024
     save_dir: str = "/media/eigsep/T7/data"
-    ntimes: int = 60  # number of times per file
+    ntimes: int = 240  # number of times per file
+
+    @property
+    def inttime(self) -> float:
+        """
+        Integration time in seconds.
+
+        Returns
+        -------
+        float
+            Integration time in seconds.
+
+        """
+        return calc_inttime(
+            self.sample_rate * 1e6,  # in Hz
+            self.corr_acc_len,
+            acc_bins=self.acc_bins,
+        )
+
+    @property
+    def file_time(self) -> float:
+        """
+        Time covered by each file in seconds.
+
+        Returns
+        -------
+        float
+            Time covered by each file in seconds.
+
+        """
+        return self.inttime * self.ntimes
 
 
 default_corr_config = CorrConfig()
