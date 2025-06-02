@@ -89,7 +89,8 @@ class ObsConfig:
     sensors, and other high-level parameters.
 
     """
-
+    rpi_ip: str = "10.10.10.10"
+    panda_ip: str = "10.10.10.12"
     sensors: dict[str, str] = field(
         default_factory=lambda: {
             "imu_az": "/dev/pico_imu_az",
