@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
-from .data import DATA_PATH
+from eigsep_corr.data import DATA_PATH
 
 
 @dataclass
