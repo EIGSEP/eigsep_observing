@@ -89,6 +89,30 @@ def reshape_data(data, avg_even_odd=True):
     return reshaped
 
 
+def to_remote_path(path, mnt_path=Path("/mnt/rpi")):
+    """
+    Convert a local path to a remote path. This ensures that data
+    gathered on the client (LattePanda) is saved to the remote Raspbery
+    Pi server.
+
+    Parameters
+    ----------
+    path : str or Path
+        Local path to be converted.
+    mnt_path : str or Path
+        Mount point for the remote server. Default is '/mnt/data'.
+
+    Returns
+    -------
+    Path
+        Converted remote path.
+
+    """
+    p = Path(path).resolve()
+    mnt = Path(mnt_path)
+    return mnt / p.relative_to("/")
+
+
 def write_hdf5(fname, data, header, metadata=None):
     """
     Write data to an HDF5 file.

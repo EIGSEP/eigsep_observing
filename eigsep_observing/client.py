@@ -11,7 +11,7 @@ from . import io, sensors
 
 class PandaClient:
 
-    def __init__(self, redis, logger=None):
+    def __init__(self, redis, mnt_path=Path("/mnt/rpi"), logger=None):
         """
         Client class that runs on the computer in the suspended box. This
         pulls data from connected sensors and pushes it to the Redis server.
@@ -22,6 +22,9 @@ class PandaClient:
         ----------
         redis : EigsepRedis
             The Redis server object to push data to and read commands from.
+        mnt_path : Path or str
+            The path where the Raspberry Pi is mounted. This is used to
+            save files on the Raspberry Pi.
 
         """
         if logger is None:
@@ -29,6 +32,7 @@ class PandaClient:
             logger.setLevel(logging.INFO)
         self.logger = logger
         self.redis = redis
+        self.mnt_path = Path(mnt_path).resolve()
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.switch_nw = None
         self.vna = None
@@ -193,7 +197,9 @@ class PandaClient:
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
-        save_dir = Path(self.vna.save_dir) / Path(mode)
+        # make sure save_dir is on the Raspberry Pi, not on the client
+        panda_path = Path(self.vna.save_dir) / Path(mode)
+        save_dir = io.to_remote_path(panda_path, mnt_path=self.mnt_path)
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_header()
