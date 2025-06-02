@@ -95,7 +95,6 @@ class EigsepRedis:
                 "vna:rec",  # receiver
             ],
             "init": ["init:picos"],  # set pico device names
-            "stop": ["stop"],  # done observing
         }
         return commands
 
@@ -127,19 +126,6 @@ class EigsepRedis:
 
         """
         return self.ctrl_commands["init"]
-
-    @property
-    def stop_command(self):
-        """
-        Return the stop command.
-
-        Returns
-        -------
-        command : str
-            The stop command.
-
-        """
-        return self.ctrl_commands["stop"][0]  # only one stop command
 
     @property
     def switch_commands(self):
@@ -259,7 +245,7 @@ class EigsepRedis:
             redis_hdr[stream] = np.array(out)
         return redis_hdr
 
-    def add_raw(self, key, value):
+    def add_raw(self, key, value, ex=None):
         """
         Update redis database with raw data in bytes.
 
@@ -269,9 +255,12 @@ class EigsepRedis:
             Data key.
         value : bytes
             Data value.
+        ex : float
+            Optional expiration time in seconds. If provided, the key will
+            expire after this time.
 
         """
-        return self.r.set(key, value)
+        return self.r.set(key, value, ex=ex)
 
     def get_raw(self, key):
         """
@@ -284,6 +273,47 @@ class EigsepRedis:
 
         """
         return self.r.get(key, encoding=None)
+
+    def _is_alive(self, key):
+        """
+        Check for heartbeat.
+
+        Returns
+        -------
+        alive : bool
+            True if heartbeat is received, False otherwise.
+
+        """
+        raw = self.get_raw(key)
+        if raw is None:
+            return False
+        alive_int = int(raw)
+        alive = bool(alive_int)
+        return alive
+
+    def is_client_alive(self):
+        """
+        Check if client is alive by checking the heartbeat.
+
+        Returns
+        -------
+        alive : bool
+            True if client is alive, False otherwise.
+
+        """
+        return self._is_alive("heartbeat:client")
+
+    def is_server_alive(self):
+        """
+        Check if server is alive by checking the heartbeat.
+
+        Returns
+        -------
+        alive : bool
+            True if server is alive, False otherwise.
+
+        """
+        return self._is_alive("heartbeat:server")
 
     def send_status(self, status):
         """

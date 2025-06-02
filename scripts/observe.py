@@ -126,8 +126,8 @@ if args.sync:
 
 
 observer = EigObserver(fpga, cfg=obs_cfg, logger=logger)
-# clear redis at the start of observing
-observer.redis.reset()
+observer.redis.reset()  # clear redis at the start of observing
+observer.start_heartbeat(ex=60)  # heartbeat thread
 # start the client
 observer.start_client()
 subprocess.run(

@@ -36,6 +36,7 @@ class PandaClient:
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.switch_nw = None
         self.vna = None
+        self.stop_event = None
 
         try:
             self.read_init_commands()
@@ -46,10 +47,33 @@ class PandaClient:
             )
             raise
 
+        # start heartbeat thread
+        self.heartbeat_thd = threading.Thread(
+            target=self._send_heartbeat,
+            kwargs={"ex": 60},
+            daemon=True,
+        )
+        self.heartbeat_thd.start()
+
         if self.sensors:
             self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
             for sensor, thd in self.sensors.values():
                 thd.start()
+
+    def _send_heartbeat(self, ex=60):
+        """
+        Send a heartbeat message to the Redis server to indicate that the
+        client is alive and running.
+
+        Parameters
+        ----------
+        ex : float
+            The expiration time for the heartbeat in seconds.
+
+        """
+        while True:
+            self.redis.add_raw("heartbeat:client", 1, ex=ex)
+            time.sleep(ex / 2)  # update faster than expiration
 
     def read_init_commands(self, timeout=60):
         """
@@ -212,13 +236,38 @@ class PandaClient:
             save_dir=save_dir,
         )
 
+    def _listen_heartbeat(self, cadence=60):
+        """
+        Listen for heartbeat messages from the server. If no heartbeat is
+        received within a certain time, a stop event is set.
+
+        Parameters
+        ----------
+        cadence : int
+            The time in seconds to wait between checking for heartbeats.
+            Default is 10 seconds.
+
+        """
+        while self.redis.is_server_alive():
+            time.sleep(cadence)
+        # if we reach here, the server is not alive
+        self.logger.info("Received stop command. Stopping client.")
+        self.stop_event.set()
+
     def read_ctrl(self):
         """
         Read control commands from Redis. Executes the
         commands and sends acknowledgements back to the Redis server.
 
         """
-        while True:
+        self.stop_event = threading.Event()
+        heartbeat_listen = threading.Thread(
+            target=self._listen_heartbeat,
+            kwargs={"cadence": 60},
+            daemon=True,
+        )
+        heartbeat_listen.start()
+        while not self.stop_event.is_set():
             entry_id, msg = self.redis.read_ctrl()
             if entry_id is None:  # no message
                 self.logger.debug("No message received. Waiting.")
@@ -228,10 +277,7 @@ class PandaClient:
                 self.logger.warning("Invalid message received.")
                 continue
             cmd, kwargs = msg
-            if cmd == self.redis.stop_command:
-                self.logger.info("Received stop command. Stopping client.")
-                return
-            elif cmd in self.redis.switch_commands:
+            if cmd in self.redis.switch_commands:
                 if self.switch_nw is None:
                     raise RuntimeError(
                         "Switch network not initialized. Cannot execute "

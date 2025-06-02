@@ -76,6 +76,47 @@ class EigObserver:
         self.cfg = cfg
         self.redis = EigsepRedis()
 
+        self.stop_heartbeat_event = Event()
+
+    def _send_heartbeat(self, ex):
+        """
+        Send a heartbeat message to Redis to inidicate to the client
+        that the server is alive and running. The message is sent
+        with an expiration time set by ``ex''. It is updated
+        at a faster rate (ex/2 seconds) while the server is running. If
+        observing is done, the thread will stop sending heartbeats
+        as 'client_stop_event' will be set.
+
+        Parameters
+        ----------
+        ex : float
+            The expiration time of the heartbeat message in seconds.
+
+        """
+        while not self.client_stop_event.is_set():
+            self.redis.add_raw("heartbeat:server", 1, ex=ex)
+            time.sleep(ex / 2)  # send heartbeat every ex/2 seconds
+
+    def start_heartbeat(self, ex=60):
+        """
+        Start the heartbeat thread to keep the Redis connection alive.
+        This is necessary to ensure that the client can connect and
+        receive data from the server.
+
+        Parameters
+        ----------
+        ex : float
+            The expiration time of the heartbeat message in seconds.
+
+        """
+        self.logger.info("Starting heartbeat thread.")
+        thd = Thread(
+            target=self._send_heartbeat,
+            args=(ex,),
+            daemon=True,
+        )
+        thd.start()
+
     def start_client(self):
         """
         Tell client that the server is ready to start observing, and
@@ -229,7 +270,7 @@ class EigObserver:
         self.fpga.pause_event = Event()
         self.fpga.stop_event = Event()
 
-        self.pause_event.set()
+        self.fpga.pause_event.set()
 
         thd = Thread(
             target=self.fpga._read_integrations,
@@ -250,7 +291,8 @@ class EigObserver:
         self.schedule_cycle = make_schedule(self.cfg.switch_schedule)
         remaining = -1  # initialize remaining to trigger first switch
         while not self.fpga.stop_event.is_set():
-            if remaining <= 0:
+            # can only do switching if client is alive
+            if remaining <= 0 and self.redis.is_client_alive():
                 self.fpga.pause_event.set()
                 # drain queue here since we've read what we wanted to
                 while True:
@@ -295,4 +337,5 @@ class EigObserver:
 
     def end_observing(self):
         self.fpga.end_observing()
-        self.redis.send_ctrl(self.redis.stop_command)
+        # stop the heartbeat thread, which will stop the client
+        self.stop_heartbeat_event.set()
