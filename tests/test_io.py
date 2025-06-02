@@ -5,6 +5,8 @@ import tempfile
 
 from eigsep_observing import io
 
+from .utils import compare_dicts
+
 # header to use for testing, mimics EigsepFpga().header
 HEADER = {
     "dtype": ("int32", ">"),
@@ -50,19 +52,6 @@ S11_HEADER = {
     "freqs": np.linspace(1e6, 250e6, 1000),
     "mode": "ant",
 }
-
-
-def compare_dicts(dict1, dict2):
-    """
-    Compare two dictionaries containing numpy arrays for equality.
-    """
-    assert set(dict1) == set(dict2), "Dictionaries have different keys."
-    for key in dict1:
-        np.testing.assert_array_equal(
-            dict1[key],
-            dict2[key],
-            err_msg=f"Arrays for key '{key}' are not equal.",
-        )
 
 
 def generate_data(reshape=True, return_time_freq=False):
