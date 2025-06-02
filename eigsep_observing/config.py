@@ -89,6 +89,7 @@ class ObsConfig:
     sensors, and other high-level parameters.
 
     """
+
     rpi_ip: str = "10.10.10.10"
     panda_ip: str = "10.10.10.12"
     sensors: dict[str, str] = field(

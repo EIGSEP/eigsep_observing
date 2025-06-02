@@ -1,5 +1,6 @@
 from eigsep_observing.config import CorrConfig, ObsConfig
 
+
 def test_inttime():
     # defaults
     sample_rate = 500
@@ -33,6 +34,7 @@ def test_inttime():
     for ntimes in [30, 60, 120, 240, 480]:
         cfg.ntimes = ntimes
         assert cfg.file_time == ntimes * cfg.inttime
+
 
 # test ObsConfig
 switch_schedule = {
