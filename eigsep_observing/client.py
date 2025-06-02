@@ -228,7 +228,10 @@ class PandaClient:
                 self.logger.warning("Invalid message received.")
                 continue
             cmd, kwargs = msg
-            if cmd in self.redis.switch_commands:
+            if cmd == self.redis.stop_command:
+                self.logger.info("Received stop command. Stopping client.")
+                return
+            elif cmd in self.redis.switch_commands:
                 if self.switch_nw is None:
                     raise RuntimeError(
                         "Switch network not initialized. Cannot execute "

@@ -72,8 +72,8 @@ class EigsepRedis:
         Returns
         -------
         commands : dict
-            Dictonary of commands. Key is the command type. Values is a list
-            of allowed commands for that type.
+            Dictonary of commands. Key is the command type. Values are
+            the allowed commands for that type.
 
         """
         commands = {
@@ -94,10 +94,8 @@ class EigsepRedis:
                 "vna:ant",  # antenna
                 "vna:rec",  # receiver
             ],
-            # set pico device names
-            "init": [
-                "init:picos",
-            ],
+            "init": ["init:picos"],  # set pico device names
+            "stop": ["stop"],  # done observing
         }
         return commands
 
@@ -129,6 +127,19 @@ class EigsepRedis:
 
         """
         return self.ctrl_commands["init"]
+
+    @property
+    def stop_command(self):
+        """
+        Return the stop command.
+
+        Returns
+        -------
+        command : str
+            The stop command.
+
+        """
+        return self.ctrl_commands["stop"][0]  # only one stop command
 
     @property
     def switch_commands(self):

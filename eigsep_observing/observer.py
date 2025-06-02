@@ -289,3 +289,4 @@ class EigObserver:
 
     def end_observing(self):
         self.fpga.end_observing()
+        self.redis.send_ctrl(self.redis.stop_command)
