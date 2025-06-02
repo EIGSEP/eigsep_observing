@@ -76,6 +76,12 @@ class EigObserver:
         self.cfg = cfg
         self.redis = EigsepRedis()
 
+    def start_client(self):
+        """
+        Tell client that the server is ready to start observing, and
+        send the configuration of the sensors and switches to
+        the client.
+        """
         picos = {}
         for name, pico in self.cfg.sensors.items():
             picos[name] = pico
