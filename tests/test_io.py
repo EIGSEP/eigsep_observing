@@ -216,6 +216,19 @@ def test_reshape_data():
             np.testing.assert_array_equal(cdata, reshaped_data[k])
 
 
+def test_to_remote_path():
+    path = Path("/media/eigsep/T7/data")  # typical data path
+    mnt_path = Path("/mnt/rpi")  # mount point
+    remote_path = io.to_remote_path(path, mnt_path=mnt_path)
+    assert remote_path == Path("/mnt/rpi/media/eigsep/T7/data")
+    # relative path
+    path = Path("data")
+    remote_path = io.to_remote_path(path, mnt_path=mnt_path)
+    here = Path.cwd().resolve()
+    expected_path = f"/mnt/rpi/{str(here)}/data"
+    assert remote_path == Path(expected_path)
+
+
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
     with tempfile.TemporaryDirectory() as tmpdir:
