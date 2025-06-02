@@ -374,7 +374,10 @@ class File:
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
-        metadata = self.redis.get_metadata()
+        if self.redis:
+            metadata = self.redis.get_metadata()
+        else:
+            metadata = None
         data = reshape_data(self.data, avg_even_odd=True)
         write_hdf5(fname, data, self.header, metadata=metadata)
         self.reset()
