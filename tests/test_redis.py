@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import numpy as np
 import pytest
 
@@ -25,7 +25,7 @@ def eigsep_redis():
 
 def test_metadata(eigsep_redis):
     assert eigsep_redis.data_streams == {}  # initially empty
-    today = datetime.now(UTC).isoformat().split("T")[0]  # for timestamps
+    today = datetime.now(timezone.utc).isoformat().split("T")[0]
     # increment acc_cnt
     for acc_cnt in range(10):
         eigsep_redis.add_metadata("acc_cnt", acc_cnt)

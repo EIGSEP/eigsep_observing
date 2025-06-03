@@ -1,4 +1,4 @@
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 import json
 import numpy as np
 import redis
@@ -176,7 +176,7 @@ class EigsepRedis:
             payload = json.dumps(value).encode("utf-8")
         # hash (for live updates)
         self.r.hset("metadata", key, payload)
-        ts = datetime.now(UTC).isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
         self.r.hset("metadata", f"{key}_ts", json.dumps(ts).encode("utf-8"))
         # stream (for file metadata)
         self.r.xadd(
