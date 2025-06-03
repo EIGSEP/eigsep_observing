@@ -23,7 +23,7 @@ class EigsepRedis:
             updates per second.
 
         """
-        self.r = redis.Redis(host=host, port=port, decode_responses=True)
+        self.r = redis.Redis(host=host, port=port, decode_responses=False)
         self.maxlen = maxlen
         self.ctrl_streams = {
             "stream:status": "0-0",  # status stream
@@ -33,7 +33,7 @@ class EigsepRedis:
     def reset(self):
         """
         Reset the Redis client. This clears all data streams and control
-        streams.
+        streams. It also resests the last read entry ids for the streams.
 
         Notes
         -----
@@ -42,6 +42,10 @@ class EigsepRedis:
 
         """
         self.r.flushdb()
+        self.ctrl_streams = {
+            "stream:status": "0-0",
+            "stream:ctrl": "0-0",
+        }
 
     @property
     def data_streams(self):
@@ -184,26 +188,42 @@ class EigsepRedis:
         # add the stream to the data streams if not already present
         self.r.sadd("data_stream_list", key)
 
-    def get_live_metadata(self, key=None):
+    def get_live_metadata(self, keys=None):
         """
         Get live metadata from Redis, i.e. the current values stored
         in the metadata hash.
 
         Parameters
         ----------
-        key : str
-            Metadata key. If None, return all metadata.
+        keys : str or list of str
+            Metadata key(s). If None, return all metadata.
+
+        Returns
+        -------
+        m : dict
+            Dictionary of metadata. If keys is None, return all metadata.
+            If keys is a string, return the value for that key.
+            If keys is a list, return a dictionary with the requested keys.
+
+        Raises
+        ------
+        TypeError
+            If keys is not a string or a list of strings.
 
         """
         m = {}
         for k, v in self.r.hgetall("metadata").items():
             m[k] = json.loads(v)
-        if key is None:
+        if keys is None:
             return m
+        elif isinstance(keys, str):
+            return m[keys.encode("utf-8")]
+        elif isinstance(keys, list):
+            return {k: m[k.encode("utf-8")] for k in keys if k in m}
         else:
-            return m[key]
+            raise TypeError("Keys must be a string or a list of strings.")
 
-    def get_metadata(self, stream_key=None):
+    def get_metadata(self, stream_keys=None):
         """
         Get all metadata from redis stream for file writing.
 
@@ -220,14 +240,15 @@ class EigsepRedis:
             value is a list of data values.
 
         """
-        if stream_key is None:
+        if stream_keys is None:
             streams = self.data_streams
         else:
-            if isinstance(stream_key, str):
-                stream_key = [stream_key]
+            if isinstance(stream_keys, str):
+                stream_keys = [stream_keys]
+            stream_keys = [k.encode("utf-8") for k in stream_keys]
             streams = {
                 k: self.data_streams[k]
-                for k in stream_key
+                for k in stream_keys
                 if k in self.data_streams
             }
 
@@ -237,7 +258,7 @@ class EigsepRedis:
             out = []
             # stream is a list of tuples (id, data)
             for eid, d in dat:
-                value = json.loads(d["value"])
+                value = json.loads(d[b"value"])
                 out.append(value)
                 # update the stream id
                 self.r.hset("data_streams", stream, eid)
@@ -271,7 +292,7 @@ class EigsepRedis:
             Data key.
 
         """
-        return self.r.get(key, encoding=None)
+        return self.r.get(key)
 
     def _is_alive(self, key):
         """
