@@ -458,16 +458,16 @@ class EigsepRedis:
         if not msg:
             return None, None
         # msg is stream_name, entries
-        entries = msg[1]
+        entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
         self.ctrl_streams["stream:ctrl"] = entry_id  # update the stream id
         # dat is a dict with key msg
-        raw = dat.get("msg")
+        raw = dat.get(b"msg")
         try:
-            msg = json.loads(raw)
+            decoded = json.loads(raw)
         except (TypeError, json.JSONDecodeError):
             return entry_id, None
         # msg is a dict with keys cmd and kwargs
-        cmd = msg.get("cmd")
-        kwargs = msg.get("kwargs")
+        cmd = decoded.get("cmd")
+        kwargs = decoded.get("kwargs", {})
         return entry_id, (cmd, kwargs)
