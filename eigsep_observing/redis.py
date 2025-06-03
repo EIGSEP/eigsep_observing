@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime, UTC
 import json
 import numpy as np
 import redis
@@ -172,18 +172,17 @@ class EigsepRedis:
             payload = json.dumps(value).encode("utf-8")
         # hash (for live updates)
         self.r.hset("metadata", key, payload)
-        ts = datetime.utcnow().isoformat()
-        self.r.hset("metadata", f"{key}_ts", ts)
+        ts = datetime.now(UTC).isoformat()
+        self.r.hset("metadata", f"{key}_ts", json.dumps(ts).encode("utf-8"))
         # stream (for file metadata)
-        stream_key = f"stream:{key}"
         self.r.xadd(
-            stream_key,
+            key,
             {"value": payload},
             maxlen=self.maxlen,
             approximate=True,
         )
         # add the stream to the data streams if not already present
-        self.r.sadd("data_stream_list", stream_key)
+        self.r.sadd("data_stream_list", key)
 
     def get_live_metadata(self, key=None):
         """
