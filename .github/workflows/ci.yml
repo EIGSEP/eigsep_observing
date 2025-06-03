@@ -1,6 +1,6 @@
-name: Python package
+name: EIGSEP Observing - CI
 
-on: [push]
+on: [push, pull_request]
 
 jobs:
   build:
@@ -26,9 +26,15 @@ jobs:
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       - name: Test with pytest
         run: |
-          pytest --cov=eigsep_observing --cov-report=xml tests/
+          pytest --cov=eigsep_observing --cov-report=xml --junitxml=junit.xml - o junit_family=legacy tests/
       - name: Upload coverage report
         uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
+      - name: Upload test results
+        if: ${{ !cancelled() }}
+        uses: codecov/test-results-action@v1
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
