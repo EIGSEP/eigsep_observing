@@ -26,7 +26,7 @@ jobs:
           flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
       - name: Test with pytest
         run: |
-          pytest --cov=eigsep_observing --cov-report=xml --junitxml=junit.xml - o junit_family=legacy tests/
+          pytest --cov=eigsep_observing --cov-report=xml --junitxml=junit.xml -o junit_family=legacy tests/
       - name: Upload coverage report
         uses: codecov/codecov-action@v5
         with:
