@@ -275,7 +275,7 @@ class EigsepRedis:
             Data key.
         value : bytes
             Data value.
-        ex : float
+        ex : int
             Optional expiration time in seconds. If provided, the key will
             expire after this time.
 
@@ -393,16 +393,16 @@ class EigsepRedis:
             Status message. If None, no message was received.
 
         """
+        # non-blocking read
         msg = self.r.xread(
             {"stream:status": self.ctrl_streams["stream:status"]},
-            block=0,
             count=1,
         )
         if not msg:
             return None, None
-        entry_id, status_dict = msg[1][0]  # since count=1, it's a list of 1
+        entry_id, status_dict = msg[0][1][0]
         self.ctrl_streams["stream:status"] = entry_id  # update the stream id
-        status = status_dict.get("status")
+        status = status_dict.get(b"status").decode("utf-8")
         return entry_id, status
 
     def send_ctrl(self, cmd, **kwargs):
@@ -453,7 +453,7 @@ class EigsepRedis:
         """
         # this is non-blocking
         msg = self.r.xread(
-            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, block=0, count=1
+            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, count=1
         )
         if not msg:
             return None, None
