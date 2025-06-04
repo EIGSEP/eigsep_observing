@@ -3,17 +3,17 @@ import numpy as np
 import pytest
 import time
 
-import fakeredis
 from eigsep_observing import EigsepRedis
+import fakeredis
 
 from .utils import compare_dicts, generate_data
 
 # mock redis connection using fakeredis
-redis = fakeredis.FakeRedis(decode_responses=False)
+redis = fakeredis.FakeRedis()
 
 
 class DummyEigsepRedis(EigsepRedis):
-    def __init__(self, redis, maxlen=600):
+    def __init__(self, redis=fakeredis.FakeRedis(), maxlen=600):
         self.r = redis
         self.maxlen = maxlen
         self.ctrl_streams = {
@@ -24,12 +24,12 @@ class DummyEigsepRedis(EigsepRedis):
 
 @pytest.fixture
 def server():
-    return DummyEigsepRedis(redis)
+    return DummyEigsepRedis(redis=redis)
 
 
 @pytest.fixture
 def client():
-    return DummyEigsepRedis(redis)
+    return DummyEigsepRedis(redis=redis)
 
 
 def test_metadata(server, client):
