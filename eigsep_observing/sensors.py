@@ -1,3 +1,5 @@
+from queue import Queue
+from threading import Thread
 import time
 
 
@@ -17,24 +19,19 @@ class Sensor:
         """
         self.name = name
         self.serial_port = serial_port
+        self.queue = Queue()
 
     def grab_data(self):
         """
-        Read data from the sensor. This method should be implemented by
-        subclasses.
-
-        Returns
-        -------
-        data : dict
-            Dictionary containing the sensor data.
+        Read data from the sensor and put to queue. This method should
+        be implemented by subclasses.
 
         """
         raise NotImplementedError("Subclasses should implement this method.")
 
     def read(self, redis, sleep=0):
         """
-        Read sensor data and push it to Redis. Note that subclasses should
-        implement the method ``grab_data`` to read the data from the sensor.
+        Read sensor data from queue and push it to Redis.
 
         Parameters
         ----------
@@ -44,8 +41,12 @@ class Sensor:
             Sleep time between reads in seconds.
 
         """
+        thd = Thread(target=self.grab_data, daemon=True)
+        thd.start()
         while True:
-            data = self.grab_data()
+            if self.queue.empty():
+                continue
+            data = self.queue.get()
             redis.add_metadata(self.name, data)
             time.sleep(sleep)
 
