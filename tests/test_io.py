@@ -206,6 +206,8 @@ def _test_write_header_item():
                     np.testing.assert_array_equal(grp.attrs[key], value)
                 else:
                     assert grp.attrs[key] == value
+            with pytest.raises(TypeError):
+                io._write_header_item(grp, "invalid", lambda x: x + 1)
 
 
 def test_write_read_hdf5():
@@ -258,6 +260,17 @@ def test_write_read_s11_file():
         compare_dicts(cal_data, read_cal_data)
         compare_dicts(S11_HEADER, read_header)
         compare_dicts(METADATA, read_meta)
+        # not absolute path
+        filename = Path("test_relative.h5")
+        io.write_s11_file(
+            data,
+            S11_HEADER,
+            metadata=METADATA,
+            cal_data=cal_data,
+            fname=filename,
+            save_dir=tmpdir,
+        )
+        assert Path(Path(tmpdir) / filename.name).exists()
 
 
 def test_file():
@@ -290,6 +303,7 @@ def test_file():
         np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
 
     assert test_file._counter == 0
+    assert len(test_file) == 0
 
     # add_data
     data = generate_data(reshape=False)
@@ -298,6 +312,7 @@ def test_file():
         fname = test_file.add_data(to_add)
         assert fname is None  # None until the file is full
         assert test_file._counter == i + 1
+        assert len(test_file) == i + 1
         for p in pairs:
             assert np.array_equal(test_file.data[p][i], to_add[p])
     to_add = {p: d[-1] for p, d in data.items()}
