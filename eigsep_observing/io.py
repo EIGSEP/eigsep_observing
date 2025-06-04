@@ -113,6 +113,125 @@ def to_remote_path(path, mnt_path=Path("/mnt/rpi")):
     return mnt / p.relative_to("/")
 
 
+def _write_attr(grp, key, value):
+    """
+    Helper function to write attributes to an HDF5 group.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        HDF5 group to write the attribute to.
+    key : str
+        Name of the attribute.
+    value : bool, int, float, str, bytes
+        Value of the attribute. Must be a simple type (not a list or dict).
+
+    Raises
+    -------
+    TypeError
+        If the value is not a simple type (bool, int, float, str, bytes).
+
+    """
+    if isinstance(value, bool):
+        grp.attrs[key] = np.bool_(value)
+    elif isinstance(value, int):
+        grp.attrs[key] = np.int64(value)
+    elif isinstance(value, float):
+        grp.attrs[key] = np.float64(value)
+    elif isinstance(value, str):
+        dtype = h5py.string_dtype(encoding="utf-8")
+        grp.attrs.create(key, value, dtype=dtype)
+    elif isinstance(value, bytes):
+        dtype = h5py.special_dtype(vlen=bytes)
+        grp.attrs.create(key, value, dtype=dtype)
+    else:
+        raise TypeError(f"Unsupported attribute type: {type(value)}")
+
+
+def _write_dataset(grp, key, value):
+    """
+    Helper function to write a dataset to an HDF5 group.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        HDF5 group to write the dataset to.
+    key : str
+        Name of the dataset.
+    value : array-like
+        Object that can be casted to a ndarray to be written as a dataset.
+
+    """
+    arr = np.asarray(value)
+
+    if arr.dtype.kind == "U":  # string type
+        dtype = h5py.string_dtype(encoding="utf-8")
+        grp.create_dataset(key, data=arr.astype(object), dtype=dtype)
+        return
+
+    if arr.dtype.kind == "S":  # bytes type
+        dtype = h5py.special_dtype(vlen=bytes)
+        grp.create_dataset(key, data=arr.astype(object), dtype=dtype)
+        return
+
+    grp.create_dataset(key, data=arr)
+
+
+def _write_header_item(grp, key, value):
+    """
+    Helper function to write an item to the header group in an HDF5 file.
+
+    Parameters
+    ----------
+    grp : h5py.Group
+        HDF5 group to write the item to.
+    key : str
+        Name of the item.
+    value : most native Python types, see notes
+        Value of the item.
+
+    Notes
+    -----
+    Supported types include:
+    - Simple types: bool, int, float, str, bytes
+    - Arrays/lists: numpy arrays, lists, tuples (converted to arrays)
+    - Dictionaries: nested dictionaries with simple types as values
+    - Complex numbers: 0-dim numpy arrays (e.g., np.array(1.0+0j))
+    - Path: converted to string
+    - datetime.datetime: converted to string in ISO format
+    - set: converted to a list
+
+    Raises
+    ------
+    TypeError
+        If the value is not a simple type or a small array/list/dict.
+
+    """
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, datetime.datetime):
+        value = value.isoformat()
+    if isinstance(value, set):
+        value = sorted(value)  # convert set to sorted list
+
+    if isinstance(value, complex):
+        _write_dataset(grp, key, np.complex128(value))
+        return
+    if isinstance(value, (bool, int, float, str, bytes)):
+        _write_attr(grp, key, value)
+        return
+    if isinstance(value, (list, tuple, np.ndarray)):
+        _write_dataset(grp, key, value)
+        return
+    if isinstance(value, dict):  # recursive case for dictionaries
+        sub_grp = grp.create_group(key)
+        for sub_key, sub_value in value.items():
+            _write_header_item(sub_grp, sub_key, sub_value)
+        return
+
+    raise TypeError(f"Unsupported header type: {type(value)}")
+
+
 def write_hdf5(fname, data, header, metadata=None):
     """
     Write data to an HDF5 file.
@@ -147,37 +266,12 @@ def write_hdf5(fname, data, header, metadata=None):
         # header
         header_grp = f.create_group("header")
         for key, value in header.items():
-            if isinstance(value, (str, int, float)):
-                header_grp.attrs[key] = value
-            elif isinstance(value, (list, tuple, np.ndarray)):
-                arr = np.asarray(value)
-                if arr.dtype.kind == "U":  # string type
-                    header_grp.create_dataset(
-                        key,
-                        data=arr.astype(object),
-                        dtype=h5py.string_dtype(encoding="utf-8"),
-                    )
-                else:
-                    header_grp.create_dataset(key, data=arr)
-            elif isinstance(value, dict):
-                sub_grp = header_grp.create_group(key)
-                for sub_key, sub_value in value.items():
-                    sub_grp.attrs[sub_key] = sub_value
-            else:
-                raise TypeError(f"Unsupported header type: {type(value)}")
+            _write_header_item(header_grp, key, value)
         # metadata
         if metadata is not None:
             metadata_grp = f.create_group("metadata")
             for key, value in metadata.items():
-                arr = np.asarray(value)
-                if arr.dtype.kind == "U":  # string type
-                    metadata_grp.create_dataset(
-                        key,
-                        data=arr.astype(object),
-                        dtype=h5py.string_dtype(encoding="utf-8"),
-                    )
-                else:
-                    metadata_grp.create_dataset(key, data=arr)
+                _write_header_item(metadata_grp, key, value)
 
 
 def read_hdf5(fname):

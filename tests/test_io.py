@@ -1,6 +1,7 @@
 import datetime
 import numpy as np
 from pathlib import Path
+import pytest
 import tempfile
 
 from eigsep_observing import io
@@ -148,6 +149,12 @@ def test_write_read_hdf5():
         compare_dicts(data, read_data)
         compare_dicts(HEADER, read_header)
         compare_dicts(METADATA, read_meta)
+
+        # test with invalid type in header
+        invalid_header = HEADER.copy()
+        invalid_header["bad"] = lambda x: x  # something exotic, not allowed
+        with pytest.raises(TypeError):
+            io.write_hdf5(filename, data, invalid_header)
 
 
 def test_write_read_s11_file():
