@@ -42,6 +42,9 @@ def test_metadata(server, client):
             assert server.data_streams == {b"acc_cnt": "0-0"}
         # live metadata should be updated
         assert server.get_live_metadata(keys="acc_cnt") == acc_cnt
+        assert server.get_live_metadata(keys=["acc_cnt"]) == {
+            "acc_cnt": acc_cnt
+        }
         live = server.get_live_metadata()
         # can't expect the exact timestamp
         assert b"acc_cnt_ts" in live
@@ -79,6 +82,9 @@ def test_metadata(server, client):
     compare_dicts(metadata, expected)
     assert set(server.data_streams.keys()) == set([b"acc_cnt", b"update_date"])
 
+    # test typeerror in live_metadata
+    with pytest.raises(TypeError):
+        server.get_live_metadata(keys=[1])  # keys must be str or list of str
     # test reset
     server.reset()
     assert client.data_streams == {}
