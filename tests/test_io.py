@@ -1,9 +1,11 @@
 import datetime
+import json
 import numpy as np
 from pathlib import Path
 import pytest
 import tempfile
 
+import h5py
 from eigsep_observing import io
 
 from .utils import compare_dicts, generate_data, generate_s11_data
@@ -132,6 +134,80 @@ def test_to_remote_path():
     assert remote_path == Path(expected_path)
 
 
+def test_write_attr():
+    values = {
+        bool: True,
+        int: 42,
+        float: 3.14,
+        str: "test",
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "test.h5"
+        with h5py.File(fname, "w") as f:
+            group = f.create_group("test_group")
+            for typ, value in values.items():
+                key = typ.__name__
+                io._write_attr(group, key, value)
+                assert group.attrs[key] == value
+            # write invalid type
+            with pytest.raises(TypeError):
+                io._write_attr(group, "list", [1, 2, 3])
+
+
+def test_write_dataset():
+    values = {
+        list: [1, 2, 3],
+        tuple: ("1", "2", "3"),
+        np.ndarray: np.array([1, 2, 3]),
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "test.h5"
+        with h5py.File(fname, "w") as f:
+            group = f.create_group("test_group")
+            for typ, value in values.items():
+                key = typ.__name__
+                io._write_dataset(group, key, value)
+                assert key in group
+                back = json.loads(group[key][()])
+                if key == "ndarray":
+                    back = np.array(back)
+                assert np.all(back == list(value))
+            # write invalid type
+            with pytest.raises(TypeError):
+                io._write_dataset(group, "fcn", lambda x: x + 1)
+
+
+def _test_write_header_item():
+    values = {
+        Path: Path("/test/path"),
+        datetime.datetime: datetime.datetime(2023, 10, 1, 12, 0),
+        set: {"a", "b", "c"},
+        complex: 1 + 2j,
+        bool: True,
+        int: 42,
+        float: 3.14,
+        str: "test",
+        list: [1, 2, 3],
+        tuple: ("1", "2", "3"),
+        np.ndarray: np.array([1, 2, 3]),
+        dict: {"key": "value", "nested": {"a": 1, "b": 2}},
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "test.h5"
+        with h5py.File(fname, "w") as f:
+            grp = f.create_group("test_group")
+            for typ, value in values.items():
+                key = typ.__name__
+                io._write_header_item(grp, key, value)
+                assert key in grp.attrs
+                if isinstance(value, dict):
+                    compare_dicts(value, json.loads(grp.attrs[key]))
+                elif isinstance(value, (np.ndarray, bytes)):
+                    np.testing.assert_array_equal(grp.attrs[key], value)
+                else:
+                    assert grp.attrs[key] == value
+
+
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -152,7 +228,7 @@ def test_write_read_hdf5():
 
         # test with invalid type in header
         invalid_header = HEADER.copy()
-        invalid_header["bad"] = lambda x: x  # something exotic, not allowed
+        invalid_header["bad"] = b"invalid"  # bytes not allowed
         with pytest.raises(TypeError):
             io.write_hdf5(filename, data, invalid_header)
 
