@@ -211,6 +211,12 @@ class EigsepRedis:
             If keys is not a string or a list of strings.
 
         """
+        if keys is not None and not isinstance(keys, (str, list)):
+            raise TypeError("Keys must be a string or a list of strings.")
+        if isinstance(keys, list) and not all(
+            isinstance(k, str) for k in keys
+        ):
+            raise TypeError("All keys in the list must be strings.")
         m = {}
         for k, v in self.r.hgetall("metadata").items():
             m[k] = json.loads(v)
@@ -218,10 +224,11 @@ class EigsepRedis:
             return m
         elif isinstance(keys, str):
             return m[keys.encode("utf-8")]
-        elif isinstance(keys, list):
-            return {k: m[k.encode("utf-8")] for k in keys if k in m}
         else:
-            raise TypeError("Keys must be a string or a list of strings.")
+            filtered_m = {}
+            for k in keys:
+                filtered_m[k] = m[k.encode("utf-8")]
+            return filtered_m
 
     def get_metadata(self, stream_keys=None):
         """
