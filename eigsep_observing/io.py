@@ -1,5 +1,6 @@
 import datetime
 import h5py
+import json
 import numpy as np
 from pathlib import Path
 
@@ -123,13 +124,13 @@ def _write_attr(grp, key, value):
         HDF5 group to write the attribute to.
     key : str
         Name of the attribute.
-    value : bool, int, float, str, bytes
+    value : bool, int, float, str
         Value of the attribute. Must be a simple type (not a list or dict).
 
     Raises
     -------
     TypeError
-        If the value is not a simple type (bool, int, float, str, bytes).
+        If the value is not a simple type (bool, int, float, str).
 
     """
     if isinstance(value, bool):
@@ -140,9 +141,6 @@ def _write_attr(grp, key, value):
         grp.attrs[key] = np.float64(value)
     elif isinstance(value, str):
         dtype = h5py.string_dtype(encoding="utf-8")
-        grp.attrs.create(key, value, dtype=dtype)
-    elif isinstance(value, bytes):
-        dtype = h5py.special_dtype(vlen=bytes)
         grp.attrs.create(key, value, dtype=dtype)
     else:
         raise TypeError(f"Unsupported attribute type: {type(value)}")
@@ -158,23 +156,19 @@ def _write_dataset(grp, key, value):
         HDF5 group to write the dataset to.
     key : str
         Name of the dataset.
-    value : array-like
-        Object that can be casted to a ndarray to be written as a dataset.
+    value : np.ndarray or serializable object
+        Object to be written as a dataset. If it is a numpy array,
+        it is written directly. Otherwise it is serialized to JSON.
 
     """
-    arr = np.asarray(value)
+    if isinstance(value, np.ndarray):
+        # grp.create_dataset(key, data=value)
+        # return
+        data = json.dumps(value.tolist())
+    else:
+        data = json.dumps(value)
 
-    if arr.dtype.kind == "U":  # string type
-        dtype = h5py.string_dtype(encoding="utf-8")
-        grp.create_dataset(key, data=arr.astype(object), dtype=dtype)
-        return
-
-    if arr.dtype.kind == "S":  # bytes type
-        dtype = h5py.special_dtype(vlen=bytes)
-        grp.create_dataset(key, data=arr.astype(object), dtype=dtype)
-        return
-
-    grp.create_dataset(key, data=arr)
+    grp.create_dataset(key, data=data)
 
 
 def _write_header_item(grp, key, value):
@@ -217,16 +211,11 @@ def _write_header_item(grp, key, value):
     if isinstance(value, complex):
         _write_dataset(grp, key, np.complex128(value))
         return
-    if isinstance(value, (bool, int, float, str, bytes)):
+    if isinstance(value, (bool, int, float, str)):
         _write_attr(grp, key, value)
         return
-    if isinstance(value, (list, tuple, np.ndarray)):
+    if isinstance(value, (list, tuple, bytes, dict, np.ndarray)):
         _write_dataset(grp, key, value)
-        return
-    if isinstance(value, dict):  # recursive case for dictionaries
-        sub_grp = grp.create_group(key)
-        for sub_key, sub_value in value.items():
-            _write_header_item(sub_grp, sub_key, sub_value)
         return
 
     raise TypeError(f"Unsupported header type: {type(value)}")
@@ -302,17 +291,14 @@ def read_hdf5(fname):
             if isinstance(obj, h5py.Group):
                 header[name] = {k: v for k, v in obj.attrs.items()}
             else:
-                if obj.dtype.kind in ("S", "O"):  # string type
-                    header[name] = obj.asstr()[()]
-                else:
-                    header[name] = obj[()]
+                header[name] = json.loads(obj[()])
         # metadata
         metadata = {}
-        for k, v in f.get("metadata", {}).items():
-            if v.dtype.kind in ("S", "O"):
-                metadata[k] = v.asstr()[()]
+        for name, obj in f.get("metadata", {}).items():
+            if isinstance(obj, h5py.Group):
+                metadata[name] = {k: v for k, v in obj.attrs.items()}
             else:
-                metadata[k] = v[()]
+                metadata[name] = json.loads(obj[()])
     return data, header, metadata
 
 
