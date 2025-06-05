@@ -110,6 +110,7 @@ class PandaClient:
             if cmd not in self.redis.init_commands:
                 self.logger.warning(f"Unknown command: {cmd}")
                 continue
+            break  # valid command received
         # pico_ids a dictionary
         switch_pico = pico_ids.pop("switch_pico", None)
         if switch_pico is not None:
@@ -187,29 +188,29 @@ class PandaClient:
 
     def measure_s11(self, mode, **kwargs):
         """
-        Measure S11 with the VNA and write the results to file. The directory
-        where the results are saved is set by the ``save_dir'' attribute of
-        the VNA instance.
+        Measure S11 with the VNA and write the results to file. The
+        directory where the results are saved is set by the
+        ``save_dir'' attribute of the VNA instance.
 
         Parameters
         ----------
         mode : str
-            The mode of operation, either ``ant'' for antenna or ``rec'' for
-            receiver.
+            The mode of operation, either 'ant' for antenna or 'rec'
+            for receiver.
         kwargs : dict
-            Additional keyword arguments for the VNA measurement. Passed to
-            the VNA setup method.
+            Additional keyword arguments for the VNA measurement.
+            Passed to the VNA setup method.
 
         Raises
         ------
         ValueError
-            If the mode is not ``ant'' or ``rec''.
+            If the mode is not 'ant' or 'rec'.
 
         Notes
         -----
-        This function does all the switching needed for the VNA measurement,
-        including to OSL calibrators. There's no option to skip the
-        calibration.
+        This function does all the switching needed for the VNA
+        measurement, including to OSL calibrators. There's no option to
+        skip the calibration.
 
         """
         if mode not in ["ant", "rec"]:
@@ -260,7 +261,6 @@ class PandaClient:
         ----------
         cadence : int
             The time in seconds to wait between checking for heartbeats.
-            Default is 10 seconds.
 
         """
         while self.redis.is_server_alive():
