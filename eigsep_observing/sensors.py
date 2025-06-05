@@ -2,6 +2,8 @@ from queue import Queue
 from threading import Thread
 import time
 
+import serial
+
 
 class Sensor:
 
@@ -16,10 +18,22 @@ class Sensor:
         serial_port : str
             Serial port name for the sensor.
 
+        Raises
+        ------
+        ValueError
+            If the serial port cannot be opened.
+
         """
         self.name = name
-        self.serial_port = serial_port
         self.queue = Queue()
+        try:
+            self.serial = serial.Serial(
+                port=serial_port, baudrate=115200, timeout=10
+            )
+        except serial.SerialException as e:
+            raise ValueError(
+                f"Could not open serial port {serial_port}: {e}"
+            ) from e
 
     def grab_data(self):
         """
