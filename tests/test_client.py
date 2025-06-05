@@ -6,6 +6,7 @@ import time
 
 # from cmt_vna.tests import DummyVNA  # XXX
 from eigsep_observing import PandaClient
+
 # from switch_network.tests import DummySwitchNetwork  # XXX
 
 from .test_redis import DummyEigsepRedis
@@ -20,7 +21,8 @@ class DummyEigsepRedisWithInit(DummyEigsepRedis):
 
     def __init__(self, picos={}):
         super().__init__()
-        self.redis.send_ctrl("init:picos", **picos)  # normally sent by server
+        # send init command, normally sent by the server
+        super().send_ctrl("init:picos", **picos)
 
 
 class DummyPandaClient(PandaClient):
