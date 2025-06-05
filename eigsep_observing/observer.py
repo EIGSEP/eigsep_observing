@@ -123,9 +123,7 @@ class EigObserver:
         send the configuration of the sensors and switches to
         the client.
         """
-        picos = {}
-        for name, pico in self.cfg.sensors.items():
-            picos[name] = pico
+        picos = {name: pico for name, pico in self.cfg.sensors.items()}
         picos["switch"] = self.cfg.switch_pico
         self.redis.send_ctrl("init:picos", **picos)
 
