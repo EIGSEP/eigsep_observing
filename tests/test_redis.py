@@ -13,7 +13,9 @@ redis = fakeredis.FakeRedis()
 
 
 class DummyEigsepRedis(EigsepRedis):
-    def __init__(self, redis=fakeredis.FakeRedis(), maxlen=600):
+    def __init__(self, redis=None, maxlen=600):
+        if redis is None:
+            redis = fakeredis.FakeRedis()
         self.r = redis
         self.maxlen = maxlen
         self.ctrl_streams = {
