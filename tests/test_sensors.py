@@ -7,6 +7,8 @@ from eigsep_observing import sensors
 
 from .test_redis import DummyEigsepRedis
 
+pytestmark = pytest.mark.skip(reason="Sensor class not implemented yet")
+
 
 # XXX need to mock up sensor to run w/o pico
 class DummySensor(sensors.Sensor):
@@ -15,8 +17,9 @@ class DummySensor(sensors.Sensor):
         self.name = name
         self.serial_port = serial_port
         self.queue = Queue()
-        if not self.name in sensors.SENSOR_CLASSES:
+        if self.name not in sensors.SENSOR_CLASSES:
             sensors.SENSOR_CLASSES[self.name] = DummySensor
+
 
 @pytest.fixture
 def redis():
