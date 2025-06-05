@@ -107,10 +107,11 @@ class PandaClient:
                 self.logger.warning("Invalid message received.")
                 continue
             cmd, pico_ids = msg
-            if cmd not in self.redis.init_commands:
+            if cmd in self.redis.init_commands:
+                break
+            else:
                 self.logger.warning(f"Unknown command: {cmd}")
                 continue
-            break  # valid command received
         # pico_ids a dictionary
         switch_pico = pico_ids.pop("switch_pico", None)
         if switch_pico is not None:
