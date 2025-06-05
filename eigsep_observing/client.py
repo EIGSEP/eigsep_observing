@@ -117,9 +117,17 @@ class PandaClient:
                 f"Initializing switch network with pico {switch_pico}."
             )
             # uses default gpios, paths, timeout
-            self.switch_nw = SwitchNetwork(
-                serport=switch_pico, logger=self.logger, redis=self.redis
-            )
+            try:
+                self.switch_nw = SwitchNetwork(
+                    serport=switch_pico, logger=self.logger, redis=self.redis
+                )
+            except ValueError as e:
+                self.logger.error(
+                    f"Failed to initialize switch network: {e}. "
+                    "Check the serial port and GPIO settings."
+                )
+                raise
+
         else:
             self.logger.warning(
                 "No switch pico provided. No switch network initialized."
@@ -149,12 +157,19 @@ class PandaClient:
         try:
             sensor_cls = sensors.SENSOR_CLASSES[sensor_name]
         except KeyError:
-            self.logger.error(
+            self.logger.warning(
                 f"Unknown sensor name: {sensor_name}. "
                 "Must be in sensors.SENSOR_CLASSES."
             )
             return
-        sensor = sensor_cls(sensor_name, sensor_pico)
+        try:
+            sensor = sensor_cls(sensor_name, sensor_pico)
+        except ValueError as e:
+            self.logger.error(
+                f"Failed to initialize sensor {sensor_name}: {e}. "
+                "Check the serial port and GPIO settings."
+            )
+            return
         if sensor.name in self.sensors:
             self.logger.warning(f"Sensor {sensor.name} already added.")
             return
