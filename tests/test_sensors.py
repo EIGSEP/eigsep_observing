@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from queue import Queue
 from threading import Thread
 
 from eigsep_observing import sensors
@@ -7,26 +8,39 @@ from eigsep_observing import sensors
 from .test_redis import DummyEigsepRedis
 
 
+# XXX need to mock up sensor to run w/o pico
+class DummySensor(sensors.Sensor):
+
+    def __init__(self, name="dummy_sensor", serial_port="/dev/dummy_sensor"):
+        self.name = name
+        self.serial_port = serial_port
+        self.queue = Queue()
+        if not self.name in sensors.SENSOR_CLASSES:
+            sensors.SENSOR_CLASSES[self.name] = DummySensor
+
 @pytest.fixture
 def redis():
-    """Fixture to provide a dummy Redis instance."""
     return DummyEigsepRedis()
 
 
 def test_base_class(redis):
-    name = "test_sensor"
-    serial_port = "/dev/test_sensor"
-    s = sensors.Sensor(name, serial_port)
+    name = "dummy_sensor"
+    serial_port = "/dev/dummy_sensor"
+    s = DummySensor(name=name, serial_port=serial_port)
     # __init__
     assert s.name == name
     assert s.serial_port == serial_port
     assert s.queue is not None
     assert s.queue.empty()
+    # invalid port
+    with pytest.raises(ValueError):
+        sensors.Sensor(name, "/dev/invalid_port")
     # grab_data, not implemented
     with pytest.raises(NotImplementedError):
         s.grab_data()
 
 
+# XXX need a way to test without connecting picos
 @pytest.mark.parametrize("sensor_name", sensors.SENSOR_CLASSES)
 def test_grab_data(sensor_name):
     sensor_class = sensors.SENSOR_CLASSES[sensor_name]
