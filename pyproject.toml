@@ -21,6 +21,7 @@ dependencies = [
   "numpy",
   "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git@add_tests",
   "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@dev",
+  "fakeredis",
 ]
 
 [project.optional-dependencies]
@@ -29,7 +30,6 @@ dev = [
   "flake8",
   "pytest",
   "pytest-cov",
-  "fakeredis",
 ]
 
 [tool.setuptools.packages.find]
