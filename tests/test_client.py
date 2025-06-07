@@ -4,10 +4,10 @@ import tempfile
 import threading
 import time
 
-from cmt_vna.tests import DummyVNA
-from eigsep_observing import PandaClient
-from switch_network.tests import DummySwitchNetwork
+from cmt_vna.testing import DummyVNA
+from switch_network.testing import DummySwitchNetwork
 
+from eigsep_observing import PandaClient
 from .test_redis import DummyEigsepRedis
 from .test_sensors import DummySensor
 
