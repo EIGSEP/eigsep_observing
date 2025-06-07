@@ -29,6 +29,7 @@ dev = [
   "flake8",
   "pytest",
   "pytest-cov",
+  "fakeredis",
 ]
 
 [tool.setuptools.packages.find]
@@ -38,7 +39,7 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
-  "--cov=switch_network",
+  "--cov=src",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--junitxml=junit.xml",
