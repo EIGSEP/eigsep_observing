@@ -1,6 +1,6 @@
 import numpy as np
 
-from eigsep_observing import io
+from .. import io
 
 
 def compare_dicts(dict1, dict2):

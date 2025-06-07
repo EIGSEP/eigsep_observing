@@ -7,8 +7,11 @@ import tempfile
 
 import h5py
 from eigsep_observing import io
-
-from .utils import compare_dicts, generate_data, generate_s11_data
+from eigsep_observing.testing.utils import (
+    compare_dicts,
+    generate_data,
+    generate_s11_data,
+)
 
 # header to use for testing, mimics EigsepFpga().header
 HEADER = {

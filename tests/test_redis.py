@@ -3,25 +3,13 @@ import numpy as np
 import pytest
 import time
 
-from eigsep_observing import EigsepRedis
 import fakeredis
 
-from .utils import compare_dicts, generate_data
+from eigsep_observing.testing.utils import compare_dicts, generate_data
+from eigsep_observing.testing import DummyEigsepRedis
 
 # mock redis connection using fakeredis
 redis = fakeredis.FakeRedis()
-
-
-class DummyEigsepRedis(EigsepRedis):
-    def __init__(self, redis=None, maxlen=600):
-        if redis is None:
-            redis = fakeredis.FakeRedis()
-        self.r = redis
-        self.maxlen = maxlen
-        self.ctrl_streams = {
-            "stream:status": "0-0",
-            "stream:ctrl": "0-0",
-        }
 
 
 @pytest.fixture

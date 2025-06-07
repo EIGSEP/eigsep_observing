@@ -1,24 +1,11 @@
 import numpy as np
 import pytest
-from queue import Queue
 from threading import Thread
 
 from eigsep_observing import sensors
-
-from .test_redis import DummyEigsepRedis
+from eigsep_observing.testing import DummyEigsepRedis, DummySensor
 
 pytestmark = pytest.mark.skip(reason="Sensor class not implemented yet")
-
-
-# XXX need to mock up sensor to run w/o pico
-class DummySensor(sensors.Sensor):
-
-    def __init__(self, name="dummy_sensor", serial_port="/dev/dummy_sensor"):
-        self.name = name
-        self.serial_port = serial_port
-        self.queue = Queue()
-        if self.name not in sensors.SENSOR_CLASSES:
-            sensors.SENSOR_CLASSES[self.name] = DummySensor
 
 
 @pytest.fixture

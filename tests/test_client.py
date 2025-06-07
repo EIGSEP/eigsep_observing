@@ -8,8 +8,7 @@ from cmt_vna.testing import DummyVNA
 from switch_network.testing import DummySwitchNetwork
 
 from eigsep_observing import PandaClient
-from .test_redis import DummyEigsepRedis
-from .test_sensors import DummySensor
+from eigsep_observing.testing import DummyEigsepRedis, DummySensor
 
 
 class DummyEigsepRedisWithInit(DummyEigsepRedis):
