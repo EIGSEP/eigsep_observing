@@ -7,6 +7,7 @@ import time
 from cmt_vna.testing import DummyVNA
 from switch_network.testing import DummySwitchNetwork
 
+import eigsep_observing
 from eigsep_observing import PandaClient
 from eigsep_observing.testing import DummyEigsepRedis, DummySensor
 
@@ -112,6 +113,48 @@ def test_read_init(monkeypatch):
     assert isinstance(sensor, DummySensor)
     assert sensor.name == "dummy_sensor"
     assert sensor_thd.is_alive()
+
+
+def test_add_sensor(caplog, monkeypatch, client):
+    caplog.set_level("DEBUG")
+    # our sensor is not a valid sensor
+    sensor_classes = eigsep_observing.client.sensors.SENSOR_CLASSES
+    with pytest.raises(KeyError):
+        sensor_classes["dummy_sensor"]
+    # so it should not be added
+    client.add_sensor("dummy_sensor", "/dev/dummy_sensor")
+    assert client.sensors == {}
+    rec = caplog.records[-1]
+    assert "Unknown sensor name: dummy_sensor" in rec.getMessage()
+
+    # add a valid sensor, but that we can't connect to
+    name = "therm"  # thermistor
+    assert name in sensor_classes
+    client.add_sensor(name, "/dev/dummy_sensor")
+    assert client.sensors == {}
+    rec = caplog.records[-1]
+    assert f"Failed to initialize sensor {name}" in rec.getMessage()
+
+    # add a valid sensor that we can connect to
+    monkeypatch.setattr(
+        "eigsep_observing.client.sensors.SENSOR_CLASSES",
+        {"dummy_sensor": DummySensor},
+    )
+    name = "dummy_sensor"
+    client.add_sensor(name, "/dev/dummy_sensor")
+    assert name in client.sensors
+    assert len(client.sensors) == 1
+    sensor, sensor_thd = client.sensors["dummy_sensor"]
+    assert isinstance(sensor, DummySensor)
+    assert sensor.name == "dummy_sensor"
+    assert isinstance(sensor_thd, threading.Thread)
+    assert not sensor_thd.is_alive()  # not automatically started
+
+    # add the same sensor again, should not raise an error but log warning
+    client.add_sensor(name, "/dev/dummy_sensor")
+    assert len(client.sensors) == 1  # still only one sensor
+    rec = caplog.records[-1]
+    assert f"Sensor {name} already added" in rec.getMessage()
 
 
 @pytest.mark.skip(reason="DummyVNA not implemented yet")  # XXX
