@@ -34,6 +34,7 @@ class PandaClient:
         self.redis = redis
         self.mnt_path = Path(mnt_path).resolve()
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
+        self.serial_timeout = 5  # serial port timeout in seconds
         self.switch_nw = None
         self.vna = None
         self.stop_event = None
@@ -165,7 +166,9 @@ class PandaClient:
             )
             return
         try:
-            sensor = sensor_cls(sensor_name, sensor_pico)
+            sensor = sensor_cls(
+                sensor_name, sensor_pico, timeout=self.serial_timeout
+            )
         except ValueError as e:
             self.logger.error(
                 f"Failed to initialize sensor {sensor_name}: {e}. "
@@ -178,7 +181,7 @@ class PandaClient:
         thd = threading.Thread(
             target=sensor.read,
             args=(self.redis),
-            kwargs={"sleep": sleep_time},
+            kwargs={"cadence": sleep_time},
             daemon=True,
         )
         self.sensors[sensor.name] = (sensor, thd)
