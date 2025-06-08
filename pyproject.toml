@@ -21,6 +21,7 @@ dependencies = [
   "numpy",
   "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git@add_tests",
   "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@dev",
+  "eigsep_sensors @ git+https://github.com/EIGSEP/eigsep-sensors.git",
   "fakeredis",
 ]
 
