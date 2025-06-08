@@ -180,7 +180,7 @@ class PandaClient:
             return
         thd = threading.Thread(
             target=sensor.read,
-            args=(self.redis),
+            args=(self.redis,),
             kwargs={"cadence": sleep_time},
             daemon=True,
         )
