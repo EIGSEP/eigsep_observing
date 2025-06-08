@@ -1,11 +1,14 @@
-import numpy as np
+import json
 import pytest
 from threading import Thread
 
 from eigsep_observing import sensors
 from eigsep_observing.testing import DummyEigsepRedis, DummySensor
 
-pytestmark = pytest.mark.skip(reason="Sensor class not implemented yet")
+
+@pytest.fixture
+def dummy_sensor():
+    return DummySensor()
 
 
 @pytest.fixture
@@ -13,43 +16,43 @@ def redis():
     return DummyEigsepRedis()
 
 
-def test_base_class(redis):
+def test_init():
     name = "dummy_sensor"
-    serial_port = "/dev/dummy_sensor"
-    s = DummySensor(name=name, serial_port=serial_port)
-    # __init__
-    assert s.name == name
-    assert s.serial_port == serial_port
-    assert s.queue is not None
-    assert s.queue.empty()
-    # invalid port
-    with pytest.raises(ValueError):
-        sensors.Sensor(name, "/dev/invalid_port")
-    # grab_data, not implemented
-    with pytest.raises(NotImplementedError):
-        s.grab_data()
+    port = "/dev/dummy_sensor"
+    with pytest.raises(TypeError):  # can't init abstract class
+        sensors.Sensor(name, port)
+    dummy = DummySensor(name=name, port=port)
+    assert dummy.name == name
+    # init also creates a queue
+    assert dummy.queue is not None
+    assert dummy.queue.empty()
 
 
-# XXX need a way to test without connecting picos
-@pytest.mark.parametrize("sensor_name", sensors.SENSOR_CLASSES)
-def test_grab_data(sensor_name):
-    sensor_class = sensors.SENSOR_CLASSES[sensor_name]
-    sensor = sensor_class(sensor_name, "/dev/test_sensor")
-    thd = Thread(target=sensor.grab_data, daemon=True)
+# make a subclass of Sensor that does not implement from_sensor
+class NoFromSensor(sensors.Sensor):
+    def __init__(self, name="", port=""):
+        super().__init__(name, port)
+
+
+def test_no_from_sensor():
+    with pytest.raises(TypeError):
+        NoFromSensor()
+
+
+def test_queue_data(dummy_sensor):
+    cadence = 0.1  # seconds
+    thd = Thread(target=dummy_sensor._queue_data, args=(cadence,), daemon=True)
     thd.start()
-    data = sensor.queue.get(timeout=1)
-    # XXX do some comparisons
+    for i in range(10):
+        data = dummy_sensor.queue.get(timeout=1.0)
+        assert json.loads(data) == f"data: {i+1}"
 
 
-@pytest.mark.parametrize("sensor_name", sensors.SENSOR_CLASSES)
-def test_read(sensor_name, redis):
-    sensor_class = sensors.SENSOR_CLASSES[sensor_name]
-    sensor = sensor_class(sensor_name, "/dev/test_sensor")
-    thd = Thread(target=sensor.read, args=(redis,), daemon=True)
-    thd.start()
-    # compare data in redis with data in queue
-    data = sensor.queue.get(timeout=5)  # XXX get one reading only
-    redis_hdr = redis.get_metadata(stream_keys=sensor.name)
-    assert len(redis_hdr) == 1  # only one sensor at a time
-    redis_data = redis_hdr.values()[0]
-    np.testing.assert_array_equal(data, redis_data)
+@pytest.mark.skip(reason="Not implemented yet")
+def test_read():
+    pass
+
+
+@pytest.mark.skip(reason="Not implemented yet")
+def test_from_sensor():
+    pass
