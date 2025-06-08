@@ -169,7 +169,7 @@ class PandaClient:
             sensor = sensor_cls(
                 sensor_name, sensor_pico, timeout=self.serial_timeout
             )
-        except ValueError as e:
+        except RuntimeError as e:
             self.logger.error(
                 f"Failed to initialize sensor {sensor_name}: {e}. "
                 "Check the serial port and GPIO settings."

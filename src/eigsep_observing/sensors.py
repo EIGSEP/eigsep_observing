@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 import json
 from queue import Queue
+import serial
 from threading import Thread
 import time
 
@@ -20,7 +21,9 @@ class Sensor(ABC):
     def __init__(self, name, port, timeout=10, **kwargs):
         """
         Initialize the Sensor class. This method should be implemented
-        by subclasses to initialize the sensor.
+        by subclasses to initialize the sensor. Note that subclasses
+        should raise a RuntimeError if there is an issue connecting
+        to the sensor on the specified port.
 
         Parameters
         ----------
@@ -106,7 +109,7 @@ class Sensor(ABC):
 class ImuSensor(Sensor):
 
     def __init__(self, name, port, timeout=10):
-        pass
+        super().__init__(name, port, timeout=timeout)
 
     def from_sensor(self):
         return
@@ -129,9 +132,20 @@ class ThermSensor(Sensor):
         timeout : float
             Timeout for serial communication in seconds.
 
+        Raises
+        -------
+        RuntimeError
+            If there is an issue connecting to the thermistor on the
+            specified port.
+
         """
         super().__init__(name, port, timeout=timeout)
-        self.thermistor = eig_sensors.Thermistor(port, timeout=timeout)
+        try:
+            self.thermistor = eig_sensors.Thermistor(port, timeout=timeout)
+        except serial.SerialException as e:
+            raise RuntimeError(
+                f"Failed to connect to thermistor on port {port}: {e}"
+            ) from e
 
     def from_sensor(self):
         """
@@ -151,7 +165,7 @@ class ThermSensor(Sensor):
 class PeltierSensor(Sensor):
 
     def __init__(self, name, port, timeout=10):
-        pass
+        super().__init__(name, port, timeout=timeout)
 
     def from_sensor(self):
         return
@@ -160,7 +174,7 @@ class PeltierSensor(Sensor):
 class LidarSensor(Sensor):
 
     def __init__(self, name, port, timeout=10):
-        pass
+        super().__init__(name, port, timeout=timeout)
 
     def from_sensor(self):
         return
