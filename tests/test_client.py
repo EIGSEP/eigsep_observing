@@ -75,32 +75,42 @@ def test_client(client):
     assert client.stop_event.is_set()
 
 
-@pytest.mark.skip(reason="DummySwitchNetwork not implemented yet")  # XXX
 def test_read_init(monkeypatch):
-    # make sure the DummySensor is available in SENSOR_CLASSES
-    monkeypatch.setattr(
-        "eigsep_observing.client.sensors.SENSOR_CLASSES",  # XXX
-        {"dummy_sensor": DummySensor},
-    )
+    """
+    Test that the client can read initialization commands from Redis.
+    This includes setting up the switch network and sensors.
+    """
     picos = {
         "dummy_sensor": "/dev/dummy_sensor",
         "switch_pico": "/dev/dummy_switch",
     }
-    # can't instantiate PandaClient if SwitchNetwork is not available
+    # normal SwitchNetwork can't connect to the pico, so it raises ValueError
     with pytest.raises(ValueError):
         DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
-    # make it work with a dummy SwitchNetwork
+    # use DummySwitchNetwork to simulate connection
     monkeypatch.setattr(
         "eigsep_observing.client.SwitchNetwork",
         DummySwitchNetwork,
     )
     client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
     assert isinstance(client.switch_nw, DummySwitchNetwork)
-    # XXX implement __eq__ in switch_network
-    assert client.switch_nw == DummySwitchNetwork(picos["switch_pico"])
+    assert client.switch_nw.ser.is_open  # check if the serial port is open
+    # the read_init_commands also tries to instantiate sensors
+    # but DummySensor is not available in SENSOR_CLASSES so this should
+    # fail silently (we don't want a missing sensor to crash the client)
+    assert client.sensors == {}  # no sensors instantiated yet
+
+    # make sure the DummySensor is available in SENSOR_CLASSES
+    monkeypatch.setattr(
+        "eigsep_observing.client.sensors.SENSOR_CLASSES",
+        {"dummy_sensor": DummySensor},
+    )
+    client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
     # instantiation of PandaClient calls add_sensor
     assert "dummy_sensor" in client.sensors
-    sensor_thd = client.sensors["dummy_sensor"]
+    sensor, sensor_thd = client.sensors["dummy_sensor"]
+    assert isinstance(sensor, DummySensor)
+    assert sensor.name == "dummy_sensor"
     assert sensor_thd.is_alive()
 
 
