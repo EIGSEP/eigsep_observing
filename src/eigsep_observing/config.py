@@ -96,9 +96,7 @@ class ObsConfig:
         default_factory=lambda: {
             "imu_az": "/dev/pico_imu_az",
             "imu_el": "/dev/pico_imu_el",
-            "therm_load": "/dev/pico_therm_load",
-            "therm_lna": "/dev/pico_therm_lna",
-            "therm_vna_load": "/dev/pico_therm_vna_load",
+            "therm": "/dev/pico_therm",
             "peltier": "/dev/pico_peltier",
             "lidar": "/dev/pico_lidar",
         }
