@@ -19,23 +19,36 @@ def make_schedule(switch_schedule):
     switch_schedule : dict
         The switch schedule used for observing. A dictionary with keys
         `vna'', ``snap_repeat'', ``sky'', ``load'', and ``noise''. The
-        first two keys specify the number of measurements with the VNA and
-        the SNAP respectivtly. When measuring PSDs with the SNAP, the
-        ``sky'', ``load'', and ``noise'' keys specify the number of
+        first two keys specify the number of measurements with the VNA
+        and the SNAP respectivtly. When measuring PSDs with the SNAP,
+        the ``sky'', ``load'', and ``noise'' keys specify the number of
         measurements to take for each state.
 
     Returns
     -------
     schedule : cycle
-        A cycle object that iterates over the switch schedule. The schedule
-        is a list of tuples, where each tuple contains the state and the
-        number of measurements to take.
+        A cycle object that iterates over the switch schedule. The
+        schedule is a list of tuples, where each tuple contains the
+        state and the number of measurements to take.
+
+    Raises
+    ------
+    KeyError
+        If the switch schedule contains an invalid key.
+
+    ValueError
+        If the switch schedule is empty, i.e. no states are specified.
 
     Notes
     -----
-    Defaults are 0 for all states, except for ``snap_repeat'', which is 1.
+    Defaults are 0 for all states, except for ``snap_repeat'', which
+    defaults to 1.
 
     """
+    keys = ("sky", "load", "noise", "snap_repeat", "vna")
+    for k in switch_schedule:
+        if k not in keys:
+            raise KeyError(f"Invalid key in switch schedule: {k}.")
     n_vna = switch_schedule.get("vna", 0)
     if n_vna > 0:
         schedule = [("vna", n_vna)]
@@ -46,6 +59,10 @@ def make_schedule(switch_schedule):
     n_repeat = switch_schedule.get("snap_repeat", 1)
     if n_repeat > 0:
         schedule += n_repeat * block
+    if not schedule:
+        raise ValueError(
+            "Switch schedule is empty. Specify at least one state to observe."
+        )
     return cycle(schedule)
 
 
@@ -85,15 +102,15 @@ class EigObserver:
         with an expiration time set by ``ex''. It is updated
         at a faster rate (ex/2 seconds) while the server is running. If
         observing is done, the thread will stop sending heartbeats
-        as 'client_stop_event' will be set.
+        as `stop_heartbeat_event' will be set.
 
         Parameters
         ----------
-        ex : float
+        ex : int
             The expiration time of the heartbeat message in seconds.
 
         """
-        while not self.client_stop_event.is_set():
+        while not self.stop_heartbeat_event.is_set():
             self.redis.add_raw("heartbeat:server", 1, ex=ex)
             time.sleep(ex / 2)  # send heartbeat every ex/2 seconds
 
