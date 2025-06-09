@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import pytest
 import tempfile
@@ -157,9 +158,7 @@ def test_add_sensor(caplog, monkeypatch, client):
     assert f"Sensor {name} already added" in rec.getMessage()
 
 
-@pytest.mark.skip(reason="DummyVNA not implemented yet")  # XXX
-def test_read_ctrl(monkeypatch, client):
-    monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
+def test_read_ctrl_no_switch(client):
     # need to send fake server heartbeat so that the client does not stop
     client.redis.add_raw("heartbeat:server", 1)
     thd = threading.Thread(target=client.read_ctrl, daemon=True)
@@ -169,9 +168,56 @@ def test_read_ctrl(monkeypatch, client):
     # raises RunTimeError in thread, which ends the thread
     thd.join(timeout=1)
     assert not thd.is_alive()  # thread should have stopped
-    # send invalid VNA command
+
+
+@pytest.mark.skip(reason="fix this test - need to reset redis first")
+def test_read_ctrl_switch(monkeypatch):
+    """
+    Test read_ctrl with a switch network.
+    """
+    monkeypatch.setattr(
+        "eigsep_observing.client.SwitchNetwork",
+        DummySwitchNetwork,
+    )
+    picos = {"switch_pico": "/dev/dummy_switch"}
+    client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
+    # manually add redis to switch network; not supported by DummySwitchNetwork
+    client.switch_nw.redis = client.redis
+    # make sure the switching updates redis
+    mode = "RFANT"
+    client.switch_nw.switch(mode)
+    obs_mode = client.redis.get_live_metadata(keys="obs_mode")
+    assert obs_mode == mode
+
+    # do it from the client, using read_ctrl  #XXX need reset redis
+    assert False, "fix this test - need to reset redis first"
+    thd = threading.Thread(target=client.read_ctrl, daemon=True)
     thd.start()
-    client.redis.send_ctrl("vna:invalid")
+    # send a switch command, should work with DummySwitchNetwork
+    switch_cmd = f"switch:{mode}"
+    client.redis.send_ctrl(switch_cmd)
+    obs_mode = client.redis.get_live_metadata(keys="obs_mode")
+    assert obs_mode == mode
+
+
+def test_read_ctrl_VNA(monkeypatch):
+    monkeypatch.setattr(
+        "eigsep_observing.client.SwitchNetwork", DummySwitchNetwork
+    )
+    monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
+    picos = {"switch_pico": "/dev/dummy_switch"}
+    client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
+    # need to send fake server heartbeat so that the client does not stop
+    client.redis.add_raw("heartbeat:server", 1)
+    # manually add redis to switch network; not supported by DummySwitchNetwork
+    assert client.switch_nw is not None
+    client.switch_nw.redis = client.redis
+    # send invalid VNA command
+    thd = threading.Thread(target=client.read_ctrl, daemon=True)
+    thd.start()
+    # note: can't use send_ctrl here because it requires a valid command
+    invalid_command = {"cmd": "vna:invalid"}
+    client.redis.r.xadd("stream:ctrl", {"msg": json.dumps(invalid_command)})
     # should send a VNA error to redis but continue running
     status = client.redis.read_status()[1]
     assert status == "VNA_ERROR"
@@ -190,20 +236,3 @@ def test_read_ctrl(monkeypatch, client):
     client.stop_event.set()
     thd.join(timeout=1)
     assert not thd.is_alive()
-
-
-@pytest.mark.skip(reason="DummySwitchNetwork not implemented yet")  # XXX
-def test_read_ctrl_switch(monkeypatch):
-    # test read_ctrl with a switch network
-    monkeypatch.setattr(
-        "eigsep_observing.client.SwitchNetwork",
-        DummySwitchNetwork,
-    )
-    picos = {"switch_pico": "/dev/dummy_switch"}
-    client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
-    thd = threading.Thread(target=client.read_ctrl, daemon=True)
-    thd.start()
-    # send a switch command, should work with DummySwitchNetwork
-    client.redis.send_ctrl("switch:RFANT")
-    obs_mode = client.redis.get_live_metadata(keys="obs_mode")
-    assert obs_mode == "RFANT"
