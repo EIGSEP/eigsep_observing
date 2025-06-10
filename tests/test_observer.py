@@ -1,8 +1,11 @@
 import itertools
 import pytest
+import time
 
+from eigsep_corr.testing import DummyEigsepFpga
 from eigsep_observing.config import default_obs_config
 from eigsep_observing.observer import make_schedule, EigObserver
+from eigsep_observing.testing import DummyEigsepRedis
 
 
 def take_schedule(schedule, n):
@@ -77,3 +80,46 @@ def test_make_schedule():
     for i in range(2 * len(expected_modes)):
         mode = next(sched)[0]
         assert mode == expected_modes[i % len(expected_modes)]
+
+
+# test the EigObserver class
+@pytest.fixture
+def fpga():
+    return DummyEigsepFpga()
+
+@pytest.fixture
+def obs(fpga):
+    eig_obs = EigObserver(fpga, cfg=default_obs_config)
+    eig_obs.redis = DummyEigsepRedis()  # replace redis with a dummy
+    return eig_obs
+
+
+def test_send_heartbeat(obs):
+    """
+    Test that the EigObserver sends a heartbeat message.
+    """
+    assert not obs.redis.is_server_alive()  # initially no heartbeat
+    ex = 1  # heartbeat expiration time in seconds
+    obs.start_heartbeat(ex=ex)
+    assert obs.redis.is_server_alive()
+    # stop the heartbeat
+    obs.stop_heartbeat_event.set()
+    # wait for the heartbeat to stop
+    time.sleep(ex + 0.1)
+    assert not obs.redis.is_server_alive()  # heartbeat should be stopped
+
+
+def test_start_client(obs):
+    """
+    Test that the EigObserver starts the client correctly.
+    """
+    obs.start_client()
+    # logic in client.read_init_commands:
+    eid, msg = obs.redis.read_ctrl()
+    assert eid is not None
+    assert msg is not None
+    cmd, pico_ids = msg
+    assert cmd in obs.redis.init_commands
+    switch_pico = pico_ids.pop("switch_pico", None)
+    assert switch_pico == obs.cfg.switch_pico
+    assert pico_ids == obs.cfg.sensors
