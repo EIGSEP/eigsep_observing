@@ -134,7 +134,7 @@ subprocess.run(
     [
         "ssh",
         f"{PANDA_USERNAME}@{obs_cfg.panda_ip}",
-        "nohup python3 {CLIENT_PATH} > client.log 2>&1 &",
+        "nohup python3 {CLIENT_PATH} > client.log 2>&1 &",  # XXX no nohup?
     ]
 )
 logger.info("Observing.")
