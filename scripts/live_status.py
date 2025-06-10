@@ -27,12 +27,15 @@ r = EigsepRedis(host=args.rpi_ip)
 @app.route("/")
 def index():
     metadata = r.get_live_metadata()
+    # XXX key also come with key_ts that are timestamps.
+    # XXX handle this in an organized way
     data = {}
     for p in PAIRS:
         data[p] = r.get_raw(f"data:{p}")
         # XXX need to process this somehow, unpack bytes ETC
     return flask.render_template("index.html", metadata=metadata, data=data)
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     print("Starting live status server, go to http://localhost:5000")
     app.run(host="localhost", port=5000, debug=True)
