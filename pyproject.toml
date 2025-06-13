@@ -19,6 +19,7 @@ classifiers = [
 dependencies = [
   "h5py",
   "numpy",
+  "pyyaml",
   "switch_network @ git+https://github.com/EIGSEP/switchNW.git",
   "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git@add_tests",
   "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@dev",
