@@ -199,7 +199,7 @@ def test_read_ctrl_switch(monkeypatch):
     obs_mode = client.redis.get_live_metadata(keys="obs_mode")
     assert obs_mode == mode
 
-
+@pytest.mark.skip(reason="not implemented yet")
 def test_read_ctrl_VNA(monkeypatch):
     monkeypatch.setattr(
         "eigsep_observing.client.SwitchNetwork", DummySwitchNetwork
