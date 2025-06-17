@@ -1,7 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 import yaml
-from typing import Dict, Any
 
 from eigsep_corr.data import DATA_PATH
 from eigsep_corr.utils import calc_inttime
@@ -72,40 +71,83 @@ class CorrConfig:
         """
         return self.inttime * self.ntimes
 
+    def to_dict(self) -> dict:
+        """
+        Convert CorrConfig to dictionary for Redis storage.
+
+        Returns
+        -------
+        dict
+            Configuration as dictionary.
+        """
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "CorrConfig":
+        """
+        Create CorrConfig from dictionary loaded from Redis.
+
+        Parameters
+        ----------
+        data : dict
+            Configuration dictionary.
+
+        Returns
+        -------
+        CorrConfig
+            Configuration instance.
+        """
+        # Convert lists back to tuples where needed
+        if "fpg_version" in data and isinstance(data["fpg_version"], list):
+            data["fpg_version"] = tuple(data["fpg_version"])
+        if "dtype" in data and isinstance(data["dtype"], list):
+            data["dtype"] = tuple(data["dtype"])
+
+        # Convert pam_atten values back to tuples
+        if "pam_atten" in data:
+            data["pam_atten"] = {
+                k: tuple(v) if isinstance(v, list) else v
+                for k, v in data["pam_atten"].items()
+            }
+
+        return cls(**data)
+
 
 def load_corr_config(config_name: str = "default") -> CorrConfig:
     """
     Load CorrConfig from YAML file.
-    
+
     Parameters
     ----------
     config_name : str
         Configuration name ("default" or "dummy")
-        
+
     Returns
     -------
     CorrConfig
         Loaded configuration
     """
     config_path = Path(__file__).parent / "corr_config.yaml"
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
-    
+
     data = config_data[config_name]
-    
+
     # Handle fpg_file path construction for default config
     if config_name == "default" and data["fpg_file"] is None:
         data["fpg_file"] = str(
-            (Path(DATA_PATH) / "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg").resolve()
+            (
+                Path(DATA_PATH) / "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg"
+            ).resolve()
         )
-    
+
     # Convert lists to tuples where needed
     data["fpg_version"] = tuple(data["fpg_version"])
     data["dtype"] = tuple(data["dtype"])
-    
+
     # Convert pam_atten and pol_delay to proper dict format
     data["pam_atten"] = {k: tuple(v) for k, v in data["pam_atten"].items()}
-    
+
     return CorrConfig(**data)
 
 
@@ -206,27 +248,55 @@ class ObsConfig:
                 nmodes += 1
         return nmodes > 1
 
+    def to_dict(self) -> dict:
+        """
+        Convert ObsConfig to dictionary for Redis storage.
+
+        Returns
+        -------
+        dict
+            Configuration as dictionary.
+        """
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ObsConfig":
+        """
+        Create ObsConfig from dictionary loaded from Redis.
+
+        Parameters
+        ----------
+        data : dict
+            Configuration dictionary.
+
+        Returns
+        -------
+        ObsConfig
+            Configuration instance.
+        """
+        return cls(**data)
+
 
 def load_obs_config(config_name: str = "default") -> ObsConfig:
     """
     Load ObsConfig from YAML file.
-    
+
     Parameters
     ----------
     config_name : str
         Configuration name ("default")
-        
+
     Returns
     -------
     ObsConfig
         Loaded configuration
     """
     config_path = Path(__file__).parent / "obs_config.yaml"
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
-    
+
     data = config_data[config_name]
-    
+
     return ObsConfig(**data)
 
 

@@ -157,6 +157,93 @@ class EigsepRedis:
         """
         return self.ctrl_commands["VNA"]
 
+    def upload_config(self, config_type: str, config):
+        """
+        Upload configuration to Redis.
+
+        Parameters
+        ----------
+        config_type : str
+            Type of configuration ("corr" or "obs").
+        config : CorrConfig or ObsConfig
+            Configuration object to upload.
+
+        """
+        if not hasattr(config, "to_dict"):
+            raise ValueError("Config must have to_dict method")
+
+        config_dict = config.to_dict()
+        payload = json.dumps(config_dict).encode("utf-8")
+
+        # Store in hash for live access
+        self.r.hset("configs", f"{config_type}_config", payload)
+        ts = datetime.now(timezone.utc).isoformat()
+        self.r.hset(
+            "configs",
+            f"{config_type}_config_ts",
+            json.dumps(ts).encode("utf-8"),
+        )
+
+        # Also stream for history
+        self.r.xadd(
+            f"config:{config_type}",
+            {"config": payload},
+            maxlen=self.maxlen,
+            approximate=True,
+        )
+
+    def get_config(self, config_type: str):
+        """
+        Get current configuration from Redis.
+
+        Parameters
+        ----------
+        config_type : str
+            Type of configuration ("corr" or "obs").
+
+        Returns
+        -------
+        config : CorrConfig or ObsConfig or None
+            Configuration object or None if not found.
+        """
+        from .config import CorrConfig, ObsConfig
+
+        config_classes = {
+            "corr": CorrConfig,
+            "obs": ObsConfig,
+        }
+
+        if config_type not in config_classes:
+            raise ValueError(f"Invalid config_type: {config_type}")
+
+        raw = self.r.hget("configs", f"{config_type}_config")
+        if raw is None:
+            return None
+
+        config_dict = json.loads(raw)
+        return config_classes[config_type].from_dict(config_dict)
+
+    def list_configs(self):
+        """
+        List all available configurations in Redis.
+
+        Returns
+        -------
+        configs : dict
+            Dictionary with config types as keys and timestamps as values.
+        """
+        configs = {}
+        config_hash = self.r.hgetall("configs")
+
+        for key, value in config_hash.items():
+            key_str = key.decode("utf-8") if isinstance(key, bytes) else key
+            if key_str.endswith("_config_ts"):
+                config_type = key_str.replace("_config_ts", "")
+                timestamp = json.loads(value)
+                configs[config_type] = timestamp
+
+        return configs
+
     def add_metadata(self, key, value):
         """
         Add metadata to Redis. This both streams values and adds the current
@@ -478,3 +565,47 @@ class EigsepRedis:
         cmd = decoded.get("cmd")
         kwargs = decoded.get("kwargs", {})
         return entry_id, (cmd, kwargs)
+
+    def upload_corr_config(self, config):
+        """
+        Upload CorrConfig to Redis.
+
+        Parameters
+        ----------
+        config : CorrConfig
+            Correlator configuration to upload.
+        """
+        self.upload_config("corr", config)
+
+    def upload_obs_config(self, config):
+        """
+        Upload ObsConfig to Redis.
+
+        Parameters
+        ----------
+        config : ObsConfig
+            Observation configuration to upload.
+        """
+        self.upload_config("obs", config)
+
+    def get_corr_config(self):
+        """
+        Get current CorrConfig from Redis.
+
+        Returns
+        -------
+        config : CorrConfig or None
+            Correlator configuration or None if not found.
+        """
+        return self.get_config("corr")
+
+    def get_obs_config(self):
+        """
+        Get current ObsConfig from Redis.
+
+        Returns
+        -------
+        config : ObsConfig or None
+            Observation configuration or None if not found.
+        """
+        return self.get_config("obs")
