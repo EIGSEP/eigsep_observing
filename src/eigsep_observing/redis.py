@@ -6,7 +6,7 @@ import redis
 
 class EigsepRedis:
 
-    def __init__(self, host="localhost", port=6379, maxlen=600):
+    def __init__(self, host="localhost", port=6379, maxlen=10000):
         """
         Default EigsepRedis client.
 
@@ -17,10 +17,7 @@ class EigsepRedis:
         port : int
             Redis server port.
         maxlen : int
-            Maximum length of Redis streams. We really only need the streams
-            to contain data for one file, so 600 is very conservative. One
-            file is about 1 minute of data, 600 therefore allows for 10
-            updates per second.
+            Maximum length of Redis streams.
 
         """
         self.r = redis.Redis(host=host, port=port, decode_responses=False)
@@ -301,14 +298,14 @@ class EigsepRedis:
         """
         return self.r.get(key)
 
-    def _is_alive(self, key):
+    def _check_alive_key(self, key):
         """
-        Check for heartbeat.
+        Check if expiring key is set in Redis.
 
         Returns
         -------
         alive : bool
-            True if heartbeat is received, False otherwise.
+            True if the key is set, False otherwise.
 
         """
         raw = self.get_raw(key)
@@ -318,7 +315,22 @@ class EigsepRedis:
         alive = bool(alive_int)
         return alive
 
-    def is_client_alive(self):
+    def client_heartbeat_set(self, ex, alive=True):
+        """
+        Set the client heartbeat key in Redis. This is used to keep
+        track of whether the client is alive or not.
+
+        Parameters
+        ----------
+        ex : int
+            Expiration time in seconds.
+        alive : bool
+            If True, set the key to 1, otherwise set it to 0 (not alive).
+
+        """
+        self.add_raw("heartbeat:client", int(alive), ex=ex)
+
+    def client_heartbeat_check(self):
         """
         Check if client is alive by checking the heartbeat.
 
@@ -328,19 +340,35 @@ class EigsepRedis:
             True if client is alive, False otherwise.
 
         """
-        return self._is_alive("heartbeat:client")
+        return self._check_alive_key("heartbeat:client")
 
-    def is_server_alive(self):
+    def set_client_alive(self, ex, alive=True):
         """
-        Check if server is alive by checking the heartbeat.
+        Set the client alive key in Redis. This is used to keep track of
+        whether the client is alive or not.
+
+        Parameters
+        ----------
+        ex : int
+            Expiration time in seconds.
+        alive : bool
+            If True, set the key to 1, otherwise set it to 0.
+
+        """
+        self.add_raw("keep_alive:client", int(alive), ex=ex)
+
+    def get_client_alive(self):
+        """
+        Check if the key for keeping the client alive is set in Redis.
 
         Returns
         -------
         alive : bool
-            True if server is alive, False otherwise.
+            True if the key is set, False otherwise.
 
         """
-        return self._is_alive("heartbeat:server")
+        return self._check_alive_key("keep_alive:client")
+
 
     def send_status(self, status):
         """
@@ -387,6 +415,47 @@ class EigsepRedis:
 
         """
         self.send_status("VNA_TIMEOUT")
+
+    def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
+        """
+        Send VNA data to Redis using a stream. Used by client.
+
+        Parameters
+        ----------
+        data : dict
+            Dictionary holding VNA data. Keys are measurement modes and
+            values are arrays of complex numbers.
+        cal_data : dict
+            Dictionary holding calibration data. Keys are calibration
+            modes and values are arrays of complex numbers.
+        header : dict
+            VNA configuration. To be placed in file header.
+        metadata : dict
+            Live sensor metadata. To be placed in file header.
+        """
+        raise NotImplementedError
+
+    def read_vna_data(self):
+        """
+        Read VNA data stream from Redis. Used by server.
+
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        data : dict
+            Dictionary holding VNA data. Keys are measurement modes and
+            values are arrays of complex numbers. If None, no message was
+            received.
+        cal_data : dict
+            Dictionary holding calibration data. Keys are calibration
+            modes and values are arrays of complex numbers.
+        header : dict
+            VNA configuration. To be placed in file header.
+        metadata : dict
+            Live sensor metadata. To be placed in file header.
+        """
+        raise NotImplementedError("This method is not implemented yet.")
 
     def read_status(self):
         """
