@@ -93,16 +93,14 @@ class EigObserver:
         self.cfg = cfg
         self.redis = EigsepRedis()
 
-        self.stop_heartbeat_event = Event()
+        self.keepalive_event = Event()  # clear: send keepalive, set: stop
 
-    def _send_heartbeat(self, ex):
+    def _send_keepalive(self, ex):
         """
-        Send a heartbeat message to Redis to inidicate to the client
-        that the server is alive and running. The message is sent
-        with an expiration time set by ``ex''. It is updated
-        at a faster rate (ex/2 seconds) while the server is running. If
-        observing is done, the thread will stop sending heartbeats
-        as `stop_heartbeat_event' will be set.
+        Tell client to stay alive. The message is sent with an 
+        expiration time set by ``ex``. It is updated at a faster rate 
+        (``ex``/2 seconds) while the server is running. Stops when
+        observing is stopped.
 
         Parameters
         ----------
@@ -110,13 +108,13 @@ class EigObserver:
             The expiration time of the heartbeat message in seconds.
 
         """
-        while not self.stop_heartbeat_event.is_set():
-            self.redis.add_raw("heartbeat:server", 1, ex=ex)
-            time.sleep(ex / 2)  # send heartbeat every ex/2 seconds
+        while not self.keepalive_event.is_set():
+            self.redis.set_client_alive(alive=True, ex=ex)
+            stop_keeplive.wait(ex / 2)  # send heartbeat every ex/2 seconds
 
-    def start_heartbeat(self, ex=60):
+    def start_keepalive(self, ex=60):
         """
-        Start the heartbeat thread to keep the Redis connection alive.
+        Start the keepalive thread to keep the Redis connection alive.
         This is necessary to ensure that the client can connect and
         receive data from the server.
 
@@ -126,23 +124,14 @@ class EigObserver:
             The expiration time of the heartbeat message in seconds.
 
         """
-        self.logger.info("Starting heartbeat thread.")
-        thd = Thread(
-            target=self._send_heartbeat,
+        self.logger.info("Starting keepalive thread.")
+        self.keepalive_event.clear()  # clear to send keepalive
+        self.keepalive_thd = Thread(
+            target=self._send_keepalive,
             args=(ex,),
             daemon=True,
         )
-        thd.start()
-
-    def start_client(self):
-        """
-        Tell client that the server is ready to start observing, and
-        send the configuration of the sensors and switches to
-        the client.
-        """
-        picos = {name: pico for name, pico in self.cfg.sensors.items()}
-        picos["switch"] = self.cfg.switch_pico
-        self.redis.send_ctrl("init:picos", **picos)
+        self.keepalive_thd.start()
 
     def set_mode(self, mode):
         """
@@ -217,10 +206,6 @@ class EigObserver:
             raise ValueError(f"Invalid VNA command: {cmd}.")
 
         kwargs = {
-            "ip": self.cfg.vna_ip,
-            "port": self.cfg.vna_port,
-            "timeout": self.cfg.vna_timeout,
-            "save_dir": self.cfg.vna_save_dir,
             "fstart": self.cfg.vna_fstart,
             "fstop": self.cfg.vna_fstop,
             "npoints": self.cfg.vna_npoints,
@@ -230,6 +215,7 @@ class EigObserver:
 
         self.redis.send_ctrl(cmd, **kwargs)
         tstart = time.time()
+        # XXX don't read status, read data!
         while True:
             entry_id, status = self.redis.read_status()
             if status == "VNA_TIMEOUT" or time.time() - tstart > timeout:
@@ -251,6 +237,7 @@ class EigObserver:
         raise NotImplementedError
 
     # XXX how to handle motors?
+    # XXX change everything
     def observe(
         self,
         pairs=None,
@@ -282,12 +269,12 @@ class EigObserver:
             pairs = self.fpga.autos + self.fpga.crosses
 
         self.fpga.queue = queue.Queue(maxsize=0)
-        self.fpga.pause_event = Event()
+        self.fpga.pause_event = Event()  # XXX remove
         self.fpga.stop_event = Event()
 
         self.fpga.pause_event.set()
 
-        thd = Thread(
+        thd = Thread(  # XXX remove
             target=self.fpga._read_integrations,
             args=(pairs),
             kwargs={"timeout": timeout},
@@ -351,6 +338,8 @@ class EigObserver:
         self.logger.info("Observing complete.")
 
     def end_observing(self):
-        self.fpga.end_observing()
-        # stop the heartbeat thread, which will stop the client
-        self.stop_heartbeat_event.set()
+        """
+        Stop the keepalive thread, which will stop the client.
+        """
+        self.keepalive_event.set()
+        self.keepalive_thd.join()

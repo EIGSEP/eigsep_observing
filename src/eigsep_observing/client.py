@@ -1,4 +1,3 @@
-import logging
 from pathlib import Path
 import threading
 import time
@@ -7,11 +6,12 @@ from cmt_vna import VNA
 from switch_network import SwitchNetwork
 
 from . import io, sensors
+from .utils import eig_logger
 
 
 class PandaClient:
 
-    def __init__(self, redis, mnt_path=Path("/mnt/rpi"), logger=None):
+    def __init__(self, redis, logger=None):
         """
         Client class that runs on the computer in the suspended box. This
         pulls data from connected sensors and pushes it to the Redis server.
@@ -22,33 +22,25 @@ class PandaClient:
         ----------
         redis : EigsepRedis
             The Redis server object to push data to and read commands from.
-        mnt_path : Path or str
-            The path where the Raspberry Pi is mounted. This is used to
-            save files on the Raspberry Pi.
+        logger : logging.Logger
+            Logger for the client. If None, a default logger is created
+            using `eig_logger`.
 
         """
         if logger is None:
-            logger = logging.getLogger(__name__)
-            logger.setLevel(logging.INFO)
+            logger = eig_logger(__name__)
         self.logger = logger
         self.redis = redis
-        self.mnt_path = Path(mnt_path).resolve()
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.serial_timeout = 5  # serial port timeout in seconds
-        self.switch_nw = None
         self.vna = None
-        self.stop_event = None
 
-        try:
-            self.read_init_commands()
-        except TimeoutError:
-            self.logger.error(
-                "No initialization commands received within the timeout."
-                "Check Redis connection."
-            )
-            raise
+        self.cfg = self.redis.get_config("panda")  # XXX needs implementation
+        self.init_switch_network()
+        self.init_sensors()
 
-        # start heartbeat thread
+        self.stop_client = threading.Event()
+        # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
             kwargs={"ex": 60},
@@ -56,10 +48,14 @@ class PandaClient:
         )
         self.heartbeat_thd.start()
 
-        if self.sensors:
-            self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
-            for sensor, thd in self.sensors.values():
-                thd.start()
+        # listen for request to stay alive
+        self.alive_thd = threading.Thread(
+            target=self._listen_alive,
+            kwargs={"cadence": 60},
+            daemon=True,
+        )
+        self.alive_thd.start()
+
 
     def _send_heartbeat(self, ex=60):
         """
@@ -72,79 +68,99 @@ class PandaClient:
             The expiration time for the heartbeat in seconds.
 
         """
-        while True:
-            self.redis.add_raw("heartbeat:client", 1, ex=ex)
-            time.sleep(ex / 2)  # update faster than expiration
-
-    def read_init_commands(self, timeout=60):
+        while not self.stop_client.is_set():
+            self.redis.client_hearbeat_set(ex, alive=True)
+            stop_client.wait(ex / 2)  # update faster than expiration
+        # if we reach here, the client should stop running
+        self.client_heartbeat_set(alive=False)
+    
+    def _listen_alive(self, cadence=60):
         """
-        Read initialization commands from Redis. This is used to set up the
-        switch network and sensors before starting the main loop.
+        Listen for message to stay alive. If this is not set when
+        checked, the client will stop running.
 
         Parameters
         ----------
-        timeout : int
-            The maximum time to wait for initialization commands in seconds.
-            Default is 60 seconds.
+        cadence : int
+            How often (in seconds) to check if the client should
+            continue running.
 
-        Raises
-        ------
-        TimeoutError
-            If no initialization commands are received within the timeout.
+        Notes
+        -----
+        Anyone connected to the Redis server can set the key
+        'alive:client' to 1 to keep the client running. If this key
+        is not set when checked, the client will stop running.
 
         """
-        time_start = time.time()
-        while True:
-            if time.time() - time_start > timeout:
-                raise TimeoutError(
-                    "No initialization commands received within the timeout."
-                )
-            entry_id, msg = self.redis.read_ctrl()
-            if entry_id is None:  # no message
-                self.logger.debug("No message received. Waiting.")
-                time.sleep(1)
-                continue
-            if msg is None:  # invalid message
-                self.logger.warning("Invalid message received.")
-                continue
-            cmd, pico_ids = msg
-            if cmd in self.redis.init_commands:
-                break
-            else:
-                self.logger.warning(f"Unknown command: {cmd}")
-                continue
-        # pico_ids a dictionary
-        switch_pico = pico_ids.pop("switch_pico", None)
-        if switch_pico is not None:
-            self.logger.info(
-                f"Initializing switch network with pico {switch_pico}."
-            )
-            # uses default gpios, paths, timeout
-            try:
-                self.switch_nw = SwitchNetwork(
-                    serport=switch_pico, logger=self.logger, redis=self.redis
-                )
-            except ValueError as e:
-                self.logger.error(
-                    f"Failed to initialize switch network: {e}. "
-                    "Check the serial port and GPIO settings."
-                )
-                raise
+        while self.redis.get_client_alive():
+            time.sleep(cadence)
+        # if we reach here, the client should stop running
+        self.logger.info("Received stop command. Stopping client.")
+        self.stop_client.set()
 
-        else:
+    def init_switch_network(self):
+        """
+        Initialize the switch network, using the serial port and GPIO
+        settings from the Redis configuration.
+
+        Notes
+        -----
+        This methods overrides the attribute ``switch_nw`` with the
+        initialized SwitchNetwork instance. If no cofiguration is
+        provided or there is an error, ``switch_nw`` will remain None.
+        
+        """
+        switch_pico = self.cfg.get("switch_pico", None)
+        if switch_pico is None:
             self.logger.warning(
-                "No switch pico provided. No switch network initialized."
+                "No switch pico provided in configuration. "
+                "Switch network will not be initialized."
             )
-        for sensor_name, sensor_pico in pico_ids.items():
+            return
+        try:
+            self.switch_nw = SwitchNetwork(
+                serport=switch_pico,
+                logger=self.logger,
+                redis=self.redis,
+            )
+            self.logger.info(f"Switch network initialized with {switch_pico}.")
+        except ValueError as e:
+            self.logger.error(
+                f"Failed to initialize switch network: {e}. "
+                "Check the serial port and GPIO settings."
+            )
+            self.switch_nw = None
+
+    def init_sensors(self):
+        """
+        Initialize sensors based on the configuration in Redis. This
+        creates sensor instances and starts threads to read data from
+        the sensors. It also adds a list of sensor names to redis
+        under the key 'sensors'.
+        """
+        sensor_picos = self.cfg.get("sensor_picos", {})
+        if not sensor_picos:
+            self.logger.warning(
+                "No sensor picos provided in configuration. "
+                "No sensors will be initialized."
+            )
+            return
+        for sensor_name, sensor_pico in sensor_picos.items():
             self.logger.info(
                 f"Adding sensor {sensor_name} with pico {sensor_pico}."
             )
             self.add_sensor(sensor_name, sensor_pico)
 
+        if self.sensors:
+            self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
+            for sensor, thd in self.sensors.values():
+                thd.start()
+                self.redis.r.sadd("sensors", sensor.name)
+
     def add_sensor(self, sensor_name, sensor_pico, sleep_time=1):
         """
-        Add a sensor to the client. Spawns a thread that reads data from the
-        sensor and pushes to redis.
+        Add a sensor to the client. Spawns a thread that reads data
+        from the sensor and pushes to redis.
 
         Parameters
         ----------
@@ -209,6 +225,8 @@ class PandaClient:
         ------
         ValueError
             If the mode is not 'ant' or 'rec'.
+        RuntimeError
+            If the switch network is not initialized.
 
         Notes
         -----
@@ -221,57 +239,38 @@ class PandaClient:
             raise ValueError(
                 f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'."
             )
-        ip = kwargs.pop("ip", None)
-        port = kwargs.pop("port", None)
-        timeout = kwargs.pop("timeout", None)
-        save_dir = kwargs.pop("save_dir", None)
+        if self.switch_nw is None:
+            raise RuntimeError(
+                "Switch network not initialized. Cannot execute "
+                "VNA commands."
+            )
         if not self.vna_initialized:
             self.logger.info("VNA not initialized. Initializing now.")
             vna = VNA(
-                ip=ip,
-                port=port,
-                timeout=timeout,
-                save_dir=save_dir,
+                ip=self.cfg.vna_ip,
+                port=self.cfg.vna_port,
+                timeout=self.cfg.vna_timeout,
+                switch_network=self.switch_nw,
             )
             self.vna = vna
+
         setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         _ = self.vna.setup(**setup_kwargs)
-        osl_s11 = self.vna.measure_OSL(snw=self.switch_nw)
+        
+        osl_s11 = self.vna.measure_OSL()
+        
         if mode == "ant":
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
-        # make sure save_dir is on the Raspberry Pi, not on the client
-        panda_path = Path(self.vna.save_dir) / Path(mode)
-        save_dir = io.to_remote_path(panda_path, mnt_path=self.mnt_path)
+        
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_header()
-        io.write_s11_file(
-            s11,
-            header,
-            metadata=metadata,
-            cal_data=osl_s11,
-            fname=None,
-            save_dir=save_dir,
+        self.redis.send_vna_data(
+            s11, cal_data=osl_s11, header=header, metadata=metadata
         )
 
-    def _listen_heartbeat(self, cadence=60):
-        """
-        Listen for heartbeat messages from the server. If no heartbeat is
-        received within a certain time, a stop event is set.
-
-        Parameters
-        ----------
-        cadence : int
-            The time in seconds to wait between checking for heartbeats.
-
-        """
-        while self.redis.is_server_alive():
-            time.sleep(cadence)
-        # if we reach here, the server is not alive
-        self.logger.info("Received stop command. Stopping client.")
-        self.stop_event.set()
 
     def read_ctrl(self):
         """
@@ -279,14 +278,7 @@ class PandaClient:
         commands and sends acknowledgements back to the Redis server.
 
         """
-        self.stop_event = threading.Event()
-        heartbeat_listen = threading.Thread(
-            target=self._listen_heartbeat,
-            kwargs={"cadence": 60},
-            daemon=True,
-        )
-        heartbeat_listen.start()
-        while not self.stop_event.is_set():
+        while not self.stop_client.is_set():
             entry_id, msg = self.redis.read_ctrl()
             if entry_id is None:  # no message
                 self.logger.debug("No message received. Waiting.")
@@ -317,3 +309,21 @@ class PandaClient:
             else:
                 self.logger.warning(f"Unknown command: {cmd}")
                 continue
+
+    def close(self):
+        """
+        Stop the client and clean up resources. This stops all sensor
+        threads, stops the heartbeat and alive threads, and clears the
+        sensors dictionary.
+
+        """
+        self.logger.info("Stopping PandaClient.")
+        self.stop_client.set()
+        for sensor, thd in self.sensors.values():
+            sensor.stop()
+            thd.join()
+        self.sensors.clear()
+        self.redis.client_heartbeat_set(alive=False)
+        self.heartbeat_thd.join()
+        self.alive_thd.join()
+        self.logger.info("PandaClient stopped.")
