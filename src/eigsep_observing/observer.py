@@ -5,7 +5,7 @@ import time
 from threading import Event, Thread
 
 from . import EigsepRedis, io
-from .config import default_obs_config
+from .utils import eig_logger
 
 
 def make_schedule(switch_schedule):
@@ -68,70 +68,28 @@ def make_schedule(switch_schedule):
 
 class EigObserver:
 
-    def __init__(self, fpga, cfg=default_obs_config, logger=None):
+    def __init__(self, panda_ip="10.10.10.12", logger=None):
         """
-        Main controll class for Eigsep observing. This code is meant to run
-        on the Raspberry Pi. It uses EigsepFpga to initialize observing
-        with the SNAP correlator and communicates with the LattePanda in the
-        EIGSEP box via Redis. It pulls sensor readings from the LattePanda
-        and puts them in the file headers, synchronized with the data stream.
+        Main controll class and filewriter for Eigsep observing. This
+        code is meant to run on the Raspberry Pi on the ground. It
+        reads correlator data from the SNAP (over a local Redis), and
+        data from VNA and sesnors from the LattePanda (over a Redis)
+        hosted on the LattePanda. It also writes data to files.
 
         Parameters
         ----------
-        fpga : EigsepFpga
-            The EigsepFpga object to use for observing.
-        cfg : eigsep_observing.config.ObsConfig
-            The configuration object to use for observing. This is a
-            data class specifying the sensors and switch schedule to use.
 
         """
         if logger is None:
-            logger = logging.getLogger(__name__)
-            logger.setLevel(logging.DEBUG)
+            logger = eig_logger(__name__)
         self.logger = logger
-        self.fpga = fpga
-        self.cfg = cfg
-        self.redis = EigsepRedis()
 
-        self.keepalive_event = Event()  # clear: send keepalive, set: stop
+        # redis connections
+        self.redis_SNAP = EigsepRedis(host="localhost")
+        self.redis_Panda = EigsepRedis(host=panda_ip)
 
-    def _send_keepalive(self, ex):
-        """
-        Tell client to stay alive. The message is sent with an
-        expiration time set by ``ex``. It is updated at a faster rate
-        (``ex``/2 seconds) while the server is running. Stops when
-        observing is stopped.
+        self.cfg = self.redis_SNAP.get_config()
 
-        Parameters
-        ----------
-        ex : int
-            The expiration time of the heartbeat message in seconds.
-
-        """
-        while not self.keepalive_event.is_set():
-            self.redis.set_client_alive(alive=True, ex=ex)
-            stop_keeplive.wait(ex / 2)  # send heartbeat every ex/2 seconds
-
-    def start_keepalive(self, ex=60):
-        """
-        Start the keepalive thread to keep the Redis connection alive.
-        This is necessary to ensure that the client can connect and
-        receive data from the server.
-
-        Parameters
-        ----------
-        ex : float
-            The expiration time of the heartbeat message in seconds.
-
-        """
-        self.logger.info("Starting keepalive thread.")
-        self.keepalive_event.clear()  # clear to send keepalive
-        self.keepalive_thd = Thread(
-            target=self._send_keepalive,
-            args=(ex,),
-            daemon=True,
-        )
-        self.keepalive_thd.start()
 
     def set_mode(self, mode):
         """
@@ -214,23 +172,9 @@ class EigObserver:
         }
 
         self.redis.send_ctrl(cmd, **kwargs)
-        tstart = time.time()
-        # XXX don't read status, read data!
-        while True:
-            entry_id, status = self.redis.read_status()
-            if status == "VNA_TIMEOUT" or time.time() - tstart > timeout:
-                raise TimeoutError
-            if status is None:
-                if entry_id is None:
-                    self.logger.debug("No message yet. Waiting.")
-                else:
-                    self.logger.warning("Invalid status. Waiting.")
-                time.sleep(1)
-                continue
-            if status != "VNA_COMPLETE":
-                raise RuntimeError(f"VNA error, status: {status}")
-            self.logger.info("VNA observation complete.")
-            return
+        self.redis.read_vna_data(timeout=120)
+        # XXX write data to file
+        raise NotImplementedError
 
     # XXX
     def rotate_motors(self, motors):
