@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 import yaml
-from typing import Dict, Any
 
 from eigsep_corr.data import DATA_PATH
 from eigsep_corr.utils import calc_inttime
@@ -76,36 +75,38 @@ class CorrConfig:
 def load_corr_config(config_name: str = "default") -> CorrConfig:
     """
     Load CorrConfig from YAML file.
-    
+
     Parameters
     ----------
     config_name : str
         Configuration name ("default" or "dummy")
-        
+
     Returns
     -------
     CorrConfig
         Loaded configuration
     """
     config_path = Path(__file__).parent / "corr_config.yaml"
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
-    
+
     data = config_data[config_name]
-    
+
     # Handle fpg_file path construction for default config
     if config_name == "default" and data["fpg_file"] is None:
         data["fpg_file"] = str(
-            (Path(DATA_PATH) / "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg").resolve()
+            (
+                Path(DATA_PATH) / "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg"
+            ).resolve()
         )
-    
+
     # Convert lists to tuples where needed
     data["fpg_version"] = tuple(data["fpg_version"])
     data["dtype"] = tuple(data["dtype"])
-    
+
     # Convert pam_atten and pol_delay to proper dict format
     data["pam_atten"] = {k: tuple(v) for k, v in data["pam_atten"].items()}
-    
+
     return CorrConfig(**data)
 
 
@@ -210,23 +211,23 @@ class ObsConfig:
 def load_obs_config(config_name: str = "default") -> ObsConfig:
     """
     Load ObsConfig from YAML file.
-    
+
     Parameters
     ----------
     config_name : str
         Configuration name ("default")
-        
+
     Returns
     -------
     ObsConfig
         Loaded configuration
     """
     config_path = Path(__file__).parent / "obs_config.yaml"
-    with open(config_path, 'r') as f:
+    with open(config_path, "r") as f:
         config_data = yaml.safe_load(f)
-    
+
     data = config_data[config_name]
-    
+
     return ObsConfig(**data)
 
 

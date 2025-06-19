@@ -97,8 +97,8 @@ class EigObserver:
 
     def _send_keepalive(self, ex):
         """
-        Tell client to stay alive. The message is sent with an 
-        expiration time set by ``ex``. It is updated at a faster rate 
+        Tell client to stay alive. The message is sent with an
+        expiration time set by ``ex``. It is updated at a faster rate
         (``ex``/2 seconds) while the server is running. Stops when
         observing is stopped.
 

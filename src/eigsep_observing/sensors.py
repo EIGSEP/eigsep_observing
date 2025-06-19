@@ -147,7 +147,7 @@ class ImuSensor(Sensor):
         str
             JSON string representing the IMU data. The JSON string is a
             dictionary with keys ???.
-        
+
         """
         return json.dumps(self.imu.read_imu())
 

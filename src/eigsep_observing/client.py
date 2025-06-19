@@ -1,11 +1,10 @@
-from pathlib import Path
 import threading
 import time
 
 from cmt_vna import VNA
 from switch_network import SwitchNetwork
 
-from . import io, sensors
+from . import sensors
 from .utils import eig_logger
 
 
@@ -64,10 +63,10 @@ class PandaClient:
         """
         while not self.stop_client.is_set():
             self.redis.client_hearbeat_set(ex, alive=True)
-            stop_client.wait(ex / 2)  # update faster than expiration
+            self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
         self.client_heartbeat_set(alive=False)
-    
+
     def init_switch_network(self):
         """
         Initialize the switch network, using the serial port and GPIO
@@ -78,7 +77,7 @@ class PandaClient:
         This methods overrides the attribute ``switch_nw`` with the
         initialized SwitchNetwork instance. If no cofiguration is
         provided or there is an error, ``switch_nw`` will remain None.
-        
+
         """
         switch_pico = self.cfg.get("switch_pico", None)
         if switch_pico is None:
@@ -233,21 +232,20 @@ class PandaClient:
 
         setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         _ = self.vna.setup(**setup_kwargs)
-        
+
         osl_s11 = self.vna.measure_OSL()
-        
+
         if mode == "ant":
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
-        
+
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_header()
         self.redis.send_vna_data(
             s11, cal_data=osl_s11, header=header, metadata=metadata
         )
-
 
     def read_ctrl(self):
         """

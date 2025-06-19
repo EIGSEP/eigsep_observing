@@ -319,7 +319,7 @@ class EigsepRedis:
     def send_status(self, status, err=False):
         """
         Publish status message to Redis. Used by client. If the status
-        message is an error, it will be prefixed with "ERROR: " and 
+        message is an error, it will be prefixed with "ERROR: " and
         raise an error in the server upon reading it.
 
         Parameters
@@ -360,7 +360,7 @@ class EigsepRedis:
         self.ctrl_streams["stream:status"] = entry_id  # update the stream id
         status = status_dict.get(b"status").decode("utf-8")
         if status.startswith("ERROR: "):
-            raise RuntimeError("Client ERROR: " + status[len("ERROR: "):])
+            raise RuntimeError("Client ERROR: " + status[len("ERROR: ") :])
         return entry_id, status
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
@@ -403,7 +403,6 @@ class EigsepRedis:
             Live sensor metadata. To be placed in file header.
         """
         raise NotImplementedError("This method is not implemented yet.")
-
 
     def send_ctrl(self, cmd, **kwargs):
         """
