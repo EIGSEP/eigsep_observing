@@ -342,41 +342,12 @@ class EigsepRedis:
         """
         return self._check_alive_key("heartbeat:client")
 
-    def set_client_alive(self, ex, alive=True):
+
+    def send_status(self, status, err=False):
         """
-        Set the client alive key in Redis. This is used to keep track of
-        whether the client is alive or not.
-
-        Parameters
-        ----------
-        ex : int
-            Expiration time in seconds.
-        alive : bool
-            If True, set the key to 1, otherwise set it to 0.
-
-        """
-        self.add_raw("keep_alive:client", int(alive), ex=ex)
-
-    def get_client_alive(self):
-        """
-        Check if the key for keeping the client alive is set in Redis.
-
-        Returns
-        -------
-        alive : bool
-            True if the key is set, False otherwise.
-
-        """
-        return self._check_alive_key("keep_alive:client")
-
-
-    def send_status(self, status):
-        """
-        Publish status message to Redis. Used by client.
-
-        Status must be a string, either ``VNA_COMPLETE'', ``VNA_ERROR'' or
-        ``VNA_TIMEOUT''. Timeout is only used in case of timeout (obviously),
-        other errors get flagged as ``VNA_ERROR''.
+        Publish status message to Redis. Used by client. If the status
+        message is an error, it will be prefixed with "ERROR: " and 
+        raise an error in the server upon reading it.
 
         Parameters
         ----------
@@ -384,37 +355,40 @@ class EigsepRedis:
             Status message.
 
         """
+        if err:
+            status = f"ERROR: {status}"
         self.r.xadd("stream:status", {"status": status}, maxlen=self.maxlen)
 
-    def send_vna_complete(self):
+    def read_status(self):
         """
-        Send VNA complete status to Redis. Used by client.
+        Read status stream from Redis. Used by server.
 
-        This is a convenience method that sends the ``VNA_COMPLETE'' status
-        message.
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        status : str
+            Status message. If None, no message was received.
 
-        """
-        self.send_status("VNA_COMPLETE")
-
-    def send_vna_error(self):
-        """
-        Send VNA error status to Redis. Used by client.
-
-        This is a convenience method that sends the ``VNA_ERROR'' status
-        message.
-
-        """
-        self.send_status("VNA_ERROR")
-
-    def send_vna_timeout(self):
-        """
-        Send VNA timeout status to Redis. Used by client.
-
-        This is a convenience method that sends the ``VNA_TIMEOUT'' status
-        message.
+        Raises
+        ------
+        RuntimeError
+            If the status message indicates an error.
 
         """
-        self.send_status("VNA_TIMEOUT")
+        # non-blocking read
+        msg = self.r.xread(
+            {"stream:status": self.ctrl_streams["stream:status"]},
+            count=1,
+        )
+        if not msg:
+            return None, None
+        entry_id, status_dict = msg[0][1][0]
+        self.ctrl_streams["stream:status"] = entry_id  # update the stream id
+        status = status_dict.get(b"status").decode("utf-8")
+        if status.startswith("ERROR: "):
+            raise RuntimeError("Client ERROR: " + status[len("ERROR: "):])
+        return entry_id, status
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
         """
@@ -457,29 +431,6 @@ class EigsepRedis:
         """
         raise NotImplementedError("This method is not implemented yet.")
 
-    def read_status(self):
-        """
-        Read status stream from Redis. Used by server.
-
-        Returns
-        -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
-        status : str
-            Status message. If None, no message was received.
-
-        """
-        # non-blocking read
-        msg = self.r.xread(
-            {"stream:status": self.ctrl_streams["stream:status"]},
-            count=1,
-        )
-        if not msg:
-            return None, None
-        entry_id, status_dict = msg[0][1][0]
-        self.ctrl_streams["stream:status"] = entry_id  # update the stream id
-        status = status_dict.get(b"status").decode("utf-8")
-        return entry_id, status
 
     def send_ctrl(self, cmd, **kwargs):
         """
