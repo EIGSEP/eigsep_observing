@@ -382,9 +382,14 @@ class EigsepRedis:
         """
         raise NotImplementedError
 
-    def read_vna_data(self):
+    def read_vna_data(self, timeout=120):
         """
         Read VNA data stream from Redis. Used by server.
+
+        Parameters
+        ----------
+        timeout : int
+            Timeout in seconds for blocking read.
 
         Returns
         -------
@@ -401,6 +406,10 @@ class EigsepRedis:
             VNA configuration. To be placed in file header.
         metadata : dict
             Live sensor metadata. To be placed in file header.
+
+        Notes
+        -----
+        This is a blocking read with a timeout of ``timeout`` seconds.
         """
         raise NotImplementedError("This method is not implemented yet.")
 
