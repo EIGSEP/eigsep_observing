@@ -8,7 +8,7 @@ class EigsepRedis:
 
     def __init__(self, host="localhost", port=6379, maxlen=10000):
         """
-        Default EigsepRedis client.
+        Initialize the EigsepRedis client.
 
         Parameters
         ----------
@@ -95,7 +95,6 @@ class EigsepRedis:
                 "vna:ant",  # antenna
                 "vna:rec",  # receiver
             ],
-            "init": ["init:picos"],  # set pico device names
         }
         return commands
 
@@ -111,22 +110,11 @@ class EigsepRedis:
 
         """
         commands = []
-        for cmd_list in self.ctrl_commands.values():
-            commands.extend(cmd_list)
+        for key in self.r.smembers("ctrl_commands"):
+            key = key.decode("utf-8")
+            if key in self.ctrl_commands:
+                commands.extend(self.ctrl_commands[key])
         return commands
-
-    @property
-    def init_commands(self):
-        """
-        Return allowed initialization commands.
-
-        Returns
-        -------
-        commands : list
-            List of allowed initialization commands.
-
-        """
-        return self.ctrl_commands["init"]
 
     @property
     def switch_commands(self):
@@ -298,23 +286,6 @@ class EigsepRedis:
         """
         return self.r.get(key)
 
-    def _check_alive_key(self, key):
-        """
-        Check if expiring key is set in Redis.
-
-        Returns
-        -------
-        alive : bool
-            True if the key is set, False otherwise.
-
-        """
-        raw = self.get_raw(key)
-        if raw is None:
-            return False
-        alive_int = int(raw)
-        alive = bool(alive_int)
-        return alive
-
     def client_heartbeat_set(self, ex, alive=True):
         """
         Set the client heartbeat key in Redis. This is used to keep
@@ -340,8 +311,10 @@ class EigsepRedis:
             True if client is alive, False otherwise.
 
         """
-        return self._check_alive_key("heartbeat:client")
-
+        raw = self.get_raw("heartbeat:client")
+        if raw is None:
+            return False
+        return int(raw) == 1
 
     def send_status(self, status, err=False):
         """
