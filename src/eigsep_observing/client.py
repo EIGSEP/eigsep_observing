@@ -33,10 +33,13 @@ class PandaClient:
         self.redis = redis
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.serial_timeout = 5  # serial port timeout in seconds
-        self.vna = None
 
         self.cfg = self.redis.get_config("panda")  # XXX needs implementation
         self.init_switch_network()
+        if self.cfg.use_vna and self.switch_nw is not None:
+            self.init_VNA()
+        else:
+            self.vna = None
         self.init_sensors()
 
         self.stop_client = threading.Event()  # flag to stop the client
@@ -90,13 +93,28 @@ class PandaClient:
                 logger=self.logger,
                 redis=self.redis,
             )
-            self.logger.info(f"Switch network initialized with {switch_pico}.")
         except ValueError as e:
-            self.logger.error(
+            err = (
                 f"Failed to initialize switch network: {e}. "
                 "Check the serial port and GPIO settings."
             )
+            self.logger.error(err)
+            self.redis.send_status(err, err=True)
             self.switch_nw = None
+        self.logger.info(f"Switch network initialized with {switch_pico}.")
+        self.redis.r.sadd("ctrl_commands", "switch")
+
+    def init_VNA(self):
+        """
+        Initialize the VNA instance using the configuration from Redis.
+        """
+        self.vna = VNA(
+            ip=self.cfg.vna_ip,
+            port=self.cfg.vna_port,
+            timeout=self.cfg.vna_timeout,
+            switch_network=self.switch_nw,
+        )
+        self.redis.r.sadd("ctrl_commands", "VNA")
 
     def init_sensors(self):
         """
@@ -169,10 +187,6 @@ class PandaClient:
         )
         self.sensors[sensor.name] = (sensor, thd)
 
-    @property
-    def vna_initialized(self):
-        return self.vna is not None
-
     def measure_s11(self, mode, **kwargs):
         """
         Measure S11 with the VNA and write the results to file. The
@@ -193,7 +207,8 @@ class PandaClient:
         ValueError
             If the mode is not 'ant' or 'rec'.
         RuntimeError
-            If the switch network is not initialized.
+            If the switch network is not initialized or the VNA is not
+            initialized.
 
         Notes
         -----
@@ -211,15 +226,10 @@ class PandaClient:
                 "Switch network not initialized. Cannot execute "
                 "VNA commands."
             )
-        if not self.vna_initialized:
-            self.logger.info("VNA not initialized. Initializing now.")
-            vna = VNA(
-                ip=self.cfg.vna_ip,
-                port=self.cfg.vna_port,
-                timeout=self.cfg.vna_timeout,
-                switch_network=self.switch_nw,
+        if self.vna is None:
+            raise RuntimeError(
+                "VNA not initialized. Cannot execute VNA commands."
             )
-            self.vna = vna
 
         setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
         _ = self.vna.setup(**setup_kwargs)
