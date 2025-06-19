@@ -39,7 +39,7 @@ class PandaClient:
         self.init_switch_network()
         self.init_sensors()
 
-        self.stop_client = threading.Event()
+        self.stop_client = threading.Event()  # flag to stop the client
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
@@ -47,15 +47,6 @@ class PandaClient:
             daemon=True,
         )
         self.heartbeat_thd.start()
-
-        # listen for request to stay alive
-        self.alive_thd = threading.Thread(
-            target=self._listen_alive,
-            kwargs={"cadence": 60},
-            daemon=True,
-        )
-        self.alive_thd.start()
-
 
     def _send_heartbeat(self, ex=60):
         """
@@ -74,30 +65,6 @@ class PandaClient:
         # if we reach here, the client should stop running
         self.client_heartbeat_set(alive=False)
     
-    def _listen_alive(self, cadence=60):
-        """
-        Listen for message to stay alive. If this is not set when
-        checked, the client will stop running.
-
-        Parameters
-        ----------
-        cadence : int
-            How often (in seconds) to check if the client should
-            continue running.
-
-        Notes
-        -----
-        Anyone connected to the Redis server can set the key
-        'alive:client' to 1 to keep the client running. If this key
-        is not set when checked, the client will stop running.
-
-        """
-        while self.redis.get_client_alive():
-            time.sleep(cadence)
-        # if we reach here, the client should stop running
-        self.logger.info("Received stop command. Stopping client.")
-        self.stop_client.set()
-
     def init_switch_network(self):
         """
         Initialize the switch network, using the serial port and GPIO
@@ -274,56 +241,47 @@ class PandaClient:
 
     def read_ctrl(self):
         """
-        Read control commands from Redis. Executes the
-        commands and sends acknowledgements back to the Redis server.
+        Read control commands from Redis.
+
+        Notes
+        -----
+        If an exception occurs while reading or executing the command,
+        it is logged and an error message is sent back to Redis.
+        This prevents users from connecting to the client and
+        crashing it with invalid commands.
 
         """
-        while not self.stop_client.is_set():
-            entry_id, msg = self.redis.read_ctrl()
-            if entry_id is None:  # no message
-                self.logger.debug("No message received. Waiting.")
-                time.sleep(1)
-                continue
-            if msg is None:  # invalid message
-                self.logger.warning("Invalid message received.")
-                continue
-            cmd, kwargs = msg
-            if cmd in self.redis.switch_commands:
-                if self.switch_nw is None:
-                    raise RuntimeError(
-                        "Switch network not initialized. Cannot execute "
-                        "switch commands."
-                    )
-                mode = cmd.split(":")[1]
-                path = self.switch_nw.paths[mode]
-                self.switch_nw.switch(path)
-            elif cmd in self.redis.vna_commands:
-                mode = cmd.split(":")[1]
-                try:
-                    self.measure_s11(mode, **kwargs)
-                except ValueError:
-                    self.logger.warning(f"Unknown VNA mode: {mode}")
-                    self.redis.send_vna_error()
-                    continue
-                self.redis.send_vna_complete()
-            else:
-                self.logger.warning(f"Unknown command: {cmd}")
-                continue
+        entry_id, msg = self.redis.read_ctrl()
+        if entry_id is None:  # no message
+            self.logger.debug("No message received. Waiting.")
+            time.sleep(1)
+            return
+        if msg is None:  # invalid message
+            self.logger.warning("Invalid message received.")
+            return
 
-    def close(self):
-        """
-        Stop the client and clean up resources. This stops all sensor
-        threads, stops the heartbeat and alive threads, and clears the
-        sensors dictionary.
-
-        """
-        self.logger.info("Stopping PandaClient.")
-        self.stop_client.set()
-        for sensor, thd in self.sensors.values():
-            sensor.stop()
-            thd.join()
-        self.sensors.clear()
-        self.redis.client_heartbeat_set(alive=False)
-        self.heartbeat_thd.join()
-        self.alive_thd.join()
-        self.logger.info("PandaClient stopped.")
+        cmd, kwargs = msg
+        if cmd in self.redis.switch_commands:
+            if self.switch_nw is None:
+                err = (
+                    "Switch network not initialized. Cannot execute "
+                    "switch commands."
+                )
+                self.logger.error(err)
+                self.redis.send_status(err, err=True)
+                return
+            mode = cmd.split(":")[1]
+            path = self.switch_nw.paths[mode]
+            self.switch_nw.switch(path)
+        elif cmd in self.redis.vna_commands:
+            mode = cmd.split(":")[1]
+            try:
+                self.measure_s11(mode, **kwargs)
+            except (ValueError, RuntimeError) as e:
+                err = f"Error executing VNA command {cmd}: {e}"
+                self.logger.error(err)
+                self.redis.send_status(err, err=True)
+        else:
+            err = f"Unknown command: {cmd}"
+            self.logger.error(err)
+            self.redis.send_status(err, err=True)
