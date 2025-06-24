@@ -1,6 +1,7 @@
 from collections import defaultdict
 from datetime import datetime, timezone
 import json
+import logging
 import numpy as np
 import yaml
 
@@ -557,13 +558,13 @@ class EigsepRedis:
             return False
         return int(raw) == 1
 
-    def send_status(self, level="info", status=None):
+    def send_status(self, level=logging.INFO, status=None):
         """
         Publish status message to Redis. Used by client..
 
         Parameters
         ----------
-        level : str
+        level : int
             Log level.
         status : str
             Status message.
@@ -581,7 +582,7 @@ class EigsepRedis:
 
         Returns
         -------
-        level : str
+        level : int
             Log level of the status message.
         status : str
             Status message. If None, no message was received.
@@ -592,5 +593,9 @@ class EigsepRedis:
         entry_id, status_dict = msg[0][1][0]
         self._last_read_ids["stream:status"] = entry_id  # update the stream id
         status = status_dict.get(b"status").decode("utf-8")
-        level = status_dict.get(b"level", b"info").decode("utf-8")
+        level = status_dict.get(b"level").decode("utf-8")
+        if level is None:
+            level = logging.INFO  # default to info
+        else:
+            level = int(level)
         return level, status
