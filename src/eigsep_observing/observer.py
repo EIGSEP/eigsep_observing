@@ -57,6 +57,25 @@ class EigObserver:
         }
         self.switch_lock = threading.Lock()  # lock for RF switches
 
+        # start a status thread
+        if self.redis_panda is not None:
+            status_thread = threading.Thread(
+                target=self.status_logger,
+                daemon=True,
+            )
+            status_thread.start()
+
+    @require_panda
+    def status_logger(self):
+        """
+        Log status messages from the LattePanda Redis server.
+        """
+        while True:
+            level, status = self.redis_panda.read_status()
+            if status is None:
+                continue
+            self.logger.log(level, status)
+
     @require_panda
     def set_mode(self, mode):
         """
