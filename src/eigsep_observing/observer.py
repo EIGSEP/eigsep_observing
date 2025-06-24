@@ -65,6 +65,22 @@ class EigObserver:
             )
             status_thread.start()
 
+    @property
+    def snap_connected(self):
+        """
+        Check if the SNAP Redis connection is established.
+        """
+        return self.redis_snap is not None
+
+    @property
+    def panda_connected(self):
+        """
+        Check if the LattePanda Redis connection is established.
+        """
+        if self.redis_panda is None:
+            return False
+        return self.redis_panda.client_heartbeat_check()
+
     @require_panda
     def status_logger(self):
         """
@@ -105,7 +121,7 @@ class EigObserver:
                 f"{list(cmd_mode_map.keys())}."
             )
         self.logger.info(f"Switching to {mode} measurements")
-        self.redis.send_ctrl(cmd_mode_map[mode])
+        self.redis_panda.send_ctrl(cmd_mode_map[mode])
 
     @require_panda
     def do_switching(self):
@@ -183,9 +199,9 @@ class EigObserver:
             "power_dBm": self.cfg.vna_power[mode],
         }
 
-        self.redis.send_ctrl(cmd, **kwargs)
+        self.redis_panda.send_ctrl(cmd, **kwargs)
         try:
-            out = self.redis.read_vna_data(timeout=120)
+            out = self.redis_panda.read_vna_data(timeout=120)
         except TimeoutError:
             self.logger.error(
                 "Timeout while waiting for VNA data. "
@@ -249,7 +265,7 @@ class EigObserver:
             pairs,
             self.cfg.ntimes,
             self.cfg.snap_header,  # XXX some verification of fpga.header
-            redis=self.redis,
+            redis=self.redis_panda,
         )
 
         while not self.stop_events["snap"].is_set():
