@@ -10,7 +10,7 @@ from .utils import eig_logger
 
 class PandaClient:
 
-    def __init__(self, redis, logger=None):
+    def __init__(self, cfg=default_, logger=None):
         """
         Client class that runs on the computer in the suspended box. This
         pulls data from connected sensors and pushes it to the Redis server.

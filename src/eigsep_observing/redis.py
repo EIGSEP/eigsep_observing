@@ -74,7 +74,7 @@ class EigsepRedis:
         return self.r.get(key)
 
     # ---------- correlation data and s11 measurements ----------
-   
+
     def add_corr_data(self, data, cnt, dtype=">i4"):
         """
         Upload raw correlation data to Redis.
@@ -93,7 +93,7 @@ class EigsepRedis:
             data on the consumer side.
 
         """
-        redis_data = {p.encode(): d for p, d in data.items()} 
+        redis_data = {p.encode(): d for p, d in data.items()}
         # add pairs to the set of correlation pairs
         self.r.sadd("corr_pairs", *redis_data.keys())
         # add acc_cnt and dtype to the dict
@@ -164,7 +164,6 @@ class EigsepRedis:
                 arr = v
             data[k.decode()] = arr
         return acc_cnt, data
-
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
         """
@@ -357,7 +356,7 @@ class EigsepRedis:
                 self.r.hset("data_streams", stream, eid)
             redis_hdr[stream] = np.array(out)
         return redis_hdr
-    
+
     # ------------------- control commands -----------------
 
     @property
@@ -392,7 +391,11 @@ class EigsepRedis:
                 "vna:rec",  # receiver
             ],
         }
-        return {k: v for k, v in commands.items() if self.r.sismember("ctrl_commands", k.encode("utf-8"))}
+        return {
+            k: v
+            for k, v in commands.items()
+            if self.r.sismember("ctrl_commands", k.encode("utf-8"))
+        }
 
     @property
     def all_commands(self):
@@ -506,7 +509,7 @@ class EigsepRedis:
         cmd = decoded.get("cmd")
         kwargs = decoded.get("kwargs", {})
         return entry_id, (cmd, kwargs)
-    
+
     # ------------------- heartbeat and status -----------------
 
     def client_heartbeat_set(self, ex, alive=True):
