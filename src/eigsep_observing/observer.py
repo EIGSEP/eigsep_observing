@@ -1,69 +1,10 @@
-from itertools import cycle
 import logging
-from threading import Event
+import threading
 
 from . import io
 from .utils import require_panda, require_snap
 
 logger = logging.getLogger(__name__)
-
-
-def make_schedule(switch_schedule):
-    """
-    Create a schedule for switching between VNA and SNAP observing. This
-    creates a cycle object that can iterate indefinitely over the switch
-    schedule.
-
-    Parameters
-    ----------
-    switch_schedule : dict
-        The switch schedule used for observing. A dictionary with keys
-        `vna``, ``snap_repeat``, ``sky``, ``load``, and ``noise``. The
-        first two keys specify the number of measurements with the VNA
-        and the SNAP respectively. When measuring PSDs with the SNAP,
-        the ``sky``, ``load``, and ``noise`` keys specify the number of
-        measurements to take for each state.
-
-    Returns
-    -------
-    schedule : cycle
-        A cycle object that iterates over the switch schedule. The
-        schedule is a list of tuples, where each tuple contains the
-        state and the number of measurements to take.
-
-    Raises
-    ------
-    KeyError
-        If the switch schedule contains an invalid key.
-
-    ValueError
-        If the switch schedule is empty, i.e. no states are specified.
-
-    Notes
-    -----
-    Defaults are 0 for all states, except for ``snap_repeat``, which
-    defaults to 1.
-
-    """
-    keys = ("sky", "load", "noise", "snap_repeat", "vna")
-    for k in switch_schedule:
-        if k not in keys:
-            raise KeyError(f"Invalid key in switch schedule: {k}.")
-    n_vna = switch_schedule.get("vna", 0)
-    if n_vna > 0:
-        schedule = [("vna", n_vna)]
-    else:
-        schedule = []
-    block = [(k, switch_schedule.get(k, 0)) for k in ("sky", "load", "noise")]
-    block = [x for x in block if x[1] > 0]
-    n_repeat = switch_schedule.get("snap_repeat", 1)
-    if n_repeat > 0:
-        schedule += n_repeat * block
-    if not schedule:
-        raise ValueError(
-            "Switch schedule is empty. Specify at least one state to observe."
-        )
-    return cycle(schedule)
 
 
 class EigObserver:
@@ -108,7 +49,13 @@ class EigObserver:
         else:
             raise ValueError("At least one Redis connection must be provided.")
 
-        self.stop_event = Event()
+        self.stop_events = {
+            "switches": threading.Event(),
+            "vna": threading.Event(),
+            "motors": threading.Event(),
+            "snap": threading.Event(),
+        }
+        self.switch_lock = threading.Lock()  # lock for RF switches
 
     @require_panda
     def set_mode(self, mode):
@@ -142,7 +89,35 @@ class EigObserver:
         self.redis.send_ctrl(cmd_mode_map[mode])
 
     @require_panda
-    def observe_vna(self, mode, timeout=300, write_files=True):
+    def do_switching(self):
+        """
+        Use the RF switches to switch between sky, load, and noise
+        source measurements according to the switch schedule.
+
+        Notes
+        -----
+        The majority of the observing time is spent on sky
+        measurements. Therefore, S11 measurements are only allowed
+        to interrupt the sky measurements, and not the load or
+        noise source measurements.
+
+        """
+        switch_schedule = self.cfg.switch_schedule
+        while not self.stop_events["switches"].is_set():
+            with self.switch_lock:
+                for mode in ["load", "noise"]:
+                    self.logger.info(f"Switching to {mode} measurements")
+                    self.set_mode(mode)
+                    if self.stop_events["switches"].wait(
+                        switch_schedule[mode]
+                    ):
+                        self.logger.info("Switching stopped by event")
+                        return
+            self.logger.info("Switching to sky measurements")
+            self.stop_events["switches"].wait(switch_schedule["sky"])
+
+    @require_panda
+    def measure_s11(self, mode, timeout=300, write_files=True):
         """
         VNA observations. Performs OSL calibration measurements and
         measurment of the device(s) under test.
@@ -210,6 +185,19 @@ class EigObserver:
         else:
             return data, cal_data
 
+    @require_panda
+    def observe_vna(self):
+        """
+        Observe with VNA and write data to files.
+        """
+        while not self.stop_events["vna"].is_set():
+            with self.switch_lock:
+                for mode in ["ant", "rec"]:
+                    self.logger.info(f"Measuring S11 of {mode} with VNA")
+                    self.measure_s11(mode, write_files=True)
+            # wait for the next iteration
+            self.stop_events["vna"].wait(self.cfg.vna_interval)
+
     # XXX
     @require_panda
     def rotate_motors(self, motors):
@@ -219,10 +207,11 @@ class EigObserver:
         AttributeError
             If the `redis_panda` attribute is not set.
         """
+        # runs if not stop_events[motors].is_set()
         raise NotImplementedError
 
     @require_snap
-    def observe_snap(self, pairs=None, timeout=10):
+    def record_corr_data(self, pairs=None, timeout=10):
         """
         Read data from the SNAP correlator via Redis and write it to
         file.
@@ -244,7 +233,7 @@ class EigObserver:
             redis=self.redis,
         )
 
-        while not self.stop_event.is_set():  # XXX implement stop_event
+        while not self.stop_events["snap"].is_set():
             # blocking read from Redis
             data = self.redis_snap.read_corr_data(
                 pairs=pairs, timeout=timeout, unpack=True
@@ -257,7 +246,3 @@ class EigObserver:
         if len(file) > 0:
             self.logger.info("Writing short final file.")
             file.corr_write()
-
-    def end_observing(self):
-        self.stop_event.set()
-        self.logger.info("Observing ended.")
