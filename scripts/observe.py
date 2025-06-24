@@ -1,151 +1,114 @@
 """
-Observing script for Eigsep observing, using SNAP correlator,
-a VNA, Dicke switching, and motor rotations. This script runs on the main
-single board computer.
+Main observing script for Eigsep, using SNAP correlator, a VNA, Dicke 
+switching, and motor rotations. This script runs on the main single
+board computer, currently a Raspberry Pi 4 on the ground.
+
+The script runs indefinitely until interrupted, allowing for continuous
+observations. Exceptions raised by motors or switches may cause these
+threads to exit, but the main observer thread will continue running.
+If file writing is enabled and the recording thread exits, the main
+thread exits. This way, intterupted file writing can't go unnoticed.
 """
 
 import argparse
+from importlib import resources
 import logging
 from pathlib import Path
-import subprocess
+from threading import Event, Thread
 
-from eigsep_corr.fpga import add_args
-from eigsep_observing.config import CorrConfig, ObsConfig
-from eigsep_observing import EigObserver
+from eigsep_observing import EigObserver, EigsepRedis
+from eigsep_observing.utils import configure_eig_logger
 
-LOG_LEVEL = logging.DEBUG
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=LOG_LEVEL)
-
-# panda config
-PANDA_USERNAME = "eigsep"
-CLIENT_PATH = "/home/eigsep/eigsep_observing/scripts/client.py"  # on panda
+# logger with rotating file handler
+configure_eig_logger(level=logging.DEBUG)
 
 # command line arguments
 parser = argparse.ArgumentParser(
     description="Eigsep Observer",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-add_args(parser, eig_observing=True)
+parser.add_argument(
+    "-s",
+    dest="use_switches",
+    action="store_true",
+    default=False,
+    help="Enable Dicke switching and VNA.",
+)
+parser.add_argument(
+    "-r",
+    dest="rotate_motors",
+    action="store_true",
+    default=False,
+    help="Enable motor rotations.",
+)
+parser.add_argument(
+    "-w",
+    dest="write_files",
+    action="store_true",
+    default=False,
+    help="Write data files to disk.",
+)
+parser.add_argument(
+    "--cfg_file",
+    dest="cfg_file",
+    type=Path,
+    default=resources.files("eigsep_observing").joinpath("config", "default.cfg"),
+    help="Configuration file for the observer.",
+)
+parser.add_argument(
+    "--panda_ip",
+    dest="panda_ip",
+    type=str,
+    default="10.10.10.12",
+    help="IP address of the Panda board.",
+)
+
 args = parser.parse_args()
-save_dir = Path(args.save_dir).resolve()
-vna_save_dir = save_dir / "s11_data"
 
-# SNAP config
-corr_cfg = CorrConfig(
-    snap_ip="10.10.10.13",
-    sample_rate=500,
-    use_ref=True,
-    use_noise=False,
-    fpg_file=args.fpg_file,
-    fpg_version=(2, 3),
-    adc_gain=4,
-    fft_shift=0x00FF,
-    corr_acc_len=2**28,
-    corr_scalar=2**9,
-    corr_word=4,
-    dtype=("int32", ">"),
-    acc_bins=2,
-    pam_atten={"0": (8, 8), "1": (8, 8), "2": (8, 8)},
-    pol_delay={"01": 0, "23": 0, "45": 0},
-    nchan=1024,
-    save_dir=str(save_dir),
-    ntimes=args.ntimes,
-)
+# initialize the Redis instances
+redis_snap = EigsepRedis(host="localhost", port=6379, maxlen=10000)
+redis_panda = EigsepRedis(host=args.panda_ip, port=6379, maxlen=10000)
 
-# observing config
-obs_cfg = ObsConfig(
-    pi_ip="10.10.10.10",
-    panda_ip="10.10.10.12",
-    sensors={
-        "imu_az": "/dev/pico_imu_az",
-        "imu_el": "/dev/pico_imu_el",
-        "therm_load": "/dev/pico_therm_load",
-        "therm_lna": "/dev/pico_therm_lna",
-        "therm_vna_load": "/dev/pico_therm_vna_load",
-        "peltier": "/dev/pico_peltier",
-        "lidar": "/dev/pico_lidar",
-    },
-    switch_pico="/dev/pico_switch",
-    switch_schedule={
-        "vna": 1,
-        "snap_repeat": 1200,
-        "sky": 100,
-        "load": 100,
-        "noise": 100,
-    },
-    vna_ip="127.0.0.1",
-    vna_port=5025,
-    vna_timeout=1000,
-    vna_fstart=1e6,
-    vna_fstop=250e6,
-    vna_npoints=1000,
-    vna_ifbw=100,
-    vna_power={"amt": 0, "rec": -40},
-    vna_save_dir=str(vna_save_dir),
-)
+# upload the configuration file to the Redis instances
+redis_snap.upload_config(args.cfg_file)
+redis_panda.upload_config(args.cfg_file)
 
-if not obs_cfg.use_snap:
-    error_msg = "SNAP correlator is not configured for observing."
-    logger.error(error_msg)
-    raise RuntimeError(error_msg)
-
-if args.dummy_mode:
-    logger.warning("Running in DUMMY mode")
-    from eigsep_corr.testing import DummyEigsepFpga
-
-    fpga = DummyEigsepFpga(logger=logger)
-else:
-    from eigsep_corr.fpga import EigsepFpga
-
-    if args.force_program:
-        program = True
-        force_program = True
-    elif args.program:
-        program = True
-        force_program = False
-    else:
-        program = False
-        force_program = False
-    fpga = EigsepFpga(
-        cfg=corr_cfg,
-        program=program,
-        logger=logger,
-        force_program=force_program,
+observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+thds = {}
+# set up file writing if requested
+if args.write_files:
+    record_thd = threading.Thread(
+        target=observer.record_corr_data,
+        kwargs={"pairs": None, "timeout": 10},
     )
+    thds["snap"] = record_thd
+    logger.info("Starting file writing thread.")
+    record_thd.start()
 
-# initialize the FPGA
-if args.initialize_adc:
-    fpga.initialize_adc()
-if args.initialize_fpga:
-    fpga.initialize_fpga()
-fpga.check_version()
-fpga.set_input()
-if args.sync:
-    fpga.synchronize(delay=0, update_redis=args.update_redis)
+# set up switches and VNA if requested
+if args.use_switches:
+    switch_thd = threading.Thread(target=observer.use_switches)
+    thds["switches"] = switch_thd
+    logger.info("Starting switch and VNA thread.")
+    switch_thd.start()
 
+# set up motor rotations if requested
+if args.rotate_motors:
+    motor_thd = threading.Thread(target=observer.rotate_motors)
+    thds["motors"] = motor_thd
+    logger.info("Starting motor rotation thread.")
+    motor_thd.start()
 
-observer = EigObserver(fpga, cfg=obs_cfg, logger=logger)
-observer.redis.reset()  # clear redis at the start of observing
-observer.start_heartbeat(ex=60)  # heartbeat thread
-# start the client
-observer.start_client()
-subprocess.run(
-    [
-        "ssh",
-        f"{PANDA_USERNAME}@{obs_cfg.panda_ip}",
-        "nohup python3 {CLIENT_PATH} > client.log 2>&1 &",  # XXX no nohup?
-    ]
-)
-logger.info("Observing.")
 try:
-    observer.observe(
-        pairs=None,
-        timeout=10,
-        update_redis=args.update_redis,
-        write_files=args.write_files,
-    )
+    if "snap" in thds:
+        thds["snap"].join()   # stops blocking if recording thread exits
+    else:
+        threading.Event().wait()  # wait forever
 except KeyboardInterrupt:
-    logger.info("Exiting.")
+    logger.info("Keyboard interrupt received, stopping observer.")
 finally:
-    observer.end_observing()
+    for name in thds:
+        logger.info(f"Stopping thread: {name}")
+        observer.stop_events[name].set()
+        thds[name].join()
+    logger.info("All threads stopped. Exiting observer.")
