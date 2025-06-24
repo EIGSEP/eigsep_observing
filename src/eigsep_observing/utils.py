@@ -44,16 +44,15 @@ def configure_eig_logger(
     return logger
 
 
-def requires_attr(attr_name, exception=AttributeError):
+def require_attr(attr_name, exception=AttributeError):
     """
-    Decorator to ensure `self.<attr_name>` is not None.
-    Raises `exception` if it is.
+    Decorator to ensure `self.<attr_name>` is True and not None.
     """
 
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
-            if getattr(self, attr_name) is None:
+            if not getattr(self, attr_name):
                 raise exception(
                     f"{self.__class__.__name__!r} needs `{attr_name}` set"
                     "before calling `{func.__name__}`"
@@ -65,5 +64,5 @@ def requires_attr(attr_name, exception=AttributeError):
     return decorator
 
 
-require_panda = requires_attr("redis_panda")
-require_snap = requires_attr("redis_snap")
+require_panda = require_attr("panda_connected")
+require_snap = require_attr("snap_connected")
