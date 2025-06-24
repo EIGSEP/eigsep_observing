@@ -1,17 +1,17 @@
 import logging
 import threading
-import time
 
 from cmt_vna import VNA
 from switch_network import SwitchNetwork
 
 from . import sensors
-from .utils import eig_logger
+
+logger = logging.getLogger(__name__)
 
 
 class PandaClient:
 
-    def __init__(self, cfg=default_, logger=None):
+    def __init__(self, redis):
         """
         Client class that runs on the computer in the suspended box. This
         pulls data from connected sensors and pushes it to the Redis server.
@@ -22,19 +22,14 @@ class PandaClient:
         ----------
         redis : EigsepRedis
             The Redis server object to push data to and read commands from.
-        logger : logging.Logger
-            Logger for the client. If None, a default logger is created
-            using `eig_logger`.
 
         """
-        if logger is None:
-            logger = eig_logger(__name__)
         self.logger = logger
         self.redis = redis
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.serial_timeout = 5  # serial port timeout in seconds
 
-        self.cfg = self.redis.get_config("panda")  # XXX needs implementation
+        self.cfg = self.redis.get_config()
         self.init_switch_network()
         if self.cfg.use_vna and self.switch_nw is not None:
             self.init_VNA()
