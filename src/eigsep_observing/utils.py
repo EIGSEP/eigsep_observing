@@ -1,3 +1,4 @@
+import functools
 import logging
 from logging.handlers import RotatingFileHandler
 
@@ -43,3 +44,24 @@ def eig_logger(
         handler.setFormatter(formatter)
         logger.addHandler(handler)
     return logger
+
+
+def requires_attr(attr_name, exception=AttributeError):
+    """
+    Decorator to ensure `self.<attr_name>` is not None.
+    Raises `exception` if it is.
+    """
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(self, *args, **kwargs):
+            if getattr(self, attr_name) is None:
+                raise exception(
+                    f"{self.__class__.__name__!r} needs `{attr_name}` set"
+                    "before calling `{func.__name__}`"
+                )
+            return func(self, *args, **kwargs)
+        return wrapper
+    return decorator
+
+require_panda = requires_attr("redis_panda")
+require_snap = requires_attr("redis_snap")
