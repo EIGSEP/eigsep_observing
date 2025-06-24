@@ -1,11 +1,8 @@
 from itertools import cycle
-import logging
-import queue
-import time
-from threading import Event, Thread
+from threading import Event
 
-from . import EigsepRedis, io
-from .utils import eig_logger
+from . import io
+from .utils import eig_logger, require_panda, require_snap
 
 
 def make_schedule(switch_schedule):
@@ -18,10 +15,10 @@ def make_schedule(switch_schedule):
     ----------
     switch_schedule : dict
         The switch schedule used for observing. A dictionary with keys
-        `vna'', ``snap_repeat'', ``sky'', ``load'', and ``noise''. The
+        `vna``, ``snap_repeat``, ``sky``, ``load``, and ``noise``. The
         first two keys specify the number of measurements with the VNA
-        and the SNAP respectivtly. When measuring PSDs with the SNAP,
-        the ``sky'', ``load'', and ``noise'' keys specify the number of
+        and the SNAP respectively. When measuring PSDs with the SNAP,
+        the ``sky``, ``load``, and ``noise`` keys specify the number of
         measurements to take for each state.
 
     Returns
@@ -41,7 +38,7 @@ def make_schedule(switch_schedule):
 
     Notes
     -----
-    Defaults are 0 for all states, except for ``snap_repeat'', which
+    Defaults are 0 for all states, except for ``snap_repeat``, which
     defaults to 1.
 
     """
@@ -68,16 +65,34 @@ def make_schedule(switch_schedule):
 
 class EigObserver:
 
-    def __init__(self, panda_ip="10.10.10.12", logger=None):
+    def __init__(self, redis_snap=None, redis_panda=None, logger=None):
         """
-        Main controll class and filewriter for Eigsep observing. This
-        code is meant to run on the Raspberry Pi on the ground. It
-        reads correlator data from the SNAP (over a local Redis), and
-        data from VNA and sesnors from the LattePanda (over a Redis)
-        hosted on the LattePanda. It also writes data to files.
+        Main controll class and filewriter for Eigsep observing.
+        Provides methods to:
+         - remotely control hardware in the EIGSEP box, including
+           motors, VNA, and RF switches,
+         - read correlator data from the SNAP,
+         - read S11 measurements from the VNA,
+         - read metadata from sensors connected to the LattePanda,
+         - write data to files.
 
         Parameters
         ----------
+        redis_snap : EigsepRedis
+            The Redis connection to the Rasperry Pi controlling the
+            SNAP correlator.
+        redis_panda : EigsepRedis
+            The Redis connection to the LattePanda server.
+        logger : logging.Logger
+            The logger to use for logging messages. If None, a default
+            logger is created, using the `eig_logger` utility.
+
+        Notes
+        -----
+        At least one of the Redis connections must be provided. Connect
+        to the SNAP Redis server for reading correlator data, and to
+        the LattePanda Redis server for reading metadata and controlling
+        the VNA and RF switches.
 
         """
         if logger is None:
@@ -85,57 +100,51 @@ class EigObserver:
         self.logger = logger
 
         # redis connections
-        self.redis_SNAP = EigsepRedis(host="localhost")
-        self.redis_Panda = EigsepRedis(host=panda_ip)
+        self.redis_snap = redis_snap
+        self.redis_panda = redis_panda
 
-        self.cfg = self.redis_SNAP.get_config()
+        if self.redis_snap is not None:
+            self.cfg = self.redis_snap.get_config()
+        elif self.redis_panda is not None:
+            self.cfg = self.redis_panda.get_config()
+        else:
+            raise ValueError("At least one Redis connection must be provided.")
 
+        self.stop_event = Event()
 
+    @require_panda
     def set_mode(self, mode):
         """
-        Switch observing mode with RF switches and start VNA observing if
-        needed.
+        Switch observing mode with RF switches.
 
         Parameters
         ----------
         mode : str
-            Observing mode. Either ``sky'', ``load'', ``noise'' for
-            correlations, or ``ant''  or ``rec'' for S11 measurements with
-            the VNA.
+            Observing mode. Either ``sky``, ``load``, ``noise``.
 
         Raises
         ------
+        AttributeError
+            If the `redis_panda` attribute is not set.
         ValueError
             If the mode is not one of the valid modes.
 
         """
-        if mode in ("ant", "rec"):
-            self.logger.info(f"Switching to VNA mode, measuring {mode}")
-            try:
-                self.observe_vna(mode)
-            except ValueError as e:
-                self.logger.error(f"VNA error: {e}")
-                raise
-            except TimeoutError:
-                self.logger.error("VNA timeout. Check connection.")
-            except RuntimeError as e:
-                self.logger.error(f"Unexpected status: {e}")
-        elif mode in ("sky", "load", "noise"):
-            self.logger.info(f"Switching to {mode} measurements")
-            if mode == "sky":
-                redis_cmd = "switch:RFANT"
-            elif mode == "load":
-                redis_cmd = "switch:RFLOAD"
-            elif mode == "noise":
-                redis_cmd = "switch:RFN"
-            self.redis.send_ctrl(redis_cmd)
-        else:
+        cmd_mode_map = {
+            "sky": "switch:RFANT",
+            "load": "switch:RFLOAD",
+            "noise": "switch:RFN",
+        }
+        if mode not in cmd_mode_map:
             raise ValueError(
                 f"Invalid mode: {mode}. Must be one of "
-                "'sky', 'load', 'noise', 'ant', or 'rec'."
+                f"{list(cmd_mode_map.keys())}."
             )
+        self.logger.info(f"Switching to {mode} measurements")
+        self.redis.send_ctrl(cmd_mode_map[mode])
 
-    def observe_vna(self, mode, timeout=300):
+    @require_panda
+    def observe_vna(self, mode, timeout=300, write_files=True):
         """
         VNA observations. Performs OSL calibration measurements and
         measurment of the device(s) under test.
@@ -143,26 +152,37 @@ class EigObserver:
         Parameters
         ----------
         mode : str
-            The mode to set. Either ``ant'' or ``rec''. The former
+            The mode to set. Either `ant` or `rec`. The former
             case measures S11 of antenna and noise source. The latter
             uses less power and measures S11 of the receiver.
         timeout : int
             The time in seconds to wait for the VNA to complete.
+        write_files : bool
+            If True, write the VNA data to files. If False, only
+            return the data without writing to files.
+
+        Returns
+        -------
+        data : dict
+            The S11 measurement data from the VNA. Only returned if
+            `write_files` is False.
+        cal_data : dict
+            S11 measurement data from the OSL calibration. Only
+            returned if `write_files` is False.
 
         Raises
         ------
+        AttributeError
+            If the `redis_panda` attribute is not set.
         ValueError
-            If the mode is not one of the valid VNA commands.
-        TimeoutError
-            If the VNA does not complete within the timeout period.
-        RuntimeError
-            If the VNA returns an error status.
+            If ``mode`` is not `ant` or `rec`.
 
         """
+        if mode not in ("ant", "rec"):
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be one of 'ant' or 'rec'."
+            )
         cmd = f"vna:{mode}"
-        if cmd not in self.redis.vna_commands:
-            raise ValueError(f"Invalid VNA command: {cmd}.")
-
         kwargs = {
             "fstart": self.cfg.vna_fstart,
             "fstop": self.cfg.vna_fstop,
@@ -172,28 +192,42 @@ class EigObserver:
         }
 
         self.redis.send_ctrl(cmd, **kwargs)
-        self.redis.read_vna_data(timeout=120)
-        # XXX write data to file
-        raise NotImplementedError
+        try:
+            out = self.redis.read_vna_data(timeout=120)
+        except TimeoutError:
+            self.logger.error(
+                "Timeout while waiting for VNA data. "
+                "Check the VNA connection and settings."
+            )
+            return None, None
+        eid, data, cal_data, header, metadata = out
+        if write_files:
+            io.write_s11_file(
+                data,
+                header,
+                metadata=metadata,
+                cal_data=cal_data,
+                save_dir=self.cfg.vna_save_dir,
+            )
+        else:
+            return data, cal_data
 
     # XXX
+    @require_panda
     def rotate_motors(self, motors):
+        """
+        Raises
+        -------
+        AttributeError
+            If the `redis_panda` attribute is not set.
+        """
         raise NotImplementedError
 
-    # XXX how to handle motors?
-    # XXX change everything
-    def observe(
-        self,
-        pairs=None,
-        timeout=10,
-        update_redis=True,
-        write_files=True,
-    ):
+    @require_snap
+    def observe_snap(self, pairs=None, timeout=10):
         """
-        Start observing, reading data from the correlator and optionally
-        the VNA. This method implements automatic switching between
-        observing modes according to the switch schedule. Metadata is
-        pushed and collected from Redis, and data is written to files.
+        Read data from the SNAP correlator via Redis and write it to
+        file.
 
         Parameters
         ----------
@@ -202,88 +236,30 @@ class EigObserver:
             observed.
         timeout : int
             The time in seconds to wait for data from the correlator.
-        update_redis : bool
-            Push data to Redis.
-        write_files : bool
-            Write data to files.
-
 
         """
-        if pairs is None:
-            pairs = self.fpga.autos + self.fpga.crosses
-
-        self.fpga.queue = queue.Queue(maxsize=0)
-        self.fpga.pause_event = Event()  # XXX remove
-        self.fpga.stop_event = Event()
-
-        self.fpga.pause_event.set()
-
-        thd = Thread(  # XXX remove
-            target=self.fpga._read_integrations,
-            args=(pairs),
-            kwargs={"timeout": timeout},
+        file = io.File(
+            self.cfg.save_dir,
+            pairs,
+            self.cfg.ntimes,
+            self.cfg.snap_header,  # XXX some verification of fpga.header
+            redis=self.redis,
         )
-        thd.start()
 
-        if write_files:
-            self.file = io.File(
-                self.fpga.cfg.save_dir,
-                pairs,
-                self.fpga.cfg.ntimes,
-                self.fpga.header,
-                redis=self.redis,
+        while not self.stop_event.is_set():  # XXX implement stop_event
+            # blocking read from Redis
+            data = self.redis_snap.read_corr_data(
+                pairs=pairs, timeout=timeout, unpack=True
             )
+            filename = file.add_data(data)
+            if filename is not None:  # file buffer is full, file written
+                self.logger.info(f"Writing file {filename}")
 
-        self.schedule_cycle = make_schedule(self.cfg.switch_schedule)
-        remaining = -1  # initialize remaining to trigger first switch
-        while not self.fpga.stop_event.is_set():
-            # can only do switching if client is alive
-            if remaining <= 0 and self.redis.is_client_alive():
-                self.fpga.pause_event.set()
-                # drain queue here since we've read what we wanted to
-                while True:
-                    try:
-                        _ = self.fpga.queue.get_nowait()
-                    except queue.Empty:
-                        break
-                mode, remaining = next(self.schedule_cycle)
-                self.set_mode(mode)
-                self.fpga.pause_event.clear()
-            try:
-                d = self.fpga.queue.get(block=True, timeout=timeout)
-            except queue.Empty:
-                self.logger.warning(
-                    f"Queue empty after {timeout} seconds. "
-                    "Continuing to wait for data."
-                )
-                continue
-            if d is None:
-                if self.fpga.stop_event.is_set():
-                    self.logger.info("Stopping observing.")
-                    break
-                continue
-            data = d["data"]  # data is a dict with bytes
-            cnt = d["cnt"]
-            if update_redis:
-                self.fpga.update_redis(data, cnt)  # push bytes to Redis
-            if write_files:
-                # unpack data from bytes for writing to file
-                unpacked_data = self.fpga.unpack_data(data)
-                filename = self.file.add_data(unpacked_data)
-                if filename is not None:
-                    self.logger.info(f"Writing file {filename}")
-            remaining -= 1
-        if self.file is not None:
-            if len(self.file) > 0:
-                self.logger.info("Writing short final file.")
-                self.file.corr_write()
-
-        thd.join()
-        self.logger.info("Observing complete.")
+        # write short final file if there is more data
+        if len(file) > 0:
+            self.logger.info("Writing short final file.")
+            file.corr_write()
 
     def end_observing(self):
-        """
-        Stop the keepalive thread, which will stop the client.
-        """
-        self.keepalive_event.set()
-        self.keepalive_thd.join()
+        self.stop_event.set()
+        self.logger.info("Observing ended.")
