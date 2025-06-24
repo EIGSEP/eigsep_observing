@@ -44,6 +44,185 @@ class EigsepRedis:
             "stream:ctrl": "0-0",
         }
 
+    def add_raw(self, key, value, ex=None):
+        """
+        Update redis database with raw data in bytes.
+
+        Parameters
+        ----------
+        key : str
+            Data key.
+        value : bytes
+            Data value.
+        ex : int
+            Optional expiration time in seconds. If provided, the key will
+            expire after this time.
+
+        """
+        return self.r.set(key, value, ex=ex)
+
+    def get_raw(self, key):
+        """
+        Get raw bytes from Redis.
+
+        Parameters
+        ----------
+        key : str
+            Data key.
+
+        """
+        return self.r.get(key)
+
+    # ---------- correlation data and s11 measurements ----------
+   
+    def add_corr_data(self, data, cnt, dtype=">i4"):
+        """
+        Upload raw correlation data to Redis.
+
+        Parameters
+        ----------
+        data : dict
+            Dictionary holding correlation data. Keys are correlation
+            pairs and values are bytes. See the `read_data` method of
+            EigsepFpga in eigsep_corr.fpga for the expected format.
+        cnt : int
+            Accumulation count, read from SNAP.
+        dtype : str
+            Data type of the correlation data. Default is '>i4'
+            (big-endian 32-bit integer). This is used for unpacking the
+            data on the consumer side.
+
+        """
+        redis_data = {p.encode(): d for p, d in data.items()} 
+        # add pairs to the set of correlation pairs
+        self.r.sadd("corr_pairs", *redis_data.keys())
+        # add acc_cnt and dtype to the dict
+        redis_data["acc_cnt"] = str(cnt).encode()
+        redis_data["dtype"] = dtype.encode()
+        # add the data to the stream
+        self.r.xadd(
+            "stream:corr",
+            redis_data,
+            maxlen=self.maxlen,
+            approximate=True,
+        )
+
+    def read_corr_data(self, pairs=None, timeout=10, unpack=True):
+        """
+        Read raw correlation data from Redis and optionally unpack
+        from bytes. This is a blocking read, so it will wait until
+        data is available.
+
+        Parameters
+        ----------
+        pairs : list of str
+            List of correlation pairs to read. If None, read all pairs.
+        timeout : int
+            Timeout in seconds for blocking read.
+        unpack : bool
+            If True, unpack the data from bytes to numpy arrays.
+            If False, return the raw bytes.
+
+        Returns
+        -------
+        acc_cnt : int
+            Accumulation count, read from the correlation data.
+        data : dict
+            If `unpack` is True, return a dictionary with keys as
+            correlation pairs and values as numpy arrays of complex
+            numbers. If `unpack` is False, values are the raw bytes.
+
+        Raises
+        ------
+        TimeoutError
+            If no data is received within the timeout period.
+
+        Notes
+        -----
+        The length of the data arrays is the product of the 'nchan' and
+        'acc_bins' parameters in the SNAP configuration. The 'nchan'
+        parameter is the number of frequency channels, while 'acc_bins'
+        is the number of spectra read at each integration step.
+
+        """
+        if pairs is None:
+            pairs = self.r.smembers("corr_pairs")
+        out = self.r.xread({"stream:corr", "$"}, count=1, timeout=timeout)
+        if not out:
+            raise TimeoutError("No correlation data received within timeout.")
+        # out is a list of tuples (stream_name, entries)
+        fields = out[0][1][0][1]
+        acc_cnt = int(fields.pop(b"acc_cnt").decode())
+        dtype = fields.pop(b"dtype").decode()
+        data = {}
+        for k, v in fields.items():
+            if unpack:
+                # unpack the bytes to numpy array of complex numbers
+                arr = np.frombuffer(v, dtype=dtype)
+            else:
+                # return raw bytes
+                arr = v
+            data[k.decode()] = arr
+        return acc_cnt, data
+
+
+    def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
+        """
+        Send VNA data to Redis using a stream. Used by client.
+
+        Parameters
+        ----------
+        data : dict
+            Dictionary holding VNA data. Keys are measurement modes and
+            values are arrays of complex numbers.
+        cal_data : dict
+            Dictionary holding calibration data. Keys are calibration
+            modes and values are arrays of complex numbers.
+        header : dict
+            VNA configuration. To be placed in file header.
+        metadata : dict
+            Live sensor metadata. To be placed in file header.
+        """
+        raise NotImplementedError
+
+    def read_vna_data(self, timeout=120):
+        """
+        Read VNA data stream from Redis. Used by server.
+
+        Parameters
+        ----------
+        timeout : int
+            Timeout in seconds for blocking read.
+
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        data : dict
+            Dictionary holding VNA data. Keys are measurement modes and
+            values are arrays of complex numbers. If None, no message was
+            received.
+        cal_data : dict
+            Dictionary holding calibration data. Keys are calibration
+            modes and values are arrays of complex numbers.
+        header : dict
+            VNA configuration. To be placed in file header.
+        metadata : dict
+            Live sensor metadata. To be placed in file header.
+
+        Raises
+        ------
+        TimeoutError
+            If no data is received within the timeout period.
+
+        Notes
+        -----
+        This is a blocking read with a timeout of ``timeout`` seconds.
+        """
+        raise NotImplementedError("This method is not implemented yet.")
+
+    # ------------------- metadata -----------------
+
     @property
     def data_streams(self):
         """
@@ -64,84 +243,6 @@ class EigsepRedis:
             data_streams[stream] = last_id
         return data_streams
 
-    @property
-    def ctrl_commands(self):
-        """
-        Return allowed control commands. See also the property
-        ``all_commands'' which returns the same information in a flat list.
-
-        Returns
-        -------
-        commands : dict
-            Dictonary of commands. Key is the command type. Values are
-            the allowed commands for that type.
-
-        """
-        commands = {
-            "switch": [
-                # s11 measurements
-                "switch:VNAO",  # open cal standard
-                "switch:VNAS",  # short cal standard
-                "switch:VNAL",  # load cal standard
-                "switch:VNAANT",  # antenna
-                "switch:VNAN",  # noise source
-                "switch:VNARF",  # receiver
-                # snap observing
-                "switch:RFN",  # noise source
-                "switch:RFLOAD",  # load
-                "switch:RFANT",  # antenna
-            ],
-            "VNA": [
-                "vna:ant",  # antenna
-                "vna:rec",  # receiver
-            ],
-        }
-        return commands
-
-    @property
-    def all_commands(self):
-        """
-        Return all allowed commands.
-
-        Returns
-        -------
-        commands : list
-            List of all allowed commands.
-
-        """
-        commands = []
-        for key in self.r.smembers("ctrl_commands"):
-            key = key.decode("utf-8")
-            if key in self.ctrl_commands:
-                commands.extend(self.ctrl_commands[key])
-        return commands
-
-    @property
-    def switch_commands(self):
-        """
-        Return allowed RF switch commands.
-
-        Returns
-        -------
-        commands : list
-            List of allowed RF switch commands.
-
-        """
-        return self.ctrl_commands["switch"]
-
-    @property
-    def vna_commands(self):
-        """
-        Return allowed VNA commands.
-
-        Returns
-        -------
-        commands : list
-            List of allowed VNA commands.
-
-        """
-        return self.ctrl_commands["VNA"]
-
     def add_metadata(self, key, value):
         """
         Add metadata to Redis. This both streams values and adds the current
@@ -161,7 +262,7 @@ class EigsepRedis:
             payload = json.dumps(value).encode("utf-8")
         # hash (for live updates)
         self.r.hset("metadata", key, payload)
-        ts = datetime.now(timezone.utc).isoformat()
+        ts = datetime.now(timezone.utc).isoformat()  # XXX unreliable
         self.r.hset("metadata", f"{key}_ts", json.dumps(ts).encode("utf-8"))
         # stream (for file metadata)
         self.r.xadd(
@@ -256,35 +357,157 @@ class EigsepRedis:
                 self.r.hset("data_streams", stream, eid)
             redis_hdr[stream] = np.array(out)
         return redis_hdr
+    
+    # ------------------- control commands -----------------
 
-    def add_raw(self, key, value, ex=None):
+    @property
+    def ctrl_commands(self):
         """
-        Update redis database with raw data in bytes.
+        Return allowed control commands. See also the property
+        ``all_commands`` which returns the same information in a flat list.
+
+        Returns
+        -------
+        commands : dict
+            Dictonary of commands. Key is the command type. Values are
+            the allowed commands for that type.
+
+        """
+        commands = {
+            "switch": [
+                # s11 measurements
+                "switch:VNAO",  # open cal standard
+                "switch:VNAS",  # short cal standard
+                "switch:VNAL",  # load cal standard
+                "switch:VNAANT",  # antenna
+                "switch:VNAN",  # noise source
+                "switch:VNARF",  # receiver
+                # snap observing
+                "switch:RFN",  # noise source
+                "switch:RFLOAD",  # load
+                "switch:RFANT",  # antenna
+            ],
+            "VNA": [
+                "vna:ant",  # antenna
+                "vna:rec",  # receiver
+            ],
+        }
+        return {k: v for k, v in commands.items() if self.r.sismember("ctrl_commands", k.encode("utf-8"))}
+
+    @property
+    def all_commands(self):
+        """
+        Return all allowed commands.
+
+        Returns
+        -------
+        commands : list
+            List of all allowed commands.
+
+        """
+        commands = []
+        for v in self.ctrl_commands.values():
+            commands.extend(v)
+        return commands
+
+    @property
+    def switch_commands(self):
+        """
+        Return allowed RF switch commands.
+
+        Returns
+        -------
+        commands : list
+            List of allowed RF switch commands.
+
+        """
+        if "switch" not in self.ctrl_commands:
+            return []
+        return self.ctrl_commands["switch"]
+
+    @property
+    def vna_commands(self):
+        """
+        Return allowed VNA commands.
+
+        Returns
+        -------
+        commands : list
+            List of allowed VNA commands.
+
+        """
+        if "VNA" not in self.ctrl_commands:
+            return []
+        return self.ctrl_commands["VNA"]
+
+    def send_ctrl(self, cmd, **kwargs):
+        """
+        Stream control message to Redis. Used by server.
 
         Parameters
         ----------
-        key : str
-            Data key.
-        value : bytes
-            Data value.
-        ex : int
-            Optional expiration time in seconds. If provided, the key will
-            expire after this time.
+        cmd : str
+            Command to execute.
+        kwargs : dict
+            Additional arguments for the command.
+
+        Raises
+        ------
+        ValueError
+            If the command is not in the list of allowed commands as defined
+            by the property ``control_commands''.
 
         """
-        return self.r.set(key, value, ex=ex)
+        if cmd not in self.all_commands:
+            raise ValueError(f"Command {cmd} not allowed.")
+        payload = {"cmd": cmd}
+        if kwargs:
+            payload["kwargs"] = kwargs
+        self.r.xadd("stream:ctrl", {"msg": json.dumps(payload)})
 
-    def get_raw(self, key):
+    def read_ctrl(self):
         """
-        Get raw bytes from Redis.
+        Read control stream from Redis. Used on client (Panda).
 
-        Parameters
-        ----------
-        key : str
-            Data key.
+        Returns
+        -------
+        entry_id : str
+            Redis stream entry id. If None, no message was received.
+        cmd : tuple of (str, dict)
+            Len 2 tuple with the first element being the command to execute
+            and the second element being a dictionary of keyword arguments.
+            If None, no message was received or the message was not
+            properly formatted.
+
+        Notes
+        -----
+        This is a non-blocking call so it will not wait for a message.
+        No message is received if entry_id is None. If the message is not
+        properly formatted, cmd is None.
 
         """
-        return self.r.get(key)
+        # this is non-blocking
+        msg = self.r.xread(
+            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, count=1
+        )
+        if not msg:
+            return None, None
+        # msg is stream_name, entries
+        entries = msg[0][1]
+        entry_id, dat = entries[0]  # since count=1, it's a list of 1
+        self.ctrl_streams["stream:ctrl"] = entry_id  # update the stream id
+        # dat is a dict with key msg
+        raw = dat.get(b"msg")
+        try:
+            decoded = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            return entry_id, None
+        # msg is a dict with keys cmd and kwargs
+        cmd = decoded.get("cmd")
+        kwargs = decoded.get("kwargs", {})
+        return entry_id, (cmd, kwargs)
+    
+    # ------------------- heartbeat and status -----------------
 
     def client_heartbeat_set(self, ex, alive=True):
         """
@@ -362,120 +585,3 @@ class EigsepRedis:
         if status.startswith("ERROR: "):
             raise RuntimeError("Client ERROR: " + status[len("ERROR: ") :])
         return entry_id, status
-
-    def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
-        """
-        Send VNA data to Redis using a stream. Used by client.
-
-        Parameters
-        ----------
-        data : dict
-            Dictionary holding VNA data. Keys are measurement modes and
-            values are arrays of complex numbers.
-        cal_data : dict
-            Dictionary holding calibration data. Keys are calibration
-            modes and values are arrays of complex numbers.
-        header : dict
-            VNA configuration. To be placed in file header.
-        metadata : dict
-            Live sensor metadata. To be placed in file header.
-        """
-        raise NotImplementedError
-
-    def read_vna_data(self, timeout=120):
-        """
-        Read VNA data stream from Redis. Used by server.
-
-        Parameters
-        ----------
-        timeout : int
-            Timeout in seconds for blocking read.
-
-        Returns
-        -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
-        data : dict
-            Dictionary holding VNA data. Keys are measurement modes and
-            values are arrays of complex numbers. If None, no message was
-            received.
-        cal_data : dict
-            Dictionary holding calibration data. Keys are calibration
-            modes and values are arrays of complex numbers.
-        header : dict
-            VNA configuration. To be placed in file header.
-        metadata : dict
-            Live sensor metadata. To be placed in file header.
-
-        Notes
-        -----
-        This is a blocking read with a timeout of ``timeout`` seconds.
-        """
-        raise NotImplementedError("This method is not implemented yet.")
-
-    def send_ctrl(self, cmd, **kwargs):
-        """
-        Stream control message to Redis. Used by server.
-
-        Parameters
-        ----------
-        cmd : str
-            Command to execute.
-        kwargs : dict
-            Additional arguments for the command.
-
-        Raises
-        ------
-        ValueError
-            If the command is not in the list of allowed commands as defined
-            by the property ``control_commands''.
-
-        """
-        if cmd not in self.all_commands:
-            raise ValueError(f"Command {cmd} not allowed.")
-        payload = {"cmd": cmd}
-        if kwargs:
-            payload["kwargs"] = kwargs
-        self.r.xadd("stream:ctrl", {"msg": json.dumps(payload)})
-
-    def read_ctrl(self):
-        """
-        Read control stream from Redis. Used on client (Panda).
-
-        Returns
-        -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
-        cmd : tuple of (str, dict)
-            Len 2 tuple with the first element being the command to execute
-            and the second element being a dictionary of keyword arguments.
-            If None, no message was received or the message was not
-            properly formatted.
-
-        Notes
-        -----
-        This is a non-blocking call so it will not wait for a message.
-        No message is received if entry_id is None. If the message is not
-        properly formatted, cmd is None.
-
-        """
-        # this is non-blocking
-        msg = self.r.xread(
-            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, count=1
-        )
-        if not msg:
-            return None, None
-        # msg is stream_name, entries
-        entries = msg[0][1]
-        entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        self.ctrl_streams["stream:ctrl"] = entry_id  # update the stream id
-        # dat is a dict with key msg
-        raw = dat.get(b"msg")
-        try:
-            decoded = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            return entry_id, None
-        # msg is a dict with keys cmd and kwargs
-        cmd = decoded.get("cmd")
-        kwargs = decoded.get("kwargs", {})
-        return entry_id, (cmd, kwargs)
