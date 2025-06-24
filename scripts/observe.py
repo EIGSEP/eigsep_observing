@@ -77,8 +77,8 @@ parser.add_argument(
 args = parser.parse_args()
 
 # initialize the Redis instances
-redis_snap = EigsepRedis(host="localhost", port=6379, maxlen=10000)
-redis_panda = EigsepRedis(host=args.panda_ip, port=6379, maxlen=10000)
+redis_snap = EigsepRedis(host="localhost", port=6379)
+redis_panda = EigsepRedis(host=args.panda_ip, port=6379)
 
 # upload the configuration file to the Redis instances
 redis_snap.upload_config(args.cfg_file)
