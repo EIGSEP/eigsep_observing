@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 import json
 import numpy as np
+import yaml
+
 import redis
 
 
@@ -44,6 +46,8 @@ class EigsepRedis:
             "stream:ctrl": "0-0",
         }
 
+    # ------------------- configs -------------------
+
     def add_raw(self, key, value, ex=None):
         """
         Update redis database with raw data in bytes.
@@ -72,6 +76,36 @@ class EigsepRedis:
 
         """
         return self.r.get(key)
+
+    def upload_config(self, config_file):
+        """
+        Add configuration file to Redis. This is used to store the
+        yaml configuration file for the Eigsep system.
+
+        Parameters
+        ----------
+        config_file : str
+            Path to the configuration file.
+
+        """
+        with open(config_file, "r") as f:
+            config = yaml.safe_load(f)
+        cfg_json = json.dumps(config).encode("utf-8")
+        self.add_raw("config", cfg_json)
+
+    def get_config(self):
+        """
+        Get the configuration file from Redis. This is used to retrieve
+        the yaml configuration file for the Eigsep system.
+
+        Returns
+        -------
+        config : dict
+            Dictionary containing the configuration data.
+
+        """
+        raw = self.get_raw("config")
+        return json.loads(raw)
 
     # ---------- correlation data and s11 measurements ----------
 
