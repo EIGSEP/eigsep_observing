@@ -1,3 +1,4 @@
+from collections import defaultdict
 from datetime import datetime, timezone
 import json
 import numpy as np
@@ -8,43 +9,46 @@ import redis
 
 class EigsepRedis:
 
-    def __init__(self, host="localhost", port=6379, maxlen=10000):
+    maxlen = {"ctrl": 10, "status": 10, "data": 10000}
+
+    def __init__(self, host="localhost", port=6379):
         """
         Initialize the EigsepRedis client.
 
         Parameters
         ----------
         host : str
-            Redis server hostname.
         port : int
-            Redis server port.
-        maxlen : int
-            Maximum length of Redis streams.
 
         """
         self.r = redis.Redis(host=host, port=port, decode_responses=False)
-        self.maxlen = maxlen
-        self.ctrl_streams = {
-            "stream:status": "0-0",  # status stream
-            "stream:ctrl": "0-0",  # control stream
-        }
+        self._last_read_ids = defaultdict(lambda: "$")
 
-    def reset(self):
+    @property
+    def data_streams(self):
         """
-        Reset the Redis client. This clears all data streams and control
-        streams. It also resests the last read entry ids for the streams.
+        Dictionary of data streams. The keys are the stream names and
+        the values are the last entry id read from the stream. If no
+        entry has been read, the value is '$', indicating that the read
+        start from newest message delivered by the stream.
 
-        Notes
-        -----
-        This is a destructive operation and will remove all data from Redis.
-        Use with caution!
+        Returns
+        -------
+        d : dict
 
         """
-        self.r.flushdb()
-        self.ctrl_streams = {
-            "stream:status": "0-0",
-            "stream:ctrl": "0-0",
+        return {
+            s.decode(): self._last_read_ids[s.decode()]
+            for s in self.r.smembers("data_streams")
         }
+
+    @property
+    def ctrl_stream(self):
+        return {"stream:ctrl": self._last_read_ids["stream:ctrl"]}
+
+    @property
+    def status_stream(self):
+        return {"stream:status": self._last_read_ids["stream:status"]}
 
     # ------------------- configs -------------------
 
@@ -137,9 +141,10 @@ class EigsepRedis:
         self.r.xadd(
             "stream:corr",
             redis_data,
-            maxlen=self.maxlen,
+            maxlen=self.maxlen["data"],
             approximate=True,
         )
+        self.r.sadd("data_streams", "stream:corr")
 
     def read_corr_data(self, pairs=None, timeout=10, unpack=True):
         """
@@ -181,11 +186,12 @@ class EigsepRedis:
         """
         if pairs is None:
             pairs = self.r.smembers("corr_pairs")
-        out = self.r.xread({"stream:corr", "$"}, count=1, timeout=timeout)
+        last_id = self.data_streams["stream:corr"]
+        out = self.r.xread({"stream:corr", last_id}, count=1, timeout=timeout)
         if not out:
             raise TimeoutError("No correlation data received within timeout.")
-        # out is a list of tuples (stream_name, entries)
-        fields = out[0][1][0][1]
+        eid, fields = out[0][1][0]
+        self._last_read_ids["stream:corr"] = eid  # update last read id
         acc_cnt = int(fields.pop(b"acc_cnt").decode())
         dtype = fields.pop(b"dtype").decode()
         data = {}
@@ -216,6 +222,7 @@ class EigsepRedis:
         metadata : dict
             Live sensor metadata. To be placed in file header.
         """
+        self.r.sadd("data_streams", "stream:vna")
         raise NotImplementedError
 
     def read_vna_data(self, timeout=120):
@@ -256,26 +263,6 @@ class EigsepRedis:
 
     # ------------------- metadata -----------------
 
-    @property
-    def data_streams(self):
-        """
-        Dictionary of data streams. The keys are the stream names and
-        the values are the last entry id read from the stream.
-
-        Returns
-        -------
-        data_streams : dict
-
-        """
-        stream_names = self.r.smembers("data_stream_list")
-        stream_ids = self.r.hgetall("data_streams")
-        data_streams = {}
-        for stream in stream_names:
-            # get the last entry id for the stream
-            last_id = stream_ids.get(stream, "0-0")
-            data_streams[stream] = last_id
-        return data_streams
-
     def add_metadata(self, key, value):
         """
         Add metadata to Redis. This both streams values and adds the current
@@ -301,11 +288,11 @@ class EigsepRedis:
         self.r.xadd(
             key,
             {"value": payload},
-            maxlen=self.maxlen,
+            maxlen=self.maxlen["data"],
             approximate=True,
         )
         # add the stream to the data streams if not already present
-        self.r.sadd("data_stream_list", key)
+        self.r.sadd("data_streams", key)
 
     def get_live_metadata(self, keys=None):
         """
@@ -371,7 +358,6 @@ class EigsepRedis:
         else:
             if isinstance(stream_keys, str):
                 stream_keys = [stream_keys]
-            stream_keys = [k.encode("utf-8") for k in stream_keys]
             streams = {
                 k: self.data_streams[k]
                 for k in stream_keys
@@ -381,13 +367,14 @@ class EigsepRedis:
         resp = self.r.xread(streams)  # non-blocking read
         redis_hdr = {}
         for stream, dat in resp:
+            stream = stream.decode()  # decode stream name
             out = []
             # stream is a list of tuples (id, data)
             for eid, d in dat:
                 value = json.loads(d[b"value"])
                 out.append(value)
                 # update the stream id
-                self.r.hset("data_streams", stream, eid)
+                self._last_read_ids[stream] = eid
             redis_hdr[stream] = np.array(out)
         return redis_hdr
 
@@ -500,7 +487,11 @@ class EigsepRedis:
         payload = {"cmd": cmd}
         if kwargs:
             payload["kwargs"] = kwargs
-        self.r.xadd("stream:ctrl", {"msg": json.dumps(payload)})
+        self.r.xadd(
+            "stream:ctrl",
+            {"msg": json.dumps(payload)},
+            maxlen=self.maxlen["ctrl"],
+        )
 
     def read_ctrl(self):
         """
@@ -508,8 +499,6 @@ class EigsepRedis:
 
         Returns
         -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
         cmd : tuple of (str, dict)
             Len 2 tuple with the first element being the command to execute
             and the second element being a dictionary of keyword arguments.
@@ -518,31 +507,23 @@ class EigsepRedis:
 
         Notes
         -----
-        This is a non-blocking call so it will not wait for a message.
-        No message is received if entry_id is None. If the message is not
-        properly formatted, cmd is None.
+        This is a blocking call which may wait indefinitely for a
+        message.
 
         """
-        # this is non-blocking
-        msg = self.r.xread(
-            {"stream:ctrl": self.ctrl_streams["stream:ctrl"]}, count=1
-        )
-        if not msg:
-            return None, None
+        # this is blocking
+        msg = self.r.xread(self.ctrl_stream, count=1, block=0)
         # msg is stream_name, entries
         entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        self.ctrl_streams["stream:ctrl"] = entry_id  # update the stream id
+        self._last_read_ids["stream:ctrl"] = entry_id  # update the stream id
         # dat is a dict with key msg
         raw = dat.get(b"msg")
-        try:
-            decoded = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            return entry_id, None
+        decoded = json.loads(raw)
         # msg is a dict with keys cmd and kwargs
         cmd = decoded.get("cmd")
         kwargs = decoded.get("kwargs", {})
-        return entry_id, (cmd, kwargs)
+        return (cmd, kwargs)
 
     # ------------------- heartbeat and status -----------------
 
@@ -576,21 +557,23 @@ class EigsepRedis:
             return False
         return int(raw) == 1
 
-    def send_status(self, status, err=False):
+    def send_status(self, level="info", status=None):
         """
-        Publish status message to Redis. Used by client. If the status
-        message is an error, it will be prefixed with "ERROR: " and
-        raise an error in the server upon reading it.
+        Publish status message to Redis. Used by client..
 
         Parameters
         ----------
+        level : str
+            Log level.
         status : str
             Status message.
 
         """
-        if err:
-            status = f"ERROR: {status}"
-        self.r.xadd("stream:status", {"status": status}, maxlen=self.maxlen)
+        self.r.xadd(
+            "stream:status",
+            {"level": level, "status": status},
+            maxlen=self.maxlen["status"],
+        )
 
     def read_status(self):
         """
@@ -598,27 +581,16 @@ class EigsepRedis:
 
         Returns
         -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
+        level : str
+            Log level of the status message.
         status : str
             Status message. If None, no message was received.
 
-        Raises
-        ------
-        RuntimeError
-            If the status message indicates an error.
-
         """
-        # non-blocking read
-        msg = self.r.xread(
-            {"stream:status": self.ctrl_streams["stream:status"]},
-            count=1,
-        )
-        if not msg:
-            return None, None
+        # blocking read
+        msg = self.r.xread(self.status_stream, count=1, block=0)
         entry_id, status_dict = msg[0][1][0]
-        self.ctrl_streams["stream:status"] = entry_id  # update the stream id
+        self._last_read_ids["stream:status"] = entry_id  # update the stream id
         status = status_dict.get(b"status").decode("utf-8")
-        if status.startswith("ERROR: "):
-            raise RuntimeError("Client ERROR: " + status[len("ERROR: ") :])
-        return entry_id, status
+        level = status_dict.get(b"level", b"info").decode("utf-8")
+        return level, status
