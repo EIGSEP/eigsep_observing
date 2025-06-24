@@ -1,5 +1,5 @@
 """
-Main observing script for Eigsep, using SNAP correlator, a VNA, Dicke 
+Main observing script for Eigsep, using SNAP correlator, a VNA, Dicke
 switching, and motor rotations. This script runs on the main single
 board computer, currently a Raspberry Pi 4 on the ground.
 
@@ -14,12 +14,13 @@ import argparse
 from importlib import resources
 import logging
 from pathlib import Path
-from threading import Event, Thread
+import threading
 
 from eigsep_observing import EigObserver, EigsepRedis
 from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
+logger = logging.getLogger("__name__")
 configure_eig_logger(level=logging.DEBUG)
 
 # command line arguments
@@ -32,7 +33,15 @@ parser.add_argument(
     dest="use_switches",
     action="store_true",
     default=False,
-    help="Enable Dicke switching and VNA.",
+    help="Enable Dicke switching.",
+)
+parser.add_argument(
+    "-v",
+    "--vna",
+    dest="use_vna",
+    action="store_true",
+    default=False,
+    help="Do VNA measurements.",
 )
 parser.add_argument(
     "-r",
@@ -52,7 +61,9 @@ parser.add_argument(
     "--cfg_file",
     dest="cfg_file",
     type=Path,
-    default=resources.files("eigsep_observing").joinpath("config", "default.cfg"),
+    default=resources.files("eigsep_observing").joinpath(
+        "config", "default.cfg"
+    ),
     help="Configuration file for the observer.",
 )
 parser.add_argument(
@@ -75,7 +86,8 @@ redis_panda.upload_config(args.cfg_file)
 
 observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 thds = {}
-# set up file writing if requested
+
+# set up file writing
 if args.write_files:
     record_thd = threading.Thread(
         target=observer.record_corr_data,
@@ -85,12 +97,19 @@ if args.write_files:
     logger.info("Starting file writing thread.")
     record_thd.start()
 
-# set up switches and VNA if requested
+# set up dicke switching
 if args.use_switches:
-    switch_thd = threading.Thread(target=observer.use_switches)
+    switch_thd = threading.Thread(target=observer.do_swiching)
     thds["switches"] = switch_thd
-    logger.info("Starting switch and VNA thread.")
+    logger.info("Starting switch thread.")
     switch_thd.start()
+
+# set up VNA measurements
+if args.use_vna:
+    vna_thd = threading.Thread(target=observer.observe_vna)
+    thds["vna"] = vna_thd
+    logger.info("Starting VNA measurement thread.")
+    vna_thd.start()
 
 # set up motor rotations if requested
 if args.rotate_motors:
@@ -101,7 +120,7 @@ if args.rotate_motors:
 
 try:
     if "snap" in thds:
-        thds["snap"].join()   # stops blocking if recording thread exits
+        thds["snap"].join()  # stops blocking if recording thread exits
     else:
         threading.Event().wait()  # wait forever
 except KeyboardInterrupt:
