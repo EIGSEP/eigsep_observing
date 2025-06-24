@@ -1,8 +1,11 @@
 from itertools import cycle
+import logging
 from threading import Event
 
 from . import io
-from .utils import eig_logger, require_panda, require_snap
+from .utils import require_panda, require_snap
+
+logger = logging.getLogger(__name__)
 
 
 def make_schedule(switch_schedule):
@@ -65,7 +68,7 @@ def make_schedule(switch_schedule):
 
 class EigObserver:
 
-    def __init__(self, redis_snap=None, redis_panda=None, logger=None):
+    def __init__(self, redis_snap=None, redis_panda=None):
         """
         Main controll class and filewriter for Eigsep observing.
         Provides methods to:
@@ -83,9 +86,6 @@ class EigObserver:
             SNAP correlator.
         redis_panda : EigsepRedis
             The Redis connection to the LattePanda server.
-        logger : logging.Logger
-            The logger to use for logging messages. If None, a default
-            logger is created, using the `eig_logger` utility.
 
         Notes
         -----
@@ -95,8 +95,6 @@ class EigObserver:
         the VNA and RF switches.
 
         """
-        if logger is None:
-            logger = eig_logger(__name__)
         self.logger = logger
 
         # redis connections

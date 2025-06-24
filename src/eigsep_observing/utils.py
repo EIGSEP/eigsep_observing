@@ -3,8 +3,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 
-def eig_logger(
-    name,
+def configure_eig_logger(
     log_file="eigsep.log",
     level=logging.INFO,
     max_bytes=10 * 1024 * 1024,
@@ -15,7 +14,6 @@ def eig_logger(
 
     Parameters
     ----------
-    name : str
     log_file : str
         The name of the log file.
     level : int
@@ -30,7 +28,7 @@ def eig_logger(
         Configured logger instance.
 
     """
-    logger = logging.getLogger(name)
+    logger = logging.getLogger()  # get the root logger
     logger.setLevel(level)
     if not logger.hasHandlers():
         handler = RotatingFileHandler(
@@ -51,6 +49,7 @@ def requires_attr(attr_name, exception=AttributeError):
     Decorator to ensure `self.<attr_name>` is not None.
     Raises `exception` if it is.
     """
+
     def decorator(func):
         @functools.wraps(func)
         def wrapper(self, *args, **kwargs):
@@ -60,8 +59,11 @@ def requires_attr(attr_name, exception=AttributeError):
                     "before calling `{func.__name__}`"
                 )
             return func(self, *args, **kwargs)
+
         return wrapper
+
     return decorator
+
 
 require_panda = requires_attr("redis_panda")
 require_snap = requires_attr("redis_snap")
