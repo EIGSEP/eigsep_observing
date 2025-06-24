@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 
@@ -98,7 +99,7 @@ class PandaClient:
                 "Check the serial port and GPIO settings."
             )
             self.logger.error(err)
-            self.redis.send_status(err, err=True)
+            self.redis.send_status(level=logging.ERROR, status=err)
             self.switch_nw = None
         self.logger.info(f"Switch network initialized with {switch_pico}.")
         self.redis.r.sadd("ctrl_commands", "switch")
@@ -259,13 +260,12 @@ class PandaClient:
         crashing it with invalid commands.
 
         """
-        entry_id, msg = self.redis.read_ctrl()
-        if entry_id is None:  # no message
-            self.logger.debug("No message received. Waiting.")
-            time.sleep(1)
-            return
-        if msg is None:  # invalid message
-            self.logger.warning("Invalid message received.")
+        try:
+            msg = self.redis.read_ctrl()
+        except TypeError as e:
+            err = f"Error reading control command: {e}"
+            self.logger.error(err)
+            self.redis.send_status(level=logging.ERROR, status=err)
             return
 
         cmd, kwargs = msg
@@ -276,7 +276,7 @@ class PandaClient:
                     "switch commands."
                 )
                 self.logger.error(err)
-                self.redis.send_status(err, err=True)
+                self.redis.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
             path = self.switch_nw.paths[mode]
@@ -288,8 +288,8 @@ class PandaClient:
             except (ValueError, RuntimeError) as e:
                 err = f"Error executing VNA command {cmd}: {e}"
                 self.logger.error(err)
-                self.redis.send_status(err, err=True)
+                self.redis.send_status(level=logging.ERROR, status=err)
         else:
             err = f"Unknown command: {cmd}"
             self.logger.error(err)
-            self.redis.send_status(err, err=True)
+            self.redis.send_status(level=logging.ERROR, status=err)
