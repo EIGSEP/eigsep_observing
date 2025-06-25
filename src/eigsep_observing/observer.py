@@ -137,7 +137,7 @@ class EigObserver:
         noise source measurements.
 
         """
-        switch_schedule = self.cfg.switch_schedule
+        switch_schedule = self.cfg["switch_schedule"]
         while not self.stop_events["switches"].is_set():
             with self.switch_lock:
                 for mode in ["load", "noise"]:
@@ -191,14 +191,8 @@ class EigObserver:
                 f"Invalid mode: {mode}. Must be one of 'ant' or 'rec'."
             )
         cmd = f"vna:{mode}"
-        kwargs = {
-            "fstart": self.cfg.vna_fstart,
-            "fstop": self.cfg.vna_fstop,
-            "npoints": self.cfg.vna_npoints,
-            "ifbw": self.cfg.vna_ifbw,
-            "power_dBm": self.cfg.vna_power[mode],
-        }
-
+        kwargs = self.cfg["vna_settings"].copy()
+        kwargs["power_dBm"] = kwargs["power_dBm"][mode]
         self.redis_panda.send_ctrl(cmd, **kwargs)
         try:
             out = self.redis_panda.read_vna_data(timeout=120)
@@ -215,7 +209,7 @@ class EigObserver:
                 header,
                 metadata=metadata,
                 cal_data=cal_data,
-                save_dir=self.cfg.vna_save_dir,
+                save_dir=self.cfg["vna_save_dir"],
             )
         else:
             return data, cal_data
@@ -231,7 +225,7 @@ class EigObserver:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode, write_files=True)
             # wait for the next iteration
-            self.stop_events["vna"].wait(self.cfg.vna_interval)
+            self.stop_events["vna"].wait(self.cfg["vna_interval"])
 
     # XXX
     @require_panda
@@ -261,10 +255,10 @@ class EigObserver:
 
         """
         file = io.File(
-            self.cfg.save_dir,
+            self.cfg["save_dir"],
             pairs,
-            self.cfg.ntimes,
-            self.cfg.snap_header,  # XXX some verification of fpga.header
+            self.cfg["ntimes"],
+            self.redis_snap,  # XXX read from fpga.header
             redis=self.redis_panda,
         )
 

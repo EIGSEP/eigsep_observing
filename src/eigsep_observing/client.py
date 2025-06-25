@@ -31,7 +31,7 @@ class PandaClient:
 
         self.cfg = self.redis.get_config()
         self.init_switch_network()
-        if self.cfg.use_vna and self.switch_nw is not None:
+        if self.cfg["use_vna"] and self.switch_nw is not None:
             self.init_VNA()
         else:
             self.vna = None
@@ -104,9 +104,9 @@ class PandaClient:
         Initialize the VNA instance using the configuration from Redis.
         """
         self.vna = VNA(
-            ip=self.cfg.vna_ip,
-            port=self.cfg.vna_port,
-            timeout=self.cfg.vna_timeout,
+            ip=self.cfg["vna_ip"],
+            port=self.cfg["vna_port"],
+            timeout=self.cfg["vna_timeout"],
             switch_network=self.switch_nw,
         )
         self.redis.r.sadd("ctrl_commands", "VNA")
