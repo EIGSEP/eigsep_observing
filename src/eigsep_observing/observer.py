@@ -44,6 +44,7 @@ class EigObserver:
 
         if self.redis_snap is not None:
             self.cfg = self.redis_snap.get_config()
+            self.corr_cfg = self.redis_snap.get_corr_config()
         elif self.redis_panda is not None:
             self.cfg = self.redis_panda.get_config()
         else:
@@ -258,7 +259,7 @@ class EigObserver:
             self.cfg["save_dir"],
             pairs,
             self.cfg["ntimes"],
-            self.redis_snap,  # XXX read from fpga.header
+            self.corr_cfg,
             redis=self.redis_panda,
         )
 

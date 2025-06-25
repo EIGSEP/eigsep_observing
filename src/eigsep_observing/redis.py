@@ -3,8 +3,8 @@ from datetime import datetime, timezone
 import json
 import logging
 import numpy as np
-import yaml
 
+from eigsep_corr.config import load_config
 import redis
 
 
@@ -82,21 +82,58 @@ class EigsepRedis:
         """
         return self.r.get(key)
 
-    def upload_config(self, config_file):
+    def _upload_config(self, config, key, from_file):
         """
-        Add configuration file to Redis. This is used to store the
-        yaml configuration file for the Eigsep system.
+        Helper function for uploading configuration files to Redis.
 
         Parameters
         ----------
-        config_file : str
-            Path to the configuration file.
+        config : str or dict
+            Path to the configuration file if `from_file` is True, or a
+            dictionary containing the configuration data if `from_file`
+            is False.
+        key : str
+            Redis key under which the configuration will be stored.
+        from_file : bool
+            If True, load the configuration from a file. If False, use
+            the provided dictionary directly.
 
         """
-        with open(config_file, "r") as f:
-            config = yaml.safe_load(f)
+        if from_file:
+            config = load_config(config)
         cfg_json = json.dumps(config).encode("utf-8")
-        self.add_raw("config", cfg_json)
+        self.add_raw(key, cfg_json)
+
+    def upload_config(self, config, from_file=True):
+        """
+        Upload the Eigsep configuration to Redis.
+
+        Parameters
+        ----------
+        config : str or dict
+            Path to the configuration file if `from_file` is True, or a
+            dictionary containing the configuration data if `from_file`
+            is False.
+        from_file : bool
+
+        """
+        self._upload_config(config, "config", from_file=from_file)
+
+    def upload_corr_config(self, config, from_file=False):
+        """
+        Upload the SNAP configuration to Redis. This is the
+        configuration parameters used for programming the SNAP.
+
+        Parameters
+        ----------
+        config : str or dict
+            Path to the configuration file if `from_file` is True, or a
+            dictionary containing the configuration data if `from_file`
+            is False.
+        from_file : bool
+
+        """
+        self._upload_config(config, "corr_config", from_file=from_file)
 
     def get_config(self):
         """
@@ -110,6 +147,20 @@ class EigsepRedis:
 
         """
         raw = self.get_raw("config")
+        return json.loads(raw)
+
+    def get_corr_config(self):
+        """
+        Get the SNAP configuration file from Redis. These are the
+        configuration parameters used for programming the SNAP.
+
+        Returns
+        -------
+        config : dict
+            Dictionary containing the SNAP configuration data.
+
+        """
+        raw = self.get_raw("corr_config")
         return json.loads(raw)
 
     # ---------- correlation data and s11 measurements ----------
@@ -273,7 +324,7 @@ class EigsepRedis:
         ----------
         key : str
             Metadata key.
-        value : any
+        value : bytes or JSON serializable object
             Metadata value.
 
         """

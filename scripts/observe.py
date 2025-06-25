@@ -11,12 +11,12 @@ thread exits. This way, intterupted file writing can't go unnoticed.
 """
 
 import argparse
-from importlib import resources
 import logging
 from pathlib import Path
 import threading
 
 from eigsep_observing import EigObserver, EigsepRedis
+from eigsep_observing.config import get_config_path
 from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
@@ -61,9 +61,7 @@ parser.add_argument(
     "--cfg_file",
     dest="cfg_file",
     type=Path,
-    default=resources.files("eigsep_observing").joinpath(
-        "config", "default.cfg"
-    ),
+    default=get_config_path("obs_config.yaml"),
     help="Configuration file for the observer.",
 )
 parser.add_argument(
@@ -81,8 +79,8 @@ redis_snap = EigsepRedis(host="localhost", port=6379)
 redis_panda = EigsepRedis(host=args.panda_ip, port=6379)
 
 # upload the configuration file to the Redis instances
-redis_snap.upload_config(args.cfg_file)
-redis_panda.upload_config(args.cfg_file)
+redis_snap.upload_config(args.cfg_file, from_file=True)
+redis_panda.upload_config(args.cfg_file, from_file=True)
 
 observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 thds = {}
