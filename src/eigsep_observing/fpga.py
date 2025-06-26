@@ -1,5 +1,8 @@
 from datetime import datetime
+import time
+
 import eigsep_corr
+
 from .redis import EigsepRedis
 
 
@@ -75,19 +78,74 @@ class EigsepFpga(eigsep_corr.EigsepFpga):
             Accumulation count from the correlator.
 
         """
-        # stream data, cnt
-        raise NotImplementedError("not yet, this is important!")
+        self.redis.add_corr_data(data, cnt, dtype=self.cfg["dtype"])
 
-    def _read_integrations(self):
-        raise NotImplementedError("Not implemented, use observe directly!")
+    def _read_integrations(self, pairs, prev_cnt):
+        """
+        Read one integration from the correlator.
+
+        Parameters
+        ----------
+        pairs : list of str
+            List of correlation pairs to read.
+        prev_cnt : int
+            The previous accumulation count.
+
+        Returns
+        -------
+        data : dict
+            A dictionary containing the raw data from the correlator.
+        cnt : int
+            The current accumulation count.
+        """
+        cnt = self.fpga.read_int("corr_acc_cnt")
+        dcnt = cnt - prev_cnt
+        if dcnt == 0:
+            return None, cnt
+        if dcnt > 1:
+            self.logger.warning(f"Missed {dcnt - 1} integration(s).")
+        self.logger.info(f"Reading acc_cnt={cnt} from correlator.")
+        data = self.read_data(pairs=pairs, unpack=False)
+        if cnt != self.fpga.read_int("corr_acc_cnt"):
+            self.logger.error(
+                f"Read of acc_cnt={cnt} FAILED to complete before next "
+                "integration. "
+            )
+        return data, cnt
 
     def end_observing(self):
-        self.logger.warn("End observing not implemented in EigsepFpga!")
-        return
+        raise NotImplementedError("Not implemented in eigsep_observing")
 
-    # XXX get rid of pairs maybe
-    def observe(self, pairs=None, timeout=10):  # XXX here
-        raise NotImplementedError("Not implemented yet, this is important!")
-        # XXX remember to grab self.header and sead over redis
-        # at beginning since it's static
+    def observe(self, pairs=None, timeout=10):
+        """
+        Read correlator data and stream it to Redis.
+
+        Parameters
+        ----------
+        pairs : list of str
+            List of correlation pairs to read. If None, all pairs are
+            read and streamed.
+        timeout : int
+            Timeout in seconds for reading data from the correlator.
+
+        Raises
+        -------
+        TimeoutError
+            If the read operation times out.
+
+        """
         self.upload_config(validate=True)
+        if pairs is None:
+            pairs = self.autos + self.crosses
+        self.logger.info(f"Starting observation for pairs: {pairs}.")
+        t = time.time()
+        while True:
+            if time.time() - t > timeout:
+                raise TimeoutError("Read operation timed out.")
+            data, cnt = self._read_integrations(pairs, self.prev_cnt)
+            if data is None:
+                time.sleep(0.1)
+                continue
+            self.update_redis(data, cnt)
+            self.prev_cnt = cnt
+            t = time.time()
