@@ -6,12 +6,12 @@ import eigsep_corr
 from .redis import EigsepRedis
 
 
-class EigsepFpga(eigsep_corr.EigsepFpga):
+class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
 
     @staticmethod
     def _create_redis(host, port):
         """
-        Override the _create_redis method to use EigsepRedis.
+        Create an EigsepRedis instance.
 
         Parameters
         ----------
@@ -57,7 +57,14 @@ class EigsepFpga(eigsep_corr.EigsepFpga):
 
     def synchronize(self, delay=0):
         """
-        Override the synchronize method to use new EigsepRedis class.
+        Synchronize the correlator clock.
+
+        Parameters
+        ----------
+        delay : int
+            Delay in FPGA clock ticks beween arrival of an external
+            sync pulse and the issuing of an internal trigger.
+
         """
         super().synchronize(delay=delay, update_redis=False)
         sync_time = {
@@ -65,6 +72,49 @@ class EigsepFpga(eigsep_corr.EigsepFpga):
             "sync_date": datetime.fromtimestamp(self.sync_time).isoformat(),
         }
         self.redis.add_metadata("corr_sync_time", sync_time)
+
+    def initialize(
+        self,
+        initialize_adc=True,
+        initialize_fpga=True,
+        sync=True,
+    ):
+        """
+
+        Parameters
+        ----------
+        initialize_adc : bool
+            Initialize the ADCs.
+        initialize_fpga : bool
+            Initialize the FPGA.
+        sync : bool
+            Synchronize the correlator clock.
+
+
+        Notes
+        -----
+        This is a convenience method that calls the methods
+            - `initialize_adc`
+            - `initialize_fpga`
+            - `set_input`
+            - `synchronize`
+        in the specified order with their default parameters.
+
+        This method overrides the `initialize` method to no longer
+        accept the `update_redis` parameter. It is now required.
+        Related to this, the signature of the `synchronize` method has
+        been modified.
+
+        """
+        super().initialize(
+            initialize_adc=initialize_adc,
+            initialize_fpga=initialize_fpga,
+            sync=False,
+            update_redis=False,
+        )
+        if sync:
+            self.logger.debug("Synchronizing correlator clock.")
+            self.synchronize()
 
     def update_redis(self, data, cnt):
         """
