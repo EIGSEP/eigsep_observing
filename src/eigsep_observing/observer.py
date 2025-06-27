@@ -255,6 +255,13 @@ class EigObserver:
             The time in seconds to wait for data from the correlator.
 
         """
+        t_int = self.cfg["integration_time"]
+        file_time = self.cfg["file_time"]
+        self.logger.info(
+            "Reading correlator data from SNAP"
+            f"Integration time: {t_int} s, "
+            f"File time: {file_time} s"
+        )
         file = io.File(
             self.cfg["save_dir"],
             pairs,
@@ -265,10 +272,10 @@ class EigObserver:
 
         while not self.stop_events["snap"].is_set():
             # blocking read from Redis
-            data = self.redis_snap.read_corr_data(
+            acc_cnt, data = self.redis_snap.read_corr_data(
                 pairs=pairs, timeout=timeout, unpack=True
             )
-            filename = file.add_data(data)
+            filename = file.add_data(acc_cnt, data)
             if filename is not None:  # file buffer is full, file written
                 self.logger.info(f"Writing file {filename}")
 
