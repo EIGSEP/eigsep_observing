@@ -185,6 +185,8 @@ class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
 
         """
         self.upload_config(validate=True)
+        t_int = self.header["integration_time"]
+        self.logger.info(f"Integration time is {t_int} seconds.")
         if pairs is None:
             pairs = self.autos + self.crosses
         self.logger.info(f"Starting observation for pairs: {pairs}.")
