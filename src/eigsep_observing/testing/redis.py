@@ -1,6 +1,6 @@
 import fakeredis
 
-from eigsep_observing import EigsepRedis
+from .. import EigsepRedis
 
 
 class DummyEigsepRedis(EigsepRedis):
