@@ -15,8 +15,8 @@ import logging
 from pathlib import Path
 import threading
 
+from eigsep_corr.utils import get_config_path
 from eigsep_observing import EigObserver, EigsepRedis
-from eigsep_observing.config import get_config_path
 from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
