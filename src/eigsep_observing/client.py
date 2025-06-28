@@ -113,7 +113,7 @@ class PandaClient:
             self.redis.client_heartbeat_set(ex, alive=True)
             self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
-        self.client_heartbeat_set(alive=False)
+        self.redis.client_heartbeat_set(alive=False)
 
     def init_switch_network(self):
         """
