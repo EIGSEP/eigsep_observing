@@ -90,7 +90,8 @@ def require_attr(attr_name, exception=AttributeError):
         def wrapper(self, *args, **kwargs):
             if not getattr(self, attr_name):
                 raise exception(
-                    f"{self.__class__.__name__!r} needs `{attr_name}` set before calling `{func.__name__}`"
+                    f"{self.__class__.__name__!r} needs `{attr_name}` set "
+                    f"before calling `{func.__name__}`"
                 )
             return func(self, *args, **kwargs)
 
