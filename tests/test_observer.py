@@ -87,7 +87,6 @@ def test_make_schedule():
 def fpga():
     return DummyEigsepFpga()
 
-
 @pytest.mark.skip("Fix issues in eigsep_corr")
 @pytest.fixture
 def obs(fpga):

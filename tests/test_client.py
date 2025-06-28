@@ -113,7 +113,6 @@ def test_read_ctrl_switch(client):
     obs_mode = client.redis.get_live_metadata(keys="obs_mode")
     assert obs_mode == mode
 
-
 def test_read_ctrl_VNA(client, module_tmpdir):
     assert client.switch_nw is not None
     client.switch_nw.redis = client.redis
