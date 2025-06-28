@@ -25,6 +25,15 @@ class EigsepRedis:
         self.r = redis.Redis(host=host, port=port, decode_responses=False)
         self._last_read_ids = defaultdict(lambda: "$")
 
+    def reset(self):
+        """
+        Reset the EigsepRedis client by clearing all data streams and
+        resetting the last read ids.
+
+        """
+        self.r.flushdb()
+        self._last_read_ids = defaultdict(lambda: "$")
+
     @property
     def data_streams(self):
         """
@@ -460,11 +469,10 @@ class EigsepRedis:
             the allowed commands for that type.
 
         """
-        reprogram_cmd = "ctrl:reprogram"
-        # reprogram command is always valid
-        self.r.sadd("ctrl_commands", reprogram_cmd)
+        # ctrl command is always valid
+        self.r.sadd("ctrl_commands", "ctrl")
         commands = {
-            "ctrl": [reprogram_cmd],  # reset the panda config
+            "ctrl": ["ctrl:reprogram"],  # reset the panda config
             "switch": [
                 # s11 measurements
                 "switch:VNAO",  # open cal standard
