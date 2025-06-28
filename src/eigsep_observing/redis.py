@@ -101,6 +101,7 @@ class EigsepRedis:
         """
         if from_file:
             config = load_config(config)
+        config["upload_time"] = datetime.now(timezone.utc).isoformat()
         cfg_json = json.dumps(config).encode("utf-8")
         self.add_raw(key, cfg_json)
 
@@ -145,8 +146,15 @@ class EigsepRedis:
         config : dict
             Dictionary containing the configuration data.
 
+        Raises
+        ------
+        ValueError
+            If no configuration is found in Redis.
+
         """
         raw = self.get_raw("config")
+        if raw is None:
+            raise ValueError("No configuration found in Redis.")
         return json.loads(raw)
 
     def get_corr_config(self):
@@ -159,8 +167,15 @@ class EigsepRedis:
         config : dict
             Dictionary containing the SNAP configuration data.
 
+        Raises
+        ------
+        ValueError
+            If no configuration is found in Redis.
+
         """
         raw = self.get_raw("corr_config")
+        if raw is None:
+            raise ValueError("No SNAP configuration found in Redis.")
         return json.loads(raw)
 
     # ---------- correlation data and s11 measurements ----------
@@ -445,7 +460,11 @@ class EigsepRedis:
             the allowed commands for that type.
 
         """
+        reprogram_cmd = "ctrl:reprogram"
+        # reprogram command is always valid
+        self.r.sadd("ctrl_commands", reprogram_cmd)
         commands = {
+            "ctrl": [reprogram_cmd],  # reset the panda config
             "switch": [
                 # s11 measurements
                 "switch:VNAO",  # open cal standard
