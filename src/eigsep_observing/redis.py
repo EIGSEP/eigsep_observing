@@ -11,6 +11,7 @@ import redis
 class EigsepRedis:
 
     maxlen = {"ctrl": 10, "status": 10, "data": 10000}
+    ctrl_stream_name = "stream:ctrl"
 
     def __init__(self, host="localhost", port=6379):
         """
@@ -54,7 +55,7 @@ class EigsepRedis:
 
     @property
     def ctrl_stream(self):
-        return {"stream:ctrl": self._last_read_ids["stream:ctrl"]}
+        return {self.ctrl_stream_name: self._last_read_ids[self.ctrl_stream_name]}
 
     @property
     def status_stream(self):
@@ -567,7 +568,7 @@ class EigsepRedis:
         if kwargs:
             payload["kwargs"] = kwargs
         self.r.xadd(
-            "stream:ctrl",
+            self.ctrl_stream_name,
             {"msg": json.dumps(payload)},
             maxlen=self.maxlen["ctrl"],
         )
@@ -595,7 +596,8 @@ class EigsepRedis:
         # msg is stream_name, entries
         entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        self._last_read_ids["stream:ctrl"] = entry_id  # update the stream id
+        # update the stream id
+        self._last_read_ids[self.ctrl_stream_name] = entry_id 
         # dat is a dict with key msg
         raw = dat.get(b"msg")
         decoded = json.loads(raw)
