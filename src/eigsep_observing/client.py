@@ -304,9 +304,9 @@ class PandaClient:
         Notes
         -----
         This method should be called in a loop to continuously
-        monitor for commands. If an exception occurs while reading 
-        or executing the command, it is logged and an error message 
-        is sent back to Redis. This prevents users from connecting 
+        monitor for commands. If an exception occurs while reading
+        or executing the command, it is logged and an error message
+        is sent back to Redis. This prevents users from connecting
         to the client and crashing it with invalid commands.
 
         """
