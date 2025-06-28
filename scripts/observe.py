@@ -79,8 +79,8 @@ redis_snap = EigsepRedis(host="localhost", port=6379)
 redis_panda = EigsepRedis(host=args.panda_ip, port=6379)
 
 # upload the configuration file to the Redis instances
-redis_snap.upload_config(args.cfg_file, from_file=True)
 redis_panda.upload_config(args.cfg_file, from_file=True)
+redis_panda.send_ctrl("ctrl:reproram", force=False)
 
 observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 thds = {}
