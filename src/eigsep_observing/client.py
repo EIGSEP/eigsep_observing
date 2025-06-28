@@ -159,6 +159,7 @@ class PandaClient:
             ip=self.cfg["vna_ip"],
             port=self.cfg["vna_port"],
             timeout=self.cfg["vna_timeout"],
+            save_dir=self.cfg["vna_save_dir"],
             switch_network=self.switch_nw,
         )
         self.redis.r.sadd("ctrl_commands", "VNA")
@@ -291,7 +292,7 @@ class PandaClient:
 
         header = self.vna.header
         header["mode"] = mode
-        metadata = self.redis.get_header()
+        metadata = self.redis.get_metadata()
         self.redis.send_vna_data(
             s11, cal_data=osl_s11, header=header, metadata=metadata
         )
@@ -302,10 +303,11 @@ class PandaClient:
 
         Notes
         -----
-        If an exception occurs while reading or executing the command,
-        it is logged and an error message is sent back to Redis.
-        This prevents users from connecting to the client and
-        crashing it with invalid commands.
+        This method should be called in a loop to continuously
+        monitor for commands. If an exception occurs while reading 
+        or executing the command, it is logged and an error message 
+        is sent back to Redis. This prevents users from connecting 
+        to the client and crashing it with invalid commands.
 
         """
         try:
