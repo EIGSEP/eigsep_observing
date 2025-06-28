@@ -673,9 +673,9 @@ class EigsepRedis:
         entry_id, status_dict = msg[0][1][0]
         self._last_read_ids["stream:status"] = entry_id  # update the stream id
         status = status_dict.get(b"status").decode("utf-8")
-        level = status_dict.get(b"level").decode("utf-8")
-        if level is None:
+        raw_level = status_dict.get(b"level")
+        if raw_level is None:
             level = logging.INFO  # default to info
         else:
-            level = int(level)
+            level = int(raw_level.decode("utf-8"))
         return level, status
