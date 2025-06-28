@@ -31,6 +31,7 @@ This is a distributed radio astronomy control system for EIGSEP observations wit
 1. **EigObserver** (`observer.py`) - Main orchestrator that manages observation schedules
 2. **PandaClient** (`client.py`) - Remote client running on suspended hardware (PANDA computer)
 3. **EigsepRedis** (`redis.py`) - Redis-based message bus for distributed communication
+4. **EigsepFpga** (`fpga.py`) - FPGA/SNAP correlator interface and control
 
 ### Distributed System Design
 - **Main Computer (Ground)**: Runs EigObserver, controls overall observation schedule
@@ -51,9 +52,10 @@ This is a distributed radio astronomy control system for EIGSEP observations wit
 5. Live web interface available via `live_status.py` Flask server
 
 ### Configuration System
-- **CorrConfig**: SNAP correlator settings (fpga files, sample rates, etc.)
-- **ObsConfig**: Observation parameters (switch schedules, file handling)
-- Configurations stored in `config.py` with dataclass pattern
+- **Correlator Config**: SNAP correlator settings in `config/corr_config.yaml` (FPGA files, sample rates, etc.)
+- **Observation Config**: Observation parameters in `config/obs_config.yaml` (switch schedules, file handling, VNA settings)
+- **Dummy Config**: Test configuration in `config/dummy_config.yaml` for hardware-free development
+- Configurations loaded using `eigsep_corr.config.load_config()` from YAML files
 
 ### Testing Strategy
 - Dummy implementations in `testing/` module for hardware-free development
@@ -82,5 +84,17 @@ Sensors inherit from abstract `Sensor` base class requiring:
 
 ### File I/O Patterns  
 - HDF5 format for correlator data storage
-- JSON metadata alongside data files
-- Configurable save directories via CorrConfig.save_dir
+- JSON metadata alongside data files  
+- VNA S11 measurements saved separately
+- Configurable save directories via YAML config files (corr_config.yaml, obs_config.yaml)
+
+### Network Configuration
+- **Raspberry Pi (SNAP)**: 10.10.10.10 - Controls SNAP correlator
+- **PANDA Computer**: 10.10.10.12 - Runs sensors and VNA in suspended box  
+- **SNAP Board**: 10.10.10.13 - FPGA correlator hardware
+- **VNA**: 127.0.0.1:5025 - Vector Network Analyzer interface
+
+### Hardware Interface Details
+- **Sensor Picos**: Multiple Raspberry Pi Pico devices for different sensors (IMU, temperature, etc.)
+- **Switch Control**: Automated RF switching via dedicated Pico controller
+- **VNA Integration**: S11 measurements with configurable frequency range and power settings
