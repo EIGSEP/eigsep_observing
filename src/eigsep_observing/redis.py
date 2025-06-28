@@ -401,15 +401,15 @@ class EigsepRedis:
             raise TypeError("All keys in the list must be strings.")
         m = {}
         for k, v in self.r.hgetall("metadata").items():
-            m[k] = json.loads(v)
+            m[k.decode("utf-8")] = json.loads(v)
         if keys is None:
             return m
         elif isinstance(keys, str):
-            return m[keys.encode("utf-8")]
+            return m[keys]
         else:
             filtered_m = {}
             for k in keys:
-                filtered_m[k] = m[k.encode("utf-8")]
+                filtered_m[k] = m[k]
             return filtered_m
 
     def get_metadata(self, stream_keys=None):
