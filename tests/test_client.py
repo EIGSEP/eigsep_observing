@@ -1,4 +1,5 @@
 import json
+import logging
 from pathlib import Path
 import pytest
 import tempfile
@@ -30,9 +31,13 @@ def dummies(monkeypatch):
     )
 
 
-class DummyPandaClient(PandaClient):
-    pass
-
+@pytest.fixture(scope="module")
+def module_tmpdir(tmp_path_factory):
+    """
+    Create a temporary directory for the module scope.
+    This will be used to store VNA files and other temporary data.
+    """
+    return tmp_path_factory.mktemp("module_tmpdir")
 
 @pytest.fixture
 def redis():
@@ -40,10 +45,11 @@ def redis():
 
 
 @pytest.fixture
-def client(redis):
+def client(redis, module_tmpdir):
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
     dummy_cfg = load_config(path, compute_inttime=False)
-    return DummyPandaClient(redis, default_cfg=dummy_cfg)
+    dummy_cfg["vna_save_dir"] = str(module_tmpdir)
+    return PandaClient(redis, default_cfg=dummy_cfg)
 
 
 def test_client(client):
@@ -112,17 +118,7 @@ def test_read_ctrl_switch(client):
     assert obs_mode == mode
 
 
-@pytest.mark.skip(reason="not implemented yet")
-def test_read_ctrl_VNA(monkeypatch):
-    monkeypatch.setattr(
-        "eigsep_observing.client.SwitchNetwork", DummySwitchNetwork
-    )
-    monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
-    picos = {"switch_pico": "/dev/dummy_switch"}
-    client = DummyPandaClient(DummyEigsepRedisWithInit(picos=picos))
-    # need to send fake server heartbeat so that the client does not stop
-    client.redis.add_raw("heartbeat:server", 1)
-    # manually add redis to switch network; not supported by DummySwitchNetwork
+def test_read_ctrl_VNA(client, module_tmpdir):
     assert client.switch_nw is not None
     client.switch_nw.redis = client.redis
     # send invalid VNA command
@@ -132,20 +128,17 @@ def test_read_ctrl_VNA(monkeypatch):
     invalid_command = {"cmd": "vna:invalid"}
     client.redis.r.xadd("stream:ctrl", {"msg": json.dumps(invalid_command)})
     # should send a VNA error to redis but continue running
-    status = client.redis.read_status()[1]
-    assert status == "VNA_ERROR"
+    level, status = client.redis.read_status()
+    assert level == logging.ERROR
     # send a valid VNA command
-    tmpdir = tempfile.mkdtemp()
-    client.redis.send_ctrl("vna:ant", {"save_dir": tmpdir})
-    assert client.vna_initialized is True
+    client.redis.send_ctrl("vna:ant")
+    assert client.vna is not None
     assert isinstance(client.vna, DummyVNA)
-    assert client.vna.save_dir == tmpdir
-    # a file should have been created
-    assert len(Path(tmpdir).glob("*.h5")) == 1
-    # status should be VNA_COMPLETE
-    status = client.redis.read_status()[1]
-    assert status == "VNA_COMPLETE"
+    assert client.vna.save_dir == module_tmpdir
+    # vna stream should be in redis
+    time.sleep(1.0)  # Allow more time for VNA measurement to complete
+    assert client.redis.r.sismember("data_streams", "stream:vna")
     # stop the client
-    client.stop_event.set()
+    client.stop_client.set()
     thd.join(timeout=1)
     assert not thd.is_alive()
