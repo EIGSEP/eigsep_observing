@@ -107,6 +107,7 @@ def test_read_ctrl_switch(client):
     # send a switch command, should work with DummySwitchNetwork
     switch_cmd = f"switch:{mode}"
     client.redis.send_ctrl(switch_cmd)
+    time.sleep(0.1)  # Allow time for async command processing
     obs_mode = client.redis.get_live_metadata(keys="obs_mode")
     assert obs_mode == mode
 
