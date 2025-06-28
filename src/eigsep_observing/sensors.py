@@ -83,7 +83,7 @@ class Sensor(ABC):
                 self.queue.put(data)
             time.sleep(cadence)
 
-    def read(self, redis, cadence=5):
+    def read(self, redis, stop_event, cadence=5):
         """
         Read sensor data from queue and push it to Redis.
 
@@ -91,6 +91,8 @@ class Sensor(ABC):
         ----------
         redis : EigsepRedis
             Redis client instance.
+        stop_event : threading.Event
+            Event to signal when to stop reading data.
         cadence : float
             Sleep time between reads in seconds.
 
@@ -98,7 +100,7 @@ class Sensor(ABC):
         sleep_time = cadence / 2  # to avoid busy waiting
         thd = Thread(target=self._queue_data, args=(cadence,), daemon=True)
         thd.start()
-        while True:
+        while not stop_event.is_set():
             if self.queue.empty():
                 continue
             data = self.queue.get()
@@ -132,7 +134,7 @@ class ImuSensor(Sensor):
         """
         super().__init__(name, port, timeout=timeout)
         try:
-            self.imu = eig_sensors.IMU_BN0085(port, timeout=timeout)
+            self.imu = eig_sensors.IMU_BNO085(port, timeout=timeout)
         except serial.SerialException as e:
             raise RuntimeError(
                 f"Failed to connect to IMU on port {port}: {e}"
