@@ -11,7 +11,7 @@ redis = EigsepRedis(host="localhost", port=6379)
 client = PandaClient(redis)
 
 # main loop, runs indefinitely
-while True:
+while not client.stop_client.is_set():
     try:
         client.read_ctrl()
     except KeyboardInterrupt:
