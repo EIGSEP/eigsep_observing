@@ -43,12 +43,9 @@ class EigObserver:
         self.redis_panda = redis_panda
 
         if self.redis_snap is not None:
-            self.cfg = self.redis_snap.get_config()
             self.corr_cfg = self.redis_snap.get_corr_config()
-        elif self.redis_panda is not None:
+        if self.redis_panda is not None:
             self.cfg = self.redis_panda.get_config()
-        else:
-            raise ValueError("At least one Redis connection must be provided.")
 
         self.stop_events = {
             "switches": threading.Event(),
@@ -59,7 +56,7 @@ class EigObserver:
         self.switch_lock = threading.Lock()  # lock for RF switches
 
         # start a status thread
-        if self.redis_panda is not None:
+        if self.panda_connected:
             status_thread = threading.Thread(
                 target=self.status_logger,
                 daemon=True,
@@ -144,9 +141,8 @@ class EigObserver:
                 for mode in ["load", "noise"]:
                     self.logger.info(f"Switching to {mode} measurements")
                     self.set_mode(mode)
-                    if self.stop_events["switches"].wait(
-                        switch_schedule[mode]
-                    ):
+                    wait_time = switch_schedule[mode]
+                    if self.stop_events["switches"].wait(wait_time):
                         self.logger.info("Switching stopped by event")
                         return
             self.logger.info("Switching to sky measurements")
@@ -255,17 +251,17 @@ class EigObserver:
             The time in seconds to wait for data from the correlator.
 
         """
-        t_int = self.cfg["integration_time"]
-        file_time = self.cfg["file_time"]
+        t_int = self.corr_cfg["integration_time"]
+        file_time = self.corr_cfg["file_time"]
         self.logger.info(
             "Reading correlator data from SNAP"
             f"Integration time: {t_int} s, "
             f"File time: {file_time} s"
         )
         file = io.File(
-            self.cfg["save_dir"],
+            self.corr_cfg["save_dir"],
             pairs,
-            self.cfg["ntimes"],
+            self.corr_cfg["ntimes"],
             self.corr_cfg,
             redis=self.redis_panda,
         )
