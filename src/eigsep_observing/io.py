@@ -408,7 +408,7 @@ class File:
         nchan = header["nchan"]
         dtype = np.dtype(header["dtype"])
 
-        self.acc_cnts = np.zeros(len(self.ntimes))
+        self.acc_cnts = np.zeros(self.ntimes)
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)

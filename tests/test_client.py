@@ -1,6 +1,4 @@
 from concurrent.futures import ThreadPoolExecutor
-import json
-import logging
 import pytest
 import threading
 import time
@@ -103,7 +101,9 @@ def test_read_ctrl_switch(client):
     switch_cmd = f"switch:{mode}"
     # read_ctrl is blocking and will process the command in a thread
     with ThreadPoolExecutor() as ex:
-        future = ex.submit(client.redis.read_ctrl)  # call redis.read_ctrl directly
+        future = ex.submit(
+            client.redis.read_ctrl
+        )  # call redis.read_ctrl directly
         time.sleep(0.1)  # small delay to ensure read starts
         client.redis.send_ctrl(switch_cmd)  # send after read started
         cmd, kwargs = future.result(timeout=5)  # wait for the result
@@ -119,35 +119,36 @@ def test_read_ctrl_switch(client):
     obs_mode = client.redis.get_live_metadata(keys="obs_mode")
     assert obs_mode == mode
 
+
 def test_read_ctrl_VNA(client, module_tmpdir):
     """
     Test read_ctrl with VNA commands.
     """
     # manually add redis to switch network; not supported by DummySwitchNetwork
     client.switch_nw.redis = client.redis
-    
+
     # Test that VNA commands work correctly
     mode = "ant"
     vna_cmd = f"vna:{mode}"
-    
+
     # First test that redis.read_ctrl() can read VNA commands
     with ThreadPoolExecutor() as ex:
         future = ex.submit(client.redis.read_ctrl)
         time.sleep(0.1)  # ensure read starts
         client.redis.send_ctrl(vna_cmd)
         cmd, kwargs = future.result(timeout=5)
-    
+
     # verify the command was read correctly
     assert cmd == vna_cmd
     assert kwargs == {}
-    
+
     # Now test that client.read_ctrl() processes VNA commands correctly
     with ThreadPoolExecutor() as ex:
         future = ex.submit(client.read_ctrl)
         time.sleep(0.1)  # ensure read starts
         client.redis.send_ctrl(vna_cmd)
         future.result(timeout=10)  # VNA operations might take longer
-    
+
     # Verify VNA was initialized and used
     assert client.vna is not None
     assert isinstance(client.vna, DummyVNA)

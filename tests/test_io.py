@@ -19,7 +19,7 @@ HEADER = {
     "acc_bins": 2,
     "nchan": 1024,
     "fgp_file": "fpg_files/eigsep_fengine.fpg",
-    "fpg_version": (0, 0),
+    "fpg_version": [0, 0],
     "corr_acc_len": 2**28,
     "corr_scalar": 2**9,
     "pol01_delay": 0,
@@ -30,6 +30,8 @@ HEADER = {
     "gain": 4,
     "pam_atten": {"0": 8, "1": 8, "2": 8},
     "sync_time": 1748732903.4203713,
+    "integration_time": 0.1,
+    "file_time": 60.3,
 }
 
 # metadata to use for testing, mimics output of EigsepRedis.get_metadata
@@ -58,8 +60,6 @@ S11_HEADER = {
     "freqs": np.linspace(1e6, 250e6, 1000),
     "mode": "ant",
 }
-
-
 
 
 def test_reshape_data():
@@ -103,7 +103,6 @@ def test_reshape_data():
             imag = avg[:, 1::2]
             cdata = real + 1j * imag
             np.testing.assert_array_equal(cdata, reshaped_data[k])
-
 
 
 def test_write_attr():
@@ -263,7 +262,7 @@ def test_file():
     assert test_file.redis is None
 
     assert list(test_file.data.keys()) == pairs
-    dtype = io.build_dtype(*HEADER["dtype"])
+    dtype = HEADER["dtype"]
     for p in pairs:
         if len(p) == 1:
             shape = io.data_shape(ntimes, 2, 1024)
@@ -279,16 +278,18 @@ def test_file():
 
     # add_data
     data = generate_data(reshape=False)
+    acc_cnt = 1
     for i in range(ntimes - 1):
         to_add = {p: d[i] for p, d in data.items()}
-        fname = test_file.add_data(to_add)
+        fname = test_file.add_data(acc_cnt, to_add)
+        acc_cnt += 1
         assert fname is None  # None until the file is full
         assert test_file._counter == i + 1
         assert len(test_file) == i + 1
         for p in pairs:
             assert np.array_equal(test_file.data[p][i], to_add[p])
     to_add = {p: d[-1] for p, d in data.items()}
-    fname = test_file.add_data(to_add)
+    fname = test_file.add_data(acc_cnt, to_add)
     assert fname is not None  # should return the filename
     # reset has been called
     assert test_file._counter == 0
@@ -307,7 +308,10 @@ def test_file():
     # check that the data is written correctly
     read_data, read_header, read_meta = io.read_hdf5(fname)
     compare_dicts(io.reshape_data(data, avg_even_odd=True), read_data)
-    compare_dicts(HEADER, read_header)
+    # can't compare header with read_header since extra keys are added
+    for key in HEADER:
+        assert key in read_header
+        assert read_header[key] == HEADER[key]
     assert read_meta == {}
 
     temp_dir.cleanup()
