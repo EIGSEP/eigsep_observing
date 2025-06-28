@@ -1,8 +1,6 @@
 import json
 import logging
-from pathlib import Path
 import pytest
-import tempfile
 import threading
 import time
 
@@ -22,9 +20,7 @@ def dummies(monkeypatch):
         "eigsep_observing.client.SwitchNetwork",
         DummySwitchNetwork,
     )
-    monkeypatch.setattr(
-        "eigsep_observing.client.VNA", DummyVNA
-    )
+    monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
     monkeypatch.setattr(
         "eigsep_observing.client.sensors.SENSOR_CLASSES",
         {"dummy_sensor": DummySensor},
@@ -38,6 +34,7 @@ def module_tmpdir(tmp_path_factory):
     This will be used to store VNA files and other temporary data.
     """
     return tmp_path_factory.mktemp("module_tmpdir")
+
 
 @pytest.fixture
 def redis():
@@ -80,7 +77,6 @@ def test_add_sensor(caplog, monkeypatch, client):
     rec = caplog.records[-1]
     assert "Unknown sensor name: invalid_sensor" in rec.getMessage()
 
-
     sensor, sensor_thd = client.sensors["dummy_sensor"]
     assert isinstance(sensor, DummySensor)
     assert sensor.name == "dummy_sensor"
@@ -91,7 +87,7 @@ def test_add_sensor(caplog, monkeypatch, client):
     client.add_sensor("dummy_sensor", "/dev/dummy_sensor")
     assert len(client.sensors) == 1  # still only one sensor
     rec = caplog.records[-1]
-    assert f"Sensor dummy_sensor already added" in rec.getMessage()
+    assert "Sensor dummy_sensor already added" in rec.getMessage()
 
 
 def test_read_ctrl_switch(client):
@@ -121,17 +117,16 @@ def test_read_ctrl_switch(client):
 def test_read_ctrl_VNA(client, module_tmpdir):
     assert client.switch_nw is not None
     client.switch_nw.redis = client.redis
-    # send invalid VNA command
-    thd = threading.Thread(target=client.read_ctrl, daemon=True)
-    thd.start()
     # note: can't use send_ctrl here because it requires a valid command
     invalid_command = {"cmd": "vna:invalid"}
     client.redis.r.xadd("stream:ctrl", {"msg": json.dumps(invalid_command)})
+    client.read_ctrl()  # should process the command
     # should send a VNA error to redis but continue running
     level, status = client.redis.read_status()
     assert level == logging.ERROR
     # send a valid VNA command
     client.redis.send_ctrl("vna:ant")
+    client.read_ctrl()  # should process the command
     assert client.vna is not None
     assert isinstance(client.vna, DummyVNA)
     assert client.vna.save_dir == module_tmpdir
@@ -140,5 +135,3 @@ def test_read_ctrl_VNA(client, module_tmpdir):
     assert client.redis.r.sismember("data_streams", "stream:vna")
     # stop the client
     client.stop_client.set()
-    thd.join(timeout=1)
-    assert not thd.is_alive()
