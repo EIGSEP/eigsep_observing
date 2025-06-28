@@ -15,7 +15,7 @@ from eigsep_observing.testing.utils import (
 
 # header to use for testing, mimics EigsepFpga().header
 HEADER = {
-    "dtype": ("int32", ">"),
+    "dtype": ">i4",
     "acc_bins": 2,
     "nchan": 1024,
     "fgp_file": "fpg_files/eigsep_fengine.fpg",
@@ -60,25 +60,6 @@ S11_HEADER = {
 }
 
 
-def test_build_dtype():
-    # big endian 32-bit integer
-    dt1 = np.dtype(">i4")
-    dt2 = io.build_dtype("int32", ">")
-    assert dt1 == dt2
-    # little endian 32-bit integer
-    dt1 = np.dtype("<i4")
-    dt2 = io.build_dtype("int32", "<")
-    assert dt1 == dt2
-    # common types
-    for typ in ["int", "float", "complex"]:
-        for endian in ["<", ">", "="]:
-            for byte in [4, 8]:
-                if typ == "complex":
-                    byte *= 2  # complex types have double the byte size
-                dt1 = np.dtype(f"{endian}{typ[0]}{byte}")
-                bits = byte * 8
-                dt2 = io.build_dtype(f"{typ}{bits}", endian)
-                assert dt1 == dt2
 
 
 def test_reshape_data():
@@ -123,18 +104,6 @@ def test_reshape_data():
             cdata = real + 1j * imag
             np.testing.assert_array_equal(cdata, reshaped_data[k])
 
-
-def test_to_remote_path():
-    path = Path("/media/eigsep/T7/data")  # typical data path
-    mnt_path = Path("/mnt/rpi")  # mount point
-    remote_path = io.to_remote_path(path, mnt_path=mnt_path)
-    assert remote_path == Path("/mnt/rpi/media/eigsep/T7/data")
-    # relative path
-    path = Path("data")
-    remote_path = io.to_remote_path(path, mnt_path=mnt_path)
-    here = Path.cwd().resolve()
-    expected_path = f"/mnt/rpi/{str(here)}/data"
-    assert remote_path == Path(expected_path)
 
 
 def test_write_attr():
