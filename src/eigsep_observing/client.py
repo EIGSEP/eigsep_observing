@@ -333,8 +333,7 @@ class PandaClient:
                 self.redis.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
-            path = self.switch_nw.paths[mode]
-            self.switch_nw.switch(path)
+            self.switch_nw.switch(mode, verify=True)
         elif cmd in self.redis.vna_commands:
             mode = cmd.split(":")[1]
             try:
