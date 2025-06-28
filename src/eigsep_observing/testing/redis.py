@@ -1,15 +1,9 @@
+from collections import defaultdict
 import fakeredis
-
-from eigsep_observing import EigsepRedis
+from .. import EigsepRedis
 
 
 class DummyEigsepRedis(EigsepRedis):
-    def __init__(self, redis=None, maxlen=600):
-        if redis is None:
-            redis = fakeredis.FakeRedis()
-        self.r = redis
-        self.maxlen = maxlen
-        self.ctrl_streams = {
-            "stream:status": "0-0",
-            "stream:ctrl": "0-0",
-        }
+    def __init__(self, host="localhost", port=6379):
+        self.r = fakeredis.FakeRedis(decode_responses=False)
+        self._last_read_ids = defaultdict(lambda: "$")

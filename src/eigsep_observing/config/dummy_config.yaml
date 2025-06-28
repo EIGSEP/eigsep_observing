@@ -1,0 +1,30 @@
+# High-level configuration for EIGSEP observations
+# Sets switch schedules, sensors, and other high-level parameters
+
+# IP addresses
+rpi_ip: "10.10.10.10"
+panda_ip: "10.10.10.12"
+# sensors
+sensor_picos:
+  dummy_sensor: "/dev/dummy_sensor"
+# switches
+switch_pico: "/dev/dummy_switch"
+switch_schedule:  # seconds per measurement
+  sky: 3600
+  load: 60
+  noise: 60
+# vna
+use_vna: true
+vna_interval: 3600  # seconds between VNA measurements
+vna_ip: "127.0.0.1"
+vna_port: 5025
+vna_timeout: 1000  # in seconds
+vna_settings:
+  fstart: 1000000.0  # in Hz
+  fstop: 250000000.0  # in Hz
+  npoints: 1000
+  ifbw: 100.0  # in Hz
+  power:
+    ant: 0.0
+    rec: -40.0
+vna_save_dir: "test_vna_data"

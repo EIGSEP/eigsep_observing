@@ -1,0 +1,24 @@
+snap_ip: "10.10.10.13"
+sample_rate: 500.0  # in MHz
+use_ref: false  # use synth on snap to generate adc clock from 10 MHz ref
+use_noise: false  # use digital noise instead of ADC data
+fpg_file: "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg"  # path to fpg file
+fpg_version: [2, 3]  # major, minor
+adc_gain: 4
+fft_shift: 0x0FF
+corr_acc_len: 67108864  # 2**26 - increment corr_acc_cnt by ~4/second
+corr_scalar: 512  # 2**9 - 8 bits after binary point so 2**9 = 1
+corr_word: 4  # 4 bytes per word
+dtype: ">i4"  # big-endian int32
+acc_bins: 2
+pam_atten:
+  0: [8, 8]
+  1: [8, 8]
+  2: [8, 8]
+pol_delay:
+  "01": 0
+  "23": 0
+  "45": 0
+nchan: 1024
+ntimes: 240  # number of times per file
+save_dir: "/media/eigsep/T7/data"

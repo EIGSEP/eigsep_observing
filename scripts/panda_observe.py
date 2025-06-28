@@ -1,17 +1,22 @@
 import logging
 
 from eigsep_observing import EigsepRedis, PandaClient
+from eigsep_observing.utils import configure_eig_logger
 
-LOG_LEVEL = logging.INFO
-PI_IP = "10.10.10.10"
-INIT_TIMEOUT = 60  # seconds to wait for init commands from Redis
+# logger with rotating file handler
+logger = logging.getLogger("__name__")
+configure_eig_logger(level=logging.DEBUG)
 
-logger = logging.getLogger(__name__)
-logging.basicConfig(level=LOG_LEVEL)
-
-redis = EigsepRedis(host=PI_IP)
-client = PandaClient(redis, logger=logger)
-client.read_init_commands(timeout=INIT_TIMEOUT)
+redis = EigsepRedis(host="localhost", port=6379)
+client = PandaClient(redis)
 
 # main loop, runs indefinitely
-client.read_ctrl()
+while not client.stop_client.is_set():
+    try:
+        client.read_ctrl()
+    except KeyboardInterrupt:
+        logger.info("KeyboardInterrupt received, exiting.")
+        break
+
+client.stop_client.set()
+logger.info("Closed connection to Panda.")

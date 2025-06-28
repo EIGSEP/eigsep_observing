@@ -4,25 +4,7 @@ import json
 import numpy as np
 from pathlib import Path
 
-
-def build_dtype(dtype, endian):
-    """
-    Build a NumPy dtype based on the given type and endianness.
-
-    Parameters
-    ----------
-    dtype : str
-        Data type to use, e.g., 'float32', 'complex64'.
-    endian : str
-        Endianness. Either '>' for big-endian or '<' for little-endian.
-
-    Returns
-    -------
-    np.dtype
-        The constructed NumPy dtype.
-
-    """
-    return np.dtype(dtype).newbyteorder(endian)
+from eigsep_corr.utils import calc_times, calc_freqs_dfreq
 
 
 def data_shape(ntimes, acc_bins, nchan, cross=False):
@@ -90,28 +72,39 @@ def reshape_data(data, avg_even_odd=True):
     return reshaped
 
 
-def to_remote_path(path, mnt_path=Path("/mnt/rpi")):
+def append_corr_header(header, acc_cnts):
     """
-    Convert a local path to a remote path. This ensures that data
-    gathered on the client (LattePanda) is saved to the remote Raspbery
-    Pi server.
+    Append header for correlation files with useful computed
+    quantities: times and frequencies.
 
     Parameters
     ----------
-    path : str or Path
-        Local path to be converted.
-    mnt_path : str or Path
-        Mount point for the remote server. Default is '/mnt/data'.
+    header : dict
+        Header dictionary for correlation file.
+    acc_cnts : array_like
+        Array of accumulation counts for each time step.
 
     Returns
     -------
-    Path
-        Converted remote path.
+    new_header : dict
+        Updated header dictionary with additional computed quantities.
+
+    Raises
+    ------
+    KeyError
+        If the header does not contain the required keys.
 
     """
-    p = Path(path).resolve()
-    mnt = Path(mnt_path)
-    return mnt / p.relative_to("/")
+    times = calc_times(
+        acc_cnts, header["integration_time"], header["sync_time"]
+    )
+    freqs, dfreq = calc_freqs_dfreq(header["sample_rate"], header["nchan"])
+    new_header = header.copy()
+    new_header["times"] = times
+    new_header["freqs"] = freqs
+    new_header["dfreq"] = dfreq
+    new_header["acc_cnts"] = acc_cnts
+    return new_header
 
 
 def _write_attr(grp, key, value):
@@ -413,8 +406,9 @@ class File:
 
         acc_bins = header["acc_bins"]
         nchan = header["nchan"]
-        dtype = build_dtype(*header["dtype"])
+        dtype = np.dtype(header["dtype"])
 
+        self.acc_cnts = np.zeros(len(self.ntimes))
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
@@ -432,15 +426,18 @@ class File:
         """
         for p in self.pairs:
             self.data[p].fill(0)
+        self.acc_cnts.fill(0)
         self._counter = 0
 
-    def add_data(self, data):
+    def add_data(self, acc_cnt, data):
         """
         Populate the data arrays with the given data. The data is expected
         to be of the dtype specified in the header.
 
         Parameters
         ----------
+        acc_cnt : int
+            Accumulation count.
         data : dict
             Dictionary of data arrays to be added for one time step.
 
@@ -451,6 +448,7 @@ class File:
             the number of times. Otherwise, None.
 
         """
+        self.acc_cnts[self._counter] = acc_cnt
         for p, d in data.items():
             arr = self.data[p]
             arr[self._counter] = d
@@ -483,6 +481,7 @@ class File:
         else:
             metadata = None
         data = reshape_data(self.data, avg_even_odd=True)
-        write_hdf5(fname, data, self.header, metadata=metadata)
+        header = append_corr_header(self.header, self.acc_cnts)
+        write_hdf5(fname, data, header, metadata=metadata)
         self.reset()
         return fname
