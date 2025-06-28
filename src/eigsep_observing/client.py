@@ -1,35 +1,55 @@
 import logging
 import threading
 
+from eigsep_corr.config import load_config
 from cmt_vna import VNA
 from switch_network import SwitchNetwork
 
 from . import sensors
+from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
+default_cfg_file = get_config_path("obs_config.yaml")
+default_cfg = load_config(default_cfg_file, compute_inttime=False)
 
 
 class PandaClient:
 
-    def __init__(self, redis):
+    def __init__(self, redis, default_cfg=default_cfg):
         """
-        Client class that runs on the computer in the suspended box. This
-        pulls data from connected sensors and pushes it to the Redis server.
-        Moreover, it listens to control commands from the main computer on
-        the ground, executes them, and reports the results back to the Redis.
+        Client class that runs on the computer in the suspended box.
+        This pulls data from connected sensors and pushes it to the
+        Redis server. Moreover, it listens to control commands from the
+        main computer on the ground, executes them, and reports the
+        results back to the Redis.
 
         Parameters
         ----------
         redis : EigsepRedis
-            The Redis server object to push data to and read commands from.
+            The Redis server object to push data to and read commands
+            from.
 
         """
         self.logger = logger
         self.redis = redis
-        self.sensors = {}  # key: sensor name, value: (sensor, thread)
         self.serial_timeout = 5  # serial port timeout in seconds
+        self.stop_client = threading.Event()  # flag to stop the client
+        try:
+            self.cfg = self.redis.get_config()
+            upload_time = self.cfg["upload_time"]
+            self.logger.info(
+                f"Using config from Redis, updated at {upload_time}."
+            )
+        except ValueError:
+            self.logger.warning(
+                "Missing configuration in Redis, using default."
+            )
+            self.cfg = default_cfg
+            self.redis.upload_config(self.cfg, from_file=False)
+        self._initialize()  # initialize the client
 
-        self.cfg = self.redis.get_config()
+    def _initialize(self):
+        self.stop_client.clear()  # reset the stop flag
         self.init_switch_network()
         if self.cfg["use_vna"] and self.switch_nw is not None:
             self.init_VNA()
@@ -37,7 +57,6 @@ class PandaClient:
             self.vna = None
         self.init_sensors()
 
-        self.stop_client = threading.Event()  # flag to stop the client
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
@@ -45,6 +64,39 @@ class PandaClient:
             daemon=True,
         )
         self.heartbeat_thd.start()
+
+    def reprogram(self, force=False):
+        """
+        Reprogram the client by stopping all threads and reinitializing
+        the client. This is useful when the configuration changes.
+
+        Parameters
+        ----------
+        force : bool
+            If True, reprogram even if the config appears to be the
+            unchanged.
+
+        Notes
+        -----
+        This method interrupts all running threads, use with caution.
+
+        """
+        cfg = self.redis.get_config()
+        if not force:  # check if the config has changed
+            if cfg == self.cfg:
+                msg = "Configuration unchanged, skipping reprogram."
+                self.logger.info(msg)
+                self.redis.send_status(level=logging.INFO, status=msg)
+                return
+            self.logger.info("Configuration changed, reprogramming client.")
+            self.cfg = cfg
+
+        self.stop_client.set()  # stop all threads
+        # wait for all threads to finish
+        self.heartbeat_thd.join()
+        for sensor, thd in self.sensors.values():
+            thd.join()
+        self._initialize()  # reinitialize the client
 
     def _send_heartbeat(self, ex=60):
         """
@@ -58,7 +110,7 @@ class PandaClient:
 
         """
         while not self.stop_client.is_set():
-            self.redis.client_hearbeat_set(ex, alive=True)
+            self.redis.client_heartbeat_set(ex, alive=True)
             self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
         self.client_heartbeat_set(alive=False)
@@ -118,6 +170,7 @@ class PandaClient:
         the sensors. It also adds a list of sensor names to redis
         under the key 'sensors'.
         """
+        self.sensors = {}  # key: sensor name, value: (sensor, thread)
         sensor_picos = self.cfg.get("sensor_picos", {})
         if not sensor_picos:
             self.logger.warning(
@@ -176,7 +229,7 @@ class PandaClient:
             return
         thd = threading.Thread(
             target=sensor.read,
-            args=(self.redis,),
+            args=(self.redis, self.stop_client),
             kwargs={"cadence": sleep_time},
             daemon=True,
         )
@@ -264,7 +317,13 @@ class PandaClient:
             return
 
         cmd, kwargs = msg
-        if cmd in self.redis.switch_commands:
+        if cmd == "ctrl:reprogram":
+            self.logger.info("Reprogramming client.")
+            self.reprogram(**kwargs)
+            self.redis.send_status(
+                level=logging.INFO, status="Client reprogrammed."
+            )
+        elif cmd in self.redis.switch_commands:
             if self.switch_nw is None:
                 err = (
                     "Switch network not initialized. Cannot execute "
