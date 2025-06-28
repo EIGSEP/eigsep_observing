@@ -110,7 +110,7 @@ class PandaClient:
 
         """
         while not self.stop_client.is_set():
-            self.redis.client_heartbeat_set(ex, alive=True)
+            self.redis.client_heartbeat_set(ex=ex, alive=True)
             self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
         self.redis.client_heartbeat_set(alive=False)

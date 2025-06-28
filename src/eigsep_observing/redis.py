@@ -606,7 +606,7 @@ class EigsepRedis:
 
     # ------------------- heartbeat and status -----------------
 
-    def client_heartbeat_set(self, ex, alive=True):
+    def client_heartbeat_set(self, ex=None, alive=True):
         """
         Set the client heartbeat key in Redis. This is used to keep
         track of whether the client is alive or not.
