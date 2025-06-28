@@ -88,7 +88,6 @@ def test_add_sensor(caplog, monkeypatch, client):
     assert f"Sensor dummy_sensor already added" in rec.getMessage()
 
 
-@pytest.mark.skip(reason="fix this test - need to reset redis first")
 def test_read_ctrl_switch(client):
     """
     Test read_ctrl with a switch network.
@@ -101,8 +100,8 @@ def test_read_ctrl_switch(client):
     obs_mode = client.redis.get_live_metadata(keys="obs_mode")
     assert obs_mode == mode
 
-    # do it from the client, using read_ctrl  #XXX need reset redis
-    assert False, "fix this test - need to reset redis first"
+    client.redis.reset()
+    client.redis.r.sadd("ctrl_commands", "switch")  # make sure cmd is valid
     thd = threading.Thread(target=client.read_ctrl, daemon=True)
     thd.start()
     # send a switch command, should work with DummySwitchNetwork
