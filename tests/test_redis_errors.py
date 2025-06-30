@@ -313,7 +313,7 @@ class TestRedisStreamOperations:
         """Test send_status when Redis operation fails."""
         redis_instance.r.xadd = Mock(side_effect=redis.RedisError("Stream error"))
         
-        # Currently send_status does raise an exception (this is a potential bug)
+        # Now send_status uses _safe_redis_operation so it handles errors gracefully
         with pytest.raises(redis.RedisError):
             redis_instance.send_status(logging.INFO, "Test message")
 
