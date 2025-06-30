@@ -136,9 +136,7 @@ class PandaClient:
             return
         try:
             self.switch_nw = SwitchNetwork(
-                serport=switch_pico,
-                logger=self.logger,
-                redis=self.redis,
+                serport=switch_pico, redis=self.redis,
             )
         except ValueError as e:
             err = (
