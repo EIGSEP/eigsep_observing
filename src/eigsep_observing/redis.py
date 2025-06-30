@@ -55,7 +55,9 @@ class EigsepRedis:
 
     @property
     def ctrl_stream(self):
-        return {self.ctrl_stream_name: self._last_read_ids[self.ctrl_stream_name]}
+        return {
+            self.ctrl_stream_name: self._last_read_ids[self.ctrl_stream_name]
+        }
 
     @property
     def status_stream(self):
@@ -480,7 +482,7 @@ class EigsepRedis:
                 "switch:VNAS",  # short cal standard
                 "switch:VNAL",  # load cal standard
                 "switch:VNAANT",  # antenna
-                "switch:VNANON",  # noise source on 
+                "switch:VNANON",  # noise source on
                 "switch:VNANOFF",  # noise source off
                 "switch:VNARF",  # receiver
                 # snap observing
@@ -599,7 +601,7 @@ class EigsepRedis:
         entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
         # update the stream id
-        self._last_read_ids[self.ctrl_stream_name] = entry_id 
+        self._last_read_ids[self.ctrl_stream_name] = entry_id
         # dat is a dict with key msg
         raw = dat.get(b"msg")
         decoded = json.loads(raw)
