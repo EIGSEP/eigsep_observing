@@ -52,6 +52,7 @@ class EigObserver:
             "vna": threading.Event(),
             "motors": threading.Event(),
             "snap": threading.Event(),
+            "status": threading.Event(),
         }
         self.switch_lock = threading.Lock()  # lock for RF switches
 
@@ -84,9 +85,11 @@ class EigObserver:
         """
         Log status messages from the LattePanda Redis server.
         """
-        while True:
+        while not self.stop_events["status"].is_set():
             level, status = self.redis_panda.read_status()
             if status is None:
+                if self.stop_events["status"].wait(0.1):  # Check stop event with timeout
+                    break
                 continue
             self.logger.log(level, status)
 

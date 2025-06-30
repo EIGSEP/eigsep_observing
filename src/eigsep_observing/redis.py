@@ -3,16 +3,28 @@ from datetime import datetime, timezone
 import json
 import logging
 import numpy as np
+import threading
 
 from eigsep_corr.config import load_config
 import redis
+import redis.exceptions
+
+logger = logging.getLogger(__name__)
 
 
 class EigsepRedis:
 
     maxlen = {"ctrl": 10, "status": 10, "data": 10000}
+    ctrl_stream_name = "stream:ctrl"
 
-    def __init__(self, host="localhost", port=6379):
+    def __init__(
+        self,
+        host="localhost",
+        port=6379,
+        socket_timeout=30,
+        socket_connect_timeout=30,
+        retry_on_timeout=True,
+    ):
         """
         Initialize the EigsepRedis client.
 
@@ -20,10 +32,153 @@ class EigsepRedis:
         ----------
         host : str
         port : int
+        socket_timeout : int
+            Socket timeout in seconds for Redis operations
+        socket_connect_timeout : int
+            Socket connection timeout in seconds
+        retry_on_timeout : bool
+            Whether to retry operations on timeout
 
         """
-        self.r = redis.Redis(host=host, port=port, decode_responses=False)
+        self.logger = logger
+        self.retry_on_timeout = retry_on_timeout
+
+        self._stream_lock = threading.RLock()
         self._last_read_ids = defaultdict(lambda: "$")
+        self.r = self._make_redis(
+            host,
+            port,
+            socket_timeout,
+            socket_connect_timeout,
+            retry_on_timeout,
+        )
+
+    def _make_redis(
+        self,
+        host,
+        port,
+        socket_timeout,
+        socket_connect_timeout,
+        retry_on_timeout
+    ):
+        """
+        Create a Redis connection with error handling.
+
+        Parameters
+        ----------
+        host : str
+        port : int
+        socket_timeout : int
+            Socket timeout in seconds for Redis operations
+        socket_connect_timeout : int
+            Socket connection timeout in seconds
+        retry_on_timeout : bool
+        
+        Returns
+        -------
+        r : redis.Redis
+            Redis client instance
+
+        Raises
+        ------
+        redis.exceptions.ConnectionError
+            If connection to Redis fails
+
+        """
+        try:
+            r = redis.Redis(
+                host=host,
+                port=port,
+                decode_responses=False,
+                socket_timeout=socket_timeout,
+                socket_connect_timeout=socket_connect_timeout,
+                retry_on_timeout=retry_on_timeout,
+            )
+            # Test connection
+            r.ping()
+            self.logger.info(f"Connected to Redis at {host}:{port}")
+        except redis.exceptions.ConnectionError as e:
+            self.logger.error(
+                f"Failed to connect to Redis at {host}:{port}: {e}"
+            )
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected error connecting to Redis: {e}")
+            raise
+        return r
+
+    def _safe_redis_operation(self, operation, *args, **kwargs):
+        """
+        Execute Redis operation with error handling and optional retry.
+
+        Parameters
+        ----------
+        operation : callable
+            Redis operation to execute
+        *args, **kwargs
+            Arguments for the operation
+
+        Returns
+        -------
+        result
+            Result of the Redis operation
+
+        Raises
+        ------
+        redis.exceptions.ConnectionError
+            If connection fails after retries
+        redis.exceptions.TimeoutError
+            If operation times out
+        """
+        try:
+            return operation(*args, **kwargs)
+        except redis.exceptions.ConnectionError as e:
+            self.logger.error(f"Redis connection error: {e}")
+            if self.retry_on_timeout:
+                try:
+                    # Attempt to reconnect
+                    self.r.ping()
+                    return operation(*args, **kwargs)
+                except redis.exceptions.ConnectionError:
+                    self.logger.error("Redis reconnection failed")
+            raise
+        except redis.exceptions.TimeoutError as e:
+            self.logger.error(f"Redis operation timeout: {e}")
+            raise
+        except Exception as e:
+            self.logger.error(f"Unexpected Redis error: {e}")
+            raise
+
+    def _get_last_read_id(self, stream):
+        """
+        Thread-safe getter for last read ID.
+
+        Parameters
+        ----------
+        stream : str
+            Stream name
+
+        Returns
+        -------
+        str
+            Last read ID for the stream
+        """
+        with self._stream_lock:
+            return self._last_read_ids[stream]
+
+    def _set_last_read_id(self, stream, read_id):
+        """
+        Thread-safe setter for last read ID.
+
+        Parameters
+        ----------
+        stream : str
+            Stream name
+        read_id : str
+            New read ID
+        """
+        with self._stream_lock:
+            self._last_read_ids[stream] = read_id
 
     def reset(self):
         """
@@ -31,8 +186,9 @@ class EigsepRedis:
         resetting the last read ids.
 
         """
-        self.r.flushdb()
-        self._last_read_ids = defaultdict(lambda: "$")
+        self._safe_redis_operation(self.r.flushdb)
+        with self._stream_lock:
+            self._last_read_ids = defaultdict(lambda: "$")
 
     @property
     def data_streams(self):
@@ -47,18 +203,20 @@ class EigsepRedis:
         d : dict
 
         """
-        return {
-            s.decode(): self._last_read_ids[s.decode()]
-            for s in self.r.smembers("data_streams")
-        }
+        members = self._safe_redis_operation(self.r.smembers, "data_streams")
+        with self._stream_lock:
+            return {
+                s.decode(): self._last_read_ids[s.decode()] for s in members
+            }
 
     @property
     def ctrl_stream(self):
-        return {"stream:ctrl": self._last_read_ids["stream:ctrl"]}
+        key = self.ctrl_stream_name
+        return {key: self._get_last_read_id(key)}
 
     @property
     def status_stream(self):
-        return {"stream:status": self._last_read_ids["stream:status"]}
+        return {"stream:status": self._get_last_read_id("stream:status")}
 
     # ------------------- configs -------------------
 
@@ -77,7 +235,7 @@ class EigsepRedis:
             expire after this time.
 
         """
-        return self.r.set(key, value, ex=ex)
+        return self._safe_redis_operation(self.r.set, key, value, ex=ex)
 
     def get_raw(self, key):
         """
@@ -89,7 +247,7 @@ class EigsepRedis:
             Data key.
 
         """
-        return self.r.get(key)
+        return self._safe_redis_operation(self.r.get, key)
 
     def _upload_config(self, config, key, from_file):
         """
@@ -206,21 +364,53 @@ class EigsepRedis:
             (big-endian 32-bit integer). This is used for unpacking the
             data on the consumer side.
 
+        Raises
+        ------
+        TypeError
+            If data is not a dictionary or cnt is not an integer.
+        ValueError
+            If data is empty or contains invalid correlation pairs.
         """
-        redis_data = {p.encode(): d for p, d in data.items()}
+        # Validate inputs
+        if not isinstance(data, dict):
+            raise TypeError("data must be a dictionary")
+        if not isinstance(cnt, int):
+            raise TypeError("cnt must be an integer")
+        if not data:
+            raise ValueError("data dictionary cannot be empty")
+        if cnt < 0:
+            raise ValueError("cnt must be non-negative")
+
+        # Validate correlation pairs and data
+        for pair, d in data.items():
+            if not isinstance(pair, str):
+                raise TypeError(
+                    f"Correlation pair key must be string, got {type(pair)}"
+                )
+            if not isinstance(d, (bytes, bytearray)):
+                pair_type = type(d)
+                raise TypeError(
+                    f"Correlation data must be bytes, got {pair_type} "
+                    f"for pair {pair}"
+                )
+
+        redis_data = {p.encode("utf-8"): d for p, d in data.items()}
         # add pairs to the set of correlation pairs
-        self.r.sadd("corr_pairs", *redis_data.keys())
+        self._safe_redis_operation(
+            self.r.sadd, "corr_pairs", *redis_data.keys()
+        )
         # add acc_cnt and dtype to the dict
-        redis_data["acc_cnt"] = str(cnt).encode()
-        redis_data["dtype"] = dtype.encode()
+        redis_data["acc_cnt"] = str(cnt).encode("utf-8")
+        redis_data["dtype"] = dtype.encode("utf-8")
         # add the data to the stream
-        self.r.xadd(
+        self._safe_redis_operation(
+            self.r.xadd,
             "stream:corr",
             redis_data,
             maxlen=self.maxlen["data"],
             approximate=True,
         )
-        self.r.sadd("data_streams", "stream:corr")
+        self._safe_redis_operation(self.r.sadd, "data_streams", "stream:corr")
 
     def read_corr_data(self, pairs=None, timeout=10, unpack=True):
         """
@@ -261,13 +451,18 @@ class EigsepRedis:
 
         """
         if pairs is None:
-            pairs = self.r.smembers("corr_pairs")
+            pairs = self._safe_redis_operation(self.r.smembers, "corr_pairs")
         last_id = self.data_streams["stream:corr"]
-        out = self.r.xread({"stream:corr", last_id}, count=1, timeout=timeout)
+        out = self._safe_redis_operation(
+            self.r.xread,
+            {"stream:corr": last_id},
+            count=1,
+            block=timeout * 1000,
+        )
         if not out:
             raise TimeoutError("No correlation data received within timeout.")
         eid, fields = out[0][1][0]
-        self._last_read_ids["stream:corr"] = eid  # update last read id
+        self._set_last_read_id("stream:corr", eid)  # update last read id
         acc_cnt = int(fields.pop(b"acc_cnt").decode())
         dtype = fields.pop(b"dtype").decode()
         data = {}
@@ -298,7 +493,7 @@ class EigsepRedis:
         metadata : dict
             Live sensor metadata. To be placed in file header.
         """
-        self.r.sadd("data_streams", "stream:vna")
+        self._safe_redis_operation(self.r.sadd, "data_streams", "stream:vna")
         raise NotImplementedError
 
     def read_vna_data(self, timeout=120):
@@ -351,24 +546,50 @@ class EigsepRedis:
         value : bytes or JSON serializable object
             Metadata value.
 
+        Raises
+        ------
+        TypeError
+            If key is not a string.
+        ValueError
+            If key is empty or contains invalid characters.
         """
-        if isinstance(value, (bytes, bytearray)):
-            payload = value
-        else:
-            payload = json.dumps(value).encode("utf-8")
+        # Validate inputs
+        if not isinstance(key, str):
+            raise TypeError("key must be a string")
+        if not key or not key.strip():
+            raise ValueError("key cannot be empty or whitespace only")
+        if ":" in key:
+            raise ValueError(
+                "key cannot contain ':' character (reserved for Redis)"
+            )
+
+        try:
+            if isinstance(value, (bytes, bytearray)):
+                payload = value
+            else:
+                payload = json.dumps(value).encode("utf-8")
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"value is not JSON serializable: {e}")
+
         # hash (for live updates)
-        self.r.hset("metadata", key, payload)
+        self._safe_redis_operation(self.r.hset, "metadata", key, payload)
         ts = datetime.now(timezone.utc).isoformat()  # XXX unreliable
-        self.r.hset("metadata", f"{key}_ts", json.dumps(ts).encode("utf-8"))
+        self._safe_redis_operation(
+            self.r.hset,
+            "metadata",
+            f"{key}_ts",
+            json.dumps(ts).encode("utf-8"),
+        )
         # stream (for file metadata)
-        self.r.xadd(
+        self._safe_redis_operation(
+            self.r.xadd,
             key,
             {"value": payload},
             maxlen=self.maxlen["data"],
             approximate=True,
         )
         # add the stream to the data streams if not already present
-        self.r.sadd("data_streams", key)
+        self._safe_redis_operation(self.r.sadd, "data_streams", key)
 
     def get_live_metadata(self, keys=None):
         """
@@ -400,7 +621,8 @@ class EigsepRedis:
         ):
             raise TypeError("All keys in the list must be strings.")
         m = {}
-        for k, v in self.r.hgetall("metadata").items():
+        metadata = self._safe_redis_operation(self.r.hgetall, "metadata")
+        for k, v in metadata.items():
             m[k.decode("utf-8")] = json.loads(v)
         if keys is None:
             return m
@@ -440,7 +662,9 @@ class EigsepRedis:
                 if k in self.data_streams
             }
 
-        resp = self.r.xread(streams)  # non-blocking read
+        resp = self._safe_redis_operation(
+            self.r.xread, streams
+        )  # non-blocking read
         redis_hdr = {}
         for stream, dat in resp:
             stream = stream.decode()  # decode stream name
@@ -450,7 +674,7 @@ class EigsepRedis:
                 value = json.loads(d[b"value"])
                 out.append(value)
                 # update the stream id
-                self._last_read_ids[stream] = eid
+                self._set_last_read_id(stream, eid)
             redis_hdr[stream] = np.array(out)
         return redis_hdr
 
@@ -470,7 +694,7 @@ class EigsepRedis:
 
         """
         # ctrl command is always valid
-        self.r.sadd("ctrl_commands", "ctrl")
+        self._safe_redis_operation(self.r.sadd, "ctrl_commands", "ctrl")
         commands = {
             "ctrl": ["ctrl:reprogram"],  # reset the panda config
             "switch": [
@@ -479,10 +703,12 @@ class EigsepRedis:
                 "switch:VNAS",  # short cal standard
                 "switch:VNAL",  # load cal standard
                 "switch:VNAANT",  # antenna
-                "switch:VNAN",  # noise source
+                "switch:VNANON",  # noise source on
+                "switch:VNANOFF",  # noise source off
                 "switch:VNARF",  # receiver
                 # snap observing
-                "switch:RFN",  # noise source
+                "switch:RFNON",  # noise source on
+                "switch:RFNOFF",  # noise source off
                 "switch:RFLOAD",  # load
                 "switch:RFANT",  # antenna
             ],
@@ -494,7 +720,9 @@ class EigsepRedis:
         return {
             k: v
             for k, v in commands.items()
-            if self.r.sismember("ctrl_commands", k.encode("utf-8"))
+            if self._safe_redis_operation(
+                self.r.sismember, "ctrl_commands", k.encode("utf-8")
+            )
         }
 
     @property
@@ -556,25 +784,50 @@ class EigsepRedis:
 
         Raises
         ------
+        TypeError
+            If cmd is not a string.
         ValueError
             If the command is not in the list of allowed commands as defined
             by the property ``control_commands''.
 
         """
+        # Validate command
+        if not isinstance(cmd, str):
+            raise TypeError("cmd must be a string")
+        if not cmd or not cmd.strip():
+            raise ValueError("cmd cannot be empty or whitespace only")
+
         if cmd not in self.all_commands:
-            raise ValueError(f"Command {cmd} not allowed.")
+            valid_cmds = self.all_commands
+            raise ValueError(
+                f"Command {cmd} not allowed. Valid commands: {valid_cmds}"
+            )
+
+        # Validate kwargs are JSON serializable
+        try:
+            if kwargs:
+                json.dumps(kwargs)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"kwargs are not JSON serializable: {e}")
+
         payload = {"cmd": cmd}
         if kwargs:
             payload["kwargs"] = kwargs
-        self.r.xadd(
-            "stream:ctrl",
+        self._safe_redis_operation(
+            self.r.xadd,
+            self.ctrl_stream_name,
             {"msg": json.dumps(payload)},
             maxlen=self.maxlen["ctrl"],
         )
 
-    def read_ctrl(self):
+    def read_ctrl(self, timeout=None):
         """
         Read control stream from Redis. Used on client (Panda).
+
+        Parameters
+        ----------
+        timeout : int, optional
+            Timeout in seconds for blocking read. If None, blocks indefinitely.
 
         Returns
         -------
@@ -587,15 +840,21 @@ class EigsepRedis:
         Notes
         -----
         This is a blocking call which may wait indefinitely for a
-        message.
+        message if timeout is None.
 
         """
-        # this is blocking
-        msg = self.r.xread(self.ctrl_stream, count=1, block=0)
+        # blocking read with optional timeout
+        block_time = 0 if timeout is None else timeout * 1000
+        msg = self._safe_redis_operation(
+            self.r.xread, self.ctrl_stream, count=1, block=block_time
+        )
+        if not msg:
+            return None, {}
         # msg is stream_name, entries
         entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        self._last_read_ids["stream:ctrl"] = entry_id  # update the stream id
+        # update the stream id
+        self._set_last_read_id(self.ctrl_stream_name, entry_id)
         # dat is a dict with key msg
         raw = dat.get(b"msg")
         decoded = json.loads(raw)
@@ -606,7 +865,7 @@ class EigsepRedis:
 
     # ------------------- heartbeat and status -----------------
 
-    def client_heartbeat_set(self, ex, alive=True):
+    def client_heartbeat_set(self, ex=None, alive=True):
         """
         Set the client heartbeat key in Redis. This is used to keep
         track of whether the client is alive or not.
@@ -654,9 +913,14 @@ class EigsepRedis:
             maxlen=self.maxlen["status"],
         )
 
-    def read_status(self):
+    def read_status(self, timeout=None):
         """
         Read status stream from Redis. Used by server.
+
+        Parameters
+        ----------
+        timeout : int, optional
+            Timeout in seconds for blocking read. If None, blocks indefinitely.
 
         Returns
         -------
@@ -666,10 +930,17 @@ class EigsepRedis:
             Status message. If None, no message was received.
 
         """
-        # blocking read
-        msg = self.r.xread(self.status_stream, count=1, block=0)
+        # blocking read with optional timeout
+        block_time = 0 if timeout is None else timeout * 1000
+        msg = self._safe_redis_operation(
+            self.r.xread, self.status_stream, count=1, block=block_time
+        )
+        if not msg:
+            return None, None
         entry_id, status_dict = msg[0][1][0]
-        self._last_read_ids["stream:status"] = entry_id  # update the stream id
+        self._set_last_read_id(
+            "stream:status", entry_id
+        )  # update the stream id
         status = status_dict.get(b"status").decode("utf-8")
         raw_level = status_dict.get(b"level")
         if raw_level is None:
@@ -677,3 +948,39 @@ class EigsepRedis:
         else:
             level = int(raw_level.decode("utf-8"))
         return level, status
+
+    def is_connected(self):
+        """
+        Check if Redis connection is active.
+
+        Returns
+        -------
+        bool
+            True if connected, False otherwise
+        """
+        try:
+            return self._safe_redis_operation(self.r.ping)
+        except (
+            redis.exceptions.ConnectionError,
+            redis.exceptions.TimeoutError,
+        ):
+            return False
+
+    def close(self):
+        """
+        Close the Redis connection and clean up resources.
+        """
+        try:
+            if hasattr(self.r, "close"):
+                self.r.close()
+            self.logger.info("Redis connection closed")
+        except Exception as e:
+            self.logger.warning(f"Error closing Redis connection: {e}")
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit."""
+        self.close()

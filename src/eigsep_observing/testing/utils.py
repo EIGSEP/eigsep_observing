@@ -44,9 +44,9 @@ def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
 
     """
     rng = np.random.default_rng(1420)
-    dtype = io.build_dtype("int32", ">")
+    dtype = np.dtype(">i4")
     # need to use native dtype for the data generation
-    native_dtype = io.build_dtype("int32", "=")
+    native_dtype = np.dtype("=i4")
     data_min = np.iinfo(native_dtype).min
     data_max = np.iinfo(native_dtype).max
     nchan = 1024
