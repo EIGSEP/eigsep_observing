@@ -171,48 +171,48 @@ class TestRequireSnapDecorator:
 class TestGetConfigPath:
     """Test the get_config_path function."""
 
-    @patch('eigsep_observing.utils.pkg_resources.resource_filename')
-    def test_get_config_path_basic(self, mock_resource_filename):
+    @patch('eigsep_observing.utils.resources.files')
+    def test_get_config_path_basic(self, mock_files):
         """Test basic config path retrieval."""
-        mock_resource_filename.return_value = "/path/to/config/test_config.yaml"
+        mock_path = Mock()
+        mock_path.joinpath.return_value.joinpath.return_value = "/path/to/config/test_config.yaml"
+        mock_files.return_value = mock_path
         
         result = get_config_path("test_config.yaml")
         
-        mock_resource_filename.assert_called_once_with(
-            "eigsep_observing", "config/test_config.yaml"
-        )
+        mock_files.assert_called_once_with("eigsep_observing")
         assert result == "/path/to/config/test_config.yaml"
 
-    @patch('eigsep_observing.utils.pkg_resources.resource_filename')
-    def test_get_config_path_with_subdirectory(self, mock_resource_filename):
+    @patch('eigsep_observing.utils.resources.files')
+    def test_get_config_path_with_subdirectory(self, mock_files):
         """Test config path with subdirectory."""
-        mock_resource_filename.return_value = "/path/to/config/subdir/config.yaml"
+        mock_path = Mock()
+        mock_path.joinpath.return_value.joinpath.return_value = "/path/to/config/subdir/config.yaml"
+        mock_files.return_value = mock_path
         
         result = get_config_path("subdir/config.yaml")
         
-        mock_resource_filename.assert_called_once_with(
-            "eigsep_observing", "config/subdir/config.yaml"
-        )
+        mock_files.assert_called_once_with("eigsep_observing")
         assert result == "/path/to/config/subdir/config.yaml"
 
-    @patch('eigsep_observing.utils.pkg_resources.resource_filename')
-    def test_get_config_path_error_handling(self, mock_resource_filename):
+    @patch('eigsep_observing.utils.resources.files')
+    def test_get_config_path_error_handling(self, mock_files):
         """Test config path error handling."""
-        mock_resource_filename.side_effect = FileNotFoundError("Config not found")
+        mock_files.side_effect = FileNotFoundError("Config not found")
         
         with pytest.raises(FileNotFoundError):
             get_config_path("nonexistent_config.yaml")
 
-    @patch('eigsep_observing.utils.pkg_resources.resource_filename')
-    def test_get_config_path_empty_filename(self, mock_resource_filename):
+    @patch('eigsep_observing.utils.resources.files')
+    def test_get_config_path_empty_filename(self, mock_files):
         """Test config path with empty filename."""
-        mock_resource_filename.return_value = "/path/to/config/"
+        mock_path = Mock()
+        mock_path.joinpath.return_value.joinpath.return_value = "/path/to/config/"
+        mock_files.return_value = mock_path
         
         result = get_config_path("")
         
-        mock_resource_filename.assert_called_once_with(
-            "eigsep_observing", "config/"
-        )
+        mock_files.assert_called_once_with("eigsep_observing")
         assert result == "/path/to/config/"
 
 
@@ -319,13 +319,15 @@ class TestUtilsIntegration:
 
     def test_config_path_integration(self):
         """Test config path function integration."""
-        with patch('eigsep_observing.utils.pkg_resources.resource_filename') as mock_fn:
-            mock_fn.return_value = "/path/to/obs_config.yaml"
+        with patch('eigsep_observing.utils.resources.files') as mock_files:
+            mock_path = Mock()
+            mock_path.joinpath.return_value.joinpath.return_value = "/path/to/obs_config.yaml"
+            mock_files.return_value = mock_path
             
             config_path = get_config_path("obs_config.yaml")
             
-            assert config_path.endswith("obs_config.yaml")
-            mock_fn.assert_called_once()
+            assert config_path == "/path/to/obs_config.yaml"
+            mock_files.assert_called_once()
 
 
 class TestUtilsErrorConditions:
