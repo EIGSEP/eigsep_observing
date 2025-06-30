@@ -9,6 +9,8 @@ from eigsep_corr.config import load_config
 import redis
 import redis.exceptions
 
+logger = logging.getLogger(__name__)
+
 
 class EigsepRedis:
 
@@ -38,7 +40,7 @@ class EigsepRedis:
             Whether to retry operations on timeout
 
         """
-        self.logger = logging.getLogger(__name__)
+        self.logger = logger
         self.retry_on_timeout = retry_on_timeout
 
         # Thread-safe access to stream positions
@@ -171,11 +173,8 @@ class EigsepRedis:
 
     @property
     def ctrl_stream(self):
-        return {
-            self.ctrl_stream_name: self._get_last_read_id(
-                self.ctrl_stream_name
-            )
-        }
+        key = self.ctrl_stream_name
+        return {key: self._get_last_read_id(key)}
 
     @property
     def status_stream(self):
