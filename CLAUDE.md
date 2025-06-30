@@ -9,6 +9,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 pytest                    # Run all tests
 pytest tests/test_*.py    # Run specific test file
 pytest -k "test_name"     # Run tests matching pattern
+pytest -x                 # Stop on first failure (useful for debugging)
+pytest --cov             # Run with coverage report
+pytest --tb=no -q        # Quick run without traceback details
 ```
 
 ### Code Quality
@@ -61,6 +64,9 @@ This is a distributed radio astronomy control system for EIGSEP observations wit
 - Dummy implementations in `testing/` module for hardware-free development
 - DummyEigsepRedis and DummySensor classes for unit testing
 - Tests cover Redis communication, sensor integration, and observation logic
+- **Current Coverage**: 54% overall (FPGA: 100%, Redis: 68%, Client: 57%, Sensors: 80%)
+- **Test Execution**: Use `pytest -x` for fail-fast debugging of edge cases
+- **Fixture Pattern**: All tests use dummy instances instead of excessive mocking
 
 ## Important Development Notes
 
@@ -98,3 +104,30 @@ Sensors inherit from abstract `Sensor` base class requiring:
 - **Sensor Picos**: Multiple Raspberry Pi Pico devices for different sensors (IMU, temperature, etc.)
 - **Switch Control**: Automated RF switching via dedicated Pico controller
 - **VNA Integration**: S11 measurements with configurable frequency range and power settings
+
+## Known Issues and Improvement Areas
+
+### Critical Issues
+1. **Redis Module Complexity**: `redis.py` (986 lines) handles too many responsibilities
+   - Consider splitting into: redis_client, redis_config, redis_data, redis_streams
+2. **API Inconsistencies**: Sensor constructor parameters don't match test expectations
+   - Some tests expect `pico` parameter, current API doesn't include it
+3. **Error Handling Gaps**: Not all Redis operations use `_safe_redis_operation()`
+   - `send_status()` bypasses error handling unlike other methods
+
+### Testing Edge Cases (41 remaining failures)
+- **Sensor API Mismatches**: Constructor and method signatures need alignment
+- **Mock vs Reality**: Some test expectations don't match actual implementation
+- **Import Issues**: `pkg_resources` vs `resources` conflicts suggest packaging evolution
+
+### Recommended Improvements
+1. **Code Organization**: Refactor large modules for better maintainability
+2. **Error Handling**: Standardize Redis error handling patterns
+3. **API Documentation**: Document intended sensor class interfaces
+4. **Type Hints**: Add type annotations for better IDE support
+5. **Integration Tests**: Add tests for full distributed scenarios
+
+### Development Workflow Notes
+- **MRO Inheritance**: `DummyEigsepFpga` requires specific inheritance order
+- **Dummy vs Mocking**: Prefer dummy instances over unittest.mock for behavior testing
+- **Redis Streams**: Use proper stream structure: `[(stream_name, [(entry_id, fields)])]`
