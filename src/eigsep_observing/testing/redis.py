@@ -9,6 +9,8 @@ class DummyEigsepRedis(EigsepRedis):
     def __init__(self, host="localhost", port=6379):
         self.r = fakeredis.FakeRedis(decode_responses=False)
         self._last_read_ids = defaultdict(lambda: "$")
+        # Enable all command types for testing
+        self.r.sadd("ctrl_commands", "ctrl", "switch", "VNA")
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
         """
