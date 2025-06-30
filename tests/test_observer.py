@@ -329,21 +329,29 @@ def test_observe_vna(observer_panda_only, redis_panda):
         {"meta": "test"},
     )
 
+    # Reduce VNA interval to speed up test
+    observer.cfg["vna_interval"] = 0.01
+
     # Start VNA observation in thread and stop quickly
     stop_event = observer.stop_events["vna"]
 
     def stop_after_delay():
-        time.sleep(0.1)
+        time.sleep(0.05)  # Reduced from 0.1 to 0.05
         stop_event.set()
 
     stop_thread = threading.Thread(target=stop_after_delay)
     stop_thread.start()
 
     with patch("eigsep_observing.io.write_s11_file"):
+        start_time = time.time()
         observer.observe_vna()
+        duration = time.time() - start_time
 
-    stop_thread.join()
-
+    stop_thread.join(timeout=1)  # Add timeout to join
+    
+    # Ensure test completes quickly
+    assert duration < 5.0, f"Test took too long: {duration:.2f}s"
+    
     # Verify VNA commands were sent
     assert redis_panda.send_ctrl.call_count > 0
 
@@ -390,7 +398,7 @@ def test_status_logger(observer_panda_only, redis_panda, caplog):
 
 def test_threading_stop_events(observer_both):
     """Test that stop events are properly initialized."""
-    expected_events = ["switches", "vna", "motors", "snap"]
+    expected_events = ["switches", "vna", "motors", "snap", "status"]
     for event_name in expected_events:
         assert event_name in observer_both.stop_events
         assert isinstance(
