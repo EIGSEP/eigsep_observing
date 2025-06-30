@@ -43,13 +43,50 @@ class EigsepRedis:
         self.logger = logger
         self.retry_on_timeout = retry_on_timeout
 
-        # Thread-safe access to stream positions
         self._stream_lock = threading.RLock()
         self._last_read_ids = defaultdict(lambda: "$")
+        self.r = self._make_redis(
+            host,
+            port,
+            socket_timeout,
+            socket_connect_timeout,
+            retry_on_timeout,
+        )
 
-        # Initialize Redis connection with proper error handling
+    def _make_redis(
+        self,
+        host,
+        port,
+        socket_timeout,
+        socket_connect_timeout,
+        retry_on_timeout
+    ):
+        """
+        Create a Redis connection with error handling.
+
+        Parameters
+        ----------
+        host : str
+        port : int
+        socket_timeout : int
+            Socket timeout in seconds for Redis operations
+        socket_connect_timeout : int
+            Socket connection timeout in seconds
+        retry_on_timeout : bool
+        
+        Returns
+        -------
+        r : redis.Redis
+            Redis client instance
+
+        Raises
+        ------
+        redis.exceptions.ConnectionError
+            If connection to Redis fails
+
+        """
         try:
-            self.r = redis.Redis(
+            r = redis.Redis(
                 host=host,
                 port=port,
                 decode_responses=False,
@@ -58,7 +95,7 @@ class EigsepRedis:
                 retry_on_timeout=retry_on_timeout,
             )
             # Test connection
-            self.r.ping()
+            r.ping()
             self.logger.info(f"Connected to Redis at {host}:{port}")
         except redis.exceptions.ConnectionError as e:
             self.logger.error(
@@ -68,6 +105,7 @@ class EigsepRedis:
         except Exception as e:
             self.logger.error(f"Unexpected error connecting to Redis: {e}")
             raise
+        return r
 
     def _safe_redis_operation(self, operation, *args, **kwargs):
         """
