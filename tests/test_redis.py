@@ -3,23 +3,20 @@ import numpy as np
 import pytest
 import time
 
-import fakeredis
-
 from eigsep_observing.testing.utils import compare_dicts, generate_data
 from eigsep_observing.testing import DummyEigsepRedis
-
-# mock redis connection using fakeredis
-redis = fakeredis.FakeRedis()
 
 
 @pytest.fixture
 def server():
-    return DummyEigsepRedis(redis=redis)
+    return DummyEigsepRedis()
 
 
 @pytest.fixture
-def client():
-    return DummyEigsepRedis(redis=redis)
+def client(server):
+    c = DummyEigsepRedis()
+    c.r = server.r
+    return c
 
 
 def test_metadata(server, client):
@@ -28,8 +25,10 @@ def test_metadata(server, client):
     # increment acc_cnt
     for acc_cnt in range(10):
         client.add_metadata("acc_cnt", acc_cnt)
+        assert client.r.smembers("data_streams") == {b"acc_cnt"}
+        assert server.r.smembers("data_streams") == {b"acc_cnt"}
         if acc_cnt == 0:  # data stream should be created on first call
-            assert server.data_streams == {b"acc_cnt": "0-0"}
+            assert server.data_streams == {"acc_cnt": "$"}
         # live metadata should be updated
         assert server.get_live_metadata(keys="acc_cnt") == acc_cnt
         assert server.get_live_metadata(keys=["acc_cnt"]) == {
