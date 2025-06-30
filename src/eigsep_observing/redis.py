@@ -480,10 +480,12 @@ class EigsepRedis:
                 "switch:VNAS",  # short cal standard
                 "switch:VNAL",  # load cal standard
                 "switch:VNAANT",  # antenna
-                "switch:VNAN",  # noise source
+                "switch:VNANON",  # noise source on 
+                "switch:VNANOFF",  # noise source off
                 "switch:VNARF",  # receiver
                 # snap observing
-                "switch:RFN",  # noise source
+                "switch:RFNON",  # noise source on
+                "switch:RFNOFF",  # noise source off
                 "switch:RFLOAD",  # load
                 "switch:RFANT",  # antenna
             ],
