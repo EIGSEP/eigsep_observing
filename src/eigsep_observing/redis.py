@@ -266,7 +266,7 @@ class EigsepRedis:
         if pairs is None:
             pairs = self.r.smembers("corr_pairs")
         last_id = self.data_streams["stream:corr"]
-        out = self.r.xread({"stream:corr", last_id}, count=1, timeout=timeout)
+        out = self.r.xread({"stream:corr": last_id}, count=1, block=timeout*1000)
         if not out:
             raise TimeoutError("No correlation data received within timeout.")
         eid, fields = out[0][1][0]
