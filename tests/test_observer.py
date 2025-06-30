@@ -36,7 +36,7 @@ def redis_panda():
     # Mock config
     redis.get_config = Mock(
         return_value={
-            "switch_schedule": {"sky": 300, "load": 30, "noise": 30},
+            "switch_schedule": {"sky": 0.05, "load": 0.02, "noise": 0.02},
             "vna_settings": {
                 "ip": "127.0.0.1",
                 "port": 5025,
@@ -44,7 +44,7 @@ def redis_panda():
                 "power_dBm": {"ant": -20, "rec": -40},
             },
             "vna_save_dir": "/tmp/test_vna",
-            "vna_interval": 600,
+            "vna_interval": 0.5,
         }
     )
     # Mock client heartbeat check and control methods
@@ -292,19 +292,25 @@ def test_do_switching(observer_panda_only, redis_panda):
     """Test do_switching method."""
     observer = observer_panda_only
 
-    # Start switching in thread and stop quickly
+    # Start switching in thread and stop after a brief delay
     stop_event = observer.stop_events["switches"]
 
     def stop_after_delay():
-        time.sleep(0.1)
+        time.sleep(0.1)  # Wait long enough for at least one switching cycle
         stop_event.set()
 
     stop_thread = threading.Thread(target=stop_after_delay)
     stop_thread.start()
 
+    # Run switching with timeout protection
+    start_time = time.time()
     observer.do_switching()
+    end_time = time.time()
     stop_thread.join()
 
+    # Verify the test completed quickly (should be under 1 second with new config)
+    assert end_time - start_time < 1.0, f"Test took too long: {end_time - start_time:.2f}s"
+    
     # Verify switching commands were sent
     assert redis_panda.send_ctrl.call_count > 0
 
