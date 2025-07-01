@@ -14,7 +14,8 @@ from eigsep_observing.capture import SpectrumCapture
 def main():
     """Main function with command line interface."""
     parser = argparse.ArgumentParser(
-        description="Capture correlation spectra from EIGSEP Redis"
+        description="Capture N consecutive correlation spectra "
+        "based on acc_cnt changes"
     )
     parser.add_argument(
         "--pairs",
@@ -27,13 +28,13 @@ def main():
         "-n",
         type=int,
         default=10,
-        help="Number of spectra to capture",
+        help="Number of consecutive spectra to capture",
     )
     parser.add_argument(
-        "--interval",
+        "--timeout",
         type=float,
-        default=1.0,
-        help="Time interval between captures in seconds",
+        default=30.0,
+        help="Maximum time to wait for all spectra in seconds",
     )
     parser.add_argument(
         "--output",
@@ -61,11 +62,11 @@ def main():
 
     # Capture and save spectra
     try:
-        filename = capture.save_last_n_spectra(
+        filename = capture.save_n_consecutive_spectra(
             n_spectra=args.count,
             pairs=args.pairs,
             filename=args.output,
-            interval=args.interval,
+            timeout=args.timeout,
         )
         print(f"Capture complete. Data saved to: {filename}")
     except KeyboardInterrupt:

@@ -22,7 +22,7 @@ class LivePlotter:
         pairs=None,
         plot_delay=False,
         log_scale=True,
-        update_interval=100,
+        poll_interval=50,
     ):
         """
         Initialize the live plotter.
@@ -37,8 +37,8 @@ class LivePlotter:
             Whether to plot delay spectrum
         log_scale : bool
             Use logarithmic scale for magnitude plot
-        update_interval : int
-            Update interval in milliseconds
+        poll_interval : int
+            Polling interval in milliseconds to check for acc_cnt changes
         """
         self.redis = redis_client
         self.pairs = pairs or [
@@ -57,7 +57,8 @@ class LivePlotter:
         ]
         self.plot_delay = plot_delay
         self.log_scale = log_scale
-        self.update_interval = update_interval
+        self.poll_interval = poll_interval
+        self.last_acc_cnt = None
 
         # Get configuration from Redis
         try:
@@ -193,6 +194,20 @@ class LivePlotter:
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
         try:
+            # Check if acc_cnt has changed
+            acc_cnt = self.redis.get_raw("ACC_CNT")
+            if acc_cnt is not None:
+                current_acc_cnt = (
+                    acc_cnt.decode()
+                    if isinstance(acc_cnt, bytes)
+                    else str(acc_cnt)
+                )
+
+                # Only update plot if acc_cnt has changed
+                if current_acc_cnt == self.last_acc_cnt:
+                    return list(self.lines["mag"].values())
+
+                self.last_acc_cnt = current_acc_cnt
             for p in self.pairs:
                 # Get data from Redis
                 data_key = f"data:{p}"
@@ -238,20 +253,11 @@ class LivePlotter:
                             dly = np.abs(np.fft.rfft(np.exp(1j * phase))) ** 2
                             self.lines["delay"][p].set_ydata(dly)
 
-            # Get accumulation count for display
-            try:
-                acc_cnt = self.redis.get_raw("ACC_CNT")
-                if acc_cnt is not None:
-                    cnt_str = (
-                        acc_cnt.decode()
-                        if isinstance(acc_cnt, bytes)
-                        else str(acc_cnt)
-                    )
-                    self.fig.suptitle(
-                        f"Live Correlation Spectra (ACC_CNT: {cnt_str})"
-                    )
-            except Exception:
-                pass
+            # Update title with current acc_cnt
+            if self.last_acc_cnt is not None:
+                self.fig.suptitle(
+                    f"Live Correlation Spectra (ACC_CNT: {self.last_acc_cnt})"
+                )
 
         except Exception as e:
             print(f"Error updating plot: {e}")
@@ -262,7 +268,8 @@ class LivePlotter:
         """Start the live plotting animation."""
         print("Starting live plotter...")
         print(
-            f"Configuration: nchan={self.nchan}, sample_rate={self.sample_rate}"
+            f"Configuration: nchan={self.nchan}, "
+            f"sample_rate={self.sample_rate}"
         )
         print(f"Plotting pairs: {self.pairs}")
         print("Press Ctrl+C to stop")
@@ -270,7 +277,7 @@ class LivePlotter:
         self.ani = FuncAnimation(
             self.fig,
             self.update_plot,
-            interval=self.update_interval,
+            interval=self.poll_interval,
             blit=False,
             cache_frame_data=False,
         )

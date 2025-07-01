@@ -30,10 +30,10 @@ def main():
         help="Use linear scale (default is log)",
     )
     parser.add_argument(
-        "--interval",
+        "--poll-interval",
         type=int,
-        default=100,
-        help="Update interval in milliseconds",
+        default=50,
+        help="Polling interval in milliseconds to check for acc_cnt changes",
     )
     parser.add_argument("--redis-host", default="localhost", help="Redis host")
     parser.add_argument(
@@ -56,7 +56,7 @@ def main():
         pairs=args.pairs,
         plot_delay=args.delay,
         log_scale=not args.linear,
-        update_interval=args.interval,
+        poll_interval=getattr(args, 'poll_interval', 50),
     )
 
     plotter.start()

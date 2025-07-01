@@ -111,22 +111,22 @@ class SpectrumCapture:
 
         return data, metadata
 
-    def save_last_n_spectra(
-        self, n_spectra=10, pairs=None, filename=None, interval=1.0
+    def save_n_consecutive_spectra(
+        self, n_spectra=10, pairs=None, filename=None, timeout=30.0
     ):
         """
-        Capture and save the last N spectra.
+        Capture and save N consecutive spectra based on acc_cnt changes.
 
         Parameters
         ----------
         n_spectra : int
-            Number of spectra to capture
+            Number of consecutive spectra to capture
         pairs : list of str, optional
             Correlation pairs to save
         filename : str, optional
             Output filename (default: auto-generated)
-        interval : float
-            Time interval between captures in seconds
+        timeout : float
+            Maximum time to wait for all spectra in seconds
 
         Returns
         -------
@@ -140,20 +140,72 @@ class SpectrumCapture:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"corr_spectra_{timestamp}.json"
 
-        print(f"Capturing {n_spectra} spectra at {interval}s intervals...")
+        print(
+            f"Capturing {n_spectra} consecutive spectra "
+            f"based on acc_cnt changes..."
+        )
+
+        # Get initial acc_cnt
+        last_acc_cnt = None
+        try:
+            acc_cnt = self.redis.get_raw("ACC_CNT")
+            if acc_cnt is not None:
+                last_acc_cnt = (
+                    acc_cnt.decode()
+                    if isinstance(acc_cnt, bytes)
+                    else str(acc_cnt)
+                )
+        except Exception:
+            pass
 
         spectra_list = []
-        for i in range(n_spectra):
-            print(f"Capturing spectrum {i+1}/{n_spectra}")
-            data, metadata = self.get_spectrum_data(pairs)
+        start_time = time.time()
+        captured = 0
 
-            # Add sequence number
-            metadata["sequence"] = i
+        while captured < n_spectra and (time.time() - start_time) < timeout:
+            try:
+                # Check for acc_cnt change
+                acc_cnt = self.redis.get_raw("ACC_CNT")
+                if acc_cnt is not None:
+                    current_acc_cnt = (
+                        acc_cnt.decode()
+                        if isinstance(acc_cnt, bytes)
+                        else str(acc_cnt)
+                    )
 
-            spectra_list.append({"data": data, "metadata": metadata})
+                    # If acc_cnt changed, capture spectrum
+                    if (current_acc_cnt != last_acc_cnt and
+                            last_acc_cnt is not None):
+                        print(
+                            f"Capturing spectrum {captured+1}/{n_spectra} "
+                            f"(ACC_CNT: {current_acc_cnt})"
+                        )
+                        data, metadata = self.get_spectrum_data(pairs)
 
-            if i < n_spectra - 1:  # Don't sleep after last capture
-                time.sleep(interval)
+                        # Add sequence number
+                        metadata["sequence"] = captured
+
+                        spectra_list.append(
+                            {"data": data, "metadata": metadata}
+                        )
+                        captured += 1
+
+                    last_acc_cnt = current_acc_cnt
+
+                # Small sleep to avoid overwhelming the system
+                time.sleep(0.01)
+
+            except Exception as e:
+                print(f"Error during capture: {e}")
+                time.sleep(0.1)
+
+        if captured < n_spectra:
+            print(
+                f"Warning: Only captured {captured}/{n_spectra} spectra "
+                f"(timeout reached)"
+            )
+        else:
+            print(f"Successfully captured {captured} consecutive spectra")
 
         # Save to JSON file
         with open(filename, "w") as f:
@@ -172,5 +224,43 @@ class SpectrumCapture:
 
             json.dump(json_data, f, indent=2)
 
-        print(f"Saved {n_spectra} spectra to {filename}")
+        print(f"Saved {captured} spectra to {filename}")
         return filename
+
+    def save_last_n_spectra(
+        self, n_spectra=10, pairs=None, filename=None, interval=None
+    ):
+        """
+        Legacy method for backward compatibility.
+        Captures N consecutive spectra based on acc_cnt changes.
+
+        Note: interval parameter is ignored - capture is based on
+        acc_cnt changes.
+
+        Parameters
+        ----------
+        n_spectra : int
+            Number of consecutive spectra to capture
+        pairs : list of str, optional
+            Correlation pairs to save
+        filename : str, optional
+            Output filename (default: auto-generated)
+        interval : float, optional
+            IGNORED - kept for backward compatibility
+
+        Returns
+        -------
+        filename : str
+            Path to saved file
+        """
+        if interval is not None:
+            print(
+                "Warning: interval parameter is ignored. "
+                "Capture is based on acc_cnt changes."
+            )
+
+        return self.save_n_consecutive_spectra(
+            n_spectra=n_spectra,
+            pairs=pairs,
+            filename=filename
+        )
