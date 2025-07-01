@@ -308,9 +308,11 @@ def test_do_switching(observer_panda_only, redis_panda):
     end_time = time.time()
     stop_thread.join()
 
-    # Verify the test completed quickly (should be under 1 second with new config)
-    assert end_time - start_time < 1.0, f"Test took too long: {end_time - start_time:.2f}s"
-    
+    # Verify the test completed quickly
+    assert (
+        end_time - start_time < 1.0
+    ), f"Test took too long: {end_time - start_time:.2f}s"
+
     # Verify switching commands were sent
     assert redis_panda.send_ctrl.call_count > 0
 
@@ -348,10 +350,10 @@ def test_observe_vna(observer_panda_only, redis_panda):
         duration = time.time() - start_time
 
     stop_thread.join(timeout=1)  # Add timeout to join
-    
+
     # Ensure test completes quickly
     assert duration < 5.0, f"Test took too long: {duration:.2f}s"
-    
+
     # Verify VNA commands were sent
     assert redis_panda.send_ctrl.call_count > 0
 

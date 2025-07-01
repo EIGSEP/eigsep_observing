@@ -6,7 +6,10 @@ from pathlib import Path
 from typing import Optional, Union, Callable, Any
 
 
-def get_path(dirname: Optional[Union[str, Path]] = None, fname: Optional[Union[str, Path]] = None) -> Path:
+def get_path(
+    dirname: Optional[Union[str, Path]] = None,
+    fname: Optional[Union[str, Path]] = None,
+) -> Path:
     """
     Get the path to a directory or file within the package.
     Default returns path to the package, <pkg_path>.
