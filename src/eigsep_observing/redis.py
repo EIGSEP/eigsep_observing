@@ -907,7 +907,8 @@ class EigsepRedis:
             Status message.
 
         """
-        self.r.xadd(
+        self._safe_redis_operation(
+            self.r.xadd,
             "stream:status",
             {"level": level, "status": status},
             maxlen=self.maxlen["status"],

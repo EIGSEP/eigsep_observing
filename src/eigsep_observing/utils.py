@@ -2,9 +2,11 @@ import functools
 from importlib import resources
 import logging
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Optional, Union, Callable, Any
 
 
-def get_path(dirname=None, fname=None):
+def get_path(dirname: Optional[Union[str, Path]] = None, fname: Optional[Union[str, Path]] = None) -> Path:
     """
     Get the path to a directory or file within the package.
     Default returns path to the package, <pkg_path>.
@@ -31,7 +33,7 @@ def get_path(dirname=None, fname=None):
     return path
 
 
-def get_config_path(fname=None):
+def get_config_path(fname: Optional[Union[str, Path]] = None) -> Path:
     """
     Get the path to the configuration directory within the package.
     If `fname` is provided, return the full path to that file.
@@ -40,11 +42,11 @@ def get_config_path(fname=None):
 
 
 def configure_eig_logger(
-    log_file="eigsep.log",
-    level=logging.INFO,
-    max_bytes=10 * 1024 * 1024,
-    backup_count=5,
-):
+    log_file: str = "eigsep.log",
+    level: int = logging.INFO,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+) -> logging.Logger:
     """
     Configure a logger with a rotating file handler.
 
@@ -80,14 +82,14 @@ def configure_eig_logger(
     return logger
 
 
-def require_attr(attr_name, exception=AttributeError):
+def require_attr(attr_name: str, exception: type = AttributeError) -> Callable:
     """
     Decorator to ensure `self.<attr_name>` is True and not None.
     """
 
-    def decorator(func):
+    def decorator(func: Callable) -> Callable:
         @functools.wraps(func)
-        def wrapper(self, *args, **kwargs):
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
             if not getattr(self, attr_name):
                 raise exception(
                     f"{self.__class__.__name__!r} needs `{attr_name}` set "
@@ -100,5 +102,5 @@ def require_attr(attr_name, exception=AttributeError):
     return decorator
 
 
-require_panda = require_attr("panda_connected")
-require_snap = require_attr("snap_connected")
+require_panda: Callable = require_attr("panda_connected")
+require_snap: Callable = require_attr("snap_connected")
