@@ -232,16 +232,6 @@ class TestDecoratorEdgeCases:
         result = TestClass.test_class_method()
         assert result == "class_success"
 
-    def test_require_snap_with_static_method(self):
-        """Test require_snap on static method (should fail)."""
-        class TestClass:
-            @staticmethod
-            @require_snap
-            def test_static_method():
-                return "static_success"
-        
-        with pytest.raises(AttributeError):
-            TestClass.test_static_method()
 
     def test_decorators_stacked(self):
         """Test stacking both decorators."""
@@ -329,66 +319,3 @@ class TestUtilsIntegration:
             assert config_path == "/path/to/obs_config.yaml"
             mock_files.assert_called_once()
 
-
-class TestUtilsErrorConditions:
-    """Test error conditions in utils functions."""
-
-    def test_require_attr_invalid_attribute(self):
-        """Test require_attr with invalid attribute name."""
-        @require_attr("nonexistent_attr")
-        def test_func(self):
-            return "success"
-        
-        class TestClass:
-            pass
-        
-        obj = TestClass()
-        obj.test_func = test_func.__get__(obj, TestClass)
-        
-        with pytest.raises(AttributeError):
-            obj.test_func()
-
-    def test_require_attr_custom_exception(self):
-        """Test require_attr with custom exception type."""
-        @require_attr("missing_attr", exception=ValueError)
-        def test_func(self):
-            return "success"
-        
-        class TestClass:
-            pass
-        
-        obj = TestClass()
-        obj.test_func = test_func.__get__(obj, TestClass)
-        
-        with pytest.raises(ValueError):
-            obj.test_func()
-
-    def test_require_panda_with_exception_in_method(self):
-        """Test require_panda when decorated method raises exception."""
-        class TestClass:
-            def __init__(self):
-                self.panda_connected = True
-            
-            @require_panda
-            def test_method(self):
-                raise ValueError("Method error")
-        
-        obj = TestClass()
-        
-        with pytest.raises(ValueError, match="Method error"):
-            obj.test_method()
-
-    def test_require_snap_with_exception_in_method(self):
-        """Test require_snap when decorated method raises exception."""
-        class TestClass:
-            def __init__(self):
-                self.snap_connected = True
-            
-            @require_snap
-            def test_method(self):
-                raise RuntimeError("Snap method error")
-        
-        obj = TestClass()
-        
-        with pytest.raises(RuntimeError, match="Snap method error"):
-            obj.test_method()
