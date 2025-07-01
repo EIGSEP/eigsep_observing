@@ -174,8 +174,10 @@ class SpectrumCapture:
                     )
 
                     # If acc_cnt changed, capture spectrum
-                    if (current_acc_cnt != last_acc_cnt and
-                            last_acc_cnt is not None):
+                    if (
+                        current_acc_cnt != last_acc_cnt
+                        and last_acc_cnt is not None
+                    ):
                         print(
                             f"Capturing spectrum {captured+1}/{n_spectra} "
                             f"(ACC_CNT: {current_acc_cnt})"
@@ -260,7 +262,5 @@ class SpectrumCapture:
             )
 
         return self.save_n_consecutive_spectra(
-            n_spectra=n_spectra,
-            pairs=pairs,
-            filename=filename
+            n_spectra=n_spectra, pairs=pairs, filename=filename
         )

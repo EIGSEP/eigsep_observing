@@ -1,9 +1,10 @@
+import datetime as dt_module
 import pytest
 import numpy as np
 import json
 import tempfile
 import os
-from unittest.mock import patch, mock_open
+from unittest.mock import patch, mock_open, Mock
 
 from eigsep_observing.capture import SpectrumCapture
 from eigsep_observing.testing import DummyEigsepRedis
@@ -169,17 +170,19 @@ def test_save_last_n_spectra(
     assert filename == "test_spectra.json"
 
 
-@patch("time.sleep")  
+@patch("time.sleep")
 def test_save_last_n_spectra_auto_filename(mock_sleep, spectrum_capture):
     with patch("builtins.open", mock_open()):
         with patch("json.dump"):
-            # Since datetime is imported inside the function, we need to mock the module
-            import datetime as dt_module
-            with patch.object(dt_module, 'datetime') as mock_datetime_class:
+            # mock the datetime module
+
+            with patch.object(dt_module, "datetime") as mock_datetime_class:
                 mock_datetime_instance = Mock()
-                mock_datetime_instance.strftime.return_value = "20231215_143022"
+                mock_datetime_instance.strftime.return_value = (
+                    "20231215_143022"
+                )
                 mock_datetime_class.now.return_value = mock_datetime_instance
-                
+
                 filename = spectrum_capture.save_last_n_spectra(n_spectra=1)
 
                 assert filename == "corr_spectra_20231215_143022.json"

@@ -59,7 +59,7 @@ class EigsepRedis:
         port,
         socket_timeout,
         socket_connect_timeout,
-        retry_on_timeout
+        retry_on_timeout,
     ):
         """
         Create a Redis connection with error handling.
@@ -73,7 +73,7 @@ class EigsepRedis:
         socket_connect_timeout : int
             Socket connection timeout in seconds
         retry_on_timeout : bool
-        
+
         Returns
         -------
         r : redis.Redis

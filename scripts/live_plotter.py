@@ -56,7 +56,7 @@ def main():
         pairs=args.pairs,
         plot_delay=args.delay,
         log_scale=not args.linear,
-        poll_interval=getattr(args, 'poll_interval', 50),
+        poll_interval=getattr(args, "poll_interval", 50),
     )
 
     plotter.start()
