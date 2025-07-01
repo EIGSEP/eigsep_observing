@@ -1,5 +1,6 @@
 from datetime import datetime
 import time
+from typing import Optional, Dict, Any
 
 import eigsep_corr
 
@@ -9,7 +10,7 @@ from .redis import EigsepRedis
 class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
 
     @staticmethod
-    def _create_redis(host, port):
+    def _create_redis(host: str, port: int) -> EigsepRedis:
         """
         Create an EigsepRedis instance.
 
@@ -29,7 +30,7 @@ class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
         """
         return EigsepRedis(host=host, port=port)
 
-    def upload_config(self, validate=True):
+    def upload_config(self, validate: bool = True) -> None:
         """
         Upload the configuration to Redis.
 

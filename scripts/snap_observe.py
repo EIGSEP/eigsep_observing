@@ -3,11 +3,11 @@ from eigsep_observing.utils import configure_eig_logger
 
 logger = configure_eig_logger(level=logging.DEBUG)
 
-import argparse
-from eigsep_corr.config import load_config
-from eigsep_corr.fpga import add_args
-from eigsep_observing import EigsepFpga
-from eigsep_observing.testing import DummyEigsepFpga
+import argparse  # noqa: E402
+from eigsep_corr.config import load_config  # noqa: E402
+from eigsep_corr.fpga import add_args  # noqa: E402
+from eigsep_observing import EigsepFpga  # noqa: E402
+from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 
 parser = argparse.ArgumentParser(
     description="Snap observing with Eigsep FPGA",

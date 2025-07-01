@@ -110,10 +110,10 @@ class PandaClient:
 
         """
         while not self.stop_client.is_set():
-            self.redis.client_heartbeat_set(ex, alive=True)
+            self.redis.client_heartbeat_set(ex=ex, alive=True)
             self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
-        self.client_heartbeat_set(alive=False)
+        self.redis.client_heartbeat_set(alive=False)
 
     def init_switch_network(self):
         """
@@ -136,9 +136,7 @@ class PandaClient:
             return
         try:
             self.switch_nw = SwitchNetwork(
-                serport=switch_pico,
-                logger=self.logger,
-                redis=self.redis,
+                serport=switch_pico, redis=self.redis,
             )
         except ValueError as e:
             err = (
