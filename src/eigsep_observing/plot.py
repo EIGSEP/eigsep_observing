@@ -74,7 +74,7 @@ class LivePlotter:
         # Frequency axis
         if calc_freqs_dfreq is not None:
             try:
-                freqs, _ = calc_freqs_dfreq(self.nchan, self.sample_rate)
+                freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
                 self.x = freqs
             except Exception:
                 self.x = np.linspace(

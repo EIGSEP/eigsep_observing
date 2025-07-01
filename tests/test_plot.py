@@ -34,7 +34,7 @@ def live_plotter(redis_client):
             pairs=["0", "1", "02"],
             plot_delay=False,
             log_scale=True,
-            update_interval=100,
+            poll_interval=100,
         )
     return plotter
 
@@ -196,20 +196,23 @@ def test_update_plot_no_data(live_plotter):
 
 
 def test_update_plot_error_handling(live_plotter):
-    # Add invalid data to Redis
-    live_plotter.redis.add_raw("data:0", b"invalid_data")
-
-    # Mock the plot lines
+    # Mock lines to cause an error when set_ydata is called
     mock_line = Mock()
+    mock_line.set_ydata.side_effect = RuntimeError("Test error")
     live_plotter.lines = {"mag": {"0": mock_line}, "phase": {}, "delay": None}
+
+    # Add valid data to Redis (so it tries to update the line)
+    auto_data = np.random.randint(0, 1000, 1024, dtype=np.int32)
+    data_bytes = auto_data.astype(">i4").tobytes()
+    live_plotter.redis.add_raw("data:0", data_bytes)
 
     # Update plot should handle errors gracefully
     with patch("builtins.print") as mock_print:
         live_plotter.update_plot(0)
         mock_print.assert_called()  # Should print error message
 
-    # Line should not be updated
-    mock_line.set_ydata.assert_not_called()
+    # Line update should have been attempted
+    mock_line.set_ydata.assert_called_once()
 
 
 @patch("eigsep_observing.plot.FuncAnimation")
