@@ -650,6 +650,11 @@ class EigsepRedis:
             Dictionary of stream data. Each key is a stream name, and the
             value is a list of data values.
 
+        Notes
+        -----
+        This grabs updated metadata from the Redis streams. If a stream
+        has not been updated, it will not be included in the output.
+
         """
         if stream_keys is None:
             streams = self.data_streams
@@ -662,9 +667,8 @@ class EigsepRedis:
                 if k in self.data_streams
             }
 
-        resp = self._safe_redis_operation(
-            self.r.xread, streams
-        )  # non-blocking read
+        # non-blocking read
+        resp = self._safe_redis_operation(self.r.xread, streams) 
         redis_hdr = {}
         for stream, dat in resp:
             stream = stream.decode()  # decode stream name
