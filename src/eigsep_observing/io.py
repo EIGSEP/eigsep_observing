@@ -1,3 +1,4 @@
+from collections import defaultdict
 import datetime
 import h5py
 import json
@@ -379,7 +380,7 @@ def read_s11_file(fname):
 
 class File:
 
-    def __init__(self, save_dir, pairs, ntimes, header, redis=None):
+    def __init__(self, save_dir, pairs, ntimes, header):
         """
         Initialize the File object for saving correlation data.
 
@@ -394,21 +395,19 @@ class File:
             Number of time steps to accumulate per file.
         header : dict
             Header information to be written to the file.
-        redis : EigsepRedis
-            Redis server to pull more header information from.
 
         """
         self.save_dir = Path(save_dir)
         self.ntimes = ntimes
         self.pairs = pairs
         self.header = header
-        self.redis = redis
 
         acc_bins = header["acc_bins"]
         nchan = header["nchan"]
         dtype = np.dtype(header["dtype"])
 
         self.acc_cnts = np.zeros(self.ntimes)
+        self.metadata = defaultdict(list)  # dynamic metadata
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
@@ -424,12 +423,13 @@ class File:
         Reset the data arrays to zero.
 
         """
+        self.metadata = {}
         for p in self.pairs:
             self.data[p].fill(0)
         self.acc_cnts.fill(0)
         self._counter = 0
 
-    def add_data(self, acc_cnt, data):
+    def add_data(self, acc_cnt, data, metadata=None):
         """
         Populate the data arrays with the given data. The data is expected
         to be of the dtype specified in the header.
@@ -440,6 +440,8 @@ class File:
             Accumulation count.
         data : dict
             Dictionary of data arrays to be added for one time step.
+        metadata : dict
+            Dynamic metadata, such as sensor readings, timestamps, etc.
 
         Returns
         -------
@@ -452,6 +454,13 @@ class File:
         for p, d in data.items():
             arr = self.data[p]
             arr[self._counter] = d
+        for key, value in metadata.items():
+            # XXX need to do some averaging here if multiple per time step
+            # XXX if timeout then we need to add filler NaN
+            # XXX is there a chance for no new data??
+            # also bear in mind we're getting a dict with data, status
+            md = process_metadata(value)
+            self.metadata[key].append(md)
         self._counter += 1
         if self._counter == self.ntimes:
             return self.corr_write()
@@ -476,12 +485,8 @@ class File:
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
-        if self.redis:
-            metadata = self.redis.get_metadata()
-        else:
-            metadata = None
         data = reshape_data(self.data, avg_even_odd=True)
         header = append_corr_header(self.header, self.acc_cnts)
-        write_hdf5(fname, data, header, metadata=metadata)
+        write_hdf5(fname, data, header, metadata=self.metadata)
         self.reset()
         return fname
