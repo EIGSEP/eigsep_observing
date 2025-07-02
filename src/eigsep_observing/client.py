@@ -171,18 +171,16 @@ class PandaClient:
         under the key 'sensors'.
         """
         self.sensors = {}  # key: sensor name, value: (sensor, thread)
-        sensor_picos = self.cfg.get("sensor_picos", {})
-        if not sensor_picos:
+        try:
+            sensor_cfg = self.cfg["sensors"]
+        except KeyError:
             self.logger.warning(
-                "No sensor picos provided in configuration. "
-                "No sensors will be initialized."
+                "No sensor config provided, no sensors will be initialized."
             )
             return
-        for sensor_name, sensor_pico in sensor_picos.items():
-            self.logger.info(
-                f"Adding sensor {sensor_name} with pico {sensor_pico}."
-            )
-            self.add_sensor(sensor_name, sensor_pico)
+        for name, cfg in sensor_cfg.items():
+            self.logger.info(f"Adding sensor {name}.")
+            self.add_sensor(name, cfg["pico"], cfg["cadence"])
 
         if self.sensors:
             self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
@@ -190,34 +188,35 @@ class PandaClient:
                 thd.start()
                 self.redis.r.sadd("sensors", sensor.name)
 
-    def add_sensor(self, sensor_name, sensor_pico): 
+    def add_sensor(self, name, pico, cadence): 
         """
         Add a sensor to the client. Spawns a thread that reads data
         from the sensor and pushes to redis.
 
         Parameters
         ----------
-        sensor_name : str
+        name : str
             Name of the sensor. Must be in sensors.SENSOR_CLASSES.
-        sensor_pico : str
+        pico : str
             Serial port of the pico that controls the sensor.
+        cadence : float
+            The cadence at which the sensor should read data, in
+            seconds.
 
         """
         try:
-            sensor_cls = sensors.SENSOR_CLASSES[sensor_name]
+            sensor_cls = sensors.SENSOR_CLASSES[name]
         except KeyError:
             self.logger.warning(
-                f"Unknown sensor name: {sensor_name}. "
+                f"Unknown sensor name: {name}. "
                 "Must be in sensors.SENSOR_CLASSES."
             )
             return
         try:
-            sensor = sensor_cls(
-                sensor_name, sensor_pico, timeout=self.serial_timeout
-            )
+            sensor = sensor_cls(name, pico, timeout=self.serial_timeout)
         except RuntimeError as e:
             self.logger.error(
-                f"Failed to initialize sensor {sensor_name}: {e}. "
+                f"Failed to initialize sensor {name}: {e}. "
                 "Check the serial port and GPIO settings."
             )
             return
@@ -227,6 +226,7 @@ class PandaClient:
         thd = threading.Thread(
             target=sensor.read,
             args=(self.redis, self.stop_client),
+            kwargs={"cadence": cadence},
             daemon=True,
         )
         self.sensors[sensor.name] = (sensor, thd)

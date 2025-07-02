@@ -5,12 +5,22 @@
 rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.12"
 # sensors
-sensor_picos:
-  imu_az: "/dev/pico_imu_az"
-  imu_el: "/dev/pico_imu_el"
-  therm: "/dev/pico_therm"
-  peltier: "/dev/pico_peltier"
-  lidar: "/dev/pico_lidar"
+sensors:
+  imu_az:
+    pico: "/dev/pico_imu_az"
+    cadence: 1  # seconds between readings
+  imu_el:
+    pico: "/dev/pico_imu_el"
+    cadence: 1
+  therm:
+    pico: "/dev/pico_therm"
+    cadence: 1
+  peltier:
+    pico: "/dev/pico_peltier"
+    cadence: 1
+  lidar:
+    pico: "/dev/pico_lidar"
+    cadence: 1
 # switches
 switch_pico: "/dev/pico_switch"
 switch_schedule:  # seconds per measurement

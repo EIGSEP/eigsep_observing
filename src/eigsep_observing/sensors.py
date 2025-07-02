@@ -55,7 +55,7 @@ class Sensor(ABC):
 
         """
 
-    def read(self, redis, stop_event):
+    def read(self, redis, stop_event, cadence=1.):
         """
         Read sensor data and push it to Redis.
 
@@ -65,11 +65,14 @@ class Sensor(ABC):
             Redis client instance.
         stop_event : threading.Event
             Event to signal when to stop reading data.
+        cadence : float
+            Time in seconds to wait between reads.
         
         """
         while not stop_event.is_set():
             data = self.from_sensor()  # blocking call
             redis.add_metadata(self.name, data)
+            stop_event.wait(cadence)
 
 class ImuSensor(Sensor):
 
