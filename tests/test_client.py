@@ -69,7 +69,7 @@ def test_add_sensor(caplog, monkeypatch, client):
     with pytest.raises(KeyError):
         sensor_classes["invalid_sensor"]
     # so it should not be added
-    client.add_sensor("invalid_sensor", "/dev/invalid_sensor")
+    client.add_sensor("invalid_sensor", "/dev/invalid_sensor", 1.0)
     # only dummy sensor should be present
     assert len(client.sensors) == 1
     assert "dummy_sensor" in client.sensors
@@ -83,7 +83,7 @@ def test_add_sensor(caplog, monkeypatch, client):
     assert sensor_thd.is_alive()
 
     # add the same sensor again, should not raise an error but log warning
-    client.add_sensor("dummy_sensor", "/dev/dummy_sensor")
+    client.add_sensor("dummy_sensor", "/dev/dummy_sensor", 0.1)
     assert len(client.sensors) == 1  # still only one sensor
     rec = caplog.records[-1]
     assert "Sensor dummy_sensor already added" in rec.getMessage()

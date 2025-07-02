@@ -44,7 +44,7 @@ def test_read(dummy_sensor, redis):
     # Create a stop event
     stop_event = threading.Event()
     
-    # Start reading in a separate thread
+    # Start reading in a separate thread with default cadence
     read_thread = threading.Thread(
         target=dummy_sensor.read, 
         args=(redis, stop_event)
@@ -100,3 +100,51 @@ def test_from_sensor(dummy_sensor):
     data3 = dummy_sensor.from_sensor()
     parsed3 = json.loads(data3)
     assert "data: 3" in parsed3
+
+
+def test_read_with_cadence(dummy_sensor, redis):
+    """Test the sensor read method with custom cadence."""
+    # Create a stop event
+    stop_event = threading.Event()
+    
+    # Use a short cadence for testing
+    cadence = 0.05  # 50ms
+    
+    # Start reading in a separate thread with custom cadence
+    read_thread = threading.Thread(
+        target=dummy_sensor.read, 
+        args=(redis, stop_event),
+        kwargs={"cadence": cadence}
+    )
+    
+    start_time = time.time()
+    read_thread.start()
+    
+    # Let it run for enough time to get multiple readings
+    time.sleep(0.3)  # Should get ~6 readings with 50ms cadence
+    
+    # Stop the reading
+    stop_event.set()
+    read_thread.join(timeout=1)
+    
+    # Check that multiple data points were added
+    stream_entries = redis.r.xrange("dummy_sensor")
+    
+    # With 300ms runtime and 50ms cadence, we should have at least 5 entries
+    # (allowing for some timing variance)
+    assert len(stream_entries) >= 5
+    
+    # Verify the timing between entries is roughly the cadence
+    # Note: This is approximate due to thread scheduling
+    timestamps = []
+    for entry_id, fields in stream_entries:
+        # Extract timestamp from entry_id (format: timestamp-sequence)
+        timestamp = int(entry_id.decode().split('-')[0])
+        timestamps.append(timestamp)
+    
+    # Check that readings are spaced appropriately
+    if len(timestamps) > 1:
+        intervals = [timestamps[i+1] - timestamps[i] for i in range(len(timestamps)-1)]
+        avg_interval = sum(intervals) / len(intervals)
+        # Allow for some variance in timing (50ms cadence = ~50ms intervals)
+        assert 40 < avg_interval < 100  # milliseconds

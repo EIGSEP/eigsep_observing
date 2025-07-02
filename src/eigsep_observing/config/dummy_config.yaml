@@ -5,8 +5,10 @@
 rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.12"
 # sensors
-sensor_picos:
-  dummy_sensor: "/dev/dummy_sensor"
+sensors:
+  dummy_sensor:
+    pico: "/dev/dummy_sensor"
+    cadence: 0.1  # fast cadence for testing
 # switches
 switch_pico: "/dev/dummy_switch"
 switch_schedule:  # seconds per measurement
