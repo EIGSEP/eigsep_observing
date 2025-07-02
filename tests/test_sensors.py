@@ -1,6 +1,5 @@
 import json
 import pytest
-from threading import Thread
 
 from eigsep_observing import sensors
 from eigsep_observing.testing import DummyEigsepRedis, DummySensor
@@ -23,10 +22,6 @@ def test_init():
         sensors.Sensor(name, port)
     dummy = DummySensor(name=name, port=port)
     assert dummy.name == name
-    # init also creates a queue
-    assert dummy.queue is not None
-    assert dummy.queue.empty()
-
 
 # make a subclass of Sensor that does not implement from_sensor
 class NoFromSensor(sensors.Sensor):
@@ -37,15 +32,6 @@ class NoFromSensor(sensors.Sensor):
 def test_no_from_sensor():
     with pytest.raises(TypeError):
         NoFromSensor()
-
-
-def test_queue_data(dummy_sensor):
-    cadence = 0.1  # seconds
-    thd = Thread(target=dummy_sensor._queue_data, args=(cadence,), daemon=True)
-    thd.start()
-    for i in range(10):
-        data = dummy_sensor.queue.get(timeout=1.0)
-        assert json.loads(data) == f"data: {i+1}"
 
 
 @pytest.mark.skip(reason="Not implemented yet")

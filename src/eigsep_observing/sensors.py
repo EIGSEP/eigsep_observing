@@ -1,8 +1,6 @@
 from abc import ABC, abstractmethod
 import json
-from queue import Queue
 import serial
-from threading import Thread
 import time
 
 import eigsep_sensors as eig_sensors
@@ -38,7 +36,6 @@ class Sensor(ABC):
 
         """
         self.name = name
-        self.queue = Queue()
 
     @abstractmethod
     def from_sensor(self):
@@ -54,38 +51,13 @@ class Sensor(ABC):
         Notes
         -----
         This method is expected to do one single read from the sensor.
-        It should be non-blocking and return immediately after reading
-        the data.
+        It should blocking.
 
         """
 
-    def _queue_data(self, cadence):
+    def read(self, redis, stop_event):
         """
-        Read data from the sensor and put it into the queue.
-        This method runs in a separate thread and should be called
-        by the `read' method.
-
-        Parameters
-        ----------
-        cadence : int
-            Number of seconds between reads.
-
-        Notes
-        -----
-        This method is expected to run continuously and should not
-        block. It should read data from the sensor and put it into
-        the queue.
-
-        """
-        while True:
-            data = self.from_sensor()
-            if data is not None:
-                self.queue.put(data)
-            time.sleep(cadence)
-
-    def read(self, redis, stop_event, cadence=5):
-        """
-        Read sensor data from queue and push it to Redis.
+        Read sensor data and push it to Redis.
 
         Parameters
         ----------
@@ -93,20 +65,11 @@ class Sensor(ABC):
             Redis client instance.
         stop_event : threading.Event
             Event to signal when to stop reading data.
-        cadence : float
-            Sleep time between reads in seconds.
-
+        
         """
-        sleep_time = cadence / 2  # to avoid busy waiting
-        thd = Thread(target=self._queue_data, args=(cadence,), daemon=True)
-        thd.start()
         while not stop_event.is_set():
-            if self.queue.empty():
-                continue
-            data = self.queue.get()
+            data = self.from_sensor()  # blocking call
             redis.add_metadata(self.name, data)
-            time.sleep(sleep_time)
-
 
 class ImuSensor(Sensor):
 
@@ -188,7 +151,8 @@ class ThermSensor(Sensor):
 
     def from_sensor(self):
         """
-        Read temperature from the thermistor.
+        Read temperature from the thermistor. This is blocking, as
+        expected by the base class.
 
         Returns
         -------
@@ -198,7 +162,12 @@ class ThermSensor(Sensor):
             values are the associated temperatures in degrees Celsius.
 
         """
-        return json.dumps(self.thermistor.read_temperature())
+        d = self.thermistor.read_temperature()
+        if d is None:
+            payload = {"data": None, "status": "TIMEOUT"}
+        else:
+            payload = {"data": d, "status": "OK"}
+        return json.dumps(payload)
 
 
 class PeltierSensor(Sensor):
