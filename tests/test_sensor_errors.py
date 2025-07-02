@@ -40,7 +40,7 @@ class TestSensorBaseClass:
         mock_redis.add_metadata = Mock(side_effect=Exception("Redis error"))
 
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
-        sensor.from_sensor = Mock(return_value='{"test": "data"}')
+        sensor.from_sensor = Mock(return_value={"data": "test_data", "status": "OK"})
 
         # Run read briefly with a stop event
         stop_event = threading.Event()
@@ -134,7 +134,7 @@ class TestImuSensorErrors:
 
         # Should handle empty/timeout responses gracefully
         data = sensor.from_sensor()
-        assert data == "null"  # JSON null for None
+        assert data == {"data": None, "status": "TIMEOUT"}
 
     @patch("eigsep_sensors.IMU_BNO085")
     def test_imu_sensor_from_sensor_malformed_data(
@@ -147,9 +147,9 @@ class TestImuSensorErrors:
 
         sensor = ImuSensor("imu_sensor", "/dev/ttyUSB0", timeout=10)
 
-        # Should handle malformed data by JSON serializing it
+        # Should handle malformed data by returning it in the expected format
         data = sensor.from_sensor()
-        assert data == '"malformed_data"'  # JSON string
+        assert data == {"data": "malformed_data", "status": "OK"}
 
     @patch("eigsep_sensors.IMU_BNO085")
     def test_imu_sensor_serial_communication_error(
@@ -210,9 +210,9 @@ class TestThermSensorErrors:
 
         sensor = ThermSensor("therm_sensor", "/dev/ttyUSB1", timeout=10)
 
-        # Should handle invalid data gracefully (JSON serialization of string)
+        # Should handle invalid data gracefully
         data = sensor.from_sensor()
-        assert isinstance(data, str)  # JSON string
+        assert data == {"data": "invalid_temp_reading", "status": "OK"}
 
     @patch("eigsep_sensors.Thermistor")
     def test_therm_sensor_timeout_recovery(
@@ -231,11 +231,11 @@ class TestThermSensorErrors:
 
         # First call should handle timeout
         data1 = sensor.from_sensor()
-        assert '{"data": null, "status": "TIMEOUT"}' == data1
+        assert data1 == {"data": None, "status": "TIMEOUT"}
 
         # Second call should succeed
         data2 = sensor.from_sensor()
-        assert '{"data": {"temperature": 25.5}, "status": "OK"}' == data2
+        assert data2 == {"data": {"temperature": 25.5}, "status": "OK"}
 
 
 class TestPeltierSensorStub:
@@ -307,7 +307,7 @@ class TestSensorThreadSafety:
         """Test sensor reading thread interruption and cleanup."""
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
         sensor.from_sensor = Mock(
-            side_effect=lambda: time.sleep(0.01) or {"data": "test"}
+            side_effect=lambda: time.sleep(0.01) or {"data": "test", "status": "OK"}
         )
 
         stop_event = threading.Event()
@@ -401,7 +401,7 @@ class TestSensorDataValidation:
     def test_sensor_from_sensor_none_data(self, mock_redis):
         """Test sensor handling when from_sensor returns None."""
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
-        sensor.from_sensor = Mock(return_value=None)
+        sensor.from_sensor = Mock(return_value={"data": None, "status": "TIMEOUT"})
         mock_redis.add_metadata = Mock()
 
         # Run sensor read briefly
@@ -423,7 +423,7 @@ class TestSensorDataValidation:
     def test_sensor_from_sensor_empty_dict(self, mock_redis):
         """Test sensor handling when from_sensor returns empty dict."""
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
-        sensor.from_sensor = Mock(return_value="{}")
+        sensor.from_sensor = Mock(return_value={"data": {}, "status": "OK"})
         mock_redis.add_metadata = Mock()
 
         # Run sensor read briefly
@@ -462,13 +462,12 @@ class TestSensorDataValidation:
         for test_data in test_cases:
             mock_imu.read_imu.return_value = test_data
             data = sensor.from_sensor()
-            # Should return JSON string, never raise for data format issues
-            assert isinstance(data, str)
-            # Should be valid JSON
-            import json
-
-            parsed = json.loads(data)
-            assert parsed == test_data
+            # Should return dict with data and status, never raise for data format issues
+            assert isinstance(data, dict)
+            assert "data" in data
+            assert "status" in data
+            assert data["data"] == test_data
+            assert data["status"] == "OK"
 
 
 class TestSensorResourceManagement:
@@ -511,5 +510,9 @@ class TestSensorResourceManagement:
         # Should call from_sensor without errors
         result = sensor.from_sensor()
         assert result is not None
-        assert isinstance(result, str)  # JSON string
+        assert isinstance(result, dict)  # Dict with data and status
+        assert "data" in result
+        assert "status" in result
+        assert result["data"] == {"test": "data"}
+        assert result["status"] == "OK"
         mock_imu.read_imu.assert_called_once()

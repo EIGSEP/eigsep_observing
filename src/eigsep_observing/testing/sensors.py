@@ -15,4 +15,4 @@ class DummySensor(sensors.Sensor):
 
     def from_sensor(self):
         self._data += 1
-        return json.dumps(f"data: {self._data}")
+        return {"data": self._data, "status": "OK"}

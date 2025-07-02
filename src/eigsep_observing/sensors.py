@@ -45,8 +45,9 @@ class Sensor(ABC):
 
         Returns
         -------
-        str
-            JSON string representing the sensor data.
+        dict
+            Dictionary with keys `data` and `status`. The status value
+            is either "OK" or "TIMEOUT".
 
         Notes
         -----
@@ -71,6 +72,8 @@ class Sensor(ABC):
         """
         while not stop_event.is_set():
             data = self.from_sensor()  # blocking call
+            # data is dict with keys `data` and `status`, add `cadence`
+            data["cadence"] = cadence
             redis.add_metadata(self.name, data)
             stop_event.wait(cadence)
 
@@ -106,19 +109,25 @@ class ImuSensor(Sensor):
                 f"Failed to connect to IMU on port {port}: {e}"
             ) from e
 
-    def from_sensor(self):  # XXX what keys are in the JSON?
+    def from_sensor(self):
         """
-        Read data from the IMU.
+        Read data from the IMU. This is blocking, as expected by the
+        base class.
 
         Returns
         -------
-        str
-            JSON string representing the IMU data. The JSON string is a
-            dictionary with keys ???.
+        dict
+            Dictionary with keys `data` and `status`. The status value
+            is either "OK" or "TIMEOUT".
 
         """
-        return json.dumps(self.imu.read_imu())
-
+        d = self.imu.read_imu()
+        if d is None:
+            payload = {"data": None, "status": "TIMEOUT"}
+        else:
+            payload = {"data": d, "status": "OK"}
+        return payload
+    
 
 class ThermSensor(Sensor):
 
@@ -159,10 +168,11 @@ class ThermSensor(Sensor):
 
         Returns
         -------
-        str
-            JSON string representing the temperature data. The JSON
-            string is a dictionary where keys are ADC pin numbers and
+        dict
+            Dictionary with keys `data` and `status`. The data value
+            is a dictionary where keys are ADC pin numbers and
             values are the associated temperatures in degrees Celsius.
+            The status value is either "OK" or "TIMEOUT".
 
         """
         d = self.thermistor.read_temperature()
@@ -170,7 +180,7 @@ class ThermSensor(Sensor):
             payload = {"data": None, "status": "TIMEOUT"}
         else:
             payload = {"data": d, "status": "OK"}
-        return json.dumps(payload)
+        return payload
 
 
 class PeltierSensor(Sensor):

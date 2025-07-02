@@ -38,8 +38,6 @@ def test_no_from_sensor():
 
 def test_read(dummy_sensor, redis):
     """Test the sensor read method."""
-    import threading
-    import time
     
     # Create a stop event
     stop_event = threading.Event()
@@ -77,30 +75,25 @@ def test_read(dummy_sensor, redis):
     # Each stream entry should contain the sensor data
     for entry_id, fields in stream_entries:
         assert b"value" in fields
-        # Data should be JSON string from dummy sensor
-        assert b"data:" in fields[b"value"]
+        # Data should be dict from dummy sensor
+        dat_dict = json.loads(fields[b"value"])
+        assert isinstance(dat_dict, dict)
+        assert "data" in dat_dict
+        assert "status" in dat_dict
+        assert dat_dict["status"] == "OK"
+        assert "cadence" in dat_dict
+        assert isinstance(dat_dict["cadence"], float)
 
 
 def test_from_sensor(dummy_sensor):
     """Test the from_sensor method."""
-    # Get initial data
-    data1 = dummy_sensor.from_sensor()
-    assert isinstance(data1, str)
-    
-    # Parse JSON
-    parsed1 = json.loads(data1)
-    assert "data: 1" in parsed1
-    
-    # Call again - should increment
-    data2 = dummy_sensor.from_sensor()
-    parsed2 = json.loads(data2)
-    assert "data: 2" in parsed2
-    
-    # Verify it's incrementing
-    data3 = dummy_sensor.from_sensor()
-    parsed3 = json.loads(data3)
-    assert "data: 3" in parsed3
-
+    expected_keys = {"data", "status"}
+    for i in range(5):
+        data = dummy_sensor.from_sensor()
+        assert isinstance(data, dict)
+        assert set(data.keys()) == expected_keys
+        assert data["status"] == "OK"
+        assert data["data"] == i + 1  # Should increment each call
 
 def test_read_with_cadence(dummy_sensor, redis):
     """Test the sensor read method with custom cadence."""
