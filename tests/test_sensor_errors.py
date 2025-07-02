@@ -36,7 +36,7 @@ class TestSensorBaseClass:
             Sensor("test_sensor", "/dev/test", timeout=1)
 
     def test_sensor_queue_data_redis_error(self, mock_redis):
-        """Test _queue_data when Redis operation fails during read."""
+        """Test read when Redis operation fails during read."""
         mock_redis.add_metadata = Mock(side_effect=Exception("Redis error"))
 
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
@@ -47,7 +47,6 @@ class TestSensorBaseClass:
         thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.01},
         )
         thread.start()
         time.sleep(0.05)
@@ -59,7 +58,7 @@ class TestSensorBaseClass:
 
     def test_sensor_read_from_sensor_exception(self, mock_redis):
         """Test that exceptions in from_sensor terminate the
-        _queue_data thread."""
+        read loop."""
         sensor = DummySensor("test_sensor", "/dev/test", timeout=1)
         sensor.from_sensor = Mock(side_effect=Exception("Sensor error"))
         mock_redis.add_metadata = Mock()
@@ -69,7 +68,6 @@ class TestSensorBaseClass:
         sensor_thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.01},
         )
         sensor_thread.start()
 
@@ -79,7 +77,7 @@ class TestSensorBaseClass:
         sensor_thread.join(timeout=1)
 
         # Should have attempted to read from sensor at least once
-        # Exception in from_sensor will terminate the _queue_data thread
+        # Exception in from_sensor will terminate the read loop
         assert sensor.from_sensor.call_count >= 1
         # Redis should not have been called due to exception
         mock_redis.add_metadata.assert_not_called()
@@ -94,11 +92,11 @@ class TestSensorBaseClass:
         stop_event.set()  # Set immediately
 
         # Should exit immediately due to stop event
-        sensor.read(mock_redis, stop_event, cadence=0.01)
+        sensor.read(mock_redis, stop_event)
 
-        # The _queue_data thread still starts and may call from_sensor once
-        # but the main read loop should exit immediately
-        # Redis should not be called because the main loop exits
+        # The read loop should exit immediately without calling from_sensor
+        sensor.from_sensor.assert_not_called()
+        # Redis should not be called because the loop exits immediately
         mock_redis.add_metadata.assert_not_called()
 
 
@@ -233,11 +231,11 @@ class TestThermSensorErrors:
 
         # First call should handle timeout
         data1 = sensor.from_sensor()
-        assert data1 == "null"  # JSON null for None
+        assert '{"data": null, "status": "TIMEOUT"}' == data1
 
         # Second call should succeed
         data2 = sensor.from_sensor()
-        assert '{"temperature": 25.5}' in data2  # JSON string
+        assert '{"data": {"temperature": 25.5}, "status": "OK"}' == data2
 
 
 class TestPeltierSensorStub:
@@ -274,7 +272,7 @@ class TestSensorThreadSafety:
 
         def run_sensor_read(stop_event):
             try:
-                sensor.read(mock_redis, stop_event, cadence=0.01)
+                sensor.read(mock_redis, stop_event)
             except Exception:
                 pass  # Ignore exceptions in test threads
 
@@ -316,7 +314,6 @@ class TestSensorThreadSafety:
         sensor_thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.005},
         )
 
         sensor_thread.start()
@@ -350,7 +347,6 @@ class TestSensorThreadSafety:
         thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.01},
         )
         thread.start()
         time.sleep(0.05)
@@ -413,17 +409,16 @@ class TestSensorDataValidation:
         thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.01},
         )
         thread.start()
         time.sleep(0.02)
         stop_event.set()
         thread.join(timeout=1)
 
-        # Should not call Redis when from_sensor returns None
-        # Note: The sensor still queues None, but Redis won't get
-        # called with None data
+        # Should call from_sensor and add_metadata with None
         sensor.from_sensor.assert_called()
+        # Redis should be called with None data
+        mock_redis.add_metadata.assert_called()
 
     def test_sensor_from_sensor_empty_dict(self, mock_redis):
         """Test sensor handling when from_sensor returns empty dict."""
@@ -436,7 +431,6 @@ class TestSensorDataValidation:
         thread = threading.Thread(
             target=sensor.read,
             args=(mock_redis, stop_event),
-            kwargs={"cadence": 0.01},
         )
         thread.start()
         time.sleep(0.02)

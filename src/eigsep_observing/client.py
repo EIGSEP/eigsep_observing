@@ -190,7 +190,7 @@ class PandaClient:
                 thd.start()
                 self.redis.r.sadd("sensors", sensor.name)
 
-    def add_sensor(self, sensor_name, sensor_pico, sleep_time=1):
+    def add_sensor(self, sensor_name, sensor_pico): 
         """
         Add a sensor to the client. Spawns a thread that reads data
         from the sensor and pushes to redis.
@@ -201,9 +201,6 @@ class PandaClient:
             Name of the sensor. Must be in sensors.SENSOR_CLASSES.
         sensor_pico : str
             Serial port of the pico that controls the sensor.
-        sleep_time : float
-            The time to sleep between reads from the sensor. Default is 1
-            second.
 
         """
         try:
@@ -230,7 +227,6 @@ class PandaClient:
         thd = threading.Thread(
             target=sensor.read,
             args=(self.redis, self.stop_client),
-            kwargs={"cadence": sleep_time},
             daemon=True,
         )
         self.sensors[sensor.name] = (sensor, thd)

@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 import pytest
 
 from eigsep_observing import sensors
@@ -34,11 +36,67 @@ def test_no_from_sensor():
         NoFromSensor()
 
 
-@pytest.mark.skip(reason="Not implemented yet")
-def test_read():
-    pass
+def test_read(dummy_sensor, redis):
+    """Test the sensor read method."""
+    import threading
+    import time
+    
+    # Create a stop event
+    stop_event = threading.Event()
+    
+    # Start reading in a separate thread
+    read_thread = threading.Thread(
+        target=dummy_sensor.read, 
+        args=(redis, stop_event)
+    )
+    read_thread.start()
+    
+    # Let it run for a short time
+    time.sleep(0.1)
+    
+    # Stop the reading
+    stop_event.set()
+    read_thread.join(timeout=1)
+    
+    # Check that data was added to Redis
+    # The dummy sensor should have added metadata through Redis
+    # Check using Redis hash commands
+    metadata_keys = redis.r.hkeys("metadata")
+    assert len(metadata_keys) > 0
+    assert b"dummy_sensor" in metadata_keys
+    
+    # Get the metadata value
+    metadata_value = redis.r.hget("metadata", "dummy_sensor")
+    assert metadata_value is not None
+    
+    # Check that data was streamed
+    # The stream key is just the sensor name
+    stream_entries = redis.r.xrange("dummy_sensor")
+    assert len(stream_entries) > 0
+    
+    # Each stream entry should contain the sensor data
+    for entry_id, fields in stream_entries:
+        assert b"value" in fields
+        # Data should be JSON string from dummy sensor
+        assert b"data:" in fields[b"value"]
 
 
-@pytest.mark.skip(reason="Not implemented yet")
-def test_from_sensor():
-    pass
+def test_from_sensor(dummy_sensor):
+    """Test the from_sensor method."""
+    # Get initial data
+    data1 = dummy_sensor.from_sensor()
+    assert isinstance(data1, str)
+    
+    # Parse JSON
+    parsed1 = json.loads(data1)
+    assert "data: 1" in parsed1
+    
+    # Call again - should increment
+    data2 = dummy_sensor.from_sensor()
+    parsed2 = json.loads(data2)
+    assert "data: 2" in parsed2
+    
+    # Verify it's incrementing
+    data3 = dummy_sensor.from_sensor()
+    parsed3 = json.loads(data3)
+    assert "data: 3" in parsed3
