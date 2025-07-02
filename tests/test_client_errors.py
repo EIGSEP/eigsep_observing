@@ -241,7 +241,7 @@ class TestClientSensorErrors:
     def test_add_sensor_invalid_name(self, client):
         """Test adding sensor with invalid name."""
         # Should handle invalid sensor names gracefully
-        client.add_sensor("invalid_sensor", "/dev/invalid")
+        client.add_sensor("invalid_sensor", "/dev/invalid", 1)
 
         # Should not have added the sensor
         assert "invalid_sensor" not in client.sensors
@@ -250,8 +250,8 @@ class TestClientSensorErrors:
         """Test adding duplicate sensor."""
         # Add sensor twice (dummy_sensor already exists from fixture)
         initial_count = len(client.sensors)
-        client.add_sensor("dummy_sensor", "/dev/test1")
-        client.add_sensor("dummy_sensor", "/dev/test2")
+        client.add_sensor("dummy_sensor", "/dev/test1", 1)
+        client.add_sensor("dummy_sensor", "/dev/test2", 1)
 
         # Should still have the same number of sensors
         assert len(client.sensors) == initial_count
@@ -268,7 +268,7 @@ class TestClientSensorErrors:
         )
 
         # Should handle connection errors gracefully
-        client.add_sensor("failing_sensor", "/dev/test")
+        client.add_sensor("failing_sensor", "/dev/test", 1)
 
         # Sensor should not be added
         assert "failing_sensor" not in client.sensors
@@ -307,8 +307,8 @@ class TestClientSensorErrors:
         )
 
         # Try to add multiple sensors
-        client.add_sensor("failing_sensor", "/dev/fail")
-        client.add_sensor("dummy_sensor", "/dev/work")
+        client.add_sensor("failing_sensor", "/dev/fail", 1)
+        client.add_sensor("dummy_sensor", "/dev/work", 1)
 
         # Should handle mixed success/failure
         assert "failing_sensor" not in client.sensors
@@ -341,7 +341,7 @@ class TestClientEdgeCases:
 
         def add_sensors():
             for i in range(3):
-                client.add_sensor("dummy_sensor", f"/dev/test{i}")
+                client.add_sensor("dummy_sensor", f"/dev/test{i}", 1)
 
         # Start multiple threads adding sensors
         threads = []
@@ -361,7 +361,7 @@ class TestClientEdgeCases:
         """Test that client doesn't leak memory with repeated operations."""
         # Repeatedly add sensors (same name, should not accumulate)
         for i in range(5):
-            client.add_sensor("dummy_sensor", f"/dev/temp{i}")
+            client.add_sensor("dummy_sensor", f"/dev/temp{i}", 1)
 
         # Should not accumulate excessive resources
         assert len(client.sensors) <= 5
@@ -391,9 +391,10 @@ class TestClientEdgeCases:
     def test_invalid_sensor_configuration(self, client):
         """Test client with invalid sensor configuration."""
         # Try adding sensor with invalid parameters
-        client.add_sensor("", "/dev/test")  # Empty name
-        client.add_sensor("test_sensor", "")  # Empty device
-        client.add_sensor(None, "/dev/test")  # None name
+        client.add_sensor("", "/dev/test", 1)  # Empty name
+        client.add_sensor("test_sensor", "", 1)  # Empty device
+        client.add_sensor(None, "/dev/test", 1)  # None name
+        client.add_sensor("test_sensor", "/dev/test", -1)  # negative cadence
 
         # Should handle all gracefully
         assert isinstance(client.sensors, dict)

@@ -220,6 +220,12 @@ class PandaClient:
                 "Check the serial port and GPIO settings."
             )
             return
+        if not isinstance(cadence, (int, float)) or cadence <= 0:
+            self.logger.warning(
+                f"Invalid cadence for sensor {name}: {cadence}. "
+                "Must be a positive number."
+            )
+            return
         if sensor.name in self.sensors:
             self.logger.warning(f"Sensor {sensor.name} already added.")
             return
