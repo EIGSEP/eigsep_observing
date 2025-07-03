@@ -107,26 +107,6 @@ def append_corr_header(header, acc_cnts):
     new_header["acc_cnts"] = acc_cnts
     return new_header
 
-def process_metadata(metadata_entry):
-    """
-    Process metadata for correlation file header. Specfically ensures
-    that each metadata key gives a single value per accumulation count.
-    Averages calls where multiple values are provided for the same
-    accumulation count, and fills NaN for missing values.
-
-    Parameters
-    ----------
-    metadata_entry : dict
-        Dictionary of a metadata entry. Keys are `data`, `status`, and
-        `cadence`.
-
-    Returns
-    -------
-    str, float or NaN
-        Processed metadata value.
-
-    """
-
 def _write_attr(grp, key, value):
     """
     Helper function to write attributes to an HDF5 group.
@@ -427,8 +407,7 @@ class File:
 
         self.acc_cnts = np.zeros(self.ntimes)
         self.metadata = defaultdict(list)  # dynamic metadata
-        self._metadata_keys = set()  # keys of metadata
-        self._metadata_cadences = {}  # dict with cadence/fill count
+        self._metadata_fills = {}  # dict with keys: cadence/fill count
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
@@ -476,32 +455,55 @@ class File:
             arr = self.data[p]
             arr[self._counter] = d
         # process metadata
-        self._metadata_keys |= metadata  # add new keys if any
-        for key in self._metadata_keys:
+        all_keys = self._metadata_fills | metadata
+        for key in all_keys:
             if key in metadata:
-                value = metadata[key]
-                self._metadata_cadences[key] = {
+                # value: list of dicts with keys data, status, cadence
+                value = metadata[key] 
+                self._metadata_fills[key] = {
                     "cadence": value["cadence"], "fill_cnt": 0
                 }
-                md = process_metadata(value)
+                md = self._avg_metadata(value)
             else:  # in this case, metadata was added before
-                self._metadata_cadences[key]["fill_cnt"] += 1
+                self._metadata_fills[key]["fill_cnt"] += 1
                 md = self._fill_metadata()  # NaN or copy based on cnt
-        for key, value in metadata.items():
-            # XXX need to do some averaging here if multiple per time step
-            # XXX if timeout then we need to add filler NaN
-            # XXX is there a chance for no new data?
-            # XXX answer to previous is yes, in that case - we copy previous
-            # XXX value for number of acc_cnts corresponding to cfg[cadence]
-            # XXX actually metadata ships with the cadence!
-            # XXX then start filling NANs
-            # also bear in mind we're getting a dict with data, status
-            md = process_metadata(value)
             self.metadata[key].append(md)
         self._counter += 1
         if self._counter == self.ntimes:
             return self.corr_write()
         return None
+
+    @staticmethod
+    def _avg_metadata(value):
+        """
+        Average the metadata value if needed.
+
+        Parameters
+        ----------
+        value : list of dicts
+            Output from `redis.get_metadata`. List of at least one dict
+            with keys 'data', 'status', and 'cadence'.
+
+        Returns
+        -------
+        avg : float or str
+            Average value of the metadata. If the value is a string,
+            it is returned as is. Otherwise, it is averaged.
+
+        """
+        data = []
+        for v in value:
+            if v["status"] == "TIMEOUT":
+                return "TIMEOUT"
+            data.append(v["data"])
+        # check if scalar or string
+        if isinstance(data[0], str):
+            return ",".join(data)
+        return np.mean(data)  # data is scalar or array-like
+            
+
+    def _fill_metadata(self):  # XXX here
+        raise NotImplementedError
 
     def corr_write(self, fname=None):
         """
