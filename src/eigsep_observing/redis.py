@@ -679,7 +679,7 @@ class EigsepRedis:
                 out.append(value)
                 # update the stream id
                 self._set_last_read_id(stream, eid)
-            redis_hdr[stream] = np.array(out)
+            redis_hdr[stream] = out
         return redis_hdr
 
     # ------------------- control commands -----------------
