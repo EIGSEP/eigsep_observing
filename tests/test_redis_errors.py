@@ -36,7 +36,6 @@ class TestRedisConnectionErrors:
             EigsepRedis(host="localhost", port=6379)
 
 
-
 class TestRedisDataValidation:
     """Test data validation in Redis operations."""
 

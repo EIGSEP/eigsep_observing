@@ -233,7 +233,7 @@ class PandaClient:
                 p.set_response_handler(
                     self._pico_response_handler(pico_queue, name)
                 )
-                if p.connect():
+                if p.is_connected:
                     self.picos[name] = p
                     self.redis.r.sadd("picos", name)
             except Exception as e:
