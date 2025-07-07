@@ -109,8 +109,9 @@ class PandaClient:
         self.stop_client.set()  # stop all threads
         # wait for all threads to finish
         self.heartbeat_thd.join()
-        for sensor, thd in self.sensors.values():
-            thd.join()
+        for name, pico in self.picos.items():
+            self.logger.debug(f"Stopping pico {name} thread.")
+            pico.stop()
         self._initialize()  # reinitialize the client
 
     def _send_heartbeat(self, ex=60):

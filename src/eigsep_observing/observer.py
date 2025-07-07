@@ -81,6 +81,26 @@ class EigObserver:
         return self.redis_panda.client_heartbeat_check()
 
     @require_panda
+    def reprogram_panda(self, force=False):
+        """
+        Reprogram the LattePanda Redis server with the current
+        configuration.
+
+        Parameters
+        ----------
+        force : bool
+            Reprogram if config appears to be the same as before.
+
+        Raises
+        ------
+        AttributeError
+            If the `redis_panda` attribute is not set.
+
+        """
+        self.logger.info("Reprogramming LattePanda with current configuration")
+        self.redis_panda.send_ctrl("ctrl:reprogram", force=force)
+
+    @require_panda
     def status_logger(self):
         """
         Log status messages from the LattePanda Redis server.
@@ -88,9 +108,8 @@ class EigObserver:
         while not self.stop_events["status"].is_set():
             level, status = self.redis_panda.read_status()
             if status is None:
-                if self.stop_events["status"].wait(
-                    0.1
-                ):  # Check stop event with timeout
+                # Check stop event with timeout
+                if self.stop_events["status"].wait(0.1):  
                     break
                 continue
             self.logger.log(level, status)
