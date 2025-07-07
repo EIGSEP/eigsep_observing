@@ -429,7 +429,7 @@ class File:
         self.acc_cnts.fill(0)
         self._counter = 0
 
-    def add_data(self, acc_cnt, data, metadata={}):
+    def add_data(self, acc_cnt, data, metadata=None):
         """
         Populate the data arrays with the given data. The data is expected
         to be of the dtype specified in the header.
@@ -450,6 +450,7 @@ class File:
             the number of times. Otherwise, None.
 
         """
+        metadata = metadata or {}
         self.acc_cnts[self._counter] = acc_cnt
         for p, d in data.items():
             arr = self.data[p]
@@ -478,7 +479,7 @@ class File:
 
         Returns
         -------
-        avg : float or str
+        avg : dict
             Average value of the metadata where 'status' is not 'error'.
 
         """
@@ -491,6 +492,7 @@ class File:
                 return "SWITCHING"
             return state[0]  # all states are the same
 
+        avg = {}
         for data_key in value[0].keys():
             if data_key in ("status", "app_id"):
                 continue
@@ -499,8 +501,7 @@ class File:
                 np.array([v[data_key] for v in value]),
                 np.nan,
             )
-
-        avg = np.nanmean(data)
+            avg[data_key] = np.nanmean(data)
         return avg
 
     def corr_write(self, fname=None):
