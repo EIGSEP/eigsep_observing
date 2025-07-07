@@ -174,7 +174,7 @@ class EigsepRedis:
         """
         return self.r.get(key)
 
-    def _upload_config(self, config, key, from_file):
+    def _upload_config(self, config, key):
         """
         Helper function for uploading configuration files to Redis.
 
@@ -186,13 +186,8 @@ class EigsepRedis:
             is False.
         key : str
             Redis key under which the configuration will be stored.
-        from_file : bool
-            If True, load the configuration from a file. If False, use
-            the provided dictionary directly.
 
         """
-        if from_file:
-            config = load_config(config)
         config["upload_time"] = datetime.now(timezone.utc).isoformat()
         cfg_json = json.dumps(config).encode("utf-8")
         self.add_raw(key, cfg_json)
@@ -210,7 +205,9 @@ class EigsepRedis:
         from_file : bool
 
         """
-        self._upload_config(config, "config", from_file=from_file)
+        if from_file:
+            config = load_config(config, compute_inttime=False)
+        self._upload_config(config, "config")
 
     def upload_corr_config(self, config, from_file=False):
         """
@@ -226,7 +223,9 @@ class EigsepRedis:
         from_file : bool
 
         """
-        self._upload_config(config, "corr_config", from_file=from_file)
+        if from_file:
+            config = load_config(config, compute_inttime=True)
+        self._upload_config(config, "corr_config")
 
     def get_config(self):
         """
