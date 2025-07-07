@@ -4,7 +4,7 @@ import json
 from unittest.mock import Mock, patch
 import redis
 
-from eigsep_observing.redis import EigsepRedis
+from eigsep_observing import EigsepRedis
 from eigsep_observing.testing import DummyEigsepRedis
 
 

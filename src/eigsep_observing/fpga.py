@@ -3,7 +3,7 @@ import time
 
 import eigsep_corr
 
-from .redis import EigsepRedis
+from .eig_redis import EigsepRedis
 
 
 class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
