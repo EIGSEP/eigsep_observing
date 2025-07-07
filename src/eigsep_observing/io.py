@@ -1,3 +1,4 @@
+from collections import defaultdict
 import datetime
 import h5py
 import json
@@ -379,7 +380,7 @@ def read_s11_file(fname):
 
 class File:
 
-    def __init__(self, save_dir, pairs, ntimes, header, redis=None):
+    def __init__(self, save_dir, pairs, ntimes, header):
         """
         Initialize the File object for saving correlation data.
 
@@ -394,21 +395,19 @@ class File:
             Number of time steps to accumulate per file.
         header : dict
             Header information to be written to the file.
-        redis : EigsepRedis
-            Redis server to pull more header information from.
 
         """
         self.save_dir = Path(save_dir)
         self.ntimes = ntimes
         self.pairs = pairs
         self.header = header
-        self.redis = redis
 
         acc_bins = header["acc_bins"]
         nchan = header["nchan"]
         dtype = np.dtype(header["dtype"])
 
         self.acc_cnts = np.zeros(self.ntimes)
+        self.metadata = defaultdict(list)  # dynamic metadata
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
@@ -424,12 +423,13 @@ class File:
         Reset the data arrays to zero.
 
         """
+        self.metadata.clear()  # clear metadata
         for p in self.pairs:
             self.data[p].fill(0)
         self.acc_cnts.fill(0)
         self._counter = 0
 
-    def add_data(self, acc_cnt, data):
+    def add_data(self, acc_cnt, data, metadata=None):
         """
         Populate the data arrays with the given data. The data is expected
         to be of the dtype specified in the header.
@@ -440,6 +440,8 @@ class File:
             Accumulation count.
         data : dict
             Dictionary of data arrays to be added for one time step.
+        metadata : dict
+            Dynamic metadata, such as sensor readings, timestamps, etc.
 
         Returns
         -------
@@ -448,14 +450,59 @@ class File:
             the number of times. Otherwise, None.
 
         """
+        metadata = metadata or {}
         self.acc_cnts[self._counter] = acc_cnt
         for p, d in data.items():
             arr = self.data[p]
             arr[self._counter] = d
+        # process metadata
+        for key in metadata:
+            # value: list of dicts with keys data, status, cadence
+            value = metadata[key]
+            md = self._avg_metadata(value)
+            self.metadata[key].append(md)
         self._counter += 1
         if self._counter == self.ntimes:
             return self.corr_write()
         return None
+
+    @staticmethod
+    def _avg_metadata(value):
+        """
+        Average the metadata value if needed.
+
+        Parameters
+        ----------
+        value : list of dicts
+            Output from `redis.get_metadata`. List of at least one dict
+            with 'status' and 'app_id' keys and some number of data keys.
+
+        Returns
+        -------
+        avg : dict
+            Average value of the metadata where 'status' is not 'error'.
+
+        """
+        status_list = [v["status"] for v in value]
+        app_id = value[0]["app_id"]
+        # rest of the keys are data
+        if app_id == 5:  # XXX switching, should not be hardcoded
+            state = [v["state"] for v in value]
+            if "error" in status_list or any(s != state[0] for s in state):
+                return "SWITCHING"
+            return state[0]  # all states are the same
+
+        avg = {}
+        for data_key in value[0].keys():
+            if data_key in ("status", "app_id"):
+                continue
+            data = np.where(
+                np.array(status_list) != "error",
+                np.array([v[data_key] for v in value]),
+                np.nan,
+            )
+            avg[data_key] = np.nanmean(data)
+        return avg
 
     def corr_write(self, fname=None):
         """
@@ -476,12 +523,8 @@ class File:
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
-        if self.redis:
-            metadata = self.redis.get_metadata()
-        else:
-            metadata = None
         data = reshape_data(self.data, avg_even_odd=True)
         header = append_corr_header(self.header, self.acc_cnts)
-        write_hdf5(fname, data, header, metadata=metadata)
+        write_hdf5(fname, data, header, metadata=self.metadata)
         self.reset()
         return fname

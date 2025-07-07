@@ -268,7 +268,6 @@ class EigObserver:
             pairs,
             self.corr_cfg["ntimes"],
             self.corr_cfg,
-            redis=self.redis_panda,
         )
 
         while not self.stop_events["snap"].is_set():
@@ -276,7 +275,11 @@ class EigObserver:
             acc_cnt, data = self.redis_snap.read_corr_data(
                 pairs=pairs, timeout=timeout, unpack=True
             )
-            filename = file.add_data(acc_cnt, data)
+            if self.panda_connected:
+                metadata = self.redis_panda.get_metadata()
+            else:
+                metadata = None
+            filename = file.add_data(acc_cnt, data, metadata=metadata)
             if filename is not None:  # file buffer is full, file written
                 self.logger.info(f"Writing file {filename}")
 

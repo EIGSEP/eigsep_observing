@@ -21,10 +21,9 @@ dependencies = [
   "numpy",
   "pyyaml",
   "flask",
-  "switch_network @ git+https://github.com/EIGSEP/switchNW.git",
+  "picohost", 
   "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git",
   "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@selective-merge",
-  "eigsep_sensors @ git+https://github.com/EIGSEP/eigsep-sensors.git",
   "fakeredis",
 ]
 

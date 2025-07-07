@@ -252,14 +252,13 @@ def test_file():
     cross = ["02", "04", "13", "15", "24", "35"]
     pairs = autos + cross
     ntimes = 60
-    test_file = io.File(save_dir, pairs, ntimes, HEADER, redis=None)
+    test_file = io.File(save_dir, pairs, ntimes, HEADER)
 
     # __init__
     assert test_file.save_dir.resolve() == save_dir.resolve()
     assert test_file.pairs == pairs
     assert test_file.ntimes == ntimes
     assert test_file.header == HEADER
-    assert test_file.redis is None
 
     assert list(test_file.data.keys()) == pairs
     dtype = HEADER["dtype"]

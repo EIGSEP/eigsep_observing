@@ -1,11 +1,11 @@
 import logging
+import queue
 import threading
 
 from eigsep_corr.config import load_config
 from cmt_vna import VNA
-from switch_network import SwitchNetwork
+import picohost
 
-from . import sensors
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -14,6 +14,15 @@ default_cfg = load_config(default_cfg_file, compute_inttime=False)
 
 
 class PandaClient:
+
+    PICO_CLASSES = {
+        "imu": picohost.PicoDevice,
+        "therm": picohost.PicoDevice,
+        "peltier": picohost.PicoPeltier,
+        "lidar": picohost.PicoDevice,
+        "switch": picohost.PicoRFSwitch,
+        "motor": picohost.PicoMotor,
+    }
 
     def __init__(self, redis, default_cfg=default_cfg):
         """
@@ -50,12 +59,13 @@ class PandaClient:
 
     def _initialize(self):
         self.stop_client.clear()  # reset the stop flag
-        self.init_switch_network()
-        if self.cfg["use_vna"] and self.switch_nw is not None:
-            self.init_VNA()
-        else:
+        self.init_picos()  # initialize picos
+        if self.switch_nw is None:
             self.vna = None
-        self.init_sensors()
+        else:
+            self.redis.r.sadd("ctrl_commands", "switch")
+            if self.cfg["use_vna"]:
+                self.init_VNA()
 
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
@@ -115,41 +125,6 @@ class PandaClient:
         # if we reach here, the client should stop running
         self.redis.client_heartbeat_set(alive=False)
 
-    def init_switch_network(self):
-        """
-        Initialize the switch network, using the serial port and GPIO
-        settings from the Redis configuration.
-
-        Notes
-        -----
-        This methods overrides the attribute ``switch_nw`` with the
-        initialized SwitchNetwork instance. If no cofiguration is
-        provided or there is an error, ``switch_nw`` will remain None.
-
-        """
-        switch_pico = self.cfg.get("switch_pico", None)
-        if switch_pico is None:
-            self.logger.warning(
-                "No switch pico provided in configuration. "
-                "Switch network will not be initialized."
-            )
-            return
-        try:
-            self.switch_nw = SwitchNetwork(
-                serport=switch_pico,
-                redis=self.redis,
-            )
-        except ValueError as e:
-            err = (
-                f"Failed to initialize switch network: {e}. "
-                "Check the serial port and GPIO settings."
-            )
-            self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
-            self.switch_nw = None
-        self.logger.info(f"Switch network initialized with {switch_pico}.")
-        self.redis.r.sadd("ctrl_commands", "switch")
-
     def init_VNA(self):
         """
         Initialize the VNA instance using the configuration from Redis.
@@ -163,77 +138,121 @@ class PandaClient:
         )
         self.redis.r.sadd("ctrl_commands", "VNA")
 
-    def init_sensors(self):
+    def metadata_pusher(self, queue):
         """
-        Initialize sensors based on the configuration in Redis. This
-        creates sensor instances and starts threads to read data from
-        the sensors. It also adds a list of sensor names to redis
-        under the key 'sensors'.
-        """
-        self.sensors = {}  # key: sensor name, value: (sensor, thread)
-        sensor_picos = self.cfg.get("sensor_picos", {})
-        if not sensor_picos:
-            self.logger.warning(
-                "No sensor picos provided in configuration. "
-                "No sensors will be initialized."
-            )
-            return
-        for sensor_name, sensor_pico in sensor_picos.items():
-            self.logger.info(
-                f"Adding sensor {sensor_name} with pico {sensor_pico}."
-            )
-            self.add_sensor(sensor_name, sensor_pico)
-
-        if self.sensors:
-            self.logger.info(f"Starting {len(self.sensors)} sensor threads.")
-            for sensor, thd in self.sensors.values():
-                thd.start()
-                self.redis.r.sadd("sensors", sensor.name)
-
-    def add_sensor(self, sensor_name, sensor_pico, sleep_time=1):
-        """
-        Add a sensor to the client. Spawns a thread that reads data
-        from the sensor and pushes to redis.
+        Push metadata from the pico queue to Redis.
+        This method runs in a separate thread and continuously reads
+        metadata from the queue and sends it to Redis.
 
         Parameters
         ----------
-        sensor_name : str
-            Name of the sensor. Must be in sensors.SENSOR_CLASSES.
-        sensor_pico : str
-            Serial port of the pico that controls the sensor.
-        sleep_time : float
-            The time to sleep between reads from the sensor. Default is 1
-            second.
+        queue : queue.Queue
+            The queue from which to read pico metadata. All picos
+            should push their metadata to this queue.
 
         """
-        try:
-            sensor_cls = sensors.SENSOR_CLASSES[sensor_name]
-        except KeyError:
-            self.logger.warning(
-                f"Unknown sensor name: {sensor_name}. "
-                "Must be in sensors.SENSOR_CLASSES."
-            )
-            return
-        try:
-            sensor = sensor_cls(
-                sensor_name, sensor_pico, timeout=self.serial_timeout
-            )
-        except RuntimeError as e:
-            self.logger.error(
-                f"Failed to initialize sensor {sensor_name}: {e}. "
-                "Check the serial port and GPIO settings."
-            )
-            return
-        if sensor.name in self.sensors:
-            self.logger.warning(f"Sensor {sensor.name} already added.")
-            return
-        thd = threading.Thread(
-            target=sensor.read,
-            args=(self.redis, self.stop_client),
-            kwargs={"cadence": sleep_time},
+        while not self.stop_client.is_set():
+            pico_name, metadata = queue.get()
+            self.redis.add_metadata(pico_name, metadata)
+
+    @staticmethod
+    def _pico_response_handler(queue, name):
+        """
+        Handle responses from the pico devices and push them to the
+        provided queue.
+
+        Parameters
+        ----------
+        queue : queue.Queue
+            The queue to which the pico data should be pushed.
+        name : str
+            The name of the pico device.
+
+        Returns
+        -------
+        handler : callable
+            A function that can be used as a response handler for the
+            pico device. It takes the data from the pico and pushes it
+            to the queue.
+
+        """
+
+        def handler(data):
+            """
+            Handle data from the pico device and push it to the queue.
+            """
+            try:
+                queue.put_nowait((name, data))
+            except queue.Full:
+                logging.warning(
+                    f"Queue is full, dropping data from {name}: {data}"
+                )
+                try:
+                    queue.get_nowait()  # remove oldest item
+                except queue.Empty:
+                    pass
+                queue.put_nowait((name, data))
+
+        return handler
+
+    def init_picos(self):
+        """
+        Initialize pico readings based on the configuration in Redis.
+        """
+        # queue for pico readings
+        pico_queue = queue.Queue(maxsize=1000)
+        self.metadata_thd = threading.Thread(
+            target=self.metadata_pusher,
+            args=(pico_queue,),
             daemon=True,
         )
-        self.sensors[sensor.name] = (sensor, thd)
+
+        self.picos = {}  # pico name : pico instance
+        try:
+            pico_cfg = self.cfg["picos"]  # name: serial port mapping
+        except KeyError:
+            self.logger.warning(
+                "No sensor config provided, no sensors will be initialized."
+            )
+            return
+
+        for name, port in pico_cfg.items():
+            self.logger.info(f"Adding sensor {name}.")
+            # instantiate the pico class
+            try:
+                cls = self.PICO_CLASSES[name]
+            except KeyError:
+                self.logger.warning(
+                    f"Unknown pico class {name}. "
+                    "Must be in picos.PICO_CLASSES."
+                )
+                continue
+
+            try:
+                p = cls(port, timeout=self.serial_timeout)
+                p.set_response_handler(
+                    self._pico_response_handler(pico_queue, name)
+                )
+                if p.connect():
+                    self.picos[name] = p
+                    self.redis.r.sadd("picos", name)
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize pico {name}: {e}")
+                continue  # Skip picos that fail to initialize
+
+        if not self.picos:
+            self.logger.warning("Running without pico threads.")
+            return
+
+        self.metadata_thd.start()
+        for name, p in self.picos.items():
+            self.logger.debug(f"Starting pico {name} thread.")
+            p.start()
+
+        # create reference to switch_nw, motor, peltier if they exist
+        self.switch_nw = self.picos.get("switch", None)
+        self.motor = self.picos.get("motor", None)
+        self.peltier = self.picos.get("peltier", None)
 
     def measure_s11(self, mode, **kwargs):
         """
@@ -334,7 +353,7 @@ class PandaClient:
                 self.redis.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
-            self.switch_nw.switch(mode, verify=True)
+            self.switch_nw.switch(mode)
         elif cmd in self.redis.vna_commands:
             mode = cmd.split(":")[1]
             try:

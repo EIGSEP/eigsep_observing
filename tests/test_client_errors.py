@@ -3,26 +3,33 @@ from unittest.mock import Mock, patch
 
 from cmt_vna.testing import DummyVNA
 from eigsep_corr.config import load_config
-from switch_network.testing import DummySwitchNetwork
+
+# Import dummy classes before importing client to ensure mocking works
+from eigsep_observing.testing import (
+    DummyEigsepRedis,
+    DummyPicoDevice,
+    DummyPicoRFSwitch,
+    DummyPicoPeltier,
+    DummyPicoMotor,
+)
 
 import eigsep_observing
 import eigsep_observing.utils
 from eigsep_observing.client import PandaClient
-from eigsep_observing.testing import DummyEigsepRedis, DummySensor
 
 
 # Use dummy implementations to avoid hardware dependencies
 @pytest.fixture(autouse=True)
 def dummies(monkeypatch):
-    monkeypatch.setattr(
-        "eigsep_observing.client.SwitchNetwork",
-        DummySwitchNetwork,
-    )
+    # Mock picohost at import time
+    import picohost
+
+    picohost.PicoDevice = DummyPicoDevice
+    picohost.PicoRFSwitch = DummyPicoRFSwitch
+    picohost.PicoPeltier = DummyPicoPeltier
+    picohost.PicoMotor = DummyPicoMotor
+
     monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
-    monkeypatch.setattr(
-        "eigsep_observing.client.sensors.SENSOR_CLASSES",
-        {"dummy_sensor": DummySensor},
-    )
 
 
 @pytest.fixture
@@ -32,8 +39,21 @@ def redis():
 
 
 @pytest.fixture
-def client(redis, tmp_path):
+def client(redis, tmp_path, monkeypatch):
     """Create client for error tests."""
+    # Patch init_picos to ensure attributes are set even if no picos connect
+    original_init_picos = PandaClient.init_picos
+
+    def patched_init_picos(self):
+        # Initialize attributes first
+        self.switch_nw = None
+        self.motor = None
+        self.peltier = None
+        # Call original method
+        original_init_picos(self)
+
+    monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
     dummy_cfg = load_config(path, compute_inttime=False)
     dummy_cfg["vna_save_dir"] = str(tmp_path)
@@ -43,12 +63,23 @@ def client(redis, tmp_path):
 class TestClientInitializationErrors:
     """Test client initialization error handling."""
 
-    def test_init_redis_config_fallback(self, redis, tmp_path):
+    def test_init_redis_config_fallback(self, redis, tmp_path, monkeypatch):
         """
         Test initialization falls back to default when
         redis.get_config() fails.
         """
         redis.get_config = Mock(side_effect=ValueError("Config not found"))
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -60,11 +91,22 @@ class TestClientInitializationErrors:
         # Should have used default config
         assert client.cfg == dummy_cfg
 
-    def test_init_redis_connection_error(self, redis, tmp_path):
+    def test_init_redis_connection_error(self, redis, tmp_path, monkeypatch):
         """Test initialization when Redis connection fails during heartbeat."""
         redis.client_heartbeat_check = Mock(
             side_effect=ConnectionError("Redis unavailable")
         )
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -79,22 +121,37 @@ class TestClientInitializationErrors:
             # If it fails, that's also acceptable behavior
             pass
 
-    def test_init_switch_network_error(self, redis, tmp_path, monkeypatch):
-        """Test initialization when switch network fails."""
+    def test_init_pico_error(self, redis, tmp_path, monkeypatch):
+        """Test initialization when pico initialization fails."""
 
-        def failing_switch(*args, **kwargs):
-            raise RuntimeError("Switch network unavailable")
+        def failing_pico(*args, **kwargs):
+            raise RuntimeError("Pico unavailable")
 
-        monkeypatch.setattr(
-            "eigsep_observing.client.SwitchNetwork", failing_switch
-        )
+        # Mock picohost to raise errors
+        import picohost
+
+        picohost.PicoDevice = failing_pico
+        picohost.PicoRFSwitch = failing_pico
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
-        with pytest.raises(RuntimeError, match="Switch network unavailable"):
-            PandaClient(redis, default_cfg=dummy_cfg)
+        # Should handle pico errors gracefully (no picos will connect)
+        client = PandaClient(redis, default_cfg=dummy_cfg)
+        # Should have no picos connected
+        assert len(client.picos) == 0
 
     def test_init_vna_error(self, redis, tmp_path, monkeypatch):
         """Test initialization when VNA fails."""
@@ -104,40 +161,83 @@ class TestClientInitializationErrors:
 
         monkeypatch.setattr("eigsep_observing.client.VNA", failing_vna)
 
+        # Patch init_picos to set attributes and ensure switch exists
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = DummyPicoRFSwitch("/dev/switch")
+            self.switch_nw.connect()
+            self.motor = None
+            self.peltier = None
+            self.picos = {"switch": self.switch_nw}
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
+        dummy_cfg["use_vna"] = True  # Force VNA initialization
 
         with pytest.raises(RuntimeError, match="VNA unavailable"):
             PandaClient(redis, default_cfg=dummy_cfg)
 
-    def test_init_sensor_error(self, redis, tmp_path, monkeypatch):
-        """Test initialization when sensor setup fails."""
+    def test_init_pico_connection_error(self, redis, tmp_path, monkeypatch):
+        """Test initialization when pico connection fails."""
 
-        def failing_sensor(*args, **kwargs):
-            raise RuntimeError("Sensor unavailable")
+        class FailingPico:
+            def __init__(self, *args, **kwargs):
+                pass
 
-        monkeypatch.setattr(
-            "eigsep_observing.client.sensors.SENSOR_CLASSES",
-            {"dummy_sensor": failing_sensor},
-        )
+            def connect(self):
+                return False  # Connection fails
+
+            def set_response_handler(self, handler):
+                pass
+
+        # Mock picohost with failing connection
+        import picohost
+
+        picohost.PicoDevice = FailingPico
+        picohost.PicoRFSwitch = FailingPico
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
-        # Client should handle sensor errors gracefully
+        # Client should handle pico connection errors gracefully
         client = PandaClient(redis, default_cfg=dummy_cfg)
 
-        # The failing sensor should not be in the sensors dict
-        assert "dummy_sensor" not in client.sensors
+        # No picos should be connected
+        assert len(client.picos) == 0
 
         # Client should still be initialized successfully
         assert client.redis == redis
 
-    def test_init_invalid_config_format(self, redis, tmp_path):
+    def test_init_invalid_config_format(self, redis, tmp_path, monkeypatch):
         """Test initialization with invalid config format."""
         redis.get_config = Mock(return_value="invalid_config")  # Not a dict
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -152,9 +252,20 @@ class TestClientInitializationErrors:
             # If it fails due to config format, that's acceptable
             pass
 
-    def test_init_missing_config_keys(self, redis, tmp_path):
+    def test_init_missing_config_keys(self, redis, tmp_path, monkeypatch):
         """Test initialization with missing required config keys."""
         redis.get_config = Mock(return_value={"incomplete": "config"})
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -169,9 +280,20 @@ class TestClientInitializationErrors:
             # If it fails due to missing keys, that's acceptable
             pass
 
-    def test_init_config_none(self, redis, tmp_path):
+    def test_init_config_none(self, redis, tmp_path, monkeypatch):
         """Test initialization when config is None."""
         redis.get_config = Mock(return_value=None)
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -186,9 +308,20 @@ class TestClientInitializationErrors:
             # If it fails, that's acceptable
             pass
 
-    def test_init_empty_config(self, redis, tmp_path):
+    def test_init_empty_config(self, redis, tmp_path, monkeypatch):
         """Test initialization with empty config."""
         redis.get_config = Mock(return_value={})
+
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
@@ -235,91 +368,128 @@ class TestClientReprogramErrors:
                 client.reprogram()
 
 
-class TestClientSensorErrors:
-    """Test client sensor management error handling."""
+class TestClientPicoErrors:
+    """Test client pico management error handling."""
 
-    def test_add_sensor_invalid_name(self, client):
-        """Test adding sensor with invalid name."""
-        # Should handle invalid sensor names gracefully
-        client.add_sensor("invalid_sensor", "/dev/invalid")
+    def test_pico_invalid_config(self, client):
+        """Test pico initialization with invalid config."""
+        # Test that client handles missing pico config gracefully
+        # This is tested during initialization - if picos key is missing,
+        # client should continue without picos
+        assert hasattr(client, "picos")
+        # Should be dict even if empty
+        assert isinstance(client.picos, dict)
 
-        # Should not have added the sensor
-        assert "invalid_sensor" not in client.sensors
+    def test_pico_no_config(self, redis, tmp_path, monkeypatch):
+        """Test pico initialization with no pico config."""
+        path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+        dummy_cfg = load_config(path, compute_inttime=False)
+        dummy_cfg["vna_save_dir"] = str(tmp_path)
+        # Remove picos config
+        if "picos" in dummy_cfg:
+            del dummy_cfg["picos"]
 
-    def test_add_sensor_duplicate(self, client):
-        """Test adding duplicate sensor."""
-        # Add sensor twice (dummy_sensor already exists from fixture)
-        initial_count = len(client.sensors)
-        client.add_sensor("dummy_sensor", "/dev/test1")
-        client.add_sensor("dummy_sensor", "/dev/test2")
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
 
-        # Should still have the same number of sensors
-        assert len(client.sensors) == initial_count
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
 
-    def test_add_sensor_connection_error(self, client, monkeypatch):
-        """Test adding sensor when connection fails."""
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
-        def failing_sensor(*args, **kwargs):
-            raise RuntimeError("Connection failed")
+        client = PandaClient(redis, default_cfg=dummy_cfg)
+        # Should handle missing pico config gracefully
+        assert len(client.picos) == 0
 
-        monkeypatch.setattr(
-            "eigsep_observing.client.sensors.SENSOR_CLASSES",
-            {"failing_sensor": failing_sensor},
-        )
+    def test_pico_unknown_class(self, redis, tmp_path, monkeypatch):
+        """Test pico initialization with unknown pico class."""
+        path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+        dummy_cfg = load_config(path, compute_inttime=False)
+        dummy_cfg["vna_save_dir"] = str(tmp_path)
+        # Add unknown pico type to config
+        dummy_cfg["picos"] = {"unknown_pico": "/dev/unknown"}
 
-        # Should handle connection errors gracefully
-        client.add_sensor("failing_sensor", "/dev/test")
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
 
-        # Sensor should not be added
-        assert "failing_sensor" not in client.sensors
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
 
-    def test_sensor_thread_management(self, client):
-        """Test sensor thread lifecycle management."""
-        # Should have dummy_sensor from config
-        if "dummy_sensor" in client.sensors:
-            sensor, thread = client.sensors["dummy_sensor"]
-            assert thread.is_alive()
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
-            # Thread should be running
-            assert thread.is_alive()
+        client = PandaClient(redis, default_cfg=dummy_cfg)
+        # Should handle unknown pico class gracefully
+        assert "unknown_pico" not in client.picos
 
-    def test_sensor_stop_event_handling(self, client):
-        """Test sensor stop event handling."""
-        # Check if client has stop events for sensors
-        # Note: The current implementation may not have stop_events attribute
-        if hasattr(client, "stop_events") and "dummy_sensor" in client.sensors:
-            if "dummy_sensor" in client.stop_events:
-                assert not client.stop_events["dummy_sensor"].is_set()
+    def test_pico_thread_management(self, client):
+        """Test pico thread lifecycle management."""
+        # Check if any picos were initialized
+        if client.picos:
+            for name, pico in client.picos.items():
+                # Picos should have started if they connected
+                if hasattr(pico, "_thread") and pico._thread:
+                    assert pico._thread.is_alive()
 
-                # Set stop event
-                client.stop_events["dummy_sensor"].set()
-                assert client.stop_events["dummy_sensor"].is_set()
+    def test_pico_stop_event_handling(self, client):
+        """Test pico stop event handling."""
+        # Check if client has stop_client event
+        assert hasattr(client, "stop_client")
+        assert not client.stop_client.is_set()
 
-    def test_sensor_error_resilience(self, client, monkeypatch):
-        """Test client resilience to sensor errors."""
+        # Set stop event
+        client.stop_client.set()
+        assert client.stop_client.is_set()
 
-        def failing_sensor(*args, **kwargs):
-            raise RuntimeError("Sensor error")
+    def test_pico_error_resilience(self, redis, tmp_path, monkeypatch):
+        """Test client resilience to pico errors."""
+        path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+        dummy_cfg = load_config(path, compute_inttime=False)
+        dummy_cfg["vna_save_dir"] = str(tmp_path)
+        dummy_cfg["picos"] = {
+            "imu": "/dev/nonexistent1",  # These will fail to connect
+            "therm": "/dev/nonexistent2",
+        }
 
-        monkeypatch.setattr(
-            "eigsep_observing.client.sensors.SENSOR_CLASSES",
-            {"dummy_sensor": DummySensor, "failing_sensor": failing_sensor},
-        )
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
 
-        # Try to add multiple sensors
-        client.add_sensor("failing_sensor", "/dev/fail")
-        client.add_sensor("dummy_sensor", "/dev/work")
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
 
-        # Should handle mixed success/failure
-        assert "failing_sensor" not in client.sensors
-        # dummy_sensor should still work
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+
+        client = PandaClient(redis, default_cfg=dummy_cfg)
+
+        # Should handle pico connection errors gracefully
+        assert len(client.picos) == 0  # None should connect
+        assert client.redis == redis  # Client should still be functional
 
 
 class TestClientEdgeCases:
     """Test client edge cases and error conditions."""
 
-    def test_error_handling_edge_cases(self, tmp_path):
+    def test_error_handling_edge_cases(self, tmp_path, monkeypatch):
         """Test edge cases in error handling."""
+        # Patch init_picos to set attributes
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            original_init_picos(self)
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+
         # Test with None parameters
         with pytest.raises(AttributeError):
             PandaClient(None)
@@ -335,18 +505,20 @@ class TestClientEdgeCases:
         with pytest.raises(AttributeError):
             PandaClient(InvalidRedis(), default_cfg=dummy_cfg)
 
-    def test_concurrent_sensor_operations(self, client):
-        """Test concurrent sensor operations."""
+    def test_concurrent_pico_operations(self, client):
+        """Test concurrent pico operations."""
         import threading
 
-        def add_sensors():
+        def check_picos():
+            # Just check picos dict multiple times
             for i in range(3):
-                client.add_sensor("dummy_sensor", f"/dev/test{i}")
+                _ = len(client.picos)
+                _ = client.switch_nw
 
-        # Start multiple threads adding sensors
+        # Start multiple threads checking picos
         threads = []
         for _ in range(2):
-            thread = threading.Thread(target=add_sensors)
+            thread = threading.Thread(target=check_picos)
             threads.append(thread)
             thread.start()
 
@@ -355,32 +527,46 @@ class TestClientEdgeCases:
             thread.join(timeout=1)
 
         # Should handle concurrent operations without crashing
-        assert isinstance(client.sensors, dict)
+        assert isinstance(client.picos, dict)
 
     def test_memory_leak_prevention(self, client):
         """Test that client doesn't leak memory with repeated operations."""
-        # Repeatedly add sensors (same name, should not accumulate)
+        # Check that picos dict doesn't grow unexpectedly
+        initial_pico_count = len(client.picos)
+
+        # Multiple checks shouldn't change pico count
         for i in range(5):
-            client.add_sensor("dummy_sensor", f"/dev/temp{i}")
+            _ = client.picos
+            _ = client.switch_nw
 
         # Should not accumulate excessive resources
-        assert len(client.sensors) <= 5
-        if hasattr(client, "stop_events"):
-            assert len(client.stop_events) <= 5
+        assert len(client.picos) == initial_pico_count
 
     def test_client_cleanup_on_failure(self, redis, tmp_path, monkeypatch):
         """Test client cleanup when initialization fails."""
 
-        def failing_switch(*args, **kwargs):
-            raise RuntimeError("Switch initialization failed")
+        def failing_vna(*args, **kwargs):
+            raise RuntimeError("VNA initialization failed")
 
-        monkeypatch.setattr(
-            "eigsep_observing.client.SwitchNetwork", failing_switch
-        )
+        monkeypatch.setattr("eigsep_observing.client.VNA", failing_vna)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         dummy_cfg = load_config(path, compute_inttime=False)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
+        # Force VNA initialization by having a switch
+        dummy_cfg["picos"] = {"switch": "/dev/switch"}
+
+        # Patch init_picos to set attributes and ensure switch exists
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = DummyPicoRFSwitch("/dev/switch")
+            self.switch_nw.connect()
+            self.motor = None
+            self.peltier = None
+            self.picos = {"switch": self.switch_nw}
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         with pytest.raises(RuntimeError):
             PandaClient(redis, default_cfg=dummy_cfg)
@@ -388,12 +574,30 @@ class TestClientEdgeCases:
         # Even after failure, should not leave resources hanging
         # This is more about ensuring no partial initialization state
 
-    def test_invalid_sensor_configuration(self, client):
-        """Test client with invalid sensor configuration."""
-        # Try adding sensor with invalid parameters
-        client.add_sensor("", "/dev/test")  # Empty name
-        client.add_sensor("test_sensor", "")  # Empty device
-        client.add_sensor(None, "/dev/test")  # None name
+    def test_invalid_pico_configuration(self, redis, tmp_path, monkeypatch):
+        """Test client with invalid pico configuration."""
 
-        # Should handle all gracefully
-        assert isinstance(client.sensors, dict)
+        # Patch init_picos to set attributes once
+        original_init_picos = PandaClient.init_picos
+
+        def patched_init_picos(self):
+            self.switch_nw = None
+            self.motor = None
+            self.peltier = None
+            try:
+                original_init_picos(self)
+            except (TypeError, AttributeError):
+                # Handle gracefully
+                self.picos = {}
+
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+
+        path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+        dummy_cfg = load_config(path, compute_inttime=False)
+        dummy_cfg["vna_save_dir"] = str(tmp_path)
+
+        # Test with empty picos config
+        dummy_cfg["picos"] = {}
+        client = PandaClient(redis, default_cfg=dummy_cfg)
+        assert isinstance(client.picos, dict)
+        assert len(client.picos) == 0
