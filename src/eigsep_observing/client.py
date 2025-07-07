@@ -4,7 +4,6 @@ import threading
 
 from eigsep_corr.config import load_config
 from cmt_vna import VNA
-from switch_network import SwitchNetwork
 import picohost
 
 from .utils import get_config_path
@@ -21,7 +20,7 @@ class PandaClient:
         "therm": picohost.PicoDevice,
         "peltier": picohost.PicoPeltier,
         "lidar": picohost.PicoDevice,
-        "switch": SwitchNetwork,
+        "switch": picohost.PicoRFSwitch,
         "motor": picohost.PicoMotor,
     }
 
@@ -125,42 +124,6 @@ class PandaClient:
             self.stop_client.wait(ex / 2)  # update faster than expiration
         # if we reach here, the client should stop running
         self.redis.client_heartbeat_set(alive=False)
-
-    # XXX being removed
-    def init_switch_network(self):
-        """
-        Initialize the switch network, using the serial port and GPIO
-        settings from the Redis configuration.
-
-        Notes
-        -----
-        This methods overrides the attribute ``switch_nw`` with the
-        initialized SwitchNetwork instance. If no cofiguration is
-        provided or there is an error, ``switch_nw`` will remain None.
-
-        """
-        switch_pico = self.cfg.get("switch_pico", None)
-        if switch_pico is None:
-            self.logger.warning(
-                "No switch pico provided in configuration. "
-                "Switch network will not be initialized."
-            )
-            return
-        try:
-            self.switch_nw = SwitchNetwork(
-                serport=switch_pico,
-                redis=self.redis,
-            )
-        except ValueError as e:
-            err = (
-                f"Failed to initialize switch network: {e}. "
-                "Check the serial port and GPIO settings."
-            )
-            self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
-            self.switch_nw = None
-        self.logger.info(f"Switch network initialized with {switch_pico}.")
-        self.redis.r.sadd("ctrl_commands", "switch")
 
     def init_VNA(self):
         """
@@ -384,7 +347,7 @@ class PandaClient:
                 self.redis.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
-            self.switch_nw.switch(mode, verify=True)
+            self.switch_nw.switch(mode)
         elif cmd in self.redis.vna_commands:
             mode = cmd.split(":")[1]
             try:
