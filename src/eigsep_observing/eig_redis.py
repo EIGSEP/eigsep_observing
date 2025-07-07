@@ -17,13 +17,7 @@ class EigsepRedis:
     maxlen = {"ctrl": 10, "status": 10, "data": 10000}
     ctrl_stream_name = "stream:ctrl"
 
-    def __init__(
-        self,
-        host="localhost",
-        port=6379,
-        socket_timeout=30,
-        socket_connect_timeout=30,
-    ):
+    def __init__(self, host="localhost", port=6379):
         """
         Initialize the EigsepRedis client.
 
@@ -31,29 +25,14 @@ class EigsepRedis:
         ----------
         host : str
         port : int
-        socket_timeout : int
-            Socket timeout in seconds for Redis operations
-        socket_connect_timeout : int
-            Socket connection timeout in seconds
 
         """
         self.logger = logger
         self._stream_lock = threading.RLock()
         self._last_read_ids = defaultdict(lambda: "$")
-        self.r = self._make_redis(
-            host,
-            port,
-            socket_timeout,
-            socket_connect_timeout,
-        )
+        self.r = self._make_redis(host, port)
 
-    def _make_redis(
-        self,
-        host,
-        port,
-        socket_timeout,
-        socket_connect_timeout,
-    ):
+    def _make_redis(self, host, port):
         """
         Create a Redis connection with error handling.
 
@@ -61,10 +40,6 @@ class EigsepRedis:
         ----------
         host : str
         port : int
-        socket_timeout : int
-            Socket timeout in seconds for Redis operations
-        socket_connect_timeout : int
-            Socket connection timeout in seconds
 
         Returns
         -------
@@ -82,8 +57,8 @@ class EigsepRedis:
                 host=host,
                 port=port,
                 decode_responses=False,
-                socket_timeout=socket_timeout,
-                socket_connect_timeout=socket_connect_timeout,
+                socket_timeout=None,
+                socket_connect_timeout=None,
                 retry_on_timeout=False,
             )
             # Test connection
