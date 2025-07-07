@@ -455,12 +455,10 @@ class File:
             arr = self.data[p]
             arr[self._counter] = d
         # process metadata
-        all_keys = self._metadata_fills | metadata
-        for key in all_keys:
-            if key in metadata:
-                # value: list of dicts with keys data, status, cadence
-                value = metadata[key]
-                md = self._avg_metadata(value)
+        for key in metadata:
+            # value: list of dicts with keys data, status, cadence
+            value = metadata[key]
+            md = self._avg_metadata(value)
             self.metadata[key].append(md)
         self._counter += 1
         if self._counter == self.ntimes:
