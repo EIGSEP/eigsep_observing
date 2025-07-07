@@ -55,6 +55,11 @@ class PandaClient:
             )
             self.cfg = default_cfg
             self.redis.upload_config(self.cfg, from_file=False)
+
+        # initialize the picos and VNA
+        self.switch_nw = None
+        self.motor = None
+        self.peltier = None
         self._initialize()  # initialize the client
 
     def _initialize(self):
