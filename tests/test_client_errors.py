@@ -161,9 +161,6 @@ class TestClientInitializationErrors:
 
         monkeypatch.setattr("eigsep_observing.client.VNA", failing_vna)
 
-        # Patch init_picos to set attributes and ensure switch exists
-        original_init_picos = PandaClient.init_picos
-
         def patched_init_picos(self):
             self.switch_nw = DummyPicoRFSwitch("/dev/switch")
             self.switch_nw.connect()
@@ -555,9 +552,6 @@ class TestClientEdgeCases:
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         # Force VNA initialization by having a switch
         dummy_cfg["picos"] = {"switch": "/dev/switch"}
-
-        # Patch init_picos to set attributes and ensure switch exists
-        original_init_picos = PandaClient.init_picos
 
         def patched_init_picos(self):
             self.switch_nw = DummyPicoRFSwitch("/dev/switch")
