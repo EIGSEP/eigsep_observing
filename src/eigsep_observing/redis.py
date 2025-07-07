@@ -401,7 +401,9 @@ class EigsepRedis:
             pairs = self.r.smembers("corr_pairs")
         last_id = self.data_streams["stream:corr"]
         out = self.r.xread(
-            {"stream:corr": last_id}, count=1, block=timeout * 1000,
+            {"stream:corr": last_id},
+            count=1,
+            block=timeout * 1000,
         )
         if not out:
             raise TimeoutError("No correlation data received within timeout.")
@@ -523,7 +525,7 @@ class EigsepRedis:
         self.r.xadd(
             key,
             {"value": payload},
-            maxlen=self.maxlen["data"], 
+            maxlen=self.maxlen["data"],
             approximate=True,
         )
         # add the stream to the data streams if not already present
@@ -606,7 +608,7 @@ class EigsepRedis:
             }
 
         # non-blocking read
-        resp = self.r.xread(streams) 
+        resp = self.r.xread(streams)
         redis_hdr = {}
         for stream, dat in resp:
             stream = stream.decode()  # decode stream name
