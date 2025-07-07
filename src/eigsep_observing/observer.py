@@ -278,7 +278,7 @@ class EigObserver:
             if self.panda_connected:
                 metadata = self.redis_panda.get_metadata()
             else:
-                metadata = {}
+                metadata = None
             filename = file.add_data(acc_cnt, data, metadata=metadata)
             if filename is not None:  # file buffer is full, file written
                 self.logger.info(f"Writing file {filename}")
