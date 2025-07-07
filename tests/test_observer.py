@@ -273,12 +273,11 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
         None,  # pairs (default)
         60,  # ntimes
         observer.corr_cfg,
-        redis=None,  # redis_panda is None
     )
 
     # Verify data was read and added
     redis_snap.read_corr_data.assert_called()
-    mock_file.add_data.assert_called_with(123, mock_data)
+    mock_file.add_data.assert_called_with(123, mock_data, metadata={})
 
 
 def test_record_corr_data_no_snap():
