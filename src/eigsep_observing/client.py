@@ -226,13 +226,19 @@ class PandaClient:
                     f"Unknown pico class {name}. "
                     "Must be in picos.PICO_CLASSES."
                 )
-            p = cls(port, timeout=self.serial_timeout)
-            p.set_response_handler(
-                self._pico_response_handler(pico_queue, name)
-            )
-            if p.connect():
-                self.picos[name] = p
-                self.redis.r.sadd("picos", name)
+                continue
+
+            try:
+                p = cls(port, timeout=self.serial_timeout)
+                p.set_response_handler(
+                    self._pico_response_handler(pico_queue, name)
+                )
+                if p.connect():
+                    self.picos[name] = p
+                    self.redis.r.sadd("picos", name)
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize pico {name}: {e}")
+                continue  # Skip picos that fail to initialize
 
         if not self.picos:
             self.logger.warning("Running without pico threads.")
