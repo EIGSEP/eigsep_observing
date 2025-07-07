@@ -107,6 +107,7 @@ def append_corr_header(header, acc_cnts):
     new_header["acc_cnts"] = acc_cnts
     return new_header
 
+
 def _write_attr(grp, key, value):
     """
     Helper function to write attributes to an HDF5 group.
@@ -407,7 +408,6 @@ class File:
 
         self.acc_cnts = np.zeros(self.ntimes)
         self.metadata = defaultdict(list)  # dynamic metadata
-        self._metadata_fills = {}  # dict with keys: cadence/fill count
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
@@ -459,14 +459,8 @@ class File:
         for key in all_keys:
             if key in metadata:
                 # value: list of dicts with keys data, status, cadence
-                value = metadata[key] 
-                self._metadata_fills[key] = {
-                    "cadence": value["cadence"], "fill_cnt": 0
-                }
+                value = metadata[key]
                 md = self._avg_metadata(value)
-            else:  # in this case, metadata was added before
-                self._metadata_fills[key]["fill_cnt"] += 1
-                md = self._fill_metadata()  # NaN or copy based on cnt
             self.metadata[key].append(md)
         self._counter += 1
         if self._counter == self.ntimes:
@@ -482,28 +476,34 @@ class File:
         ----------
         value : list of dicts
             Output from `redis.get_metadata`. List of at least one dict
-            with keys 'data', 'status', and 'cadence'.
+            with 'status' and 'app_id' keys and some number of data keys.
 
         Returns
         -------
         avg : float or str
-            Average value of the metadata. If the value is a string,
-            it is returned as is. Otherwise, it is averaged.
+            Average value of the metadata where 'status' is not 'error'.
 
         """
-        data = []
-        for v in value:
-            if v["status"] == "TIMEOUT":
-                return "TIMEOUT"
-            data.append(v["data"])
-        # check if scalar or string
-        if isinstance(data[0], str):
-            return ",".join(data)
-        return np.mean(data)  # data is scalar or array-like
-            
+        status_list = [v["status"] for v in value]
+        app_id = value[0]["app_id"]
+        # rest of the keys are data
+        if app_id == 5:  # XXX switching, should not be hardcoded
+            state = [v["state"] for v in value]
+            if "error" in status_list or any(s != state[0] for s in state):
+                return "SWITCHING"
+            return state[0]  # all states are the same
 
-    def _fill_metadata(self):  # XXX here
-        raise NotImplementedError
+        for data_key in value[0].keys():
+            if data_key in ("status", "app_id"):
+                continue
+            data = np.where(
+                np.array(status_list) != "error",
+                np.array([v[data_key] for v in value]),
+                np.nan,
+            )
+
+        avg = np.nanmean(data)
+        return avg
 
     def corr_write(self, fname=None):
         """
