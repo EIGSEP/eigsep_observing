@@ -72,6 +72,7 @@ class EigsepFpga(CorrEigsepFpga):
             "sync_date": datetime.fromtimestamp(self.sync_time).isoformat(),
         }
         self.redis.add_metadata("corr_sync_time", sync_time)
+        self.prev_cnt = 0  # resets prev cnt
 
     def initialize(
         self,
@@ -184,6 +185,9 @@ class EigsepFpga(CorrEigsepFpga):
             If the read operation times out.
 
         """
+        if not hasattr(self, prev_cnt):
+            self.logger.debug("Resetting prev cnt")
+            self.prev_cnt = 0
         self.upload_config(validate=True)
         t_int = self.header["integration_time"]
         self.logger.info(f"Integration time is {t_int} seconds.")
