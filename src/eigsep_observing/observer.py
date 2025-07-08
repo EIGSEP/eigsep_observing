@@ -110,7 +110,7 @@ class EigObserver:
             level, status = self.redis_panda.read_status()
             if status is None:
                 # Check stop event with timeout
-                if self.stop_events["status"].wait(0.1):  
+                if self.stop_events["status"].wait(0.1):
                     break
                 continue
             self.logger.log(level, status)

@@ -1,8 +1,3 @@
-"""
-Live plotting functionality for EIGSEP observing system.
-"""
-
-import time
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -98,7 +93,6 @@ class LivePlotter:
     def _setup_plots(self):
         """Set up matplotlib figure and axes."""
         nrows = 3 if self.plot_delay else 2
-        plt.ion()
         fig, axs = plt.subplots(figsize=(12, 8), nrows=nrows)
 
         # Magnitude plot
@@ -224,9 +218,6 @@ class LivePlotter:
 
         try:
             plt.show()
-            # Keep the script running
-            while True:
-                time.sleep(0.1)
         except KeyboardInterrupt:
             print("\nStopping live plotter...")
             if self.ani:

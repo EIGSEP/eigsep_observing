@@ -3,6 +3,7 @@ import picohost
 
 from .. import PandaClient
 
+
 class DummyPandaClient(PandaClient):
     """
     Mock up of PandaClient for testing purposes, that uses dummy
