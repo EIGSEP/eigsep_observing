@@ -377,7 +377,7 @@ class EigsepRedis:
         out = self.r.xread(
             {"stream:corr": last_id},
             count=1,
-            block=timeout * 1000,
+            block=int(timeout * 1000),
         )
         if not out:
             raise TimeoutError("No correlation data received within timeout.")
@@ -759,7 +759,7 @@ class EigsepRedis:
 
         """
         # blocking read with optional timeout
-        block_time = 0 if timeout is None else timeout * 1000
+        block_time = 0 if timeout is None else int(timeout * 1000)
         msg = self.r.xread(self.ctrl_stream, count=1, block=block_time)
         if not msg:
             return None, {}
@@ -844,7 +844,7 @@ class EigsepRedis:
 
         """
         # blocking read with optional timeout
-        block_time = 0 if timeout is None else timeout * 1000
+        block_time = 0 if timeout is None else int(timeout * 1000)
         msg = self.r.xread(self.status_stream, count=1, block=block_time)
         if not msg:
             return None, None
