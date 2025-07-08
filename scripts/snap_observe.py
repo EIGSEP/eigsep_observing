@@ -7,14 +7,14 @@ import argparse  # noqa: E402
 from eigsep_corr.config import load_config  # noqa: E402
 from eigsep_corr.fpga import add_args  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
-from eigsep_observing.utils import get_config_path
+from eigsep_observing.utils import get_config_path  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 
 parser = argparse.ArgumentParser(
     description="Snap observing with Eigsep FPGA",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-default_config_file=get_config_path("corr_config.yaml")
+default_config_file = get_config_path("corr_config.yaml")
 add_args(parser, default_config_file=default_config_file)
 args = parser.parse_args()
 cfg = load_config(args.config_file)
