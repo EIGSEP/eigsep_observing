@@ -99,6 +99,7 @@ class EigObserver:
         """
         self.logger.info("Reprogramming LattePanda with current configuration")
         self.redis_panda.send_ctrl("ctrl:reprogram", force=force)
+        self.cfg = self.redis_panda.get_config()  # update cfg
 
     @require_panda
     def status_logger(self):
