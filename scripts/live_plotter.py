@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Live plotter script for EIGSEP observing system.
 """

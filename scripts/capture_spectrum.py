@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Spectrum capture script for EIGSEP observing system.
 Captures and saves correlation spectra from Redis data streams.
