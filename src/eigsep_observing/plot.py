@@ -175,9 +175,7 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        acc_cnt, data = self.redis.read_corr_data(
-            pairs=self.pairs, timeout=0.5
-        )
+        acc_cnt, data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot
         for p, d in data.items():
