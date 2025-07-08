@@ -1,5 +1,6 @@
 from datetime import datetime
-import time
+from queue import Queue
+from threading import Event, Thread
 
 from eigsep_corr.fpga import EigsepFpga as CorrEigsepFpga
 
@@ -72,7 +73,6 @@ class EigsepFpga(CorrEigsepFpga):
             "sync_date": datetime.fromtimestamp(self.sync_time).isoformat(),
         }
         self.redis.add_metadata("corr_sync_time", sync_time)
-        self.prev_cnt = 0  # resets prev cnt
 
     def initialize(
         self,
@@ -131,42 +131,6 @@ class EigsepFpga(CorrEigsepFpga):
         """
         self.redis.add_corr_data(data, cnt, dtype=self.cfg["dtype"])
 
-    def _read_integrations(self, pairs, prev_cnt):
-        """
-        Read one integration from the correlator.
-
-        Parameters
-        ----------
-        pairs : list of str
-            List of correlation pairs to read.
-        prev_cnt : int
-            The previous accumulation count.
-
-        Returns
-        -------
-        data : dict
-            A dictionary containing the raw data from the correlator.
-        cnt : int
-            The current accumulation count.
-        """
-        cnt = self.fpga.read_int("corr_acc_cnt")
-        dcnt = cnt - prev_cnt
-        if dcnt == 0:
-            return None, cnt
-        if dcnt > 1:
-            self.logger.warning(f"Missed {dcnt - 1} integration(s).")
-        self.logger.info(f"Reading acc_cnt={cnt} from correlator.")
-        data = self.read_data(pairs=pairs, unpack=False)
-        if cnt != self.fpga.read_int("corr_acc_cnt"):
-            self.logger.error(
-                f"Read of acc_cnt={cnt} FAILED to complete before next "
-                "integration. "
-            )
-        return data, cnt
-
-    def end_observing(self):
-        raise NotImplementedError("Not implemented in eigsep_observing")
-
     def observe(self, pairs=None, timeout=10):
         """
         Read correlator data and stream it to Redis.
@@ -185,23 +149,30 @@ class EigsepFpga(CorrEigsepFpga):
             If the read operation times out.
 
         """
-        if not hasattr(self, prev_cnt):
-            self.logger.debug("Resetting prev cnt")
-            self.prev_cnt = 0
+        self.queue = Queue(maxsize=0)
+        self.event = Event()
         self.upload_config(validate=True)
         t_int = self.header["integration_time"]
         self.logger.info(f"Integration time is {t_int} seconds.")
         if pairs is None:
             pairs = self.autos + self.crosses
         self.logger.info(f"Starting observation for pairs: {pairs}.")
-        t = time.time()
-        while True:
-            if time.time() - t > timeout:
-                raise TimeoutError("Read operation timed out.")
-            data, cnt = self._read_integrations(pairs, self.prev_cnt)
-            if data is None:
-                time.sleep(0.1)
-                continue
+
+        thd = Thread(
+            target=self._read_integrations,
+            args=(pairs,),
+            kwargs={"timeout": timeout},
+        )
+        thd.start()
+
+        while not self.event.is_set() or not self.queue.empty():
+            d = self.queue.get()
+            if d is None:
+                if self.event.is_set():
+                    self.logger.info("End of queue, processing finished.")
+                    break
+                else:
+                    continue
+            data = d["data"]
+            cnt = d["cnt"]
             self.update_redis(data, cnt)
-            self.prev_cnt = cnt
-            t = time.time()
