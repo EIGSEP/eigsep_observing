@@ -1,12 +1,12 @@
 from datetime import datetime
 import time
 
-import eigsep_corr
+from eigsep_corr.fpga import EigsepFpga as CorrEigsepFpga
 
 from .eig_redis import EigsepRedis
 
 
-class EigsepFpga(eigsep_corr.fpga.EigsepFpga):
+class EigsepFpga(CorrEigsepFpga):
 
     @staticmethod
     def _create_redis(host: str, port: int) -> EigsepRedis:
