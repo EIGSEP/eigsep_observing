@@ -48,7 +48,11 @@ class LivePlotter:
             "15",
             "35",
         ]
-        self.plot_delay = plot_delay
+        self.plot_phase = any(len(p) == 2 for p in self.pairs)
+        if self.plot_phase:
+            self.plot_delay = plot_delay
+        else:
+            self.plot_delay = False
         self.log_scale = log_scale
         self.poll_interval = poll_interval
         self.last_acc_cnt = None
@@ -92,13 +96,16 @@ class LivePlotter:
 
     def _setup_plots(self):
         """Set up matplotlib figure and axes."""
-        nrows = 3 if self.plot_delay else 2
+        nrows = 1
+        if self.plot_phase:
+            nrows += 1
+        if self.plot_delay:
+            nrows += 1
         fig, axs = plt.subplots(figsize=(12, 8), nrows=nrows)
 
         # Magnitude plot
         axs[0].grid(True)
         axs[0].set_ylabel("Magnitude")
-        axs[0].set_title("Live Correlation Spectra")
         if self.log_scale:
             axs[0].set_yscale("log")
             axs[0].set_ylim(1e-2, 1e9)
@@ -106,10 +113,11 @@ class LivePlotter:
             axs[0].set_ylim(0, 3e6)
 
         # Phase plot
-        axs[1].grid(True)
-        axs[1].set_ylabel("Phase (rad)")
-        axs[1].set_ylim(-np.pi, np.pi)
-        axs[1].set_xlabel("Frequency (MHz)")
+        if self.plot_phase:
+            axs[1].grid(True)
+            axs[1].set_ylabel("Phase (rad)")
+            axs[1].set_ylim(-np.pi, np.pi)
+            axs[1].set_xlabel("Frequency (MHz)")
 
         # Delay plot (optional)
         if self.plot_delay:
@@ -133,7 +141,7 @@ class LivePlotter:
         """Initialize plot lines for each correlation pair."""
         lines = {
             "mag": {},
-            "phase": {},
+            "phase": {} if self.plot_phase else None,
             "delay": {} if self.plot_delay else None,
         }
 
@@ -176,6 +184,7 @@ class LivePlotter:
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
         acc_cnt, data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)
+        data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot
         for p, d in data.items():
