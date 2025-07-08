@@ -24,7 +24,7 @@ dependencies = [
   "picohost>=0.0.2a3", 
   "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git",
   "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@selective-merge",
-  "fakeredis",
+  "fakeredis==2.23.5",
 ]
 
 [project.optional-dependencies]
