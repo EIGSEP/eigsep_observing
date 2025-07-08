@@ -6,11 +6,9 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from eigsep_corr.utils import calc_freqs_dfreq
 
-try:
-    from eigsep_corr.utils import calc_freqs_dfreq
-except ImportError:
-    calc_freqs_dfreq = None
+from .io import reshape_data
 
 
 class LivePlotter:
@@ -72,18 +70,8 @@ class LivePlotter:
             self.sample_rate = 500
 
         # Frequency axis
-        if calc_freqs_dfreq is not None:
-            try:
-                freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
-                self.x = freqs
-            except Exception:
-                self.x = np.linspace(
-                    0, self.sample_rate / 2, num=self.nchan, endpoint=False
-                )
-        else:
-            self.x = np.linspace(
-                0, self.sample_rate / 2, num=self.nchan, endpoint=False
-            )
+        freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
+        self.x = freqs
 
         # Color mapping
         self.colors = self._setup_colors()
@@ -193,74 +181,26 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        try:
-            # Check if acc_cnt has changed
-            acc_cnt = self.redis.get_raw("ACC_CNT")
-            if acc_cnt is not None:
-                current_acc_cnt = (
-                    acc_cnt.decode()
-                    if isinstance(acc_cnt, bytes)
-                    else str(acc_cnt)
-                )
+        acc_cnt, data = self.redis.read_corr_data(
+            pairs=self.pairs, timeout=0.5
+        )
+        data = reshape_data(data, avg_even_odd=True)
+        # Update magnitude plot
+        for p, d in data.items():
+            if len(p) == 1:  # Auto-correlation
+                self.lines["mag"][p].set_ydata(d)
+            else:  # Cross-correlation
+                mag = np.abs(d)
+                phase = np.angle(d)
+                self.lines["mag"][p].set_ydata(mag)
+                self.lines["phase"][p].set_ydata(phase)
 
-                # Only update plot if acc_cnt has changed
-                if current_acc_cnt == self.last_acc_cnt:
-                    return list(self.lines["mag"].values())
+                # Update delay spectrum if enabled
+                if self.plot_delay:
+                    dly = np.abs(np.fft.rfft(np.exp(1j * phase))) ** 2
+                    self.lines["delay"][p].set_ydata(dly)
 
-                self.last_acc_cnt = current_acc_cnt
-            for p in self.pairs:
-                # Get data from Redis
-                data_key = f"data:{p}"
-                data_bytes = self.redis.get_raw(data_key)
-
-                if data_bytes is None:
-                    continue
-
-                # Parse correlation data
-                dt = np.dtype(np.int32).newbyteorder(">")
-                data = np.frombuffer(data_bytes, dtype=dt)
-
-                if len(data) == 0:
-                    continue
-
-                # Update magnitude plot
-                if len(p) == 1:  # Auto-correlation
-                    if len(data) == len(self.x):
-                        self.lines["mag"][p].set_ydata(data)
-                else:  # Cross-correlation
-                    if len(data) < 2:
-                        continue
-                    real = data[::2].astype(np.int64)
-                    imag = data[1::2].astype(np.int64)
-
-                    # Ensure arrays have correct length
-                    min_len = min(len(real), len(imag), self.nchan)
-                    real = real[:min_len]
-                    imag = imag[:min_len]
-
-                    # Calculate magnitude and phase
-                    mag = np.sqrt(real**2 + imag**2)
-                    phase = np.arctan2(imag, real)
-
-                    # Update plots
-                    if min_len == len(self.x):
-                        self.lines["mag"][p].set_ydata(mag)
-                        if p in self.lines["phase"]:
-                            self.lines["phase"][p].set_ydata(phase)
-
-                        # Update delay spectrum if enabled
-                        if self.plot_delay and p in self.lines["delay"]:
-                            dly = np.abs(np.fft.rfft(np.exp(1j * phase))) ** 2
-                            self.lines["delay"][p].set_ydata(dly)
-
-            # Update title with current acc_cnt
-            if self.last_acc_cnt is not None:
-                self.fig.suptitle(
-                    f"Live Correlation Spectra (ACC_CNT: {self.last_acc_cnt})"
-                )
-
-        except Exception as e:
-            print(f"Error updating plot: {e}")
+        self.fig.suptitle(f"acc_cnt: {acc_cnt}")
 
         return list(self.lines["mag"].values())
 
