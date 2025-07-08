@@ -60,6 +60,7 @@ def reshape_data(data, avg_even_odd=True):
     """
     reshaped = {}
     for p, arr in data.items():
+        arr = np.atleast_2d(arr)  # ensure at least 2D if no times
         # place even/odd on last axis
         ntimes = arr.shape[0]
         arr = arr.reshape(ntimes, -1, 2, order="F")
