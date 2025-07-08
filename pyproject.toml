@@ -21,9 +21,9 @@ dependencies = [
   "numpy",
   "pyyaml",
   "flask",
-  "picohost>=0.0.2a3", 
-  "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git",
-  "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@selective-merge",
+  "picohost>=0.0.2a4",
+  "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git@main",
+  "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@main",
   "fakeredis==2.23.5",
 ]
 
