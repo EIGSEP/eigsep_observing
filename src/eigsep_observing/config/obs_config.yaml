@@ -27,7 +27,7 @@ vna_settings:
   fstop: 250000000.0  # in Hz
   npoints: 1000
   ifbw: 100.0  # in Hz
-  power:
+  power_dBm:
     ant: 0.0
     rec: -40.0
 vna_save_dir: "/media/eigsep/T7/data/s11_data"
