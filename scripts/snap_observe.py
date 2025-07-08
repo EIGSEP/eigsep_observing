@@ -49,4 +49,5 @@ try:
 except KeyboardInterrupt:
     logger.info("Observation interrupted by user.")
 finally:
-    logger.info("Stopping observation.")
+    fpga.end_observing()
+    logger.info("Observing done.")
