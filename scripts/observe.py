@@ -77,7 +77,8 @@ thds = {}
 if args.write_files:
     record_thd = threading.Thread(
         target=observer.record_corr_data,
-        kwargs={"timeout": 10},
+        args=(cfg["corr_save_dir"],),
+        kwargs={"ntimes": cfg["corr_ntimes"], "timeout": 10},
     )
     thds["snap"] = record_thd
     logger.info("Starting file writing thread.")
