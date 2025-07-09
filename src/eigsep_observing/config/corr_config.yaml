@@ -24,74 +24,75 @@ pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
 # signal chain config
 rf_chain:
   "snap_id": C000069
-  "box":
-    fem:
-      id: "eigsep1"
-    pam:
-      id: 375
-      num: 2  # closest to PWR button
-      pol: N  # polarization channel
-      atten: 8  # attenuation in dB
-    snap:
-      input: 0  # digital input 0
-      label: N0  # label on SNAP
-  "viv1":  # vivaldi 1 (center)
-    fem:
-      id: 12
-      pol: E
-    pam:
-      id: 375
-      num: 2
-      pol: E
-      atten: 8
-    snap:
-      input: 1
-      label: E2
-  "viv2_north":  # north vivaldi / north pol
-    fem:
-      id: 32
-      pol: N
-    pam:
-      id: 377
-      num: 1
-      pol: N
-      atten: 8
-    snap:
-      input: 2
-      label: N4
-  "viv2_south":  # north vivaldi / east pol
-    fem:
-      id: 32
-      pol: E
-    pam:
-      id: 377
-      num: 1
-      pol: E
-      atten: 8
-    snap:
-      input: 3
-      label: E6
-  "viv3_north":  # south vivaldi / north pol
-    fem:
-      id: 348
-      pol: N
-    pam:
-      id: 376
-      num: 0
-      pol: N
-      atten: 8
-    snap:
-      input: 4
-      label: N8
-  "viv3_south":  # south vivaldi / east pol
-    fem:
-      id: 348
-      pol: E
-    pam:
-      id: 376
-      num: 0
-      pol: E
-      atten: 8
-    snap:
-      input: 5
-      label: E10
+  "ants":
+    "box":
+      fem:
+        id: "eigsep1"
+      pam:
+        id: 375
+        num: 2  # closest to PWR button
+        pol: N  # polarization channel
+        atten: 8  # attenuation in dB
+      snap:
+        input: 0  # digital input 0
+        label: N0  # label on SNAP
+    "viv1":  # vivaldi 1 (center)
+      fem:
+        id: 12
+        pol: E
+      pam:
+        id: 375
+        num: 2
+        pol: E
+        atten: 8
+      snap:
+        input: 1
+        label: E2
+    "viv2_north":  # north vivaldi / north pol
+      fem:
+        id: 32
+        pol: N
+      pam:
+        id: 377
+        num: 1
+        pol: N
+        atten: 8
+      snap:
+        input: 2
+        label: N4
+    "viv2_south":  # north vivaldi / east pol
+      fem:
+        id: 32
+        pol: E
+      pam:
+        id: 377
+        num: 1
+        pol: E
+        atten: 8
+      snap:
+        input: 3
+        label: E6
+    "viv3_north":  # south vivaldi / north pol
+      fem:
+        id: 348
+        pol: N
+      pam:
+        id: 376
+        num: 0
+        pol: N
+        atten: 8
+      snap:
+        input: 4
+        label: N8
+    "viv3_south":  # south vivaldi / east pol
+      fem:
+        id: 348
+        pol: E
+      pam:
+        id: 376
+        num: 0
+        pol: E
+        atten: 8
+      snap:
+        input: 5
+        label: E10
