@@ -14,7 +14,7 @@ def main():
     parser.add_argument(
         "--pairs",
         nargs="+",
-        default=["0", "1", "2", "3", "02", "13"],
+        default=None,
         help="Correlation pairs to plot",
     )
     parser.add_argument(

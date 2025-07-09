@@ -32,7 +32,7 @@ class LivePlotter:
         log_scale : bool
             Use logarithmic scale for magnitude plot
         poll_interval : int
-            Polling interval in milliseconds to check for acc_cnt changes
+            Polling interval in milliseconds to check for new data.
         """
         self.redis = redis_client
         self.pairs = pairs or [
@@ -56,7 +56,6 @@ class LivePlotter:
             self.plot_delay = False
         self.log_scale = log_scale
         self.poll_interval = poll_interval
-        self.last_acc_cnt = None
 
         # Get configuration from Redis
         try:
@@ -185,9 +184,9 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        acc_cnt, sync_time, data = self.redis.read_corr_data(
+        data = self.redis.read_corr_data(
             pairs=self.pairs, timeout=0
-        )
+        )[-1]
         data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot
@@ -205,18 +204,11 @@ class LivePlotter:
                     dly = np.abs(np.fft.rfft(np.exp(1j * phase))) ** 2
                     self.lines["delay"][p].set_ydata(dly)
 
-        sync = datetime.fromtimestamp(sync_time).strftime("%Y-%m-%d %H:%M:%S")
-        self.fig.suptitle(f"{acc_cnt=}, sync_time={sync}")
-
         return list(self.lines["mag"].values())
 
     def start(self):
         """Start the live plotting animation."""
         print("Starting live plotter...")
-        print(
-            f"Configuration: nchan={self.nchan}, "
-            f"sample_rate={self.sample_rate}"
-        )
         print(f"Plotting pairs: {self.pairs}")
         print("Press Ctrl+C to stop")
 
@@ -231,7 +223,8 @@ class LivePlotter:
         try:
             plt.show()
         except KeyboardInterrupt:
-            print("\nStopping live plotter...")
+            print("\nStopping live plotter.")
+        finally:
             if self.ani:
                 self.ani.event_source.stop()
             plt.close(self.fig)
