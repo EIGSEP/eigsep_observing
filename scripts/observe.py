@@ -1,7 +1,6 @@
 """
 Main observing script for Eigsep, using SNAP correlator, a VNA, Dicke
-switching, and motor rotations. This script runs on the main single
-board computer, currently a Raspberry Pi 4 on the ground.
+switching, and motor rotations.
 
 The script runs indefinitely until interrupted, allowing for continuous
 observations. Exceptions raised by motors or switches may cause these
@@ -15,9 +14,9 @@ import logging
 from pathlib import Path
 import threading
 
-from eigsep_corr.utils import get_config_path
+from eigsep_corr.config import load_config
 from eigsep_observing import EigObserver, EigsepRedis
-from eigsep_observing.utils import configure_eig_logger
+from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
 logger = logging.getLogger("__name__")
@@ -65,22 +64,33 @@ parser.add_argument(
     help="Configuration file for the observer.",
 )
 parser.add_argument(
-    "--panda_ip",
-    dest="panda_ip",
-    type=str,
-    default="10.10.10.12",
-    help="IP address of the Panda board.",
+    "--panda",
+    dest="use_panda",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Connect to LattePanda in box.",
 )
 
 args = parser.parse_args()
 
-# initialize the Redis instances
-redis_snap = EigsepRedis(host="localhost", port=6379)
-redis_panda = EigsepRedis(host=args.panda_ip, port=6379)
+cfg = load_config(args.cfg_file, compute_inttime=False)
+rpi_ip = cfg["rpi_ip"]
+panda_ip = cfg["panda_ip"]
 
-# upload the configuration file to the Redis instances
-redis_panda.upload_config(args.cfg_file, from_file=True)
-redis_panda.send_ctrl("ctrl:reproram", force=False)
+
+# initialize the Redis instances
+logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
+redis_snap = EigsepRedis(host=rpi_ip, port=6379)
+if args.use_panda:
+    logger.info(f"Connecting to LattePanda at {panda_ip}.")
+    redis_panda = EigsepRedis(host=panda_ip, port=6379)
+
+    # upload the configuration file to the Redis instances
+    redis_panda.upload_config(cfg, from_file=False)
+    redis_panda.send_ctrl("ctrl:reproram", force=False)
+else:
+    logger.info("Not connecting to LattePanda, using RPi Redis only.")
+    redis_panda = None
 
 observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 thds = {}
@@ -89,7 +99,7 @@ thds = {}
 if args.write_files:
     record_thd = threading.Thread(
         target=observer.record_corr_data,
-        kwargs={"pairs": None, "timeout": 10},
+        kwargs={"timeout": 10},
     )
     thds["snap"] = record_thd
     logger.info("Starting file writing thread.")

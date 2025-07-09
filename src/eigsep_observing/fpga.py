@@ -155,7 +155,7 @@ class EigsepFpga(CorrEigsepFpga):
         t_int = self.header["integration_time"]
         self.logger.info(f"Integration time is {t_int} seconds.")
         if pairs is None:
-            pairs = self.autos + self.crosses
+            pairs = self.pairs
         self.logger.info(f"Starting observation for pairs: {pairs}.")
 
         thd = Thread(

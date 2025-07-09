@@ -262,20 +262,18 @@ class EigObserver:
         raise NotImplementedError
 
     @require_snap
-    def record_corr_data(self, pairs=None, timeout=10):
+    def record_corr_data(self, timeout=10):
         """
         Read data from the SNAP correlator via Redis and write it to
         file.
 
         Parameters
         ----------
-        pairs : list
-            The list of pairs to observe. If None, all pairs will be
-            observed.
         timeout : int
             The time in seconds to wait for data from the correlator.
 
         """
+        pairs = self.corr_cfg["pairs"]
         t_int = self.corr_cfg["integration_time"]
         file_time = self.corr_cfg["file_time"]
         self.logger.info(
