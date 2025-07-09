@@ -30,7 +30,13 @@ class SwitchLock:
 
     def release(self):
         self._lock.release()
-        self.switch_nw.switch("RNANT")  # switch back to sky measurements
+        try:
+            self.switch_nw.switch("RNANT")  # switch back to sky measurements
+        except Exception as e:
+            logger.warning(
+                f"Failed to switch back to sky measurements: {e}. "
+                "Switch network may not be initialized."
+            )
 
     __enter__ = acquire
 
@@ -456,7 +462,7 @@ class PandaClient:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode)
             # wait for the next iteration
-            self.stop_event.wait(self.cfg["vna_interval"])
+            self.stop_client.wait(self.cfg["vna_interval"])
 
     # XXX
     def rotate_motors(self):
