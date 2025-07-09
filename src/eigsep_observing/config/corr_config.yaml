@@ -6,7 +6,7 @@ nchan: 1024
 use_ref: false  # use synth on snap to generate adc clock from 10 MHz ref
 use_noise: false  # use digital noise instead of ADC data
 adc_gain: 4
-fft_shift: 0x0FF
+fft_shift: 0x015F
 #corr_acc_len: 0x10000000  # 2**28 - increment corr_acc_cnt by ~1/second
 corr_acc_len: 0x04000000  # 2**26 - increment corr_acc_cnt by ~4/second
 corr_scalar: 512  # 2**9 - 8 bits after binary point so 2**9 = 1
