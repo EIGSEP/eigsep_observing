@@ -1,5 +1,6 @@
 import datetime
 import json
+import glob
 import numpy as np
 from pathlib import Path
 import pytest
@@ -258,7 +259,7 @@ def test_file():
     assert test_file.save_dir.resolve() == save_dir.resolve()
     assert test_file.pairs == pairs
     assert test_file.ntimes == ntimes
-    assert test_file.header == HEADER
+    assert test_file.cfg == HEADER
 
     assert list(test_file.data.keys()) == pairs
     dtype = HEADER["dtype"]
@@ -272,7 +273,7 @@ def test_file():
         assert d.dtype == dtype
         np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
 
-    assert test_file._counter == 0
+    assert test_file.counter == 0
     assert len(test_file) == 0
 
     # add_data
@@ -281,18 +282,16 @@ def test_file():
     sync_time = 0
     for i in range(ntimes - 1):
         to_add = {p: d[i] for p, d in data.items()}
-        fname = test_file.add_data(acc_cnt, sync_time, to_add)
+        test_file.add_data(acc_cnt, sync_time, to_add)
         acc_cnt += 1
-        assert fname is None  # None until the file is full
-        assert test_file._counter == i + 1
+        assert test_file.counter == i + 1
         assert len(test_file) == i + 1
         for p in pairs:
             assert np.array_equal(test_file.data[p][i], to_add[p])
     to_add = {p: d[-1] for p, d in data.items()}
-    fname = test_file.add_data(acc_cnt, sync_time, to_add)
-    assert fname is not None  # should return the filename
+    test_file.add_data(acc_cnt, sync_time, to_add)
     # reset has been called
-    assert test_file._counter == 0
+    assert test_file.counter == 0
     for p in pairs:
         if len(p) == 1:
             shape = io.data_shape(ntimes, 2, 1024)
@@ -304,7 +303,9 @@ def test_file():
         np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
 
     # corr_write has been called by add_data
-    assert Path(fname).exists()
+    files = glob.glob(str(save_dir / "*.h5"))
+    assert len(files) == 1
+    fname = files[0]
     # check that the data is written correctly
     read_data, read_header, read_meta = io.read_hdf5(fname)
     compare_dicts(io.reshape_data(data, avg_even_odd=True), read_data)

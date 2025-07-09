@@ -411,6 +411,7 @@ class File:
         self.ntimes = ntimes
         self.pairs = pairs
         self.cfg = cfg
+        self.set_header()
 
         acc_bins = cfg["acc_bins"]
         nchan = cfg["nchan"]
