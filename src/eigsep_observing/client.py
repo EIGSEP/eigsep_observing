@@ -184,6 +184,12 @@ class PandaClient:
     def init_VNA(self):
         """
         Initialize the VNA instance using the configuration from Redis.
+
+        Notes
+        -----
+        Called by the constructor of the client. Can be called again
+        to reinitialize the VNA if the configuration changes.
+
         """
         self.vna = VNA(
             ip=self.cfg["vna_ip"],
@@ -254,6 +260,13 @@ class PandaClient:
     def init_picos(self):
         """
         Initialize pico readings based on the configuration in Redis.
+
+        Notes
+        -----
+        Called by the constructor of the client. This method can be
+        called again to reinitialize the picos if the configuration
+        changes.
+
         """
         # queue for pico readings
         pico_queue = queue.Queue(maxsize=1000)
