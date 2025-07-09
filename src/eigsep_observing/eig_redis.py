@@ -448,19 +448,18 @@ class EigsepRedis:
         self.r.sadd("data_streams", "stream:vna")
         raise NotImplementedError
 
-    def read_vna_data(self, timeout=120):
+    def read_vna_data(self, timeout=0):
         """
-        Read VNA data stream from Redis. Used by server.
+        Blocking read of VNA data stream from Redis. Used by server.
 
         Parameters
         ----------
         timeout : int
-            Timeout in seconds for blocking read.
+            Timeout in seconds for blocking read. Set to 0 to block
+            indefinitely.
 
         Returns
         -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
         data : dict
             Dictionary holding VNA data. Keys are measurement modes and
             values are arrays of complex numbers. If None, no message was
@@ -481,6 +480,7 @@ class EigsepRedis:
         Notes
         -----
         This is a blocking read with a timeout of ``timeout`` seconds.
+
         """
         raise NotImplementedError("This method is not implemented yet.")
 
