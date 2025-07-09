@@ -34,7 +34,9 @@ def main():
         default=50,
         help="Polling interval in milliseconds to check for acc_cnt changes",
     )
-    parser.add_argument("--redis-host", default="10.10.10.10", help="Redis host")
+    parser.add_argument(
+        "--redis-host", default="10.10.10.10", help="Redis host"
+    )
     parser.add_argument(
         "--redis-port", type=int, default=6379, help="Redis port"
     )
