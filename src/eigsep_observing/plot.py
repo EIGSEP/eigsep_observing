@@ -1,3 +1,4 @@
+from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
@@ -183,7 +184,9 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        acc_cnt, sync_time, data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)
+        acc_cnt, sync_time, data = self.redis.read_corr_data(
+            pairs=self.pairs, timeout=0
+        )
         data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot

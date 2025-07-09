@@ -101,7 +101,9 @@ def append_corr_header(header, acc_cnts, sync_times):
 
     """
     times = calc_times(
-        acc_cnts, header["integration_time"], sync_times,
+        acc_cnts,
+        header["integration_time"],
+        sync_times,
     )
     freqs, dfreq = calc_freqs_dfreq(header["sample_rate"], header["nchan"])
     new_header = header.copy()
@@ -534,7 +536,9 @@ class File:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
         data = reshape_data(self.data, avg_even_odd=True)
-        header = append_corr_header(self.header, self.acc_cnts, self.sync_times)
+        header = append_corr_header(
+            self.header, self.acc_cnts, self.sync_times
+        )
         write_hdf5(fname, data, header, metadata=self.metadata)
         self.reset()
         return fname
