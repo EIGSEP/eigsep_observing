@@ -78,8 +78,6 @@ def test_observer_init_snap_only(observer_snap_only, redis_snap):
     assert observer_snap_only.redis_snap is redis_snap
     assert observer_snap_only.redis_panda is None
     assert observer_snap_only.corr_cfg is not None
-    assert hasattr(observer_snap_only, "stop_events")
-    assert hasattr(observer_snap_only, "switch_lock")
 
 
 def test_observer_init_panda_only(observer_panda_only, redis_panda):
@@ -87,8 +85,6 @@ def test_observer_init_panda_only(observer_panda_only, redis_panda):
     assert observer_panda_only.redis_snap is None
     assert observer_panda_only.redis_panda is redis_panda
     assert observer_panda_only.cfg is not None
-    assert hasattr(observer_panda_only, "stop_events")
-    assert hasattr(observer_panda_only, "switch_lock")
 
 
 def test_observer_init_both(observer_both, redis_snap, redis_panda):
@@ -253,7 +249,7 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     redis_snap.read_corr_data = Mock(return_value=(123, 0, mock_data))
 
     # Start recording in a thread and stop it quickly
-    stop_event = observer.stop_events["snap"]
+    stop_event = observer.stop_event
 
     def stop_after_delay():
         time.sleep(0.1)
@@ -283,82 +279,6 @@ def test_record_corr_data_no_snap():
     observer = EigObserver()
     with pytest.raises(AttributeError):
         observer.record_corr_data()
-
-
-def test_do_switching(observer_panda_only, redis_panda):
-    """Test do_switching method."""
-    observer = observer_panda_only
-
-    # Start switching in thread and stop after a brief delay
-    stop_event = observer.stop_events["switches"]
-
-    def stop_after_delay():
-        time.sleep(0.1)  # Wait long enough for at least one switching cycle
-        stop_event.set()
-
-    stop_thread = threading.Thread(target=stop_after_delay)
-    stop_thread.start()
-
-    # Run switching with timeout protection
-    start_time = time.time()
-    observer.do_switching()
-    end_time = time.time()
-    stop_thread.join()
-
-    # Verify the test completed quickly
-    assert (
-        end_time - start_time < 1.0
-    ), f"Test took too long: {end_time - start_time:.2f}s"
-
-    # Verify switching commands were sent
-    assert redis_panda.send_ctrl.call_count > 0
-
-
-def test_observe_vna(observer_panda_only, redis_panda):
-    """Test observe_vna method."""
-    observer = observer_panda_only
-
-    # Mock VNA data
-    mock_data, mock_cal_data = generate_s11_data(cal=True)
-    redis_panda.read_vna_data.return_value = (
-        "test_eid",
-        mock_data,
-        mock_cal_data,
-        {"header": "test"},
-        {"meta": "test"},
-    )
-
-    # Reduce VNA interval to speed up test
-    observer.cfg["vna_interval"] = 0.01
-
-    # Start VNA observation in thread and stop quickly
-    stop_event = observer.stop_events["vna"]
-
-    def stop_after_delay():
-        time.sleep(0.05)  # Reduced from 0.1 to 0.05
-        stop_event.set()
-
-    stop_thread = threading.Thread(target=stop_after_delay)
-    stop_thread.start()
-
-    with patch("eigsep_observing.io.write_s11_file"):
-        start_time = time.time()
-        observer.observe_vna()
-        duration = time.time() - start_time
-
-    stop_thread.join(timeout=1)  # Add timeout to join
-
-    # Ensure test completes quickly
-    assert duration < 5.0, f"Test took too long: {duration:.2f}s"
-
-    # Verify VNA commands were sent
-    assert redis_panda.send_ctrl.call_count > 0
-
-
-def test_rotate_motors_not_implemented(observer_panda_only):
-    """Test rotate_motors raises NotImplementedError."""
-    with pytest.raises(NotImplementedError):
-        observer_panda_only.rotate_motors(["motor1", "motor2"])
 
 
 def test_status_logger(observer_panda_only, redis_panda, caplog):
@@ -393,23 +313,6 @@ def test_status_logger(observer_panda_only, redis_panda, caplog):
     # Verify status messages were logged
     assert "Test status 1" in caplog.text
     assert "Test status 2" in caplog.text
-
-
-def test_threading_stop_events(observer_both):
-    """Test that stop events are properly initialized."""
-    expected_events = ["switches", "vna", "motors", "snap", "status"]
-    for event_name in expected_events:
-        assert event_name in observer_both.stop_events
-        assert isinstance(
-            observer_both.stop_events[event_name], threading.Event
-        )
-        assert not observer_both.stop_events[event_name].is_set()
-
-
-def test_switch_lock_initialized(observer_both):
-    """Test that switch lock is properly initialized."""
-    assert hasattr(observer_both, "switch_lock")
-    assert isinstance(observer_both.switch_lock, type(threading.Lock()))
 
 
 def test_logger_attribute(observer_both):
