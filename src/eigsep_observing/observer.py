@@ -293,6 +293,7 @@ class EigObserver:
             acc_cnt, data = self.redis_snap.read_corr_data(
                 pairs=pairs, timeout=timeout, unpack=True
             )
+            self.logger.info(f"{acc_cnt=}")
             if self.panda_connected:
                 metadata = self.redis_panda.get_metadata()
             else:
