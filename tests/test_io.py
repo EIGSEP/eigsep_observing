@@ -278,9 +278,10 @@ def test_file():
     # add_data
     data = generate_data(reshape=False)
     acc_cnt = 1
+    sync_time = 0
     for i in range(ntimes - 1):
         to_add = {p: d[i] for p, d in data.items()}
-        fname = test_file.add_data(acc_cnt, to_add)
+        fname = test_file.add_data(acc_cnt, sync_time, to_add)
         acc_cnt += 1
         assert fname is None  # None until the file is full
         assert test_file._counter == i + 1
@@ -288,7 +289,7 @@ def test_file():
         for p in pairs:
             assert np.array_equal(test_file.data[p][i], to_add[p])
     to_add = {p: d[-1] for p, d in data.items()}
-    fname = test_file.add_data(acc_cnt, to_add)
+    fname = test_file.add_data(acc_cnt, sync_time, to_add)
     assert fname is not None  # should return the filename
     # reset has been called
     assert test_file._counter == 0

@@ -17,9 +17,7 @@ def redis_snap():
     redis.get_corr_config = Mock(
         return_value={
             "integration_time": 1.0,
-            "file_time": 60.0,
-            "save_dir": "/tmp/test",
-            "ntimes": 60,
+            "pairs": ["0", "1", "2", "3", "02", "13"],
         }
     )
     return redis
@@ -252,7 +250,7 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
 
     # Mock correlator data
     mock_data = generate_data(ntimes=1)
-    redis_snap.read_corr_data = Mock(return_value=(123, mock_data))
+    redis_snap.read_corr_data = Mock(return_value=(123, 0, mock_data))
 
     # Start recording in a thread and stop it quickly
     stop_event = observer.stop_events["snap"]
@@ -264,14 +262,14 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     stop_thread = threading.Thread(target=stop_after_delay)
     stop_thread.start()
 
-    observer.record_corr_data(timeout=5)
+    observer.record_corr_data("/tmp/test", timeout=5)
     stop_thread.join()
 
     # Verify File was created with correct parameters
     mock_file_class.assert_called_once_with(
         "/tmp/test",  # save_dir
-        None,  # pairs (default)
-        60,  # ntimes
+        ["0", "1", "2", "3", "02", "13"],  # pairs (default)
+        240,  # ntimes
         observer.corr_cfg,
     )
 
