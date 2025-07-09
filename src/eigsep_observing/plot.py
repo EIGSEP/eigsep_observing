@@ -183,7 +183,7 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        acc_cnt, data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)
+        acc_cnt, sync_time, data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)
         data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot
@@ -201,7 +201,8 @@ class LivePlotter:
                     dly = np.abs(np.fft.rfft(np.exp(1j * phase))) ** 2
                     self.lines["delay"][p].set_ydata(dly)
 
-        self.fig.suptitle(f"acc_cnt: {acc_cnt}")
+        sync = datetime.fromtimestamp(sync_time).strftime("%Y-%m-%d %H:%M:%S")
+        self.fig.suptitle(f"{acc_cnt=}, sync_time={sync}")
 
         return list(self.lines["mag"].values())
 

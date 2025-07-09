@@ -74,7 +74,7 @@ def reshape_data(data, avg_even_odd=True):
     return reshaped
 
 
-def append_corr_header(header, acc_cnts):
+def append_corr_header(header, acc_cnts, sync_times):
     """
     Append header for correlation files with useful computed
     quantities: times and frequencies.
@@ -85,6 +85,9 @@ def append_corr_header(header, acc_cnts):
         Header dictionary for correlation file.
     acc_cnts : array_like
         Array of accumulation counts for each time step.
+    sync_time : array_like
+        Synchronization time for the measurements, used to calculate
+        the times. This is when `acc_cnts` starts.
 
     Returns
     -------
@@ -98,7 +101,7 @@ def append_corr_header(header, acc_cnts):
 
     """
     times = calc_times(
-        acc_cnts, header["integration_time"], header["sync_time"]
+        acc_cnts, header["integration_time"], sync_times,
     )
     freqs, dfreq = calc_freqs_dfreq(header["sample_rate"], header["nchan"])
     new_header = header.copy()
@@ -408,6 +411,7 @@ class File:
         dtype = np.dtype(header["dtype"])
 
         self.acc_cnts = np.zeros(self.ntimes)
+        self.sync_times = np.zeros(self.ntimes)
         self.metadata = defaultdict(list)  # dynamic metadata
         self.data = {}
         for p in pairs:
@@ -428,9 +432,10 @@ class File:
         for p in self.pairs:
             self.data[p].fill(0)
         self.acc_cnts.fill(0)
+        self.sync_times.fill(0)
         self._counter = 0
 
-    def add_data(self, acc_cnt, data, metadata=None):
+    def add_data(self, acc_cnt, sync_time, data, metadata=None):
         """
         Populate the data arrays with the given data. The data is expected
         to be of the dtype specified in the header.
@@ -439,6 +444,9 @@ class File:
         ----------
         acc_cnt : int
             Accumulation count.
+        sync_time : float
+            Synchronization time for the measurements, used to calculate
+            the times. This is when `acc_cnt` starts.
         data : dict
             Dictionary of data arrays to be added for one time step.
         metadata : dict
@@ -453,6 +461,7 @@ class File:
         """
         metadata = metadata or {}
         self.acc_cnts[self._counter] = acc_cnt
+        self.sync_times[self._counter] = sync_time
         for p, d in data.items():
             arr = self.data[p]
             arr[self._counter] = d
@@ -525,7 +534,7 @@ class File:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
         data = reshape_data(self.data, avg_even_odd=True)
-        header = append_corr_header(self.header, self.acc_cnts)
+        header = append_corr_header(self.header, self.acc_cnts, self.sync_times)
         write_hdf5(fname, data, header, metadata=self.metadata)
         self.reset()
         return fname

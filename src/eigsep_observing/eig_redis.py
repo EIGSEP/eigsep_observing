@@ -353,6 +353,8 @@ class EigsepRedis:
         -------
         acc_cnt : int
             Accumulation count, read from the correlation data.
+        sync_time : float
+            Synchronization time, when `acc_cnt` is 0.
         data : dict
             If `unpack` is True, return a dictionary with keys as
             correlation pairs and values as numpy arrays of complex
@@ -394,7 +396,8 @@ class EigsepRedis:
                 # return raw bytes
                 arr = v
             data[k.decode()] = arr
-        return acc_cnt, data
+        sync_time = self.get_live_metadata(keys="corr_sync_time")["sync_time_unix"]
+        return acc_cnt, sync_time, data
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
         """
