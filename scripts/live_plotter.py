@@ -1,13 +1,10 @@
-"""
-Live plotter script for EIGSEP observing system.
-"""
-
 import argparse
-import sys
+import logging
 
-from eigsep_observing.redis import EigsepRedis
+from eigsep_observing import EigsepRedis
 from eigsep_observing.plot import LivePlotter
 
+logger = logging.getLogger(__name__)
 
 def main():
     """Main function with command line interface."""
@@ -44,12 +41,8 @@ def main():
     args = parser.parse_args()
 
     # Connect to Redis
-    try:
-        redis_client = EigsepRedis(host=args.redis_host, port=args.redis_port)
-        print(f"Connected to Redis at {args.redis_host}:{args.redis_port}")
-    except Exception as e:
-        print(f"Failed to connect to Redis: {e}")
-        sys.exit(1)
+    redis_client = EigsepRedis(host=args.redis_host, port=args.redis_port)
+    print(f"Connected to Redis at {args.redis_host}:{args.redis_port}")
 
     # Create and start plotter
     plotter = LivePlotter(
