@@ -103,7 +103,8 @@ class LivePlotter:
         if self.plot_delay:
             nrows += 1
         fig, axs = plt.subplots(figsize=(12, 8), nrows=nrows)
-
+        if nrows == 1:
+            axs = [axs]
         # Magnitude plot
         axs[0].grid(True)
         axs[0].set_ylabel("Magnitude")
