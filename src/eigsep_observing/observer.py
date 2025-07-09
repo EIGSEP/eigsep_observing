@@ -100,16 +100,15 @@ class EigObserver:
         """
         Log status messages from the LattePanda Redis server.
         """
-        while not self.stop_events["status"].is_set():
+        while not self.stop_event.is_set():
             level, status = self.redis_panda.read_status()
             if status is None:
                 # Check stop event with timeout
-                if self.stop_events["status"].wait(0.1):
+                if self.stop_event.wait(0.1):
                     break
                 continue
             self.logger.log(level, status)
 
-    # XXX need to interrupt auto switching
     @require_panda
     def set_mode(self, mode):
         """
@@ -141,7 +140,6 @@ class EigObserver:
         self.logger.info(f"Switching to {mode} measurements")
         self.redis_panda.send_ctrl(cmd_mode_map[mode])
 
-    # XXX need to interrupt auto switching and VNA
     @require_panda
     def measure_s11(self, mode, timeout=300, write_files=True):
         """
