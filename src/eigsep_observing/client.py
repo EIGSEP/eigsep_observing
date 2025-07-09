@@ -44,8 +44,8 @@ class PandaClient:
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         try:
-            self.cfg = self.redis.get_config()
-            upload_time = self.cfg["upload_time"]
+            cfg = self.redis.get_config()
+            upload_time = cfg["upload_time"]
             self.logger.info(
                 f"Using config from Redis, updated at {upload_time}."
             )
@@ -53,14 +53,65 @@ class PandaClient:
             self.logger.warning(
                 "Missing configuration in Redis, using default."
             )
-            self.cfg = default_cfg
-            self.redis.upload_config(self.cfg, from_file=False)
+            cfg = default_cfg
+        # add pico info
+        try:
+            fname = cfg["pico_config_file"]
+            apps = cfg["pico_app_mapping"]
+            pico_cfg = self.get_pico_config(fname, app_mapping=apps)
+        except Exception as e:
+            self.logger.warning(
+                f"Failed to read pico config file: {e}. "
+                "Running without picos."
+            )
+            pico_cfg = {}
+        # add pico config to the cfg
+        cfg["picos"] = pico_cfg
+        # upload config to Redis
+        self.redis.upload_config(cfg, from_file=False)
+        self.cfg = cfg
 
         # initialize the picos and VNA
         self.switch_nw = None
         self.motor = None
         self.peltier = None
         self._initialize()  # initialize the client
+
+    @staticmethod
+    def get_pico_config(fname, app_mapping):
+        """
+        Read pico configuration from the config file and update `cfg`
+        and the configuration in Redis.
+
+        Parameters
+        ----------
+        fname : str or Path
+            The name of the pico configuration file to read from.
+        app_mapping : dict
+            Mapping of Pico app_id to name.
+
+        Returns
+        -------
+        pico_cfg : dict
+            The pico configuration dictionary read from the file. Keys
+            are pico names, values are serial ports.
+
+        """
+        with open(fname, "r") as f:
+            cfg = json.load(f)  # list of dicts
+        pico_cfg = {}
+        for dev in cfg:
+            app_id = dev["app_id"]
+            try:
+                name = app_mapping[app_id]
+            except KeyError:
+                self.logger.warning(
+                    f"Skipping pico with unknown app_id {app_id}."
+                )
+                continue  # skip unknown app_ids
+            pico_cfg[name] = dev["port"]
+        return pico_cfg
+
 
     def _initialize(self):
         self.stop_client.clear()  # reset the stop flag

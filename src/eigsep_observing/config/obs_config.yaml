@@ -1,17 +1,18 @@
 # High-level configuration for EIGSEP observations
-# Sets switch schedules, sensors, and other high-level parameters
+# Sets switch schedules, picos, VNA settings, and other parameters
 
 # IP addresses
 rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.12"
-# picos XXX read from device.info
-picos:
-  imu: "/dev/pico_imu"
-  therm: "/dev/pico_therm"
-  peltier: "/dev/pico_peltier"
-  lidar: "/dev/pico_lidar"
-  switch: "/dev/pico_switch"
-  motor: "/dev/pico_motor"
+# picos
+pico_config_file: "/home/eigsep/eigsep/pico-firmware/pico_config.json"
+pico_app_mapping:  # app number to device mapping
+  0: "motor"
+  1: "peltier"
+  2: "therm"
+  3: "imu"
+  4: "lidar"
+  5: "switch"
 # corr filewriter
 corr_save_dir: "/media/eigsep/T7/data"
 corr_ntimes: 240
