@@ -37,5 +37,3 @@ vna_settings:
     ant: 0.0
     rec: -40.0
 vna_save_dir: "/media/eigsep/T7/data/s11_data"
-# motors
-use_motors: true
