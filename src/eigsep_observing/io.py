@@ -389,6 +389,8 @@ def read_s11_file(fname):
 
 class File:
 
+    SWITCH_APP_ID = 5
+
     def __init__(self, save_dir, pairs, ntimes, cfg):
         """
         Initialize the File object for saving correlation data.
@@ -528,7 +530,7 @@ class File:
         status_list = [v["status"] for v in value]
         app_id = value[0]["app_id"]
         # rest of the keys are data
-        if app_id == 5:  # XXX switching, should not be hardcoded
+        if app_id == self.SWITCH_APP_ID:
             state = [v["state"] for v in value]
             if "error" in status_list or any(s != state[0] for s in state):
                 return "SWITCHING"
