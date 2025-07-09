@@ -14,8 +14,13 @@ parser = argparse.ArgumentParser(
     description="Snap observing with Eigsep FPGA",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-default_config_file = get_config_path("corr_config.yaml")
-add_args(parser, default_config_file=default_config_file)
+add_args(
+    parser,
+    default_config_file=(
+        "/home/eigsep/eigsep/eigsep_observing/src/eigsep_observing/"
+        "config/corr_config.yaml"
+    ),
+)
 args = parser.parse_args()
 cfg = load_config(args.config_file)
 
