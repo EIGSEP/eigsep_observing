@@ -113,7 +113,7 @@ def append_corr_header(header, acc_cnts, sync_times):
     new_header["times"] = times
     new_header["freqs"] = freqs
     new_header["dfreq"] = dfreq
-    new_header["acc_cnts"] = acc_cnts
+    new_header["acc_cnt"] = acc_cnts
     return new_header
 
 
