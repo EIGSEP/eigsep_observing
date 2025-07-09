@@ -6,6 +6,7 @@ from eigsep_observing.plot import LivePlotter
 
 logger = logging.getLogger(__name__)
 
+
 def main():
     """Main function with command line interface."""
     parser = argparse.ArgumentParser(

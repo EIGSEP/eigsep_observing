@@ -1,4 +1,5 @@
 import pytest
+from threading import Thread
 from unittest.mock import Mock, patch
 
 from eigsep_observing import EigsepFpga
@@ -185,7 +186,7 @@ class TestEigsepFpga:
         # Set event to stop the loop
         fpga_instance.event.set()
 
-        # Run _read_integrations (it won't put anything in queue since no new data)
+        # Run _read_integrations, won't put to queue since no new data
         fpga_instance._read_integrations(["00", "11"], timeout=0.1)
 
         assert fpga_instance.queue.empty()
@@ -299,10 +300,6 @@ class TestEigsepFpga:
 
     def test_observe_basic_functionality(self, fpga_instance):
         """Test basic observe functionality."""
-        from threading import Thread
-        from queue import Queue
-        import time
-
         fpga_instance.upload_config = Mock()
         fpga_instance.update_redis = Mock()
 

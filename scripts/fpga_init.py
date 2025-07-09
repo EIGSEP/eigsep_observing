@@ -7,7 +7,6 @@ import argparse  # noqa: E402
 from eigsep_corr.config import load_config  # noqa: E402
 from eigsep_corr.fpga import add_args  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
-from eigsep_observing.utils import get_config_path  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 
 parser = argparse.ArgumentParser(
