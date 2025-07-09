@@ -28,28 +28,6 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument(
-    "-s",
-    dest="use_switches",
-    action="store_true",
-    default=False,
-    help="Enable Dicke switching.",
-)
-parser.add_argument(
-    "-v",
-    "--vna",
-    dest="use_vna",
-    action="store_true",
-    default=False,
-    help="Do VNA measurements.",
-)
-parser.add_argument(
-    "-r",
-    dest="rotate_motors",
-    action="store_true",
-    default=False,
-    help="Enable motor rotations.",
-)
-parser.add_argument(
     "-w",
     dest="write_files",
     action="store_true",
@@ -106,21 +84,21 @@ if args.write_files:
     record_thd.start()
 
 # set up dicke switching
-if args.use_switches:
+if cfg["use_switches"]:
     switch_thd = threading.Thread(target=observer.do_swiching)
     thds["switches"] = switch_thd
     logger.info("Starting switch thread.")
     switch_thd.start()
 
 # set up VNA measurements
-if args.use_vna:
+if cfg["use_vna"]:
     vna_thd = threading.Thread(target=observer.observe_vna)
     thds["vna"] = vna_thd
     logger.info("Starting VNA measurement thread.")
     vna_thd.start()
 
 # set up motor rotations if requested
-if args.rotate_motors:
+if cfg["use_motors"]:
     motor_thd = threading.Thread(target=observer.rotate_motors)
     thds["motors"] = motor_thd
     logger.info("Starting motor rotation thread.")

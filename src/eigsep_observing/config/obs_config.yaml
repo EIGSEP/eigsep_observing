@@ -4,7 +4,7 @@
 # IP addresses
 rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.12"
-# picos
+# picos XXX read from device.info
 picos:
   imu: "/dev/pico_imu"
   therm: "/dev/pico_therm"
@@ -12,6 +12,8 @@ picos:
   lidar: "/dev/pico_lidar"
   switch: "/dev/pico_switch"
   motor: "/dev/pico_motor"
+# switches
+use_switches: true
 switch_schedule:  # seconds per measurement
   sky: 3600
   load: 60
@@ -31,3 +33,5 @@ vna_settings:
     ant: 0.0
     rec: -40.0
 vna_save_dir: "/media/eigsep/T7/data/s11_data"
+# motors
+use_motors: true
