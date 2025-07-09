@@ -174,23 +174,19 @@ class EigsepRedis:
         """
         return self.r.get(key)
 
-    def _upload_config(self, config, key):
+    def _upload_dict(self, d, key):
         """
-        Helper function for uploading configuration files to Redis.
+        Helper function for uploading dictionaries to Redis.
 
         Parameters
         ----------
-        config : str or dict
-            Path to the configuration file if `from_file` is True, or a
-            dictionary containing the configuration data if `from_file`
-            is False.
+        d : dict
         key : str
             Redis key under which the configuration will be stored.
 
         """
-        config["upload_time"] = datetime.now(timezone.utc).isoformat()
-        cfg_json = json.dumps(config).encode("utf-8")
-        self.add_raw(key, cfg_json)
+        d["upload_time"] = datetime.now(timezone.utc).isoformat()
+        self.add_raw(key, json.dumps(d).encode("utf-8"))
 
     def upload_config(self, config, from_file=True):
         """
@@ -207,7 +203,7 @@ class EigsepRedis:
         """
         if from_file:
             config = load_config(config, compute_inttime=False)
-        self._upload_config(config, "config")
+        self._upload_dict(config, "config")
 
     def upload_corr_config(self, config, from_file=False):
         """
@@ -225,7 +221,7 @@ class EigsepRedis:
         """
         if from_file:
             config = load_config(config, compute_inttime=True)
-        self._upload_config(config, "corr_config")
+        self._upload_dict(config, "corr_config")
 
     def get_config(self):
         """
@@ -267,6 +263,37 @@ class EigsepRedis:
         raw = self.get_raw("corr_config")
         if raw is None:
             raise ValueError("No SNAP configuration found in Redis.")
+        return json.loads(raw)
+
+    def upload_corr_header(self, header):
+        """
+        Upload correlation data header, from `fpga.header` attribute.
+
+        Parameters
+        ----------
+        header : dict
+
+        """
+        self._upload_dict(header, "corr_header")
+
+    def get_corr_header(self):
+        """
+        Get the correlation data header from Redis.
+
+        Returns
+        -------
+        header : dict
+            Dictionary containing the correlation data header.
+
+        Raises
+        ------
+        ValueError
+            If no correlation header is found in Redis.
+
+        """
+        raw = self.get_raw("corr_header")
+        if raw is None:
+            raise ValueError("No correlation header found in Redis.")
         return json.loads(raw)
 
     # ---------- correlation data and s11 measurements ----------

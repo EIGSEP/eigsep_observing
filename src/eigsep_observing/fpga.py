@@ -130,6 +130,9 @@ class EigsepFpga(CorrEigsepFpga):
 
         """
         self.redis.add_corr_data(data, cnt, dtype=self.cfg["dtype"])
+        # hack to upload header regularly
+        if cnt % 100 == 0:
+            self.redis.upload_corr_header(self.header)
 
     def observe(self, pairs=None, timeout=10):
         """

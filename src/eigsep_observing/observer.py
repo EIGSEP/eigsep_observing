@@ -293,6 +293,13 @@ class EigObserver:
         )
 
         while not self.stop_events["snap"].is_set():
+            if file.counter == 0:  # look up header in Redis once per file
+                try:
+                    header = self.redis_snap.get_corr_header()
+                except ValueError as e:
+                    self.logger.error(f"Error reading header from SNAP: {e}")
+                    header = None
+                file.set_header(header=header)
             # blocking read from Redis
             acc_cnt, sync_time, data = self.redis_snap.read_corr_data(
                 pairs=pairs, timeout=timeout, unpack=True
@@ -302,11 +309,7 @@ class EigObserver:
                 metadata = self.redis_panda.get_metadata()
             else:
                 metadata = None
-            filename = file.add_data(
-                acc_cnt, sync_time, data, metadata=metadata
-            )
-            if filename is not None:  # file buffer is full, file written
-                self.logger.info(f"Writing file {filename}")
+            file.add_data(acc_cnt, sync_time, data, metadata=metadata)
 
         # write short final file if there is more data
         if len(file) > 0:

@@ -2,10 +2,13 @@ from collections import defaultdict
 import datetime
 import h5py
 import json
+import logging
 import numpy as np
 from pathlib import Path
 
 from eigsep_corr.utils import calc_times, calc_freqs_dfreq
+
+logger = logging.getLogger(__name__)
 
 
 def data_shape(ntimes, acc_bins, nchan, cross=False):
@@ -386,7 +389,7 @@ def read_s11_file(fname):
 
 class File:
 
-    def __init__(self, save_dir, pairs, ntimes, header):
+    def __init__(self, save_dir, pairs, ntimes, cfg):
         """
         Initialize the File object for saving correlation data.
 
@@ -399,18 +402,19 @@ class File:
             List of correlation pairs to write.
         ntimes : int
             Number of time steps to accumulate per file.
-        header : dict
-            Header information to be written to the file.
+        cfg : dict
+            Observing configuration.
 
         """
+        self.logger = logger
         self.save_dir = Path(save_dir)
         self.ntimes = ntimes
         self.pairs = pairs
-        self.header = header
+        self.cfg = cfg
 
-        acc_bins = header["acc_bins"]
-        nchan = header["nchan"]
-        dtype = np.dtype(header["dtype"])
+        acc_bins = cfg["acc_bins"]
+        nchan = cfg["nchan"]
+        dtype = np.dtype(cfg["dtype"])
 
         self.acc_cnts = np.zeros(self.ntimes)
         self.sync_times = np.zeros(self.ntimes)
@@ -420,10 +424,10 @@ class File:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
             self.data[p] = np.zeros(shape, dtype=dtype)
 
-        self._counter = 0
+        self.counter = 0
 
     def __len__(self):
-        return self._counter
+        return self.counter
 
     def reset(self):
         """
@@ -435,7 +439,28 @@ class File:
             self.data[p].fill(0)
         self.acc_cnts.fill(0)
         self.sync_times.fill(0)
-        self._counter = 0
+        self.counter = 0
+
+    def set_header(self, header=None):
+        """
+        Set the header for the correlation file.
+
+        Parameters
+        ----------
+        header : dict
+            Header information to be written to the file. This specifies
+            static configuration, settings, etc. Values are expected to be
+            primarily strings or numbers, but may also include small
+            arrays, lists, or dictionaries.
+
+        """
+        if header is None:
+            self.header = {}
+        else:
+            self.header = header.copy()
+        for key, val in self.cfg.items():
+            if key not in self.header:
+                self.header[key] = val
 
     def add_data(self, acc_cnt, sync_time, data, metadata=None):
         """
@@ -454,29 +479,33 @@ class File:
         metadata : dict
             Dynamic metadata, such as sensor readings, timestamps, etc.
 
-        Returns
-        -------
-        str
-            Filename where the data will be written, if the counter reaches
-            the number of times. Otherwise, None.
-
         """
+        try:
+            delta_cnt = acc_cnt - self._prev_cnt
+        except AttributeError:  # first call
+            delta_cnt = 1
+        if delta_cnt > 1:  # fill with zeros
+            self.add_data(
+                self._prev_cnt + 1,
+                sync_time,
+                {p: np.zeros_like(self.data[p][0]) for p in self.pairs},
+            )
         metadata = metadata or {}
-        self.acc_cnts[self._counter] = acc_cnt
-        self.sync_times[self._counter] = sync_time
+        self.acc_cnts[self.counter] = acc_cnt
+        self.sync_times[self.counter] = sync_time
         for p, d in data.items():
             arr = self.data[p]
-            arr[self._counter] = d
+            arr[self.counter] = d
         # process metadata
         for key in metadata:
             # value: list of dicts with keys data, status, cadence
             value = metadata[key]
             md = self._avg_metadata(value)
             self.metadata[key].append(md)
-        self._counter += 1
-        if self._counter == self.ntimes:
-            return self.corr_write()
-        return None
+        self.counter += 1
+        self._prev_cnt = acc_cnt
+        if self.counter == self.ntimes:
+            self.corr_write()
 
     @staticmethod
     def _avg_metadata(value):
@@ -526,19 +555,14 @@ class File:
             Filename where the data will be written. If not provided, a
             timestamped filename will be generated.
 
-        Returns
-        -------
-        str
-            Filename where the data was written.
-
         """
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
+        self.logger.info(f"Writing correlation data to {fname}")
         data = reshape_data(self.data, avg_even_odd=True)
         header = append_corr_header(
             self.header, self.acc_cnts, self.sync_times
         )
         write_hdf5(fname, data, header, metadata=self.metadata)
         self.reset()
-        return fname
