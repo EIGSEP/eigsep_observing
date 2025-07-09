@@ -47,14 +47,8 @@ class EigObserver:
         if self.redis_panda is not None:
             self.cfg = self.redis_panda.get_config()
 
-        self.stop_events = {
-            "switches": threading.Event(),
-            "vna": threading.Event(),
-            "motors": threading.Event(),
-            "snap": threading.Event(),
-            "status": threading.Event(),
-        }
-        self.switch_lock = threading.Lock()  # lock for RF switches
+        self.stop_event = threading.Event()  # main stop event
+        # self.switch_lock = threading.Lock()  # lock for RF switches
 
         # start a status thread
         if self.panda_connected:
@@ -115,6 +109,7 @@ class EigObserver:
                 continue
             self.logger.log(level, status)
 
+    # XXX need to interrupt auto switching
     @require_panda
     def set_mode(self, mode):
         """
@@ -146,38 +141,12 @@ class EigObserver:
         self.logger.info(f"Switching to {mode} measurements")
         self.redis_panda.send_ctrl(cmd_mode_map[mode])
 
-    @require_panda
-    def do_switching(self):
-        """
-        Use the RF switches to switch between sky, load, and noise
-        source measurements according to the switch schedule.
-
-        Notes
-        -----
-        The majority of the observing time is spent on sky
-        measurements. Therefore, S11 measurements are only allowed
-        to interrupt the sky measurements, and not the load or
-        noise source measurements.
-
-        """
-        switch_schedule = self.cfg["switch_schedule"]
-        while not self.stop_events["switches"].is_set():
-            with self.switch_lock:
-                for mode in ["load", "noise"]:
-                    self.logger.info(f"Switching to {mode} measurements")
-                    self.set_mode(mode)
-                    wait_time = switch_schedule[mode]
-                    if self.stop_events["switches"].wait(wait_time):
-                        self.logger.info("Switching stopped by event")
-                        return
-            self.logger.info("Switching to sky measurements")
-            self.stop_events["switches"].wait(switch_schedule["sky"])
-
+    # XXX need to interrupt auto switching and VNA
     @require_panda
     def measure_s11(self, mode, timeout=300, write_files=True):
         """
         VNA observations. Performs OSL calibration measurements and
-        measurment of the device(s) under test.
+        measurement of the device(s) under test.
 
         Parameters
         ----------
@@ -236,19 +205,6 @@ class EigObserver:
         else:
             return data, cal_data
 
-    @require_panda
-    def observe_vna(self):
-        """
-        Observe with VNA and write data to files.
-        """
-        while not self.stop_events["vna"].is_set():
-            with self.switch_lock:
-                for mode in ["ant", "rec"]:
-                    self.logger.info(f"Measuring S11 of {mode} with VNA")
-                    self.measure_s11(mode, write_files=True)
-            # wait for the next iteration
-            self.stop_events["vna"].wait(self.cfg["vna_interval"])
-
     # XXX
     @require_panda
     def rotate_motors(self, motors):
@@ -292,7 +248,7 @@ class EigObserver:
             self.corr_cfg,
         )
 
-        while not self.stop_events["snap"].is_set():
+        while not self.stop_event.is_set():
             if file.counter == 0:  # look up header in Redis once per file
                 try:
                     header = self.redis_snap.get_corr_header()
@@ -315,3 +271,27 @@ class EigObserver:
         if len(file) > 0:
             self.logger.info("Writing short final file.")
             file.corr_write()
+
+    @require_panda
+    def record_vna_data(self, save_dir):
+        """
+        Read VNA data from the LattePanda Redis server and write it to
+        file.
+
+        Parameters
+        ----------
+        save_dir : str or Path
+            Directory to save the VNA data files.
+
+        """
+        while not self.stop_event.is_set():
+            d = self.redis_panda.read_vna_data(timeout=0)
+            data, cal_data, header, metadata = d
+            io.write_s11_file(
+                data,
+                header,
+                metadata=metadata,
+                cal_data=cal_data,
+                save_dir=save_dir,
+            )
+            self.logger.info(f"Wrote VNA data to {save_dir}.")
