@@ -510,8 +510,7 @@ class File:
         if self.counter == self.ntimes:
             self.corr_write()
 
-    @staticmethod
-    def _avg_metadata(value):
+    def _avg_metadata(self, value):
         """
         Average the metadata value if needed.
 

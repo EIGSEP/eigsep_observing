@@ -1,3 +1,4 @@
+import json
 import logging
 import queue
 import threading
@@ -77,8 +78,7 @@ class PandaClient:
         self.peltier = None
         self._initialize()  # initialize the client
 
-    @staticmethod
-    def get_pico_config(fname, app_mapping):
+    def get_pico_config(self, fname, app_mapping):
         """
         Read pico configuration from the config file and update `cfg`
         and the configuration in Redis.
@@ -111,7 +111,6 @@ class PandaClient:
                 continue  # skip unknown app_ids
             pico_cfg[name] = dev["port"]
         return pico_cfg
-
 
     def _initialize(self):
         self.stop_client.clear()  # reset the stop flag
