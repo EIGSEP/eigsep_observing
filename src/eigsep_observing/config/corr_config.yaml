@@ -26,3 +26,4 @@ save_dir: "/media/eigsep/T7/data"
 redis:
   host: "localhost"
   port: 6379
+pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
