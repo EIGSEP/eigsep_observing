@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 from eigsep_observing import EigsepFpga
 from eigsep_observing.testing import DummyEigsepFpga
 from eigsep_observing.testing import DummyEigsepRedis
+from eigsep_corr.testing import DummyPam
 
 
 @pytest.fixture
@@ -35,6 +36,7 @@ def fpga_instance(mock_redis):
     return fpga
 
 
+@patch("eigsep_corr.fpga.Pam", DummyPam)
 class TestEigsepFpga:
     """Test cases for EigsepFpga class."""
 
