@@ -2,7 +2,7 @@ import logging
 import threading
 
 from . import io
-from .utils import require_panda, require_snap
+from .utils import require_panda
 
 logger = logging.getLogger(__name__)
 
@@ -47,22 +47,12 @@ class EigObserver:
         if self.redis_panda is not None:
             self.cfg = self.redis_panda.get_config()
 
-        self.stop_events = {
-            "switches": threading.Event(),
-            "vna": threading.Event(),
-            "motors": threading.Event(),
-            "snap": threading.Event(),
-            "status": threading.Event(),
-        }
-        self.switch_lock = threading.Lock()  # lock for RF switches
+        self.stop_event = threading.Event()  # main stop event
 
         # start a status thread
-        if self.panda_connected:
-            status_thread = threading.Thread(
-                target=self.status_logger,
-                daemon=True,
-            )
-            status_thread.start()
+        self.logger.info("Starting status thread.")
+        self.status_thread = threading.Thread(target=self.status_logger)
+        self.status_thread.start()
 
     @property
     def snap_connected(self):
@@ -81,7 +71,7 @@ class EigObserver:
         return self.redis_panda.client_heartbeat_check()
 
     @require_panda
-    def reprogram_panda(self, force=False):
+    def reprogram_panda(self, force=False, timeout=5):
         """
         Reprogram the LattePanda Redis server with the current
         configuration.
@@ -101,16 +91,24 @@ class EigObserver:
         self.redis_panda.send_ctrl("ctrl:reprogram", force=force)
         self.cfg = self.redis_panda.get_config()  # update cfg
 
-    @require_panda
     def status_logger(self):
         """
         Log status messages from the LattePanda Redis server.
         """
-        while not self.stop_events["status"].is_set():
-            level, status = self.redis_panda.read_status()
+        while not self.panda_connected:
+            self.logger.debug("Status thread waiting for Panda connection.")
+            self.stop_event.wait(1)
+        self.logger.info("Status thread started. Logging Panda status.")
+
+        while not self.stop_event.is_set():
+            while not self.panda_connected:
+                self.logger.warning("Panda disconnected")
+                self.stop_event.wait(1)
+            self.logger.debug("Panda connected.")
+            level, status = self.redis_panda.read_status(timeout=10)
             if status is None:
                 # Check stop event with timeout
-                if self.stop_events["status"].wait(0.1):
+                if self.stop_event.wait(0.1):
                     break
                 continue
             self.logger.log(level, status)
@@ -147,37 +145,10 @@ class EigObserver:
         self.redis_panda.send_ctrl(cmd_mode_map[mode])
 
     @require_panda
-    def do_switching(self):
-        """
-        Use the RF switches to switch between sky, load, and noise
-        source measurements according to the switch schedule.
-
-        Notes
-        -----
-        The majority of the observing time is spent on sky
-        measurements. Therefore, S11 measurements are only allowed
-        to interrupt the sky measurements, and not the load or
-        noise source measurements.
-
-        """
-        switch_schedule = self.cfg["switch_schedule"]
-        while not self.stop_events["switches"].is_set():
-            with self.switch_lock:
-                for mode in ["load", "noise"]:
-                    self.logger.info(f"Switching to {mode} measurements")
-                    self.set_mode(mode)
-                    wait_time = switch_schedule[mode]
-                    if self.stop_events["switches"].wait(wait_time):
-                        self.logger.info("Switching stopped by event")
-                        return
-            self.logger.info("Switching to sky measurements")
-            self.stop_events["switches"].wait(switch_schedule["sky"])
-
-    @require_panda
     def measure_s11(self, mode, timeout=300, write_files=True):
         """
         VNA observations. Performs OSL calibration measurements and
-        measurment of the device(s) under test.
+        measurement of the device(s) under test.
 
         Parameters
         ----------
@@ -196,9 +167,6 @@ class EigObserver:
         data : dict
             The S11 measurement data from the VNA. Only returned if
             `write_files` is False.
-        cal_data : dict
-            S11 measurement data from the OSL calibration. Only
-            returned if `write_files` is False.
 
         Raises
         ------
@@ -224,30 +192,16 @@ class EigObserver:
                 "Check the VNA connection and settings."
             )
             return None, None
-        eid, data, cal_data, header, metadata = out
+        data, header, metadata = out
         if write_files:
             io.write_s11_file(
                 data,
                 header,
                 metadata=metadata,
-                cal_data=cal_data,
                 save_dir=self.cfg["vna_save_dir"],
             )
         else:
-            return data, cal_data
-
-    @require_panda
-    def observe_vna(self):
-        """
-        Observe with VNA and write data to files.
-        """
-        while not self.stop_events["vna"].is_set():
-            with self.switch_lock:
-                for mode in ["ant", "rec"]:
-                    self.logger.info(f"Measuring S11 of {mode} with VNA")
-                    self.measure_s11(mode, write_files=True)
-            # wait for the next iteration
-            self.stop_events["vna"].wait(self.cfg["vna_interval"])
+            return data
 
     # XXX
     @require_panda
@@ -261,7 +215,6 @@ class EigObserver:
         # runs if not stop_events[motors].is_set()
         raise NotImplementedError
 
-    @require_snap
     def record_corr_data(self, save_dir, ntimes=240, timeout=10):
         """
         Read data from the SNAP correlator via Redis and write it to
@@ -292,7 +245,13 @@ class EigObserver:
             self.corr_cfg,
         )
 
-        while not self.stop_events["snap"].is_set():
+        while not self.snap_connected:
+            self.logger.warning(
+                "Waiting for SNAP Redis connection to be established."
+            )
+            self.stop_event.wait(1)
+
+        while not self.stop_event.is_set():
             if file.counter == 0:  # look up header in Redis once per file
                 try:
                     header = self.redis_snap.get_corr_header()
@@ -315,3 +274,33 @@ class EigObserver:
         if len(file) > 0:
             self.logger.info("Writing short final file.")
             file.corr_write()
+
+    def record_vna_data(self, save_dir):
+        """
+        Read VNA data from the LattePanda Redis server and write it to
+        file.
+
+        Parameters
+        ----------
+        save_dir : str or Path
+            Directory to save the VNA data files.
+
+        """
+        while not self.panda_connected:
+            self.logger.warning(
+                "Waiting for LattePanda Redis connection to be established."
+            )
+            self.stop_event.wait(1)
+        while not self.stop_event.is_set():
+            data, header, metadata = self.redis_panda.read_vna_data(timeout=0)
+            if data is None:
+                self.logger.warning("No VNA data available. Waiting.")
+                self.stop_event.wait(1)
+                continue
+            io.write_s11_file(
+                data,
+                header,
+                metadata=metadata,
+                save_dir=save_dir,
+            )
+            self.logger.info(f"Wrote VNA data to {save_dir}.")

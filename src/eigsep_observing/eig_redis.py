@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class EigsepRedis:
 
-    maxlen = {"ctrl": 10, "status": 10, "data": 10000}
+    maxlen = {"ctrl": 10, "status": 10, "data": 5000, "vna_data": 1000}
     ctrl_stream_name = "stream:ctrl"
 
     def __init__(self, host="localhost", port=6379):
@@ -113,7 +113,7 @@ class EigsepRedis:
         """
         self.r.flushdb()
         with self._stream_lock:
-            self._last_read_ids = defaultdict(lambda: "$")
+            self._last_read_ids.clear()
 
     @property
     def data_streams(self):
@@ -322,29 +322,6 @@ class EigsepRedis:
         ValueError
             If data is empty or contains invalid correlation pairs.
         """
-        # Validate inputs
-        if not isinstance(data, dict):
-            raise TypeError("data must be a dictionary")
-        if not isinstance(cnt, int):
-            raise TypeError("cnt must be an integer")
-        if not data:
-            raise ValueError("data dictionary cannot be empty")
-        if cnt < 0:
-            raise ValueError("cnt must be non-negative")
-
-        # Validate correlation pairs and data
-        for pair, d in data.items():
-            if not isinstance(pair, str):
-                raise TypeError(
-                    f"Correlation pair key must be string, got {type(pair)}"
-                )
-            if not isinstance(d, (bytes, bytearray)):
-                pair_type = type(d)
-                raise TypeError(
-                    f"Correlation data must be bytes, got {pair_type} "
-                    f"for pair {pair}"
-                )
-
         redis_data = {p.encode("utf-8"): d for p, d in data.items()}
         # add pairs to the set of correlation pairs
         self.r.sadd("corr_pairs", *redis_data.keys())
@@ -400,6 +377,12 @@ class EigsepRedis:
         is the number of spectra read at each integration step.
 
         """
+        if not self.r.sismember("data_streams", "stream:corr"):
+            self.logger.warning(
+                "No correlation data stream found. "
+                "Please ensure the SNAP is running and sending data."
+            )
+            return None, None, {}
         if pairs is None:
             pairs = self.r.smembers("corr_pairs")
         last_id = self.data_streams["stream:corr"]
@@ -428,7 +411,7 @@ class EigsepRedis:
         ]
         return acc_cnt, sync_time, data
 
-    def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
+    def add_vna_data(self, data, header=None, metadata=None):
         """
         Send VNA data to Redis using a stream. Used by client.
 
@@ -437,37 +420,65 @@ class EigsepRedis:
         data : dict
             Dictionary holding VNA data. Keys are measurement modes and
             values are arrays of complex numbers.
-        cal_data : dict
-            Dictionary holding calibration data. Keys are calibration
-            modes and values are arrays of complex numbers.
         header : dict
             VNA configuration. To be placed in file header.
         metadata : dict
             Live sensor metadata. To be placed in file header.
-        """
-        self.r.sadd("data_streams", "stream:vna")
-        raise NotImplementedError
 
-    def read_vna_data(self, timeout=120):
+        Raises
+        ------
+        ValueError
+            If data is empty or does not contain valid arrays.
+
         """
-        Read VNA data stream from Redis. Used by server.
+        # get array metadata
+        arr = next(iter(data.values()), None)
+        if arr is None:
+            raise ValueError("Data cannot be empty")
+        arr_meta = {
+            "dtype": arr.dtype.str,
+            "shape": arr.shape,
+            "order": "C" if arr.flags["C_CONTIGUOUS"] else "F",
+        }
+        payload = {}
+        for k, arr in data.items():
+            payload[k] = arr.tobytes()
+        payload["arr_meta"] = json.dumps(arr_meta)
+        if header is not None:
+            _hdr = header.copy()
+            for k, v in _hdr.items():
+                if isinstance(v, np.ndarray):
+                    _hdr[k] = v.tolist()
+            payload["header"] = json.dumps(_hdr)
+        if metadata is not None:
+            _md = metadata.copy()
+            for k, v in _md.items():
+                if isinstance(v, np.ndarray):
+                    _md[k] = v.tolist()
+            payload["metadata"] = json.dumps(_md)
+        self.r.xadd(
+            "stream:vna",
+            payload,
+            maxlen=self.maxlen["vna_data"],
+            approximate=True,
+        )
+        self.r.sadd("data_streams", "stream:vna")
+
+    def read_vna_data(self, timeout=0):
+        """
+        Blocking read of VNA data stream from Redis. Used by server.
 
         Parameters
         ----------
         timeout : int
-            Timeout in seconds for blocking read.
+            Timeout in seconds for blocking read. Set to 0 to block
+            indefinitely.
 
         Returns
         -------
-        entry_id : str
-            Redis stream entry id. If None, no message was received.
         data : dict
             Dictionary holding VNA data. Keys are measurement modes and
-            values are arrays of complex numbers. If None, no message was
-            received.
-        cal_data : dict
-            Dictionary holding calibration data. Keys are calibration
-            modes and values are arrays of complex numbers.
+            values are arrays of complex numbers.
         header : dict
             VNA configuration. To be placed in file header.
         metadata : dict
@@ -481,8 +492,42 @@ class EigsepRedis:
         Notes
         -----
         This is a blocking read with a timeout of ``timeout`` seconds.
+
         """
-        raise NotImplementedError("This method is not implemented yet.")
+        if not self.r.sismember("data_streams", "stream:vna"):
+            self.logger.warning(
+                "No VNA data stream found. "
+                "Please ensure the VNA is running and sending data."
+            )
+            return None, None, None
+        last_id = self.data_streams["stream:vna"]
+        out = self.r.xread(
+            {"stream:vna": last_id},
+            count=1,
+            block=int(timeout * 1000),
+        )
+        if not out:
+            raise TimeoutError("No VNA data received within timeout.")
+        eid, fields = out[0][1][0]
+        self._set_last_read_id("stream:vna", eid)  # update last read id
+        # extract header, metadata, array_meta
+        arr_meta = json.loads(fields.pop(b"arr_meta").decode("utf-8"))
+        if b"header" in fields:
+            header = json.loads(fields.pop(b"header").decode("utf-8"))
+        else:
+            header = None
+        if b"metadata" in fields:
+            metadata = json.loads(fields.pop(b"metadata").decode("utf-8"))
+        else:
+            metadata = None
+        # decode the data arrays
+        vna_data = {}
+        for k, v in fields.items():
+            arr = np.frombuffer(v, dtype=np.dtype(arr_meta["dtype"])).reshape(
+                arr_meta["shape"], order=arr_meta["order"]
+            )
+            vna_data[k.decode()] = arr
+        return vna_data, header, metadata
 
     # ------------------- metadata -----------------
 
@@ -614,8 +659,10 @@ class EigsepRedis:
             }
 
         # non-blocking read
-        resp = self.r.xread(streams)
         redis_hdr = {}
+        if not streams:  # no streams to read
+            return redis_hdr
+        resp = self.r.xread(streams)
         for stream, dat in resp:
             stream = stream.decode()  # decode stream name
             out = []

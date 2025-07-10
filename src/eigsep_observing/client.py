@@ -1,6 +1,6 @@
 import json
 import logging
-import queue
+from queue import Queue, Empty, Full
 import threading
 
 from eigsep_corr.config import load_config
@@ -12,6 +12,40 @@ from .utils import get_config_path
 logger = logging.getLogger(__name__)
 default_cfg_file = get_config_path("obs_config.yaml")
 default_cfg = load_config(default_cfg_file, compute_inttime=False)
+
+
+# custom switch lock that always return to sky measurements
+class SwitchLock:
+    """
+    A lock that ensures that the switch network is always in sky
+    measurements mode after the lock is released.
+    """
+
+    def __init__(self, switch_nw):
+        self.switch_nw = switch_nw
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        self._lock.acquire(blocking=blocking, timeout=timeout)
+
+    def release(self):
+        self._lock.release()
+        try:
+            self.switch_nw.switch("RFANT")  # switch back to sky measurements
+        except Exception as e:
+            logger.warning(
+                f"Failed to switch back to sky measurements: {e}. "
+                "Switch network may not be initialized."
+            )
+
+    __enter__ = acquire
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def locked(self):
+        return self._lock.locked()
 
 
 class PandaClient:
@@ -44,17 +78,12 @@ class PandaClient:
         self.redis = redis
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
-        try:
-            cfg = self.redis.get_config()
-            upload_time = cfg["upload_time"]
-            self.logger.info(
-                f"Using config from Redis, updated at {upload_time}."
-            )
-        except ValueError:
+        cfg = self._get_cfg()  # get the current config from Redis
+        if cfg is None:
             self.logger.warning(
-                "Missing configuration in Redis, using default."
+                "No configuration found in Redis, using default config."
             )
-            cfg = default_cfg
+            cfg = default_cfg.copy()
         # add pico info
         try:
             fname = cfg["pico_config_file"]
@@ -73,15 +102,45 @@ class PandaClient:
         self.cfg = cfg
 
         # initialize the picos and VNA
-        self.switch_nw = None
         self.motor = None
         self.peltier = None
+        self._switch_nw = None
+        self.switch_lock = None
         self._initialize()  # initialize the client
+
+    def _get_cfg(self):
+        """
+        Try to get the current configuration from Redis. If it fails,
+        return None.
+
+        Returns
+        -------
+        cfg : dict or None
+            The configuration dictionary if available, otherwise None.
+
+        """
+        try:
+            cfg = self.redis.get_config()
+        except ValueError:
+            return None  # no config in Redis
+        upload_time = cfg["upload_time"]
+        self.logger.info(f"Using config from Redis, updated at {upload_time}.")
+        return cfg
+
+    @property
+    def switch_nw(self):
+        return self._switch_nw
+
+    @switch_nw.setter
+    def switch_nw(self, value):
+        self._switch_nw = value
+        self.redis.r.sadd("ctrl_commands", "switch")
+        self.switch_lock = SwitchLock(self._switch_nw)
 
     def get_pico_config(self, fname, app_mapping):
         """
-        Read pico configuration from the config file and update `cfg`
-        and the configuration in Redis.
+        Read pico configuration from the config file. This is used to
+        update `cfg` and the configuration in Redis.
 
         Parameters
         ----------
@@ -117,10 +176,8 @@ class PandaClient:
         self.init_picos()  # initialize picos
         if self.switch_nw is None:
             self.vna = None
-        else:
-            self.redis.r.sadd("ctrl_commands", "switch")
-            if self.cfg["use_vna"]:
-                self.init_VNA()
+        elif self.cfg["use_vna"]:
+            self.init_VNA()
 
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
@@ -147,22 +204,22 @@ class PandaClient:
 
         """
         cfg = self.redis.get_config()
-        if not force:  # check if the config has changed
-            if cfg == self.cfg:
-                msg = "Configuration unchanged, skipping reprogram."
-                self.logger.info(msg)
-                self.redis.send_status(level=logging.INFO, status=msg)
-                return
-            self.logger.info("Configuration changed, reprogramming client.")
-            self.cfg = cfg
+        if force or cfg != self.cfg:
+            self.cfg = cfg  # update the config
+            self.logger.info("Client reprogrammed.")
+            return
+        if not force and cfg == self.cfg:  # not force
+            msg = "Configuration unchanged, skipping reprogram."
+            self.logger.info(msg)
+            self.redis.send_status(level=logging.INFO, status=msg)
 
-        self.stop_client.set()  # stop all threads
+        # self.stop_client.set()  # stop all threads
         # wait for all threads to finish
-        self.heartbeat_thd.join()
-        for name, pico in self.picos.items():
-            self.logger.debug(f"Stopping pico {name} thread.")
-            pico.stop()
-        self._initialize()  # reinitialize the client
+        # self.heartbeat_thd.join()
+        # for name, pico in self.picos.items():
+        #     self.logger.debug(f"Stopping pico {name} thread.")
+        #    pico.stop()
+        # self._initialize()  # reinitialize the client
 
     def _send_heartbeat(self, ex=60):
         """
@@ -177,7 +234,7 @@ class PandaClient:
         """
         while not self.stop_client.is_set():
             self.redis.client_heartbeat_set(ex=ex, alive=True)
-            self.stop_client.wait(ex / 2)  # update faster than expiration
+            self.stop_client.wait(1.0)  # update faster than expiration
         # if we reach here, the client should stop running
         self.redis.client_heartbeat_set(alive=False)
 
@@ -198,6 +255,9 @@ class PandaClient:
             save_dir=self.cfg["vna_save_dir"],
             switch_network=self.switch_nw,
         )
+        kwargs = self.cfg["vna_settings"].copy()
+        kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
+        self.vna.setup(**kwargs)
         self.redis.r.sadd("ctrl_commands", "VNA")
 
     def metadata_pusher(self, queue):
@@ -245,13 +305,13 @@ class PandaClient:
             """
             try:
                 queue.put_nowait((name, data))
-            except queue.Full:
+            except Full:
                 logging.warning(
                     f"Queue is full, dropping data from {name}: {data}"
                 )
                 try:
                     queue.get_nowait()  # remove oldest item
-                except queue.Empty:
+                except Empty:  # empty queue
                     pass
                 queue.put_nowait((name, data))
 
@@ -269,16 +329,16 @@ class PandaClient:
 
         """
         # queue for pico readings
-        pico_queue = queue.Queue(maxsize=1000)
-        self.metadata_thd = threading.Thread(
-            target=self.metadata_pusher,
-            args=(pico_queue,),
-            daemon=True,
-        )
+        # pico_queue = Queue(maxsize=1000)
+        # self.metadata_thd = threading.Thread(
+        #     target=self.metadata_pusher,
+        #     args=(pico_queue,),
+        #     daemon=True,
+        # )
 
         self.picos = {}  # pico name : pico instance
         try:
-            pico_cfg = self.cfg["picos"]  # name: serial port mapping
+            pico_cfg = self.cfg["picos"].copy()  # name: serial port mapping
         except KeyError:
             self.logger.warning(
                 "No sensor config provided, no sensors will be initialized."
@@ -298,9 +358,16 @@ class PandaClient:
                 continue
 
             try:
-                p = cls(port, timeout=self.serial_timeout)
-                p.set_response_handler(
-                    self._pico_response_handler(pico_queue, name)
+                # p = cls(port, timeout=self.serial_timeout)
+                # p.set_response_handler(
+                #     self._pico_response_handler(pico_queue, name)
+                # )
+                p = cls(
+                    port,
+                    timeout=self.serial_timeout,
+                    name=name,
+                    eig_redis=self.redis,
+                    response_handler=None,  # defaults to pushing to redis
                 )
                 if p.is_connected:
                     self.picos[name] = p
@@ -313,30 +380,57 @@ class PandaClient:
             self.logger.warning("Running without pico threads.")
             return
 
-        self.metadata_thd.start()
-        for name, p in self.picos.items():
-            self.logger.debug(f"Starting pico {name} thread.")
-            p.start()
+        # self.metadata_thd.start()
+        # for name, p in self.picos.items():
+        #     self.logger.debug(f"Starting pico {name} thread.")
+        #     p.start()
 
         # create reference to switch_nw, motor, peltier if they exist
         self.switch_nw = self.picos.get("switch", None)
         self.motor = self.picos.get("motor", None)
         self.peltier = self.picos.get("peltier", None)
 
-    def measure_s11(self, mode, **kwargs):
+    def switch_loop(self):
         """
-        Measure S11 with the VNA and write the results to file. The
-        directory where the results are saved is set by the
-        ``save_dir'' attribute of the VNA instance.
+        Use the RF switches to switch between sky, load, and noise
+        source measurements according to the switch schedule.
+
+        Notes
+        -----
+        The majority of the observing time is spent on sky
+        measurements. Therefore, S11 measurements are only allowed
+        to interrupt the sky measurements, and not the load or
+        noise source measurements.
+
+        """
+        if self.switch_nw is None:
+            self.logger.warning(
+                "Switch network not initialized. Cannot execute "
+                "switching commands."
+            )
+            return
+        while not self.stop_client.is_set():
+            with self.switch_lock:
+                self.logger.debug("Switch has lock.")
+                for mode in ["RFNOFF", "RFNON"]:
+                    self.logger.info(f"Switching to {mode} measurements")
+                    self.switch_nw.switch(mode)
+                    wait_time = self.cfg["switch_schedule"][mode]
+                    if self.stop_client.wait(wait_time):
+                        self.logger.info("Switching stopped by event")
+                        return
+            self.logger.debug("Switch lock released, switching to RFANT")
+            self.stop_client.wait(self.cfg["switch_schedule"]["RFANT"])
+
+    def measure_s11(self, mode):
+        """
+        Measure S11 with the VNA and stream the results to Redis.
 
         Parameters
         ----------
         mode : str
             The mode of operation, either 'ant' for antenna or 'rec'
             for receiver.
-        kwargs : dict
-            Additional keyword arguments for the VNA measurement.
-            Passed to the VNA setup method.
 
         Raises
         ------
@@ -367,22 +461,41 @@ class PandaClient:
                 "VNA not initialized. Cannot execute VNA commands."
             )
 
-        setup_kwargs = {k: v for k, v in kwargs.items() if v is not None}
-        _ = self.vna.setup(**setup_kwargs)
-
+        self.vna.power_dBm = self.cfg["vna_settings"]["power_dBm"][mode]
         osl_s11 = self.vna.measure_OSL()
-
         if mode == "ant":
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
+        # s11 is a dict with keys ant & noise, or rec
+        for k, v in osl_s11.items():
+            s11[f"cal:{k}"] = v  # add OSL calibration data
 
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_metadata()
-        self.redis.send_vna_data(
-            s11, cal_data=osl_s11, header=header, metadata=metadata
-        )
+        self.redis.add_vna_data(s11, header=header, metadata=metadata)
+
+    def vna_loop(self):
+        """
+        Observe with VNA and write data to files.
+        """
+        while self.vna is None:
+            self.logger.warning(
+                "VNA not initialized. Cannot execute VNA commands."
+            )
+            threading.Event().wait(5)  # wait for VNA to be initialized
+        while not self.stop_client.is_set():
+            with self.switch_lock:
+                for mode in ["ant", "rec"]:
+                    self.logger.info(f"Measuring S11 of {mode} with VNA")
+                    self.measure_s11(mode)
+            # wait for the next iteration
+            self.stop_client.wait(self.cfg["vna_interval"])
+
+    # XXX
+    def rotate_motors(self):
+        raise NotImplementedError
 
     def read_ctrl(self):
         """
@@ -398,16 +511,24 @@ class PandaClient:
 
         """
         try:
-            msg = self.redis.read_ctrl()
+            msg = self.redis.read_ctrl(timeout=0.1)
         except TypeError as e:
             err = f"Error reading control command: {e}"
             self.logger.error(err)
             self.redis.send_status(level=logging.ERROR, status=err)
             return
 
+        if msg is None:
+            return
+
         cmd, kwargs = msg
+        if cmd is None:
+            return  # no command to execute
+
+        self.logger.info(f"Received control message: {msg}")
+
         if cmd == "ctrl:reprogram":
-            self.logger.info("Reprogramming client.")
+            self.logger.warning("Reprogramming client.")
             self.reprogram(**kwargs)
             self.redis.send_status(
                 level=logging.INFO, status="Client reprogrammed."
@@ -422,16 +543,28 @@ class PandaClient:
                 self.redis.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
-            self.switch_nw.switch(mode)
+            with self.switch_lock:
+                self.logger.info(f"Switching to {mode} measurements")
+                self.switch_nw.switch(mode)
         elif cmd in self.redis.vna_commands:
             mode = cmd.split(":")[1]
-            try:
-                self.measure_s11(mode, **kwargs)
-            except (ValueError, RuntimeError) as e:
-                err = f"Error executing VNA command {cmd}: {e}"
-                self.logger.error(err)
-                self.redis.send_status(level=logging.ERROR, status=err)
+            with self.switch_lock:
+                try:
+                    self.measure_s11(mode)
+                except (ValueError, RuntimeError) as e:
+                    err = f"Error executing VNA command {cmd}: {e}"
+                    self.logger.error(err)
+                    self.redis.send_status(level=logging.ERROR, status=err)
         else:
-            err = f"Unknown command: {cmd}"
+            err = f"Unknown command: {msg=}, {cmd=}, {kwargs=}. "
             self.logger.error(err)
             self.redis.send_status(level=logging.ERROR, status=err)
+
+    def ctrl_loop(self):
+        """
+        Control loop that reads commands from Redis and executes them.
+        This method runs in a separate thread.
+
+        """
+        while not self.stop_client.is_set():
+            self.read_ctrl()
