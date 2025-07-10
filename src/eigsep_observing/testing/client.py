@@ -5,8 +5,8 @@ import picohost
 from .. import PandaClient
 
 default_cfg_file = (
-    "~/Documents/research/eigsep/eigsep_observing/src/eigsep_observing/"
-    "configs/dummy_config.yaml"
+    "/home/christian/Documents/research/eigsep/eigsep_observing/src/"
+    "eigsep_observing/config/dummy_config.yaml"
 )
 default_cfg = load_config(default_cfg_file, compute_inttime=False)
 
