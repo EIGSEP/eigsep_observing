@@ -377,7 +377,7 @@ class EigsepRedis:
         is the number of spectra read at each integration step.
 
         """
-        if not self.r.ismember("data_streams", "stream:corr"):
+        if not self.r.sismember("data_streams", "stream:corr"):
             self.logger.warning(
                 "No correlation data stream found. "
                 "Please ensure the SNAP is running and sending data."
@@ -494,7 +494,7 @@ class EigsepRedis:
         This is a blocking read with a timeout of ``timeout`` seconds.
 
         """
-        if not self.r.ismember("data_streams", "stream:vna"):
+        if not self.r.sismember("data_streams", "stream:vna"):
             self.logger.warning(
                 "No VNA data stream found. "
                 "Please ensure the VNA is running and sending data."
@@ -512,11 +512,11 @@ class EigsepRedis:
         self._set_last_read_id("stream:vna", eid)  # update last read id
         # extract header, metadata, array_meta
         arr_meta = json.loads(fields.pop(b"arr_meta").decode("utf-8"))
-        if "header" in fields:
+        if b"header" in fields:
             header = json.loads(fields.pop(b"header").decode("utf-8"))
         else:
             header = None
-        if "metadata" in fields:
+        if b"metadata" in fields:
             metadata = json.loads(fields.pop(b"metadata").decode("utf-8"))
         else:
             metadata = None
