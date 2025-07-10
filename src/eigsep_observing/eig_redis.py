@@ -445,9 +445,17 @@ class EigsepRedis:
             payload[k] = arr.tobytes()
         payload["arr_meta"] = json.dumps(arr_meta)
         if header is not None:
-            payload["header"] = json.dumps(header)  # XXX,freq is array
+            _hdr = header.copy()
+            for k, v in _hdr.items():
+                if isinstance(v, np.ndarray):
+                    _hdr[k] = v.tolist()
+            payload["header"] = json.dumps(_hdr)
         if metadata is not None:
-            payload["metadata"] = json.dumps(metadata)  # XXX???
+            _md = metadata.copy()
+            for k, v in _md.items():
+                if isinstance(v, np.ndarray):
+                    _md[k] = v.tolist()
+            payload["metadata"] = json.dumps(_md)
         self.r.xadd(
             "stream:vna",
             payload,
