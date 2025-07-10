@@ -4,8 +4,9 @@ from .. import EigObserver, utils
 
 logger = logging.getLogger(__name__)
 
-CORR_CFG_PATH = utils.get_config_path("corr_cfg.yaml")
-CFG_PATH = utils.get_config_path("dummy_obs_cfg.yaml")
+CORR_CFG_PATH = utils.get_config_path("corr_config.yaml")
+CFG_PATH = utils.get_config_path("dummy_config.yaml")
+
 
 class DummyEigObserver(EigObserver):
 
@@ -17,6 +18,6 @@ class DummyEigObserver(EigObserver):
         if redis_snap is not None:
             redis_snap.upload_corr_config(CORR_CFG_PATH, from_file=True)
         if redis_panda is not None:
-            redis_panda.upload_corr_config(CFG_PATH, from_file=True)
+            redis_panda.upload_config(CFG_PATH, from_file=True)
         # call parent constructor
         super().__init__(redis_snap=redis_snap, redis_panda=redis_panda)

@@ -33,6 +33,20 @@ class DummyPandaClient(PandaClient):
         """
         super().__init__(redis, default_cfg=default_cfg)
 
+    def get_pico_config(self, fname, app_mapping):
+        """
+        Override the pico config loading to use the default dummy config.
+        """
+        pico_cfg = {
+            "motor": "dummy",
+            "peltier": "dummy",
+            "therm": "dummy",
+            "imu": "dummy",
+            "lidar": "dummy",
+            "switch": "dummy",
+        }
+        return pico_cfg
+
     def init_VNA(self):
         """
         Override the VNA initialization to use a dummy VNA.
