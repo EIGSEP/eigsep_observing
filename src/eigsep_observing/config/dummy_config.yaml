@@ -1,24 +1,32 @@
-# High-level configuration for EIGSEP observations
-# Sets switch schedules, sensors, and other high-level parameters
+# dummy_config file for running on a single machine
 
 # IP addresses
-rpi_ip: "10.10.10.10"
-panda_ip: "10.10.10.12"
+rpi_ip: "localhost"
+panda_ip: "localhost"
 # picos
-picos:
-  imu: "/dev/dummy_imu"
-  therm: "/dev/dummy_therm"
-  switch: "/dev/dummy_switch"
+pico_config_file: "~/Documents/research/eigsep/pico-firmware/pico_config.json"
+pico_app_mapping:  # app number to device mapping
+  0: "motor"
+  1: "peltier"
+  2: "therm"
+  3: "imu"
+  4: "lidar"
+  5: "switch"
+# corr filewriter
+corr_save_dir: "~/Documents/research/eigsep/eigsep_observing/test_data"
+corr_ntimes: 240
+# switches
+use_switches: true
 switch_schedule:  # seconds per measurement
-  sky: 3600
-  load: 60
-  noise: 60
+  sky: 300
+  load: 5
+  noise: 5
 # vna
 use_vna: true
-vna_interval: 3600  # seconds between VNA measurements
+vna_interval: 600  # seconds between VNA measurements
 vna_ip: "127.0.0.1"
 vna_port: 5025
-vna_timeout: 1000  # in seconds
+vna_timeout: 1  # in seconds
 vna_settings:
   fstart: 1000000.0  # in Hz
   fstop: 250000000.0  # in Hz
@@ -27,4 +35,4 @@ vna_settings:
   power_dBm:
     ant: 0.0
     rec: -40.0
-vna_save_dir: "test_vna_data"
+vna_save_dir: "~/Documents/research/eigsep/eigsep_observing/test_s11_data"
