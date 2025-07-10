@@ -20,8 +20,8 @@ corr_ntimes: 240
 use_switches: true
 switch_schedule:  # seconds per measurement
   RFANT: 100  # sky
-  RFNOFF: 10  # load
-  RFNON: 10  # noise source
+  RFNOFF: 20  # load
+  RFNON: 20  # noise source
 # vna
 use_vna: true
 vna_interval: 300  # seconds between VNA measurements
