@@ -31,7 +31,7 @@ class SwitchLock:
     def release(self):
         self._lock.release()
         try:
-            self.switch_nw.switch("RNANT")  # switch back to sky measurements
+            self.switch_nw.switch("RFANT")  # switch back to sky measurements
         except Exception as e:
             logger.warning(
                 f"Failed to switch back to sky measurements: {e}. "
@@ -139,8 +139,8 @@ class PandaClient:
 
     def get_pico_config(self, fname, app_mapping):
         """
-        Read pico configuration from the config file and update `cfg`
-        and the configuration in Redis.
+        Read pico configuration from the config file. This is used to
+        update `cfg` and the configuration in Redis.
 
         Parameters
         ----------
@@ -405,14 +405,14 @@ class PandaClient:
         switch_schedule = self.cfg["switch_schedule"].copy()
         while not self.stop_client.is_set():
             with self.switch_lock:
-                for mode in ["RNNOFF", "RNNON"]:
+                for mode in ["RFNOFF", "RFNON"]:
                     self.logger.info(f"Switching to {mode} measurements")
                     self.switch_nw.switch(mode)
                     wait_time = switch_schedule[mode]
                     if self.stop_client.wait(wait_time):
                         self.logger.info("Switching stopped by event")
                         return
-            self.stop_client.wait(switch_schedule["sky"])
+            self.stop_client.wait(switch_schedule["RFANT"])
 
     def measure_s11(self, mode):
         """
@@ -459,13 +459,14 @@ class PandaClient:
             s11 = self.vna.measure_ant(measure_noise=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
+        # s11 is a dict with keys ant & noise, or rec
+        for k, v in osl_s11.items():
+            s11[f"cal:{k}"] = v  # add OSL calibration data
 
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_metadata()
-        self.redis.add_vna_data(
-            s11, cal_data=osl_s11, header=header, metadata=metadata
-        )
+        self.redis.add_vna_data(s11, header=header, metadata=metadata)
 
     def vna_loop(self):
         """
@@ -502,11 +503,14 @@ class PandaClient:
 
         """
         try:
-            msg = self.redis.read_ctrl()
+            msg = self.redis.read_ctrl(timeout=1)
         except TypeError as e:
             err = f"Error reading control command: {e}"
             self.logger.error(err)
             self.redis.send_status(level=logging.ERROR, status=err)
+            return
+
+        if msg is None:
             return
 
         cmd, kwargs = msg

@@ -162,9 +162,6 @@ class EigObserver:
         data : dict
             The S11 measurement data from the VNA. Only returned if
             `write_files` is False.
-        cal_data : dict
-            S11 measurement data from the OSL calibration. Only
-            returned if `write_files` is False.
 
         Raises
         ------
@@ -190,17 +187,16 @@ class EigObserver:
                 "Check the VNA connection and settings."
             )
             return None, None
-        eid, data, cal_data, header, metadata = out
+        data, header, metadata = out
         if write_files:
             io.write_s11_file(
                 data,
                 header,
                 metadata=metadata,
-                cal_data=cal_data,
                 save_dir=self.cfg["vna_save_dir"],
             )
         else:
-            return data, cal_data
+            return data
 
     # XXX
     @require_panda
@@ -282,13 +278,11 @@ class EigObserver:
 
         """
         while not self.stop_event.is_set():
-            d = self.redis_panda.read_vna_data(timeout=0)
-            data, cal_data, header, metadata = d
+            data, header, metadata = self.redis_panda.read_vna_data(timeout=0)
             io.write_s11_file(
                 data,
                 header,
                 metadata=metadata,
-                cal_data=cal_data,
                 save_dir=save_dir,
             )
             self.logger.info(f"Wrote VNA data to {save_dir}.")
