@@ -89,10 +89,12 @@ else:
     observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 
 if args.use_panda:
+    while not observer.panda_connected:
+        logger.info("Waiting for Panda to connect.")
     observer.reprogram_panda(force=True)
 
 thds = {}
-
+thds["status"] = observer.status_thread
 # set up file writing: corr_thd for correlation data, panda_thd for s11
 if args.use_snap:
     corr_thd = threading.Thread(
@@ -106,7 +108,7 @@ if args.use_snap:
 
 # set up VNA measurements
 if args.use_panda and cfg["use_vna"]:
-    # vna_thd = threading.Thread(target=observer.observe_vna)
+    logger.info(f"panda connected: {observer.panda_connected}")
     vna_thd = threading.Thread(
         target=observer.record_vna_data,
         args=(cfg["vna_save_dir"],),
