@@ -161,7 +161,7 @@ class PandaClient:
         pico_cfg = {}
         for dev in cfg:
             try:
-                app_id = dev["app_id"]
+                app_id = str(dev["app_id"])
                 name = app_mapping[app_id]
             except KeyError:
                 self.logger.warning(
