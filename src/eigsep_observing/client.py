@@ -1,6 +1,5 @@
 import json
 import logging
-from queue import Queue, Empty, Full
 import threading
 
 from eigsep_corr.config import load_config
@@ -213,14 +212,6 @@ class PandaClient:
             self.logger.info(msg)
             self.redis.send_status(level=logging.INFO, status=msg)
 
-        # self.stop_client.set()  # stop all threads
-        # wait for all threads to finish
-        # self.heartbeat_thd.join()
-        # for name, pico in self.picos.items():
-        #     self.logger.debug(f"Stopping pico {name} thread.")
-        #    pico.stop()
-        # self._initialize()  # reinitialize the client
-
     def _send_heartbeat(self, ex=60):
         """
         Send a heartbeat message to the Redis server to indicate that the
@@ -260,63 +251,6 @@ class PandaClient:
         self.vna.setup(**kwargs)
         self.redis.r.sadd("ctrl_commands", "VNA")
 
-    def metadata_pusher(self, queue):
-        """
-        Push metadata from the pico queue to Redis.
-        This method runs in a separate thread and continuously reads
-        metadata from the queue and sends it to Redis.
-
-        Parameters
-        ----------
-        queue : queue.Queue
-            The queue from which to read pico metadata. All picos
-            should push their metadata to this queue.
-
-        """
-        while not self.stop_client.is_set():
-            pico_name, metadata = queue.get()
-            self.redis.add_metadata(pico_name, metadata)
-
-    @staticmethod
-    def _pico_response_handler(queue, name):
-        """
-        Handle responses from the pico devices and push them to the
-        provided queue.
-
-        Parameters
-        ----------
-        queue : queue.Queue
-            The queue to which the pico data should be pushed.
-        name : str
-            The name of the pico device.
-
-        Returns
-        -------
-        handler : callable
-            A function that can be used as a response handler for the
-            pico device. It takes the data from the pico and pushes it
-            to the queue.
-
-        """
-
-        def handler(data):
-            """
-            Handle data from the pico device and push it to the queue.
-            """
-            try:
-                queue.put_nowait((name, data))
-            except Full:
-                logging.warning(
-                    f"Queue is full, dropping data from {name}: {data}"
-                )
-                try:
-                    queue.get_nowait()  # remove oldest item
-                except Empty:  # empty queue
-                    pass
-                queue.put_nowait((name, data))
-
-        return handler
-
     def init_picos(self):
         """
         Initialize pico readings based on the configuration in Redis.
@@ -328,14 +262,6 @@ class PandaClient:
         changes.
 
         """
-        # queue for pico readings
-        # pico_queue = Queue(maxsize=1000)
-        # self.metadata_thd = threading.Thread(
-        #     target=self.metadata_pusher,
-        #     args=(pico_queue,),
-        #     daemon=True,
-        # )
-
         self.picos = {}  # pico name : pico instance
         try:
             pico_cfg = self.cfg["picos"].copy()  # name: serial port mapping
@@ -358,16 +284,11 @@ class PandaClient:
                 continue
 
             try:
-                # p = cls(port, timeout=self.serial_timeout)
-                # p.set_response_handler(
-                #     self._pico_response_handler(pico_queue, name)
-                # )
                 p = cls(
                     port,
                     timeout=self.serial_timeout,
                     name=name,
                     eig_redis=self.redis,
-                    response_handler=None,  # defaults to pushing to redis
                 )
                 if p.is_connected:
                     self.picos[name] = p
@@ -379,11 +300,6 @@ class PandaClient:
         if not self.picos:
             self.logger.warning("Running without pico threads.")
             return
-
-        # self.metadata_thd.start()
-        # for name, p in self.picos.items():
-        #     self.logger.debug(f"Starting pico {name} thread.")
-        #     p.start()
 
         # create reference to switch_nw, motor, peltier if they exist
         self.switch_nw = self.picos.get("switch", None)
