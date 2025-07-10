@@ -8,7 +8,6 @@ default_cfg_file = (
     "/home/christian/Documents/research/eigsep/eigsep_observing/src/"
     "eigsep_observing/config/dummy_config.yaml"
 )
-default_cfg = load_config(default_cfg_file, compute_inttime=False)
 
 
 class DummyPandaClient(PandaClient):
@@ -27,10 +26,17 @@ class DummyPandaClient(PandaClient):
         "motor": picohost.testing.DummyPicoMotor,
     }
 
-    def __init__(self, redis, default_cfg=default_cfg):
+    def __init__(self, redis, default_cfg=None):
         """
         Override the default config.
         """
+        if default_cfg is None:
+            try:
+                default_cfg = load_config(
+                    default_cfg_file, compute_inttime=False
+                )
+            except FileNotFoundError:
+                default_cfg = {}
         super().__init__(redis, default_cfg=default_cfg)
 
     def get_pico_config(self, fname, app_mapping):
