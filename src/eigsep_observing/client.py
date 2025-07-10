@@ -78,17 +78,12 @@ class PandaClient:
         self.redis = redis
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
-        try:
-            cfg = self.redis.get_config()
-            upload_time = cfg["upload_time"]
-            self.logger.info(
-                f"Using config from Redis, updated at {upload_time}."
-            )
-        except ValueError:
+        cfg = self._get_cfg()  # get the current config from Redis
+        if cfg is None:
             self.logger.warning(
-                "Missing configuration in Redis, using default."
+                "No configuration found in Redis, using default config."
             )
-            cfg = default_cfg
+            cfg = default_cfg.copy()
         # add pico info
         try:
             fname = cfg["pico_config_file"]
@@ -112,6 +107,25 @@ class PandaClient:
         self._switch_nw = None
         self.switch_lock = None
         self._initialize()  # initialize the client
+
+    def _get_cfg(self):
+        """
+        Try to get the current configuration from Redis. If it fails,
+        return None.
+
+        Returns
+        -------
+        cfg : dict or None
+            The configuration dictionary if available, otherwise None.
+
+        """
+        try:
+            cfg = self.redis.get_config()
+        except ValueError:
+            return None  # no config in Redis
+        upload_time = cfg["upload_time"]
+        self.logger.info(f"Using config from Redis, updated at {upload_time}.")
+        return cfg
 
     @property
     def switch_nw(self):
@@ -457,6 +471,11 @@ class PandaClient:
         """
         Observe with VNA and write data to files.
         """
+        if self.vna is None:
+            self.logger.warning(
+                "VNA not initialized. Cannot execute VNA commands."
+            )
+            return
         while not self.stop_client.is_set():
             with self.switch_lock:
                 for mode in ["ant", "rec"]:
