@@ -2,7 +2,7 @@ import logging
 import threading
 
 from . import io
-from .utils import require_panda, require_snap
+from .utils import require_panda
 
 logger = logging.getLogger(__name__)
 
@@ -50,12 +50,9 @@ class EigObserver:
         self.stop_event = threading.Event()  # main stop event
 
         # start a status thread
-        if self.panda_connected:
-            status_thread = threading.Thread(
-                target=self.status_logger,
-                daemon=True,
-            )
-            status_thread.start()
+        self.logger.info("Starting status thread.")
+        self.status_thread = threading.Thread(target=self.status_logger)
+        self.status_thread.start()
 
     @property
     def snap_connected(self):
@@ -74,7 +71,7 @@ class EigObserver:
         return self.redis_panda.client_heartbeat_check()
 
     @require_panda
-    def reprogram_panda(self, force=False):
+    def reprogram_panda(self, force=False, timeout=5):
         """
         Reprogram the LattePanda Redis server with the current
         configuration.
@@ -94,13 +91,21 @@ class EigObserver:
         self.redis_panda.send_ctrl("ctrl:reprogram", force=force)
         self.cfg = self.redis_panda.get_config()  # update cfg
 
-    @require_panda
     def status_logger(self):
         """
         Log status messages from the LattePanda Redis server.
         """
+        while not self.panda_connected:
+            self.logger.debug("Status thread waiting for Panda connection.")
+            self.stop_event.wait(1)
+        self.logger.info("Status thread started. Logging Panda status.")
+
         while not self.stop_event.is_set():
-            level, status = self.redis_panda.read_status()
+            while not self.panda_connected:
+                self.logger.warning("Panda disconnected")
+                self.stop_event.wait(1)
+            self.logger.debug("Panda connected.")
+            level, status = self.redis_panda.read_status(timeout=10)
             if status is None:
                 # Check stop event with timeout
                 if self.stop_event.wait(0.1):
@@ -210,7 +215,6 @@ class EigObserver:
         # runs if not stop_events[motors].is_set()
         raise NotImplementedError
 
-    @require_snap
     def record_corr_data(self, save_dir, ntimes=240, timeout=10):
         """
         Read data from the SNAP correlator via Redis and write it to
@@ -241,6 +245,12 @@ class EigObserver:
             self.corr_cfg,
         )
 
+        while not self.snap_connected:
+            self.logger.warning(
+                "Waiting for SNAP Redis connection to be established."
+            )
+            self.stop_event.wait(1)
+
         while not self.stop_event.is_set():
             if file.counter == 0:  # look up header in Redis once per file
                 try:
@@ -265,7 +275,6 @@ class EigObserver:
             self.logger.info("Writing short final file.")
             file.corr_write()
 
-    @require_panda
     def record_vna_data(self, save_dir):
         """
         Read VNA data from the LattePanda Redis server and write it to
@@ -277,8 +286,17 @@ class EigObserver:
             Directory to save the VNA data files.
 
         """
+        while not self.panda_connected:
+            self.logger.warning(
+                "Waiting for LattePanda Redis connection to be established."
+            )
+            self.stop_event.wait(1)
         while not self.stop_event.is_set():
             data, header, metadata = self.redis_panda.read_vna_data(timeout=0)
+            if data is None:
+                self.logger.warning("No VNA data available. Waiting.")
+                self.stop_event.wait(1)
+                continue
             io.write_s11_file(
                 data,
                 header,
