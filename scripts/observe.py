@@ -31,6 +31,13 @@ parser.add_argument(
     help="Configuration file for the observer.",
 )
 parser.add_argument(
+    "--snap",
+    dest="use_snap",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Read correlation data from RPi Redis in box.",
+)
+parser.add_argument(
     "--panda",
     dest="use_panda",
     action=argparse.BooleanOptionalAction,
@@ -60,8 +67,12 @@ panda_ip = cfg["panda_ip"]
 
 
 # initialize the Redis instances
-logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
-redis_snap = EigsepRedis(host=rpi_ip, port=redis_port)
+if args.use_snap:
+    logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
+    redis_snap = EigsepRedis(host=rpi_ip, port=redis_port)
+else:
+    logger.warning("Not connecting to RPi Redis instance.")
+    redis_snap = None
 if args.use_panda:
     logger.info(f"Connecting to LattePanda at {panda_ip}.")
     redis_panda = EigsepRedis(host=panda_ip, port=redis_port)
@@ -69,7 +80,7 @@ if args.use_panda:
     # upload the configuration file to the Redis instances
     redis_panda.upload_config(cfg, from_file=False)
 else:
-    logger.info("Not connecting to LattePanda, using RPi Redis only.")
+    logger.warning("Not connecting to LattePanda")
     redis_panda = None
 
 if args.dummy:
@@ -81,18 +92,20 @@ if args.use_panda:
     observer.reprogram_panda(force=True)
 
 thds = {}
+
 # set up file writing: corr_thd for correlation data, panda_thd for s11
-corr_thd = threading.Thread(
-    target=observer.record_corr_data,
-    args=(cfg["corr_save_dir"],),
-    kwargs={"ntimes": cfg["corr_ntimes"], "timeout": 10},
-)
-thds["corr"] = corr_thd
-logger.info("Starting correlation file writing thread.")
-corr_thd.start()
+if args.use_snap:
+    corr_thd = threading.Thread(
+        target=observer.record_corr_data,
+        args=(cfg["corr_save_dir"],),
+        kwargs={"ntimes": cfg["corr_ntimes"], "timeout": 10},
+    )
+    thds["corr"] = corr_thd
+    logger.info("Starting correlation file writing thread.")
+    corr_thd.start()
 
 # set up VNA measurements
-if cfg["use_vna"]:
+if args.use_panda and cfg["use_vna"]:
     # vna_thd = threading.Thread(target=observer.observe_vna)
     vna_thd = threading.Thread(
         target=observer.record_vna_data,
@@ -104,7 +117,7 @@ if cfg["use_vna"]:
 
 
 try:
-    for t in thds.values():
+    for name, t in thds.items():
         t.join()  # blocks forever until the thread is done
 except KeyboardInterrupt:
     logger.info("Keyboard interrupt received, stopping observer.")
@@ -117,6 +130,7 @@ finally:
 
 if args.dummy:
     # reset Redis instances
-    redis_snap.reset()
+    if args.use_snap:
+        redis_snap.reset()
     if args.use_panda:
         redis_panda.reset()

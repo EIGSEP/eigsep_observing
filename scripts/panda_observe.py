@@ -20,6 +20,7 @@ args = parser.parse_args()
 if args.dummy:
     logger.warning("Running in DUMMY mode, no hardware will be used.")
     redis = EigsepRedis(host="localhost", port=6380)
+    redis.reset()  # reset test redis database
     client = DummyPandaClient(redis)
 else:
     redis = EigsepRedis(host="localhost", port=6379)
