@@ -340,7 +340,8 @@ def write_s11_file(
     """
     if fname is None:
         date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        file_path = Path(save_dir) / f"s11_{date}.h5"
+        mode = "ant" if "ant" in data else "rec"
+        file_path = Path(save_dir) / f"{mode}s11_{date}.h5"
     else:
         fname = Path(fname)
         if not fname.is_absolute():
