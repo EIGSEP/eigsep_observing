@@ -380,7 +380,7 @@ class PandaClient:
         self.vna.power_dBm = self.cfg["vna_settings"]["power_dBm"][mode]
         osl_s11 = self.vna.measure_OSL()
         if mode == "ant":
-            s11 = self.vna.measure_ant(measure_noise=True)
+            s11 = self.vna.measure_ant(measure_noise=True, measure_load=True)
         else:  # mode is rec
             s11 = self.vna.measure_rec()
         # s11 is a dict with keys ant & noise, or rec
