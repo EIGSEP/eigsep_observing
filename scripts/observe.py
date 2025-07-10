@@ -11,6 +11,7 @@ import threading
 
 from eigsep_corr.config import load_config
 from eigsep_observing import EigObserver, EigsepRedis
+from eigsep_observing.testing import DummyEigObserver
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
@@ -45,10 +46,11 @@ parser.add_argument(
 args = parser.parse_args()
 if args.dummy:
     logger.warning(
-        "Running in dummy mode, using mock Redis instances. "
+        "Running in DUMMY mode, using mock Redis instances. "
         "No actual data will be recorded."
     )
     redis_port = 6380  # test port for mock Redis
+    args.cfg_file = get_config_path("dummy_config.yaml")
 else:
     redis_port = 6379
 
@@ -70,7 +72,11 @@ else:
     logger.info("Not connecting to LattePanda, using RPi Redis only.")
     redis_panda = None
 
-observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+if args.dummy:
+    observer = DummyEigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+else:
+    observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+
 if args.use_panda:
     observer.reprogram_panda(force=True)
 
