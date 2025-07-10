@@ -241,8 +241,9 @@ class PandaClient:
             save_dir=self.cfg["vna_save_dir"],
             switch_network=self.switch_nw,
         )
-        # XXX
-        self.vna.setup()  # XXX kwargs in cfg, how to call
+        kwargs = self.cfg["vna_settings"].copy()
+        kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
+        self.vna.setup(**kwargs)
         self.redis.r.sadd("ctrl_commands", "VNA")
 
     def metadata_pusher(self, queue):
@@ -323,7 +324,7 @@ class PandaClient:
 
         self.picos = {}  # pico name : pico instance
         try:
-            pico_cfg = self.cfg["picos"]  # name: serial port mapping
+            pico_cfg = self.cfg["picos"].copy()  # name: serial port mapping
         except KeyError:
             self.logger.warning(
                 "No sensor config provided, no sensors will be initialized."
@@ -387,7 +388,7 @@ class PandaClient:
                 "switching commands."
             )
             return
-        switch_schedule = self.cfg["switch_schedule"]
+        switch_schedule = self.cfg["switch_schedule"].copy()
         while not self.stop_client.is_set():
             with self.switch_lock:
                 for mode in ["RNNOFF", "RNNON"]:
@@ -438,6 +439,7 @@ class PandaClient:
                 "VNA not initialized. Cannot execute VNA commands."
             )
 
+        self.vna.power_dBm = self.cfg["vna_settings"]["power_dBm"][mode]
         osl_s11 = self.vna.measure_OSL()
         if mode == "ant":
             s11 = self.vna.measure_ant(measure_noise=True)
@@ -450,7 +452,6 @@ class PandaClient:
         self.redis.send_vna_data(
             s11, cal_data=osl_s11, header=header, metadata=metadata
         )
-        # XXX HERE
 
     def vna_loop(self):
         """
