@@ -48,7 +48,6 @@ class EigObserver:
             self.cfg = self.redis_panda.get_config()
 
         self.stop_event = threading.Event()  # main stop event
-        # self.switch_lock = threading.Lock()  # lock for RF switches
 
         # start a status thread
         if self.panda_connected:
