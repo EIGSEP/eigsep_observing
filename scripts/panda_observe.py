@@ -1,16 +1,31 @@
+from argparse import ArgumentParser
 import logging
 from threading import Thread
 
 from eigsep_observing import EigsepRedis, PandaClient
+from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
 logger = logging.getLogger("__name__")
 configure_eig_logger(level=logging.DEBUG)
 
-redis = EigsepRedis(host="localhost", port=6379)
-client = PandaClient(redis)
+parser = ArgumentParser(description="Panda observing client")
+parser.add_argument(
+    "--dummy", action="store_true", help="Run in dummy mode (no hardware)"
+)
+args = parser.parse_args()
 
+
+if args.dummy:
+    logger.warning("Running in DUMMY mode, no hardware will be used.")
+    redis = EigsepRedis(host="localhost", port=6380)
+    client = DummyPandaClient(redis)
+else:
+    redis = EigsepRedis(host="localhost", port=6379)
+    client = PandaClient(redis)
+
+logger.debug(f"Client configuration: {client.cfg}")
 thds = {}
 # switches
 if client.cfg["use_switches"]:
