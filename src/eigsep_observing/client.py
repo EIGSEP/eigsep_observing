@@ -160,12 +160,12 @@ class PandaClient:
             cfg = json.load(f)  # list of dicts
         pico_cfg = {}
         for dev in cfg:
-            app_id = dev["app_id"]
             try:
+                app_id = dev["app_id"]
                 name = app_mapping[app_id]
             except KeyError:
                 self.logger.warning(
-                    f"Skipping pico with unknown app_id {app_id}."
+                    f"Skipping pico with unknown or missing app_id, {dev}"
                 )
                 continue  # skip unknown app_ids
             pico_cfg[name] = dev["port"]
