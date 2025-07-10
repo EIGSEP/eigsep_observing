@@ -4,7 +4,7 @@
 rpi_ip: "localhost"
 panda_ip: "localhost"
 # picos
-pico_config_file: "~/Documents/research/eigsep/pico-firmware/pico_config.json"
+pico_config_file: "/home/christian/Documents/research/eigsep/pico-firmware/pico_config.json"
 pico_app_mapping:  # app number to device mapping
   0: "motor"
   1: "peltier"
@@ -13,17 +13,17 @@ pico_app_mapping:  # app number to device mapping
   4: "lidar"
   5: "switch"
 # corr filewriter
-corr_save_dir: "~/Documents/research/eigsep/eigsep_observing/test_data"
+corr_save_dir: "/home/christian/Documents/research/eigsep/eigsep_observing/test_data"
 corr_ntimes: 240
 # switches
 use_switches: true
 switch_schedule:  # seconds per measurement
-  RFANT: 300  # sky
-  RFNOFF: 5  # load
-  RFNON: 5  # noise source
+  RFANT: 100  # sky
+  RFNOFF: 1  # load
+  RFNON: 1  # noise source
 # vna
 use_vna: true
-vna_interval: 600  # seconds between VNA measurements
+vna_interval: 10  # seconds between VNA measurements
 vna_ip: "127.0.0.1"
 vna_port: 5025
 vna_timeout: 1  # in seconds
@@ -35,4 +35,4 @@ vna_settings:
   power_dBm:
     ant: 0.0
     rec: -40.0
-vna_save_dir: "~/Documents/research/eigsep/eigsep_observing/test_s11_data"
+vna_save_dir: "/home/christian/Documents/research/eigsep/eigsep_observing/test_s11_data"
