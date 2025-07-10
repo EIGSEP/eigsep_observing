@@ -449,7 +449,7 @@ class PandaClient:
         header = self.vna.header
         header["mode"] = mode
         metadata = self.redis.get_metadata()
-        self.redis.send_vna_data(
+        self.redis.add_vna_data(
             s11, cal_data=osl_s11, header=header, metadata=metadata
         )
 
