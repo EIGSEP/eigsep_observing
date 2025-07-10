@@ -1,6 +1,6 @@
 import json
 import logging
-import queue
+from queue import Queue, Empty, Full
 import threading
 
 from eigsep_corr.config import load_config
@@ -204,22 +204,22 @@ class PandaClient:
 
         """
         cfg = self.redis.get_config()
-        if not force:  # check if the config has changed
-            if cfg == self.cfg:
-                msg = "Configuration unchanged, skipping reprogram."
-                self.logger.info(msg)
-                self.redis.send_status(level=logging.INFO, status=msg)
-                return
-            self.logger.info("Configuration changed, reprogramming client.")
-            self.cfg = cfg
+        if force or cfg != self.cfg:
+            self.cfg = cfg  # update the config
+            self.logger.info("Client reprogrammed.")
+            return
+        if not force and cfg == self.cfg:  # not force
+            msg = "Configuration unchanged, skipping reprogram."
+            self.logger.info(msg)
+            self.redis.send_status(level=logging.INFO, status=msg)
 
-        self.stop_client.set()  # stop all threads
+        # self.stop_client.set()  # stop all threads
         # wait for all threads to finish
-        self.heartbeat_thd.join()
-        for name, pico in self.picos.items():
-            self.logger.debug(f"Stopping pico {name} thread.")
-            pico.stop()
-        self._initialize()  # reinitialize the client
+        # self.heartbeat_thd.join()
+        # for name, pico in self.picos.items():
+        #     self.logger.debug(f"Stopping pico {name} thread.")
+        #    pico.stop()
+        # self._initialize()  # reinitialize the client
 
     def _send_heartbeat(self, ex=60):
         """
@@ -234,7 +234,7 @@ class PandaClient:
         """
         while not self.stop_client.is_set():
             self.redis.client_heartbeat_set(ex=ex, alive=True)
-            self.stop_client.wait(ex / 2)  # update faster than expiration
+            self.stop_client.wait(1.0)  # update faster than expiration
         # if we reach here, the client should stop running
         self.redis.client_heartbeat_set(alive=False)
 
@@ -305,13 +305,13 @@ class PandaClient:
             """
             try:
                 queue.put_nowait((name, data))
-            except queue.Full:
+            except Full:
                 logging.warning(
                     f"Queue is full, dropping data from {name}: {data}"
                 )
                 try:
                     queue.get_nowait()  # remove oldest item
-                except queue.Empty:
+                except Empty:  # empty queue
                     pass
                 queue.put_nowait((name, data))
 
@@ -329,12 +329,12 @@ class PandaClient:
 
         """
         # queue for pico readings
-        pico_queue = queue.Queue(maxsize=1000)
-        self.metadata_thd = threading.Thread(
-            target=self.metadata_pusher,
-            args=(pico_queue,),
-            daemon=True,
-        )
+        # pico_queue = Queue(maxsize=1000)
+        # self.metadata_thd = threading.Thread(
+        #     target=self.metadata_pusher,
+        #     args=(pico_queue,),
+        #     daemon=True,
+        # )
 
         self.picos = {}  # pico name : pico instance
         try:
@@ -358,9 +358,16 @@ class PandaClient:
                 continue
 
             try:
-                p = cls(port, timeout=self.serial_timeout)
-                p.set_response_handler(
-                    self._pico_response_handler(pico_queue, name)
+                # p = cls(port, timeout=self.serial_timeout)
+                # p.set_response_handler(
+                #     self._pico_response_handler(pico_queue, name)
+                # )
+                p = cls(
+                    port,
+                    timeout=self.serial_timeout,
+                    name=name,
+                    eig_redis=self.redis,
+                    response_handler=None,  # defaults to pushing to redis
                 )
                 if p.is_connected:
                     self.picos[name] = p
@@ -373,10 +380,10 @@ class PandaClient:
             self.logger.warning("Running without pico threads.")
             return
 
-        self.metadata_thd.start()
-        for name, p in self.picos.items():
-            self.logger.debug(f"Starting pico {name} thread.")
-            p.start()
+        # self.metadata_thd.start()
+        # for name, p in self.picos.items():
+        #     self.logger.debug(f"Starting pico {name} thread.")
+        #     p.start()
 
         # create reference to switch_nw, motor, peltier if they exist
         self.switch_nw = self.picos.get("switch", None)
@@ -402,17 +409,18 @@ class PandaClient:
                 "switching commands."
             )
             return
-        switch_schedule = self.cfg["switch_schedule"].copy()
         while not self.stop_client.is_set():
             with self.switch_lock:
+                self.logger.debug("Switch has lock.")
                 for mode in ["RFNOFF", "RFNON"]:
                     self.logger.info(f"Switching to {mode} measurements")
                     self.switch_nw.switch(mode)
-                    wait_time = switch_schedule[mode]
+                    wait_time = self.cfg["switch_schedule"][mode]
                     if self.stop_client.wait(wait_time):
                         self.logger.info("Switching stopped by event")
                         return
-            self.stop_client.wait(switch_schedule["RFANT"])
+            self.logger.debug("Switch lock released, switching to RFANT")
+            self.stop_client.wait(self.cfg["switch_schedule"]["RFANT"])
 
     def measure_s11(self, mode):
         """
@@ -472,11 +480,11 @@ class PandaClient:
         """
         Observe with VNA and write data to files.
         """
-        if self.vna is None:
+        while self.vna is None:
             self.logger.warning(
                 "VNA not initialized. Cannot execute VNA commands."
             )
-            return
+            threading.Event().wait(5)  # wait for VNA to be initialized
         while not self.stop_client.is_set():
             with self.switch_lock:
                 for mode in ["ant", "rec"]:
@@ -503,7 +511,7 @@ class PandaClient:
 
         """
         try:
-            msg = self.redis.read_ctrl(timeout=1)
+            msg = self.redis.read_ctrl(timeout=0.1)
         except TypeError as e:
             err = f"Error reading control command: {e}"
             self.logger.error(err)
@@ -514,8 +522,13 @@ class PandaClient:
             return
 
         cmd, kwargs = msg
+        if cmd is None:
+            return  # no command to execute
+
+        self.logger.info(f"Received control message: {msg}")
+
         if cmd == "ctrl:reprogram":
-            self.logger.info("Reprogramming client.")
+            self.logger.warning("Reprogramming client.")
             self.reprogram(**kwargs)
             self.redis.send_status(
                 level=logging.INFO, status="Client reprogrammed."
@@ -543,7 +556,7 @@ class PandaClient:
                     self.logger.error(err)
                     self.redis.send_status(level=logging.ERROR, status=err)
         else:
-            err = f"Unknown command: {cmd}"
+            err = f"Unknown command: {msg=}, {cmd=}, {kwargs=}. "
             self.logger.error(err)
             self.redis.send_status(level=logging.ERROR, status=err)
 
