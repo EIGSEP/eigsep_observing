@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class EigsepRedis:
 
-    maxlen = {"ctrl": 10, "status": 10, "data": 10000}
+    maxlen = {"ctrl": 10, "status": 10, "data": 5000, "vna_data": 1000}
     ctrl_stream_name = "stream:ctrl"
 
     def __init__(self, host="localhost", port=6379):
@@ -113,7 +113,7 @@ class EigsepRedis:
         """
         self.r.flushdb()
         with self._stream_lock:
-            self._last_read_ids = defaultdict(lambda: "$")
+            self._last_read_ids.clear()
 
     @property
     def data_streams(self):
@@ -322,29 +322,6 @@ class EigsepRedis:
         ValueError
             If data is empty or contains invalid correlation pairs.
         """
-        # Validate inputs
-        if not isinstance(data, dict):
-            raise TypeError("data must be a dictionary")
-        if not isinstance(cnt, int):
-            raise TypeError("cnt must be an integer")
-        if not data:
-            raise ValueError("data dictionary cannot be empty")
-        if cnt < 0:
-            raise ValueError("cnt must be non-negative")
-
-        # Validate correlation pairs and data
-        for pair, d in data.items():
-            if not isinstance(pair, str):
-                raise TypeError(
-                    f"Correlation pair key must be string, got {type(pair)}"
-                )
-            if not isinstance(d, (bytes, bytearray)):
-                pair_type = type(d)
-                raise TypeError(
-                    f"Correlation data must be bytes, got {pair_type} "
-                    f"for pair {pair}"
-                )
-
         redis_data = {p.encode("utf-8"): d for p, d in data.items()}
         # add pairs to the set of correlation pairs
         self.r.sadd("corr_pairs", *redis_data.keys())
@@ -428,7 +405,7 @@ class EigsepRedis:
         ]
         return acc_cnt, sync_time, data
 
-    def send_vna_data(self, data, cal_data=None, header=None, metadata=None):
+    def add_vna_data(self, data, cal_data=None, header=None, metadata=None):
         """
         Send VNA data to Redis using a stream. Used by client.
 
@@ -445,8 +422,20 @@ class EigsepRedis:
         metadata : dict
             Live sensor metadata. To be placed in file header.
         """
+        vna_data = {
+            "data": data,
+            "cal_data": cal_data or {},
+            "header": header or {},
+            "metadata": metadata or {},
+        }
+        # add the data to the stream
+        self.r.xadd(
+            "stream:vna",
+            {"vna_data": json.dumps(vna_data)},
+            maxlen=self.maxlen["vna_data"],
+            approximate=True,
+        )
         self.r.sadd("data_streams", "stream:vna")
-        raise NotImplementedError
 
     def read_vna_data(self, timeout=0):
         """
@@ -482,7 +471,22 @@ class EigsepRedis:
         This is a blocking read with a timeout of ``timeout`` seconds.
 
         """
-        raise NotImplementedError("This method is not implemented yet.")
+        last_id = self.data_streams["stream:vna"]
+        out = self.r.xread(
+            {"stream:vna": last_id},
+            count=1,
+            block=int(timeout * 1000),
+        )
+        if not out:
+            raise TimeoutError("No VNA data received within timeout.")
+        eid, fields = out[0][1][0]
+        self._set_last_read_id("stream:vna", eid)  # update last read id
+        vna_data = json.loads(fields.pop(b"vna_data").decode("utf-8"))
+        data = vna_data["data"]
+        cal_data = vna_data["cal_data"]
+        header = vna_data["header"]
+        metadata = vna_data["metadata"]
+        return data, cal_data, header, metadata
 
     # ------------------- metadata -----------------
 
