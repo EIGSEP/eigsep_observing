@@ -121,7 +121,8 @@ class EigObserver:
         Parameters
         ----------
         mode : str
-            Observing mode. Either ``sky``, ``load``, ``noise``.
+            Observing mode. Either `RFANT` (sky), `RFNOFF` (load), or
+            `RFNON` (noise).
 
         Raises
         ------
@@ -131,18 +132,11 @@ class EigObserver:
             If the mode is not one of the valid modes.
 
         """
-        cmd_mode_map = {
-            "sky": "switch:RFANT",
-            "load": "switch:RFLOAD",
-            "noise": "switch:RFN",
-        }
-        if mode not in cmd_mode_map:
-            raise ValueError(
-                f"Invalid mode: {mode}. Must be one of "
-                f"{list(cmd_mode_map.keys())}."
-            )
+        modes = ("RFANT", "RFNOFF", "RFNON")
+        if mode not in modes:
+            raise ValueError(f"Invalid mode: {mode}. Must be one of {modes}.")
         self.logger.info(f"Switching to {mode} measurements")
-        self.redis_panda.send_ctrl(cmd_mode_map[mode])
+        self.redis_panda.send_ctrl(f"switch:{mode}")
 
     @require_panda
     def measure_s11(self, mode, timeout=300, write_files=True):
