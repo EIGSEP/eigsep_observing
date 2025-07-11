@@ -5,6 +5,37 @@ from eigsep_corr.utils import calc_freqs_dfreq
 
 from .io import reshape_data
 
+def pairs_to_labels(pairs, corr_cfg):
+    """
+    Map correlation pairs to antenna labels.
+
+    Parameters
+    ----------
+    pairs : list of str
+        List of correlation pairs (e.g., ['0', '1', '02', '13'])
+    corr_cfg : dict
+
+    Returns
+    -------
+    labels : dict
+        Dictionary mapping pairs to antenna labels.
+
+    """
+    labels = {}
+    for ant, cfg in corr_cfg["rf_chain"]["ants"].items():
+        inp = str(cfg["snap"]["input"])
+        if inp in pairs:
+            labels[inp] = ant
+
+    for pair in pairs:
+        if len(pair) == 2:
+            a1, a2 = pair[0], pair[1]
+            l0 = labels[a1]
+            l1 = labels[a2]
+            labels[pair] = f"{l0} / {l1}"
+
+    return labels
+    
 
 class LivePlotter:
     """Real-time plotter for correlation spectra from Redis streams."""
@@ -57,16 +88,12 @@ class LivePlotter:
         self.poll_interval = poll_interval
 
         # Get configuration from Redis
-        try:
-            self.corr_cfg = self.redis.get_corr_config()
-            self.nchan = self.corr_cfg.get("n_chans", 1024)
-            self.sample_rate = self.corr_cfg.get("sample_rate", 500)
-        except Exception as e:
-            print(f"Warning: Could not get config from Redis: {e}")
-            print("Using default values: nchan=1024, sample_rate=500")
-            self.nchan = 1024
-            self.sample_rate = 500
+        self.corr_cfg = self.redis.get_corr_config()
+        self.nchan = self.corr_cfg.get("n_chans", 1024)
+        self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
+        self.plot_labels = pairs_to_labels(self.pairs, self.corr_cfg)
+        
         # Frequency axis
         freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
         self.x = freqs
@@ -75,8 +102,10 @@ class LivePlotter:
         self.colors = self._setup_colors()
 
         # Initialize plots
-        self.fig, self.axs = self._setup_plots()
+        fig, self.axs = self._setup_plots()
         self.lines = self._setup_lines()
+        self.axs[0].legend(bbox_to_anchor=(1.01, 1), loc="upper left")
+        self.fig = fig
 
         # Animation
         self.ani = None
@@ -131,10 +160,9 @@ class LivePlotter:
             if self.plot_delay:
                 axs[1].sharex(axs[2])
 
-        # Legend
-        axs[0].legend(bbox_to_anchor=(1.05, 1), loc="upper left")
 
         plt.tight_layout()
+        plt.subplots_adjust(right=0.82)
         return fig, axs
 
     def _setup_lines(self):
@@ -148,7 +176,7 @@ class LivePlotter:
         for p in self.pairs:
             line_kwargs = {
                 "color": self.colors[p],
-                "label": p,
+                "label": self.plot_labels[p],
                 "linewidth": 1.5,
             }
 
@@ -205,9 +233,6 @@ class LivePlotter:
 
     def start(self):
         """Start the live plotting animation."""
-        print("Starting live plotter...")
-        print(f"Plotting pairs: {self.pairs}")
-        print("Press Ctrl+C to stop")
 
         self.ani = FuncAnimation(
             self.fig,
