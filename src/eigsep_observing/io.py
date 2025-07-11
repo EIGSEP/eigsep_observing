@@ -525,8 +525,21 @@ class File:
             Average value of the metadata where 'status' is not 'error'.
 
         """
-        status_list = [v["status"] for v in value]
         app_name = value[0]["sensor_name"]
+        if app_name in ("temp_mon", "tempctrl"):  # need to handle A/B
+            avgs = {}
+            for subkey in ("A", "B"):
+                keys = [k for k in value[0].keys() if k.startswith(subkey)]
+                subval = [
+                    {k[2:]: v[k] for k in keys if k in v} for v in value
+                ]
+                #keys.extend(["app_id", "sensor_name"])
+                subavg = self._avg_metadata(subval)
+                subavg["app_id"] = value[0]["app_id"]
+                subavg["sensor_name"] = value[0]["sensor_name"]
+                avgs[subkey] = subavg
+
+        status_list = [v["status"] for v in value]
         if app_name == "rfswitch":
             state = [v["sw_state"] for v in value]
             if "error" in status_list or any(s != state[0] for s in state):
@@ -535,7 +548,9 @@ class File:
 
         avg = {}  # avg metadata for this pico
         for data_key in value[0].keys():  # loop over the data keys
-            if data_key in ("status", "app_id", "sensor_name"):
+            if isinstance(value[0][data_key], str):
+                # if string, just return the first one
+                avg[data_key] = value[0][data_key]
                 continue
             data = np.where(
                 np.array(status_list) != "error",
