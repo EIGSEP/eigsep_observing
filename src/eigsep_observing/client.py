@@ -55,7 +55,7 @@ class PandaClient:
         "peltier": picohost.PicoPeltier,
         "lidar": picohost.PicoDevice,
         "switch": picohost.PicoRFSwitch,
-        "motor": picohost.PicoMotor,
+        #        "motor": picohost.PicoMotor,
     }
 
     def __init__(self, redis, default_cfg=default_cfg):
@@ -177,6 +177,8 @@ class PandaClient:
             self.vna = None
         elif self.cfg["use_vna"]:
             self.init_VNA()
+        else:
+            self.vna = None
 
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
@@ -327,7 +329,6 @@ class PandaClient:
             return
         while not self.stop_client.is_set():
             with self.switch_lock:
-                self.logger.debug("Switch has lock.")
                 for mode in ["RFNOFF", "RFNON"]:
                     self.logger.info(f"Switching to {mode} measurements")
                     self.switch_nw.switch(mode)
