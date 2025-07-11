@@ -29,9 +29,7 @@ class EigsepRedis:
         """
         self.logger = logger
         self._stream_lock = threading.RLock()
-        self._last_read_ids = defaultdict(
-            lambda s: redis.xinfo_stream(s)["last_generated_id"]
-        )
+        self._last_read_ids = {}
         self.r = self._make_redis(host, port)
 
     def _make_redis(self, host, port):
@@ -91,7 +89,11 @@ class EigsepRedis:
             Last read ID for the stream
         """
         with self._stream_lock:
-            return self._last_read_ids[stream]
+            try:
+                last = self._last_read_ids[stream]
+            except KeyError:
+                last = self.r.xinfo_stream(stream)["last-generated-id"]
+            return last
 
     def _set_last_read_id(self, stream, read_id):
         """
@@ -132,9 +134,14 @@ class EigsepRedis:
         """
         members = self.r.smembers("data_streams")
         with self._stream_lock:
-            return {
-                s.decode(): self._last_read_ids[s.decode()] for s in members
-            }
+            d = {}
+            for s in members:
+                try:
+                    last = self._last_read_ids[s.decode()]
+                except KeyError:
+                    last = self.r.xinfo_stream(s)["last-generated-id"]
+                d[s.decode()] = last
+            return d
 
     @property
     def ctrl_stream(self):
@@ -576,7 +583,7 @@ class EigsepRedis:
         self.r.hset("metadata", f"{key}_ts", json.dumps(ts).encode("utf-8"))
         # stream (for file metadata)
         self.r.xadd(
-            key,
+            f"stream:{key}",
             {"value": payload},
             maxlen=self.maxlen["data"],
             approximate=True,
