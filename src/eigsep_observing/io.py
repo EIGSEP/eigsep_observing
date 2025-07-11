@@ -390,8 +390,6 @@ def read_s11_file(fname):
 
 class File:
 
-    SWITCH_APP_ID = 5
-
     def __init__(self, save_dir, pairs, ntimes, cfg):
         """
         Initialize the File object for saving correlation data.
@@ -528,17 +526,16 @@ class File:
 
         """
         status_list = [v["status"] for v in value]
-        app_id = value[0]["app_id"]
-        # rest of the keys are data
-        if app_id == self.SWITCH_APP_ID:
-            state = [v["state"] for v in value]
+        app_name = value[0]["sensor_name"]
+        if app_name == "rfswitch":
+            state = [v["sw_state"] for v in value]
             if "error" in status_list or any(s != state[0] for s in state):
                 return "SWITCHING"
             return state[0]  # all states are the same
 
-        avg = {}
-        for data_key in value[0].keys():
-            if data_key in ("status", "app_id"):
+        avg = {}  # avg metadata for this pico
+        for data_key in value[0].keys():  # loop over the data keys
+            if data_key in ("status", "app_id", "sensor_name"):
                 continue
             data = np.where(
                 np.array(status_list) != "error",
