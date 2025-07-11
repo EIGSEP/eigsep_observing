@@ -658,11 +658,11 @@ class EigsepRedis:
                 if k in self.data_streams
             }
 
-        # non-blocking read
+        # short-blocking read
         redis_hdr = {}
         if not streams:  # no streams to read
             return redis_hdr
-        resp = self.r.xread(streams)
+        resp = self.r.xread(streams, block=1000)  # 1 second timeout
         for stream, dat in resp:
             stream = stream.decode()  # decode stream name
             out = []
