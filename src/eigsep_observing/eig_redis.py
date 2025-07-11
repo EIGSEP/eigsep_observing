@@ -29,7 +29,9 @@ class EigsepRedis:
         """
         self.logger = logger
         self._stream_lock = threading.RLock()
-        self._last_read_ids = defaultdict(lambda: "$")
+        self._last_read_ids = defaultdict(
+            lambda s: redis.xinfo_stream(s)["last_generated_id"]
+        )
         self.r = self._make_redis(host, port)
 
     def _make_redis(self, host, port):
