@@ -5,6 +5,7 @@ from eigsep_corr.utils import calc_freqs_dfreq
 
 from .io import reshape_data
 
+
 def pairs_to_labels(pairs, corr_cfg):
     """
     Map correlation pairs to antenna labels.
@@ -35,7 +36,7 @@ def pairs_to_labels(pairs, corr_cfg):
             labels[pair] = f"{l0} / {l1}"
 
     return labels
-    
+
 
 class LivePlotter:
     """Real-time plotter for correlation spectra from Redis streams."""
@@ -93,7 +94,7 @@ class LivePlotter:
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
         self.plot_labels = pairs_to_labels(self.pairs, self.corr_cfg)
-        
+
         # Frequency axis
         freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
         self.x = freqs
@@ -159,7 +160,6 @@ class LivePlotter:
             axs[0].sharex(axs[1])
             if self.plot_delay:
                 axs[1].sharex(axs[2])
-
 
         plt.tight_layout()
         plt.subplots_adjust(right=0.82)
