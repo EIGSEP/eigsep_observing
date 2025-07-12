@@ -482,6 +482,9 @@ class File:
             Dynamic metadata, such as sensor readings, timestamps, etc.
 
         """
+        if acc_cnt is None or data is None:
+            self.logger.warning("Received None for acc_cnt or data, skipping.")
+            return
         try:
             delta_cnt = acc_cnt - self._prev_cnt
         except AttributeError:  # first call
