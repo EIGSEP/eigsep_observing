@@ -14,8 +14,7 @@ logger = logging.getLogger(__name__)
 
 class EigsepRedis:
 
-    maxlen = {"ctrl": 10, "status": 10, "data": 5000, "vna_data": 1000}
-    ctrl_stream_name = "stream:ctrl"
+    maxlen = {"ctrl": 5, "status": 5, "data": 5000, "vna_data": 1000}
 
     def __init__(self, host="localhost", port=6379):
         """
@@ -30,6 +29,10 @@ class EigsepRedis:
         self.logger = logger
         self._stream_lock = threading.RLock()
         self._last_read_ids = {}
+        # initialize the last read ids for control and status streams
+        self._last_read_ids["stream:ctrl"] = "$"
+        self._last_read_ids["stream:status"] = "$"
+        self.logger.info(f"{self._last_read_ids=}")
         self.r = self._make_redis(host, port)
 
     def _make_redis(self, host, port):
@@ -118,6 +121,8 @@ class EigsepRedis:
         self.r.flushdb()
         with self._stream_lock:
             self._last_read_ids.clear()
+            self._last_read_ids["stream:ctrl"] = "$"
+            self._last_read_ids["stream:status"] = "$"
 
     @property
     def data_streams(self):
@@ -145,8 +150,7 @@ class EigsepRedis:
 
     @property
     def ctrl_stream(self):
-        key = self.ctrl_stream_name
-        return {key: self._get_last_read_id(key)}
+        return {"stream:ctrl": self._get_last_read_id("stream:ctrl")}
 
     @property
     def status_stream(self):
@@ -324,12 +328,7 @@ class EigsepRedis:
             (big-endian 32-bit integer). This is used for unpacking the
             data on the consumer side.
 
-        Raises
-        ------
-        TypeError
-            If data is not a dictionary or cnt is not an integer.
-        ValueError
-            If data is empty or contains invalid correlation pairs.
+
         """
         redis_data = {p.encode("utf-8"): d for p, d in data.items()}
         # add pairs to the set of correlation pairs
@@ -818,7 +817,7 @@ class EigsepRedis:
         if kwargs:
             payload["kwargs"] = kwargs
         self.r.xadd(
-            self.ctrl_stream_name,
+            "stream:ctrl",
             {"msg": json.dumps(payload)},
             maxlen=self.maxlen["ctrl"],
         )
@@ -855,7 +854,7 @@ class EigsepRedis:
         entries = msg[0][1]
         entry_id, dat = entries[0]  # since count=1, it's a list of 1
         # update the stream id
-        self._set_last_read_id(self.ctrl_stream_name, entry_id)
+        self._set_last_read_id("stream:ctrl", entry_id)
         # dat is a dict with key msg
         raw = dat.get(b"msg")
         decoded = json.loads(raw)
@@ -898,7 +897,7 @@ class EigsepRedis:
 
     def send_status(self, level=logging.INFO, status=None):
         """
-        Publish status message to Redis. Used by client..
+        Publish status message to Redis. Used by client.
 
         Parameters
         ----------
