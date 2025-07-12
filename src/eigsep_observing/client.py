@@ -101,7 +101,7 @@ class PandaClient:
         self.cfg = cfg
 
         # initialize the picos and VNA
-        self.motor = None
+        # self.motor = None
         self.peltier = None
         self._switch_nw = None
         self.switch_lock = None
@@ -305,7 +305,7 @@ class PandaClient:
 
         # create reference to switch_nw, motor, peltier if they exist
         self.switch_nw = self.picos.get("switch", None)
-        self.motor = self.picos.get("motor", None)
+        # self.motor = self.picos.get("motor", None)
         self.peltier = self.picos.get("peltier", None)
 
     def switch_loop(self):
