@@ -185,7 +185,7 @@ class EigObserver:
                 "Timeout while waiting for VNA data. "
                 "Check the VNA connection and settings."
             )
-            return None, None
+            return None 
         data, header, metadata = out
         if write_files:
             io.write_s11_file(
@@ -259,7 +259,8 @@ class EigObserver:
             )
             self.logger.info(f"{acc_cnt=}")
             if self.panda_connected:
-                metadata = self.redis_panda.get_metadata()
+                # metadata = self.redis_panda.get_metadata()
+                metadata = self.redis_panda.get_live_metadata()
             else:
                 metadata = None
             file.add_data(acc_cnt, sync_time, data, metadata=metadata)

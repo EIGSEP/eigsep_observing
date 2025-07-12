@@ -502,8 +502,9 @@ class File:
         for key in metadata:
             # value: list of dicts with keys data, status, cadence
             value = metadata[key]
-            md = self._avg_metadata(value)
-            self.metadata[key].append(md)
+            #md = self._avg_metadata(value)
+            #self.metadata[key].append(md)
+            self.metadata[key].append(value)
         self.counter += 1
         self._prev_cnt = acc_cnt
         if self.counter == self.ntimes:
