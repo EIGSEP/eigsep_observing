@@ -144,7 +144,11 @@ class EigsepRedis:
                 try:
                     last = self._last_read_ids[s.decode()]
                 except KeyError:
-                    last = self.r.xinfo_stream(s)["last-generated-id"]
+                    try:
+                        last = self.r.xinfo_stream(s.decode())["last-generated-id"]
+                    except KeyError:
+                        # For newly created streams or in testing, default to "$"
+                        last = "$"
                 d[s.decode()] = last
             return d
 
@@ -588,7 +592,7 @@ class EigsepRedis:
             approximate=True,
         )
         # add the stream to the data streams if not already present
-        self.r.sadd("data_streams", key)
+        self.r.sadd("data_streams", f"stream:{key}")
 
     def get_live_metadata(self, keys=None):
         """
