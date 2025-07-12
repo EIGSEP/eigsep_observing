@@ -538,6 +538,7 @@ class File:
                 subavg["app_id"] = value[0]["app_id"]
                 subavg["sensor_name"] = value[0]["sensor_name"]
                 avgs[subkey] = subavg
+            return avgs
 
         status_list = [v["status"] for v in value]
         if app_name == "rfswitch":
