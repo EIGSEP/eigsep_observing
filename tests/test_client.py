@@ -6,8 +6,8 @@ from cmt_vna.testing import DummyVNA
 from eigsep_corr.config import load_config
 
 # Import dummy classes before importing client to ensure mocking works
-from eigsep_observing.testing import (
-    DummyEigsepRedis,
+from eigsep_observing.testing import DummyEigsepRedis
+from picohost.testing import (
     DummyPicoDevice,
     DummyPicoRFSwitch,
     DummyPicoPeltier,

@@ -5,8 +5,8 @@ from cmt_vna.testing import DummyVNA
 from eigsep_corr.config import load_config
 
 # Import dummy classes before importing client to ensure mocking works
-from eigsep_observing.testing import (
-    DummyEigsepRedis,
+from eigsep_observing.testing import DummyEigsepRedis
+from picohost.testing import (
     DummyPicoDevice,
     DummyPicoRFSwitch,
     DummyPicoPeltier,
@@ -88,8 +88,12 @@ class TestClientInitializationErrors:
         # Should not raise - should fall back to default config
         client = PandaClient(redis, default_cfg=dummy_cfg)
 
-        # Should have used default config
-        assert client.cfg == dummy_cfg
+        # Should have used default config as base, with added picos and upload_time
+        expected_keys = set(dummy_cfg.keys()) | {"picos", "upload_time"}
+        assert set(client.cfg.keys()) == expected_keys
+        # Check that original config values are preserved
+        for key, value in dummy_cfg.items():
+            assert client.cfg[key] == value
 
     def test_init_redis_connection_error(self, redis, tmp_path, monkeypatch):
         """Test initialization when Redis connection fails during heartbeat."""

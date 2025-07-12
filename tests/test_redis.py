@@ -26,10 +26,10 @@ def test_metadata(server, client):
     # Test live metadata functionality - this is the primary use case
     for acc_cnt in range(10):
         client.add_metadata("acc_cnt", acc_cnt)
-        assert client.r.smembers("data_streams") == {b"acc_cnt"}
-        assert server.r.smembers("data_streams") == {b"acc_cnt"}
+        assert client.r.smembers("data_streams") == {b"stream:acc_cnt"}
+        assert server.r.smembers("data_streams") == {b"stream:acc_cnt"}
         if acc_cnt == 0:  # data stream should be created on first call
-            assert server.data_streams == {"acc_cnt": "$"}
+            assert server.data_streams == {"stream:acc_cnt": "$"}
         # live metadata should be updated
         assert server.get_live_metadata(keys="acc_cnt") == acc_cnt
         assert server.get_live_metadata(keys=["acc_cnt"]) == {
@@ -54,7 +54,7 @@ def test_metadata(server, client):
     assert "acc_cnt_ts" in live
     assert "update_date_ts" in live
     assert "update_date" in live
-    assert set(server.data_streams.keys()) == {"acc_cnt", "update_date"}
+    assert set(server.data_streams.keys()) == {"stream:acc_cnt", "stream:update_date"}
 
     # test typeerror in live_metadata
     with pytest.raises(TypeError):

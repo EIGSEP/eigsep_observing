@@ -128,15 +128,15 @@ def test_set_mode_valid(observer_panda_only, redis_panda):
     """Test set_mode with valid modes."""
     observer = observer_panda_only
 
-    for mode in ["sky", "load", "noise"]:
+    for mode in ["RFANT", "RFNOFF", "RFNON"]:
         observer.set_mode(mode)
         redis_panda.send_ctrl.assert_called()
 
         # Check the command mapping
         expected_cmds = {
-            "sky": "switch:RFANT",
-            "load": "switch:RFLOAD",
-            "noise": "switch:RFN",
+            "RFANT": "switch:RFANT",
+            "RFNOFF": "switch:RFNOFF", 
+            "RFNON": "switch:RFNON",
         }
         last_call = redis_panda.send_ctrl.call_args[0][0]
         assert last_call == expected_cmds[mode]
@@ -161,20 +161,21 @@ def test_measure_s11_valid_modes(observer_panda_only, redis_panda):
 
     # Mock VNA data response
     mock_data, mock_cal_data = generate_s11_data(cal=True)
+    # Combine data and cal_data into single dict as the actual VNA would return
+    combined_data = mock_data.copy()
+    for k, v in mock_cal_data.items():
+        combined_data[f"cal:{k}"] = v
     redis_panda.read_vna_data.return_value = (
-        "test_eid",
-        mock_data,
-        mock_cal_data,
-        {"header": "test"},
+        combined_data,
+        {"header": "test"}, 
         {"meta": "test"},
     )
 
     for mode in ["ant", "rec"]:
         result = observer.measure_s11(mode, write_files=False)
         assert result is not None
-        data, cal_data = result
-        assert data == mock_data
-        assert cal_data == mock_cal_data
+        # The method returns combined data (not separated)
+        assert result == combined_data
 
         # Verify ctrl command was sent with correct mode
         redis_panda.send_ctrl.assert_called()
@@ -194,7 +195,7 @@ def test_measure_s11_timeout(observer_panda_only, redis_panda, caplog):
     redis_panda.read_vna_data.side_effect = TimeoutError
 
     result = observer_panda_only.measure_s11("ant", write_files=False)
-    assert result == (None, None)
+    assert result is None
     assert "Timeout while waiting for VNA data" in caplog.text
 
 
@@ -206,10 +207,12 @@ def test_measure_s11_write_files(mock_write, observer_panda_only, redis_panda):
     mock_header = {"header": "test"}
     mock_metadata = {"meta": "test"}
 
+    # Combine data and cal_data as the VNA would return
+    combined_data = mock_data.copy()
+    for k, v in mock_cal_data.items():
+        combined_data[f"cal:{k}"] = v
     redis_panda.read_vna_data.return_value = (
-        "test_eid",
-        mock_data,
-        mock_cal_data,
+        combined_data,
         mock_header,
         mock_metadata,
     )
@@ -218,10 +221,9 @@ def test_measure_s11_write_files(mock_write, observer_panda_only, redis_panda):
 
     # Verify write_s11_file was called with correct arguments
     mock_write.assert_called_once_with(
-        mock_data,
+        combined_data,
         mock_header,
         metadata=mock_metadata,
-        cal_data=mock_cal_data,
         save_dir="/tmp/test_vna",
     )
 
@@ -278,7 +280,7 @@ def test_record_corr_data_no_snap():
     """Test record_corr_data without snap connection raises AttributeError."""
     observer = EigObserver()
     with pytest.raises(AttributeError):
-        observer.record_corr_data()
+        observer.record_corr_data("/tmp")
 
 
 def test_status_logger(observer_panda_only, redis_panda, caplog):
