@@ -50,7 +50,7 @@ class SwitchLock:
 class PandaClient:
 
     PICO_CLASSES = {
-        "imu": picohost.PicoDevice,
+        "imu": picohost.PicoIMU,
         "therm": picohost.PicoDevice,
         "peltier": picohost.PicoPeltier,
         "lidar": picohost.PicoDevice,
@@ -274,6 +274,9 @@ class PandaClient:
             return
 
         for name, port in pico_cfg.items():
+            if name == "motor":
+                self.logger.warning("Skipping motor init in client")
+                continue
             self.logger.info(f"Adding sensor {name}.")
             # instantiate the pico class
             try:
