@@ -390,7 +390,7 @@ class PandaClient:
 
         header = self.vna.header
         header["mode"] = mode
-        metadata = self.redis.get_metadata()
+        metadata = self.redis.get_live_metadata()
         self.redis.add_vna_data(s11, header=header, metadata=metadata)
 
     def vna_loop(self):
