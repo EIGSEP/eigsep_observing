@@ -31,24 +31,12 @@ rf_chain:
       pam:
         id: 375
         num: 2  # closest to PWR button
-        pol: N  # polarization channel
+        pol: E  # polarization channel
         atten: 8  # attenuation in dB
       snap:
-        input: 0  # digital input 0
-        label: N0  # label on SNAP
-    "viv1":  # vivaldi 1 (center)
-      fem:
-        id: 12
-        pol: E
-      pam:
-        id: 375
-        num: 2
-        pol: E
-        atten: 8
-      snap:
-        input: 1
-        label: E2
-    "viv2-N":  # north vivaldi / north pol
+        input: 5  # digital input 0
+        label: E10  # label on SNAP
+    "viv1-N":  # north vivaldi / north pol
       fem:
         id: 32
         pol: N
@@ -60,7 +48,7 @@ rf_chain:
       snap:
         input: 2
         label: N4
-    "viv2-E":  # north vivaldi / east pol
+    "viv1-E":  # north vivaldi / east pol
       fem:
         id: 32
         pol: E
@@ -72,7 +60,7 @@ rf_chain:
       snap:
         input: 3
         label: E6
-    "viv3-N":  # south vivaldi / north pol
+    "viv2-N":  # south vivaldi / north pol
       fem:
         id: 348
         pol: N
@@ -82,9 +70,9 @@ rf_chain:
         pol: N
         atten: 8
       snap:
-        input: 4
-        label: N8
-    "viv3-E":  # south vivaldi / east pol
+        input: 0
+        label: N0
+    "viv2-E":  # south vivaldi / east pol
       fem:
         id: 348
         pol: E
@@ -94,5 +82,5 @@ rf_chain:
         pol: E
         atten: 8
       snap:
-        input: 5
-        label: E10
+        input: 1
+        label: E2

@@ -3,7 +3,7 @@
 
 # IP addresses
 rpi_ip: "10.10.10.10"
-panda_ip: "10.10.10.12"
+panda_ip: "10.10.10.11"
 # picos
 pico_config_file: "/home/eigsep/eigsep/pico-firmware/pico_config.json"
 pico_app_mapping:  # app number to device mapping
