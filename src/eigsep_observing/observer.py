@@ -209,7 +209,7 @@ class EigObserver:
         # runs if not stop_events[motors].is_set()
         raise NotImplementedError
 
-    def record_corr_data(self, save_dir, ntimes=240, timeout=10):
+    def record_corr_data(self, save_dir, ntimes=240, timeout=20):
         """
         Read data from the SNAP correlator via Redis and write it to
         file.
