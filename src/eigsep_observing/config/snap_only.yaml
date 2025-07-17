@@ -1,26 +1,27 @@
 # High-level configuration for EIGSEP observations
-# Sets switch schedules, sensors, and other high-level parameters
+# Sets switch schedules, picos, VNA settings, and other parameters
 
 # IP addresses
 rpi_ip: "10.10.10.10"
-panda_ip: "10.10.10.12"
-# picos XXX read from device.info
-picos:
-  imu: "/dev/pico_imu"
-  therm: "/dev/pico_therm"
-  peltier: "/dev/pico_peltier"
-  lidar: "/dev/pico_lidar"
-  switch: "/dev/pico_switch"
-  motor: "/dev/pico_motor"
+panda_ip: "10.10.10.11"
+# picos
+pico_config_file: "/home/eigsep/eigsep/pico-firmware/pico_config.json"
+pico_app_mapping:  # app number to device mapping
+  0: "motor"
+  1: "peltier"
+  2: "therm"
+  3: "imu"
+  4: "lidar"
+  5: "switch"
 # corr filewriter
-corr_save_dir: "/media/eigsep/T7/data/jul9_test"
-corr_ntimes: 60
+corr_save_dir: "/media/eigsep/T7/data"
+corr_ntimes: 240
 # switches
 use_switches: false
 switch_schedule:  # seconds per measurement
-  sky: 3600
-  load: 60
-  noise: 60
+  RFANT: 3600  # sky
+  RFNOFF: 60  # load
+  RFNON: 60  # noise source
 # vna
 use_vna: false
 vna_interval: 3600  # seconds between VNA measurements
@@ -36,5 +37,3 @@ vna_settings:
     ant: 0.0
     rec: -40.0
 vna_save_dir: "/media/eigsep/T7/data/s11_data"
-# motors
-use_motors: false

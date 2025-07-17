@@ -34,9 +34,9 @@ rf_chain:
         pol: E  # polarization channel
         atten: 8  # attenuation in dB
       snap:
-        input: 5  # digital input 0
-        label: E10  # label on SNAP
-    "viv1-N":  # north vivaldi / north pol
+        input: 4  # digital input 0
+        label: N8  # label on SNAP
+    "viv1-N":  # south vivaldi / north pol
       fem:
         id: 32
         pol: N
@@ -48,7 +48,7 @@ rf_chain:
       snap:
         input: 2
         label: N4
-    "viv1-E":  # north vivaldi / east pol
+    "viv1-E":  # south vivaldi / east pol
       fem:
         id: 32
         pol: E
