@@ -17,9 +17,9 @@ pico_app_mapping:  # app number to device mapping
 corr_save_dir: "/media/eigsep/T7/data"
 corr_ntimes: 240
 # switches
-use_switches: false
+use_switches: true
 switch_schedule:  # seconds per measurement
-  RFANT: 3600  # sky
+  RFANT: 600  # sky
   RFNOFF: 60  # load
   RFNON: 60  # noise source
 # vna
