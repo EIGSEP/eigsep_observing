@@ -79,6 +79,7 @@ class PandaClient:
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
+        #cfg = None        
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
