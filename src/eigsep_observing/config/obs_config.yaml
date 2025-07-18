@@ -17,13 +17,13 @@ pico_app_mapping:  # app number to device mapping
 corr_save_dir: "/media/eigsep/T7/data"
 corr_ntimes: 240
 # switches
-use_switches: false
+use_switches: true
 switch_schedule:  # seconds per measurement
   RFANT: 3600  # sky
   RFNOFF: 60  # load
   RFNON: 60  # noise source
 # vna
-use_vna: false
+use_vna: true
 vna_interval: 3600  # seconds between VNA measurements
 vna_ip: "127.0.0.1"
 vna_port: 5025
