@@ -8,6 +8,7 @@ import argparse
 import logging
 from pathlib import Path
 import threading
+import time
 
 from eigsep_corr.config import load_config
 from eigsep_observing import EigObserver, EigsepRedis
@@ -16,7 +17,7 @@ from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
 logger = logging.getLogger("__name__")
-configure_eig_logger(level=logging.DEBUG)
+configure_eig_logger(level=logging.INFO)
 
 # command line arguments
 parser = argparse.ArgumentParser(
@@ -91,6 +92,7 @@ else:
 if args.use_panda:
     while not observer.panda_connected:
         logger.info("Waiting for Panda to connect.")
+        time.sleep(1.)
     observer.reprogram_panda(force=True)
 
 thds = {}
