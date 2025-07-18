@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import time
 
 from eigsep_corr.config import load_config
 from cmt_vna import VNA
@@ -96,6 +97,7 @@ class PandaClient:
             pico_cfg = {}
         # add pico config to the cfg
         cfg["picos"] = pico_cfg
+        self.logger.info(f"pico config: {pico_cfg}")
         # upload config to Redis
         self.redis.upload_config(cfg, from_file=False)
         self.cfg = cfg
@@ -174,6 +176,7 @@ class PandaClient:
         self.stop_client.clear()  # reset the stop flag
         self.init_picos()  # initialize picos
         if self.switch_nw is None:
+            self.logger.info("no switches, no vna")
             self.vna = None
         elif self.cfg["use_vna"]:
             self.init_VNA()
@@ -241,6 +244,7 @@ class PandaClient:
         to reinitialize the VNA if the configuration changes.
 
         """
+        self.logger.info("INIT VNA")
         self.vna = VNA(
             ip=self.cfg["vna_ip"],
             port=self.cfg["vna_port"],
@@ -250,8 +254,10 @@ class PandaClient:
         )
         kwargs = self.cfg["vna_settings"].copy()
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
+        self.logger.info(f"vna kwargs: {kwargs}")
         self.vna.setup(**kwargs)
         self.redis.r.sadd("ctrl_commands", "VNA")
+        self.logger.info("VNA initialized")
 
     def init_picos(self):
         """
@@ -330,6 +336,9 @@ class PandaClient:
                 "switching commands."
             )
             return
+        self.logger.info("waiting 1 min to start switches")
+        time.sleep(60)
+        self.logger.info("starting switches")
         while not self.stop_client.is_set():
             with self.switch_lock:
                 for mode in ["RFNOFF", "RFNON"]:
@@ -384,8 +393,10 @@ class PandaClient:
         self.vna.power_dBm = self.cfg["vna_settings"]["power_dBm"][mode]
         osl_s11 = self.vna.measure_OSL()
         if mode == "ant":
+            self.logger.info("Measuring antenna, noise, load S11")
             s11 = self.vna.measure_ant(measure_noise=True, measure_load=True)
         else:  # mode is rec
+            self.logger.info("Measuring receiver S11")
             s11 = self.vna.measure_rec()
         # s11 is a dict with keys ant & noise, or rec
         for k, v in osl_s11.items():
@@ -395,6 +406,7 @@ class PandaClient:
         header["mode"] = mode
         metadata = self.redis.get_live_metadata()
         self.redis.add_vna_data(s11, header=header, metadata=metadata)
+        self.logger.info("Vna data added to redis")
 
     def vna_loop(self):
         """
@@ -405,6 +417,9 @@ class PandaClient:
                 "VNA not initialized. Cannot execute VNA commands."
             )
             threading.Event().wait(5)  # wait for VNA to be initialized
+        self.logger.info("waiting 10s to start VNA")
+        time.sleep(10)
+        self.logger.info("starting VNA")
         while not self.stop_client.is_set():
             with self.switch_lock:
                 for mode in ["ant", "rec"]:

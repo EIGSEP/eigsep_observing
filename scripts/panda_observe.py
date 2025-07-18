@@ -8,7 +8,7 @@ from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
 logger = logging.getLogger("__name__")
-configure_eig_logger(level=logging.DEBUG)
+configure_eig_logger(level=logging.INFO)
 
 parser = ArgumentParser(description="Panda observing client")
 parser.add_argument(
@@ -26,7 +26,7 @@ else:
     redis = EigsepRedis(host="localhost", port=6379)
     client = PandaClient(redis)
 
-logger.debug(f"Client configuration: {client.cfg}")
+logger.info(f"Client configuration: {client.cfg}")
 thds = {}
 # switches
 if client.cfg["use_switches"]:
