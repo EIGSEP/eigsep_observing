@@ -72,7 +72,7 @@ class LivePlotter:
             "2",
             "3",
             "4",
-            "5",
+#            "5",
             "02",
             "04",
             "24",
@@ -93,7 +93,8 @@ class LivePlotter:
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
-        self.plot_labels = pairs_to_labels(self.pairs, self.corr_cfg)
+        self.plot_labels = self.pairs  # XXX
+        # pairs_to_labels(self.pairs, self.corr_cfg)
 
         # Frequency axis
         freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
@@ -176,7 +177,8 @@ class LivePlotter:
         for p in self.pairs:
             line_kwargs = {
                 "color": self.colors[p],
-                "label": self.plot_labels[p],
+                #"label": self.plot_labels[p],
+                "label": p,
                 "linewidth": 1.5,
             }
 
