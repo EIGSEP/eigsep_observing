@@ -24,7 +24,7 @@ switch_schedule:  # seconds per measurement
   RFNON: 60  # noise source
 # vna
 use_vna: true
-vna_interval: 300  # seconds between VNA measurements
+vna_interval: 3600  # seconds between VNA measurements
 vna_ip: "127.0.0.1"
 vna_port: 5025
 vna_timeout: 1000  # in seconds

@@ -179,7 +179,7 @@ class EigObserver:
         kwargs["power_dBm"] = kwargs["power_dBm"][mode]
         self.redis_panda.send_ctrl(cmd, **kwargs)
         try:
-            out = self.redis_panda.read_vna_data(timeout=120)
+            out = self.redis_panda.read_vna_data(timeout=timeout)
         except TimeoutError:
             self.logger.error(
                 "Timeout while waiting for VNA data. "
