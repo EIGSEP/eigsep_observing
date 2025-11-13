@@ -2,10 +2,11 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import json
 import logging
-import numpy as np
 import threading
+import yaml
 
 from eigsep_corr.config import load_config
+import numpy as np
 import redis
 import redis.exceptions
 
@@ -219,7 +220,8 @@ class EigsepRedis:
 
         """
         if from_file:
-            config = load_config(config, compute_inttime=False)
+            with open(config, "r") as f:
+                config = yaml.safe_load(f)
         self._upload_dict(config, "config")
 
     def upload_corr_config(self, config, from_file=False):
@@ -237,7 +239,7 @@ class EigsepRedis:
 
         """
         if from_file:
-            config = load_config(config, compute_inttime=True)
+            config = load_config(config)
         self._upload_dict(config, "corr_config")
 
     def get_config(self):

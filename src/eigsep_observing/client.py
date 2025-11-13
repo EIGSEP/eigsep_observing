@@ -2,8 +2,8 @@ import json
 import logging
 import threading
 import time
+import yaml
 
-from eigsep_corr.config import load_config
 from cmt_vna import VNA
 import picohost
 
@@ -11,7 +11,8 @@ from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
 default_cfg_file = get_config_path("obs_config.yaml")
-default_cfg = load_config(default_cfg_file, compute_inttime=False)
+with open(default_cfg_file, "r") as f:
+    default_cfg = yaml.safe_load(f)
 
 
 # custom switch lock that always return to sky measurements
@@ -79,7 +80,7 @@ class PandaClient:
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
-        #cfg = None        
+        # cfg = None
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
