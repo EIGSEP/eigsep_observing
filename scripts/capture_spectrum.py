@@ -63,6 +63,6 @@ for i in range(args.num_spec):
             all_data[k] = [v]
         all_data[k].append(v)
 
-all_data = np.array(all_data)
+all_data = {k: np.array(v) for k, v in all_data.items()}
 np.savez(args.out_filename, **all_data)
 logger.info(f"Saved captured spectra to {args.out_filename}")
