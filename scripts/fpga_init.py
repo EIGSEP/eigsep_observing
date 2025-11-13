@@ -1,7 +1,6 @@
 import logging
 from eigsep_observing.utils import configure_eig_logger
 
-#logger = configure_eig_logger(level=logging.DEBUG)
 logger = configure_eig_logger(level=logging.INFO)
 
 import argparse  # noqa: E402
