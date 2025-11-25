@@ -505,8 +505,8 @@ class File:
         for key in metadata:
             # value: list of dicts with keys data, status, cadence
             value = metadata[key]
-            #md = self._avg_metadata(value)
-            #self.metadata[key].append(md)
+            # md = self._avg_metadata(value)
+            # self.metadata[key].append(md)
             self.metadata[key].append(value)
         self.counter += 1
         self._prev_cnt = acc_cnt
@@ -534,10 +534,8 @@ class File:
             avgs = {}
             for subkey in ("A", "B"):
                 keys = [k for k in value[0].keys() if k.startswith(subkey)]
-                subval = [
-                    {k[2:]: v[k] for k in keys if k in v} for v in value
-                ]
-                #keys.extend(["app_id", "sensor_name"])
+                subval = [{k[2:]: v[k] for k in keys if k in v} for v in value]
+                # keys.extend(["app_id", "sensor_name"])
                 subavg = self._avg_metadata(subval)
                 subavg["app_id"] = value[0]["app_id"]
                 subavg["sensor_name"] = value[0]["sensor_name"]

@@ -1,5 +1,5 @@
+import yaml
 from cmt_vna.testing import DummyVNA
-from eigsep_corr.config import load_config
 import picohost
 
 from .. import PandaClient
@@ -32,9 +32,8 @@ class DummyPandaClient(PandaClient):
         """
         if default_cfg is None:
             try:
-                default_cfg = load_config(
-                    default_cfg_file, compute_inttime=False
-                )
+                with open(default_cfg_file, "r") as f:
+                    default_cfg = yaml.safe_load(f)
             except FileNotFoundError:
                 default_cfg = {}
         super().__init__(redis, default_cfg=default_cfg)

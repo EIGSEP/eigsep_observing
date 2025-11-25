@@ -215,7 +215,7 @@ def test_write_read_s11_file():
         # check that the file was created
         now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         # might be off by a second, so we use glob to find the file
-        # filename format is {mode}s11_{timestamp}.h5, where mode="ant" for this data
+        # filename format is {mode}s11_{timestamp}.h5, where mode="ant" here
         assert len(list(Path(tmpdir).glob(f"ants11_{now[:-2]}*.h5"))) == 1
         # create a filename manually
         filename = Path(tmpdir) / "test_s11.h5"

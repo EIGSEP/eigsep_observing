@@ -1,9 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 import time
+import yaml
 
 from cmt_vna.testing import DummyVNA
-from eigsep_corr.config import load_config
 
 # Import dummy classes before importing client to ensure mocking works
 from eigsep_observing.testing import DummyEigsepRedis
@@ -62,7 +62,8 @@ def client(redis, module_tmpdir, monkeypatch):
     monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-    dummy_cfg = load_config(path, compute_inttime=False)
+    with open(path, "r") as f:
+        dummy_cfg = yaml.safe_load(f)
     dummy_cfg["vna_save_dir"] = str(module_tmpdir)
     return PandaClient(redis, default_cfg=dummy_cfg)
 
