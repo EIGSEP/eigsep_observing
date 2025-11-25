@@ -135,7 +135,7 @@ def test_set_mode_valid(observer_panda_only, redis_panda):
         # Check the command mapping
         expected_cmds = {
             "RFANT": "switch:RFANT",
-            "RFNOFF": "switch:RFNOFF", 
+            "RFNOFF": "switch:RFNOFF",
             "RFNON": "switch:RFNON",
         }
         last_call = redis_panda.send_ctrl.call_args[0][0]
@@ -167,7 +167,7 @@ def test_measure_s11_valid_modes(observer_panda_only, redis_panda):
         combined_data[f"cal:{k}"] = v
     redis_panda.read_vna_data.return_value = (
         combined_data,
-        {"header": "test"}, 
+        {"header": "test"},
         {"meta": "test"},
     )
 

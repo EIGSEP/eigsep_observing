@@ -72,7 +72,7 @@ class LivePlotter:
             "2",
             "3",
             "4",
-#            "5",
+            #            "5",
             "02",
             "04",
             "24",
@@ -177,7 +177,7 @@ class LivePlotter:
         for p in self.pairs:
             line_kwargs = {
                 "color": self.colors[p],
-                #"label": self.plot_labels[p],
+                # "label": self.plot_labels[p],
                 "label": p,
                 "linewidth": 1.5,
             }

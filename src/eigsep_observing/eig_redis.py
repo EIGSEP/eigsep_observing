@@ -1,4 +1,3 @@
-from collections import defaultdict
 from datetime import datetime, timezone
 import json
 import logging
@@ -146,9 +145,11 @@ class EigsepRedis:
                     last = self._last_read_ids[s.decode()]
                 except KeyError:
                     try:
-                        last = self.r.xinfo_stream(s.decode())["last-generated-id"]
+                        last = self.r.xinfo_stream(s.decode())[
+                            "last-generated-id"
+                        ]
                     except KeyError:
-                        # For newly created streams or in testing, default to "$"
+                        # default to "$" for newly created streams
                         last = "$"
                 d[s.decode()] = last
             return d

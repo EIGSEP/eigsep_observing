@@ -54,7 +54,10 @@ def test_metadata(server, client):
     assert "acc_cnt_ts" in live
     assert "update_date_ts" in live
     assert "update_date" in live
-    assert set(server.data_streams.keys()) == {"stream:acc_cnt", "stream:update_date"}
+    assert set(server.data_streams.keys()) == {
+        "stream:acc_cnt",
+        "stream:update_date",
+    }
 
     # test typeerror in live_metadata
     with pytest.raises(TypeError):

@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import Mock, patch
+import yaml
 
 from cmt_vna.testing import DummyVNA
-from eigsep_corr.config import load_config
 
 # Import dummy classes before importing client to ensure mocking works
 from eigsep_observing.testing import DummyEigsepRedis
@@ -55,7 +55,8 @@ def client(redis, tmp_path, monkeypatch):
     monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-    dummy_cfg = load_config(path, compute_inttime=False)
+    with open(path, "r") as f:
+        dummy_cfg = yaml.safe_load(f)
     dummy_cfg["vna_save_dir"] = str(tmp_path)
     return PandaClient(redis, default_cfg=dummy_cfg)
 
@@ -82,13 +83,14 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should not raise - should fall back to default config
         client = PandaClient(redis, default_cfg=dummy_cfg)
 
-        # Should have used default config as base, with added picos and upload_time
+        # Should've used default cfg as base, with added picos and upload_time
         expected_keys = set(dummy_cfg.keys()) | {"picos", "upload_time"}
         assert set(client.cfg.keys()) == expected_keys
         # Check that original config values are preserved
@@ -113,7 +115,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # This might not always raise if heartbeat is called later
@@ -149,7 +152,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should handle pico errors gracefully (no picos will connect)
@@ -175,7 +179,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         dummy_cfg["use_vna"] = True  # Force VNA initialization
 
@@ -213,7 +218,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Client should handle pico connection errors gracefully
@@ -241,7 +247,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should either raise or fall back to default config
@@ -269,7 +276,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should either raise KeyError or handle gracefully
@@ -297,7 +305,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should either raise or handle gracefully
@@ -325,7 +334,8 @@ class TestClientInitializationErrors:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Should either raise KeyError or handle gracefully
@@ -384,7 +394,8 @@ class TestClientPicoErrors:
     def test_pico_no_config(self, redis, tmp_path, monkeypatch):
         """Test pico initialization with no pico config."""
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         # Remove picos config
         if "picos" in dummy_cfg:
@@ -408,7 +419,8 @@ class TestClientPicoErrors:
     def test_pico_unknown_class(self, redis, tmp_path, monkeypatch):
         """Test pico initialization with unknown pico class."""
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         # Add unknown pico type to config
         dummy_cfg["picos"] = {"unknown_pico": "/dev/unknown"}
@@ -450,7 +462,8 @@ class TestClientPicoErrors:
     def test_pico_error_resilience(self, redis, tmp_path, monkeypatch):
         """Test client resilience to pico errors."""
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         dummy_cfg["picos"] = {
             "imu": "/dev/nonexistent1",  # These will fail to connect
@@ -500,7 +513,8 @@ class TestClientEdgeCases:
             pass
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         with pytest.raises(AttributeError):
@@ -552,7 +566,8 @@ class TestClientEdgeCases:
         monkeypatch.setattr("eigsep_observing.client.VNA", failing_vna)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
         # Force VNA initialization by having a switch
         dummy_cfg["picos"] = {"switch": "/dev/switch"}
@@ -591,7 +606,8 @@ class TestClientEdgeCases:
         monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
 
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-        dummy_cfg = load_config(path, compute_inttime=False)
+        with open(path, "r") as f:
+            dummy_cfg = yaml.safe_load(f)
         dummy_cfg["vna_save_dir"] = str(tmp_path)
 
         # Test with empty picos config

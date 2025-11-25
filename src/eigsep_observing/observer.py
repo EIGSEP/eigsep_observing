@@ -185,7 +185,7 @@ class EigObserver:
                 "Timeout while waiting for VNA data. "
                 "Check the VNA connection and settings."
             )
-            return None 
+            return None
         data, header, metadata = out
         if write_files:
             io.write_s11_file(

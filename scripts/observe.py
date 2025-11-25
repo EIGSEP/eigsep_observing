@@ -9,8 +9,8 @@ import logging
 from pathlib import Path
 import threading
 import time
+import yaml
 
-from eigsep_corr.config import load_config
 from eigsep_observing import EigObserver, EigsepRedis
 from eigsep_observing.testing import DummyEigObserver
 from eigsep_observing.utils import configure_eig_logger, get_config_path
@@ -62,7 +62,8 @@ if args.dummy:
 else:
     redis_port = 6379
 
-cfg = load_config(args.cfg_file, compute_inttime=False)
+with open(args.cfg_file, "r") as f:
+    cfg = yaml.safe_load(f)
 rpi_ip = cfg["rpi_ip"]
 panda_ip = cfg["panda_ip"]
 
