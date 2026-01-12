@@ -398,9 +398,23 @@ class PandaClient:
             threading.Event().wait(5)  # wait for VNA to be initialized
         while not self.stop_client.is_set():
             with self.switch_lock:
+                try:
+                    sw_status = self.redis.get_live_metadata(keys="rfswitch")
+                except Exception as e:
+                    self.logger.warning(
+                        f"Failed to get switch status from Redis: {e}. "
+                    )
+                    sw_status = {}
+                # default to RFANT if not found
+                prev_mode = sw_status.get("sw_state", "RFANT")
                 for mode in ["ant", "rec"]:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode)
+                # restore previous mode
+                self.logger.info(
+                    f"Switching back to previous mode: {prev_mode}"
+                )
+                self.switch_nw.switch(prev_mode)
             # wait for the next iteration
             self.stop_client.wait(self.cfg["vna_interval"])
 
