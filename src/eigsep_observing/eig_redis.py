@@ -609,7 +609,7 @@ class EigsepRedis:
 
         Returns
         -------
-        m : dict
+        m : dict or any
             Dictionary of metadata. If keys is None, return all metadata.
             If keys is a string, return the value for that key.
             If keys is a list, return a dictionary with the requested keys.
