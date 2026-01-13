@@ -312,6 +312,12 @@ class PandaClient:
                 "switching commands."
             )
             return
+        elif not schedule:
+            self.logger.warning(
+                "Empty switch schedule found in config. Cannot execute "
+                "switching commands."
+            )
+            return
         while not self.stop_client.is_set():
             for mode, wait_time in schedule.items():
                 if mode == "RFANT":
