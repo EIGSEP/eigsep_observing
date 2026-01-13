@@ -299,9 +299,9 @@ class PandaClient:
             try:
                 p = cls(
                     port,
+                    self.redis,
                     timeout=self.serial_timeout,
                     name=name,
-                    eig_redis=self.redis,
                 )
                 if p.is_connected:
                     self.picos[name] = p
