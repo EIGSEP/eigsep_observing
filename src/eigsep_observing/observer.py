@@ -111,7 +111,8 @@ class EigObserver:
                 if time.time() - t0_status > 10:
                     self.logger.warning("Panda disconnected")
                     t0_status = time.time()
-                self.stop_event.wait(1)  # wait 1s before checking again
+                if self.stop_event.wait(1):  # wait 1s before checking again
+                    return
             self.logger.debug("Panda connected.")
             level, status = self.redis_panda.read_status(timeout=0.1)
             if status is not None:
