@@ -1,7 +1,6 @@
 import json
 import logging
 import threading
-import time
 import yaml
 
 from cmt_vna import VNA
@@ -316,6 +315,13 @@ class PandaClient:
             self.logger.warning(
                 "Empty switch schedule found in config. Cannot execute "
                 "switching commands."
+            )
+            return
+        elif any(k not in self.switch_nw.path_str for k in schedule):
+            self.logger.warning(
+                "Invalid switch keys found in schedule. Cannot execute "
+                "switching commands. Schedule keys must be in: "
+                f"{list(self.switch_nw.path_str.keys())}."
             )
             return
         while not self.stop_client.is_set():
