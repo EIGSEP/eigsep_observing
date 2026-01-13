@@ -324,6 +324,19 @@ class PandaClient:
                 f"{list(self.switch_nw.path_str.keys())}."
             )
             return
+        # Validate that all wait_time values are positive numbers
+        invalid_waits = {
+            mode: wait_time
+            for mode, wait_time in schedule.items()
+            if not isinstance(wait_time, (int, float)) or wait_time <= 0
+        }
+        if invalid_waits:
+            self.logger.warning(
+                "Invalid wait_time values found in switch schedule. "
+                "All wait_time values must be positive numbers. "
+                f"Invalid entries: {invalid_waits}."
+            )
+            return
         while not self.stop_client.is_set():
             for mode, wait_time in schedule.items():
                 if mode == "RFANT":
