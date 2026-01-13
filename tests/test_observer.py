@@ -58,19 +58,28 @@ def redis_panda():
 @pytest.fixture
 def observer_snap_only(redis_snap):
     """EigObserver with only SNAP connection."""
-    return EigObserver(redis_snap=redis_snap)
+    obs = EigObserver(redis_snap=redis_snap)
+    yield obs
+    obs.stop_event.set()  # ensure any threads are stopped after test
+    obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
 def observer_panda_only(redis_panda):
     """EigObserver with only LattePanda connection."""
-    return EigObserver(redis_panda=redis_panda)
+    obs = EigObserver(redis_panda=redis_panda)
+    yield obs
+    obs.stop_event.set()
+    obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
 def observer_both(redis_snap, redis_panda):
     """EigObserver with both SNAP and LattePanda connections."""
-    return EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    obs = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    yield obs
+    obs.stop_event.set()
+    obs.status_thread.join(timeout=1)
 
 
 def test_observer_init_snap_only(observer_snap_only, redis_snap):
@@ -100,6 +109,8 @@ def test_observer_init_none():
     observer = EigObserver()
     assert observer.redis_snap is None
     assert observer.redis_panda is None
+    observer.stop_event.set()
+    observer.status_thread.join(timeout=1)
 
 
 def test_snap_connected_property(observer_snap_only, observer_panda_only):
@@ -122,6 +133,10 @@ def test_panda_connected_property(
     # Test when heartbeat check fails
     redis_panda.client_heartbeat_check.return_value = False
     assert observer_panda_only.panda_connected is False
+    
+    # clean up
+    observer_none.stop_event.set()
+    observer_none.status_thread.join(timeout=1)
 
 
 def test_set_mode_valid(observer_panda_only, redis_panda):
@@ -153,6 +168,10 @@ def test_set_mode_no_panda():
     observer = EigObserver()
     with pytest.raises(AttributeError):
         observer.set_mode("sky")
+    
+    # clean up
+    observer.stop_event.set()
+    observer.status_thread.join(timeout=1)
 
 
 def test_measure_s11_valid_modes(observer_panda_only, redis_panda):
