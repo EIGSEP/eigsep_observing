@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 
 from . import io
 from .utils import require_panda
@@ -51,7 +52,9 @@ class EigObserver:
 
         # start a status thread
         self.logger.info("Starting status thread.")
-        self.status_thread = threading.Thread(target=self.status_logger)
+        self.status_thread = threading.Thread(
+            target=self.status_logger, daemon=True
+        )
         self.status_thread.start()
 
     @property
@@ -97,21 +100,23 @@ class EigObserver:
         """
         while not self.panda_connected:
             self.logger.debug("Status thread waiting for Panda connection.")
-            self.stop_event.wait(1)
+            if self.stop_event.wait(1):
+                return
         self.logger.info("Status thread started. Logging Panda status.")
 
         while not self.stop_event.is_set():
+            t0_status = time.time()
             while not self.panda_connected:
-                self.logger.warning("Panda disconnected")
-                self.stop_event.wait(1)
+                # print every 10 seconds
+                if time.time() - t0_status > 10:
+                    self.logger.warning("Panda disconnected")
+                    t0_status = time.time()
+                if self.stop_event.wait(1):  # wait 1s before checking again
+                    return
             self.logger.debug("Panda connected.")
-            level, status = self.redis_panda.read_status(timeout=10)
-            if status is None:
-                # Check stop event with timeout
-                if self.stop_event.wait(0.1):
-                    break
-                continue
-            self.logger.log(level, status)
+            level, status = self.redis_panda.read_status(timeout=0.1)
+            if status is not None:
+                self.logger.log(level, status)
 
     @require_panda
     def set_mode(self, mode):
