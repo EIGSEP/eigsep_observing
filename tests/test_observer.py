@@ -58,19 +58,28 @@ def redis_panda():
 @pytest.fixture
 def observer_snap_only(redis_snap):
     """EigObserver with only SNAP connection."""
-    return EigObserver(redis_snap=redis_snap)
+    obs = EigObserver(redis_snap=redis_snap)
+    yield obs
+    obs.stop_event.set()  # ensure any threads are stopped after test
+    obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
 def observer_panda_only(redis_panda):
     """EigObserver with only LattePanda connection."""
-    return EigObserver(redis_panda=redis_panda)
+    obs = EigObserver(redis_panda=redis_panda)
+    yield obs
+    obs.stop_event.set()
+    obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
 def observer_both(redis_snap, redis_panda):
     """EigObserver with both SNAP and LattePanda connections."""
-    return EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    obs = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    yield obs
+    obs.stop_event.set()
+    obs.status_thread.join(timeout=1)
 
 
 def test_observer_init_snap_only(observer_snap_only, redis_snap):
