@@ -133,7 +133,7 @@ def test_panda_connected_property(
     # Test when heartbeat check fails
     redis_panda.client_heartbeat_check.return_value = False
     assert observer_panda_only.panda_connected is False
-    
+
     # clean up
     observer_none.stop_event.set()
     observer_none.status_thread.join(timeout=1)
@@ -168,7 +168,7 @@ def test_set_mode_no_panda():
     observer = EigObserver()
     with pytest.raises(AttributeError):
         observer.set_mode("sky")
-    
+
     # clean up
     observer.stop_event.set()
     observer.status_thread.join(timeout=1)
