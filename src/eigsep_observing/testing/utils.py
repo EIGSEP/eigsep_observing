@@ -6,14 +6,57 @@ from .. import io
 def compare_dicts(dict1, dict2):
     """
     Compare two dictionaries for equality.
+
+    This function compares dictionaries recursively, handling both array
+    values (using numpy.testing.assert_array_equal) and non-array values
+    (using standard equality comparison).
+
+    Parameters
+    ----------
+    dict1 : dict
+        First dictionary to compare.
+    dict2 : dict
+        Second dictionary to compare.
+
+    Raises
+    ------
+    AssertionError
+        If the dictionaries are not equal.
     """
     assert set(dict1) == set(dict2), "Dictionaries have different keys."
     for key in dict1:
-        np.testing.assert_array_equal(
-            dict1[key],
-            dict2[key],
-            err_msg=f"Arrays for key '{key}' are not equal.",
-        )
+        val1 = dict1[key]
+        val2 = dict2[key]
+
+        # For numpy arrays or array-like objects, use numpy testing utilities
+        # This handles ndarray, list, tuple, etc.
+        if isinstance(val1, (np.ndarray, list, tuple)) and isinstance(
+            val2, (np.ndarray, list, tuple)
+        ):
+            np.testing.assert_array_equal(
+                val1,
+                val2,
+                err_msg=f"Arrays for key '{key}' are not equal.",
+            )
+        # For nested dictionaries, recursively compare
+        elif isinstance(val1, dict) and isinstance(val2, dict):
+            try:
+                compare_dicts(val1, val2)
+            except AssertionError as e:
+                raise AssertionError(
+                    f"Nested dictionaries for key '{key}' are not equal: {e}"
+                )
+        # Check for type mismatch when one is dict and other is not
+        elif isinstance(val1, dict) or isinstance(val2, dict):
+            raise AssertionError(
+                f"Type mismatch for key '{key}': "
+                f"{type(val1).__name__} vs {type(val2).__name__}"
+            )
+        # For other types, use standard equality
+        else:
+            assert (
+                val1 == val2
+            ), f"Values for key '{key}' are not equal: {val1} != {val2}"
 
 
 def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
