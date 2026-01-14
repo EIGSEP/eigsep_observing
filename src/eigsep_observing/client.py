@@ -80,7 +80,6 @@ class PandaClient:
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
-        # cfg = None
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
@@ -102,7 +101,7 @@ class PandaClient:
         self.logger.info(f"pico config: {pico_cfg}")
         # upload config to Redis
         self.redis.upload_config(cfg, from_file=False)
-        self.cfg = cfg
+        self.cfg = json.loads(json.dumps(cfg))
 
         # initialize the picos and VNA
         # self.motor = None

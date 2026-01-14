@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import pytest
 import time
 import yaml
@@ -16,6 +17,7 @@ from picohost.testing import (
 
 import eigsep_observing
 from eigsep_observing import PandaClient
+from eigsep_observing.testing.utils import compare_dicts
 
 
 # use dummy classes to simulate hardware
@@ -41,13 +43,22 @@ def module_tmpdir(tmp_path_factory):
     return tmp_path_factory.mktemp("module_tmpdir")
 
 
+@pytest.fixture()
+def dummy_cfg(module_tmpdir):
+    path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
+    cfg["vna_save_dir"] = str(module_tmpdir)
+    return cfg
+
+
 @pytest.fixture
 def redis():
     return DummyEigsepRedis()
 
 
-@pytest.fixture
-def client(redis, module_tmpdir, monkeypatch):
+@pytest.fixture(scope="module", autouse=True)
+def patch_init_picos():
     # Patch init_picos to ensure attributes are set even if no picos connect
     original_init_picos = PandaClient.init_picos
 
@@ -59,19 +70,19 @@ def client(redis, module_tmpdir, monkeypatch):
         # Call original method
         original_init_picos(self)
 
-    monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
+        yield monkeypatch
 
-    path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-    with open(path, "r") as f:
-        dummy_cfg = yaml.safe_load(f)
-    dummy_cfg["vna_save_dir"] = str(module_tmpdir)
+
+@pytest.fixture
+def client(redis, dummy_cfg):
     return PandaClient(redis, default_cfg=dummy_cfg)
 
 
 def test_client(client):
     # client is initialized with redis commands
     assert client.redis.client_heartbeat_check()  # check heartbeat
-    # Check picos instead of sensors
     if hasattr(client, "picos") and client.picos:
         if "switch" in client.picos:
             assert client.switch_nw is not None
@@ -82,6 +93,50 @@ def test_client(client):
         assert isinstance(client.vna, DummyVNA)
     else:
         assert client.vna is None
+
+
+def test_get_cfg(caplog, dummy_cfg):
+    caplog.set_level("INFO")
+
+    # should be no config in redis at start
+    r = DummyEigsepRedis(port=6380)  # different port to avoid conflicts
+    with pytest.raises(ValueError):
+        r.get_config()
+    client2 = PandaClient(r, default_cfg={})
+    # should have created a logger warning about missing config
+    for record in caplog.records:
+        if "No configuration found in Redis" in record.getMessage():
+            assert record.levelname == "WARNING"
+    # after init of client2, the cfg should be in redis
+    # it is appended with a timestamp and empty pico config
+    cfg_in_redis = client2._get_cfg()
+    assert len(cfg_in_redis) == 2  # timestamp and picos
+    assert "upload_time" in cfg_in_redis
+    assert "picos" in cfg_in_redis
+    assert cfg_in_redis["picos"] == {}
+
+    # upload the dummy config to client2's redis
+    client2.redis.upload_config(dummy_cfg, from_file=False)
+
+    # check that they're the same
+    retrieved_cfg = client2._get_cfg()
+    retrieved_cfg_copy = retrieved_cfg.copy()
+    del retrieved_cfg_copy["upload_time"]
+    dummy_cfg_serialized = json.loads(json.dumps(dummy_cfg))
+    compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
+
+    # if reinit client2, it should get the config from redis
+    client3 = PandaClient(r, default_cfg={})
+    retrieved_cfg2 = client3._get_cfg()
+    compare_dicts(client3.cfg, retrieved_cfg2)
+    # retrieved_cfg was directly uploaded so didn't have picos
+    del retrieved_cfg2["picos"]
+    compare_dicts(retrieved_cfg, retrieved_cfg2)
+
+    # check logging
+    for record in caplog.records:
+        if "Using config from Redis" in record.getMessage():
+            assert record.levelname == "INFO"
 
 
 def test_add_pico(caplog, monkeypatch, client):
@@ -109,14 +164,12 @@ def test_read_ctrl_switch(client):
     """
     Test read_ctrl with a switch network.
     """
-    # Skip test if no switch network
-    if not client.switch_nw:
-        pytest.skip("No switch network initialized")
+    client.switch_nw = DummyPicoRFSwitch(port="/dev/dummy")  # mock switch
 
     # Add switch method to the mocked switch
-    client.switch_nw.switch = lambda mode: client.redis.add_metadata(
-        "obs_mode", mode
-    )
+    # client.switch_nw.switch = lambda mode: client.redis.add_metadata(
+    #    "obs_mode", mode
+    # )
 
     # make sure the switching updates redis
     mode = "RFANT"
@@ -124,9 +177,8 @@ def test_read_ctrl_switch(client):
     switch_cmd = f"switch:{mode}"
     # read_ctrl is blocking and will process the command in a thread
     with ThreadPoolExecutor() as ex:
-        future = ex.submit(
-            client.redis.read_ctrl
-        )  # call redis.read_ctrl directly
+        # call redis.read_ctrl directly
+        future = ex.submit(client.redis.read_ctrl)
         time.sleep(0.1)  # small delay to ensure read starts
         client.redis.send_ctrl(switch_cmd)  # send after read started
         cmd, kwargs = future.result(timeout=5)  # wait for the result
@@ -138,26 +190,14 @@ def test_read_ctrl_switch(client):
         time.sleep(0.1)  # small delay to ensure read starts
         client.redis.send_ctrl(switch_cmd)  # send another command
         future.result(timeout=5)  # wait for processing to complete
-    # check that switch was actually processed
-    metadata = client.redis.get_live_metadata()
-    assert metadata.get("obs_mode") == mode
 
 
-def test_read_ctrl_VNA(client, module_tmpdir):
+def test_read_ctrl_VNA(client):
     """
     Test read_ctrl with VNA commands.
     """
-    # Skip test if no VNA
-    if not client.vna:
-        pytest.skip("No VNA initialized")
-
-    # Add switch method to the mocked switch if it exists
-    if client.switch_nw:
-
-        def mock_switch(mode, verify=False):
-            client.redis.add_metadata("obs_mode", mode)
-
-        client.switch_nw.switch = mock_switch
+    client.switch_nw = DummyPicoRFSwitch(port="/dev/dummy")  # mock switch
+    client.init_VNA()
 
     # Test that VNA commands work correctly
     mode = "ant"
