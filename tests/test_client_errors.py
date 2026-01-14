@@ -68,7 +68,7 @@ class TestClientInitializationErrors:
         """
         Test initialization falls back to default when
         redis.get_config() fails.
-        
+
         Note: There's an inconsistency in the API where client.cfg does not
         include 'upload_time' when falling back to default config, but does
         include it when successfully loading from Redis. The upload_time is
@@ -96,17 +96,19 @@ class TestClientInitializationErrors:
         client = PandaClient(redis, default_cfg=dummy_cfg)
 
         # Should've used default cfg as base, with added picos
-        # Note: upload_time is NOT added to client.cfg in fallback case (API bug)
+        # Note: upload_time NOT added to client.cfg in fallback (API bug)
         expected_keys = set(dummy_cfg.keys()) | {"picos"}
         assert set(client.cfg.keys()) == expected_keys
-        
+
         # Check that original config values are preserved
-        # Note: JSON serialization (line 104 of client.py) converts integer
-        # dict keys to strings, so we can't do exact equality checks for dicts
-        # with integer keys. This is a known limitation of JSON.
+        # Note: JSON serialization (line 104 of client.py) converts
+        # integer dict keys to strings, so we can't do exact equality
+        # checks for dicts with integer keys (JSON limitation).
         for key, value in dummy_cfg.items():
-            if isinstance(value, dict) and any(isinstance(k, int) for k in value.keys()):
-                # For dicts with integer keys, check values match (keys will be stringified)
+            if isinstance(value, dict) and any(
+                isinstance(k, int) for k in value.keys()
+            ):
+                # For dicts with int keys, check values match
                 assert set(client.cfg[key].values()) == set(value.values())
             else:
                 assert client.cfg[key] == value
