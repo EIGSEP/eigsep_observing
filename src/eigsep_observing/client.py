@@ -325,18 +325,18 @@ class PandaClient:
             )
             return
         # Validate that all wait_time values are positive numbers
-        invalid_waits = {
-            mode: wait_time
-            for mode, wait_time in schedule.items()
-            if not isinstance(wait_time, (int, float)) or wait_time <= 0
-        }
-        if invalid_waits:
-            self.logger.warning(
-                "Invalid wait_time values found in switch schedule. "
-                "All wait_time values must be positive numbers. "
-                f"Invalid entries: {invalid_waits}."
-            )
-            return
+        for mode, wait_time in schedule.items:
+            if not isinstance(wait_time, (int, float)) or wait_time < 0:
+                self.logger.warning(
+                    f"Invalid wait_time for mode {mode}: {wait_time}. "
+                    "All wait_time values must be positive numbers."
+                )
+                return
+            elif wait_time == 0:
+                self.logger.info(
+                    f"Zero wait_time for mode {mode}: skipping this mode."
+                )
+                schedule.pop(mode)
         while not self.stop_client.is_set():
             for mode, wait_time in schedule.items():
                 if mode == "RFANT":
