@@ -28,8 +28,11 @@ def compare_dicts(dict1, dict2):
         val1 = dict1[key]
         val2 = dict2[key]
 
-        # For numpy arrays, use numpy testing utilities
-        if isinstance(val1, np.ndarray) or isinstance(val2, np.ndarray):
+        # For numpy arrays or array-like objects, use numpy testing utilities
+        # This handles ndarray, list, tuple, etc.
+        if isinstance(val1, (np.ndarray, list, tuple)) and isinstance(
+            val2, (np.ndarray, list, tuple)
+        ):
             np.testing.assert_array_equal(
                 val1,
                 val2,
@@ -43,6 +46,12 @@ def compare_dicts(dict1, dict2):
                 raise AssertionError(
                     f"Nested dictionaries for key '{key}' are not equal: {e}"
                 )
+        # Check for type mismatch when one is dict and other is not
+        elif isinstance(val1, dict) or isinstance(val2, dict):
+            raise AssertionError(
+                f"Type mismatch for key '{key}': "
+                f"{type(val1).__name__} vs {type(val2).__name__}"
+            )
         # For other types, use standard equality
         else:
             assert (
