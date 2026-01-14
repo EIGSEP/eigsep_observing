@@ -204,7 +204,9 @@ class EigsepRedis:
             Redis key under which the configuration will be stored.
 
         """
-        d["upload_time"] = datetime.now(timezone.utc).isoformat()
+        d = d.copy()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        d["upload_time"] = now
         self.add_raw(key, json.dumps(d).encode("utf-8"))
 
     def upload_config(self, config, from_file=True):
