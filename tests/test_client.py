@@ -47,9 +47,9 @@ def module_tmpdir(tmp_path_factory):
 def dummy_cfg(module_tmpdir):
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
     with open(path, "r") as f:
-        return yaml.safe_load(f)
-    dummy_cfg["vna_save_dir"] = str(module_tmpdir)
-    return dummy_cfg
+        cfg = yaml.safe_load(f)
+    cfg["vna_save_dir"] = str(module_tmpdir)
+    return cfg
 
 
 @pytest.fixture
@@ -108,7 +108,7 @@ def test_get_cfg(caplog, dummy_cfg):
         if "No configuration found in Redis" in record.getMessage():
             assert record.levelname == "WARNING"
     # after init of client2, the cfg should be in redis
-    # it is appened with a timestamp and empty pico config
+    # it is appended with a timestamp and empty pico config
     cfg_in_redis = client2._get_cfg()
     assert len(cfg_in_redis) == 2  # timestamp and picos
     assert "upload_time" in cfg_in_redis
