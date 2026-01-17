@@ -48,7 +48,6 @@ class PandaClient:
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
-        # cfg = None
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
@@ -70,7 +69,7 @@ class PandaClient:
         self.logger.info(f"pico config: {pico_cfg}")
         # upload config to Redis
         self.redis.upload_config(cfg, from_file=False)
-        self.cfg = cfg
+        self.cfg = json.loads(json.dumps(cfg))
 
         # initialize the picos and VNA
         # self.motor = None
@@ -152,13 +151,17 @@ class PandaClient:
     def _initialize(self):
         self.stop_client.clear()  # reset the stop flag
         self.init_picos()  # initialize picos
-        if self.switch_nw is None:
-            self.logger.info("no switches, no vna")
-            self.vna = None
-        elif self.cfg["use_vna"]:
-            self.init_VNA()
+        if self.cfg.get("use_vna", False):
+            if self.switch_nw is None:
+                self.logger.error(
+                    "Switch network not initialized, cannot initialize VNA."
+                )
+                self.vna = None
+            else:
+                self.init_VNA()
         else:
             self.vna = None
+            self.logger.info("VNA not initialized")
 
         # start heartbeat thread, telling others that we are alive
         self.heartbeat_thd = threading.Thread(
@@ -171,7 +174,8 @@ class PandaClient:
     def reprogram(self, force=False):
         """
         Reprogram the client by stopping all threads and reinitializing
-        the client. This is useful when the configuration changes.
+        the client. This is useful when the configuration in Redis
+        changes.
 
         Parameters
         ----------
@@ -187,12 +191,11 @@ class PandaClient:
         cfg = self.redis.get_config()
         if force or cfg != self.cfg:
             self.cfg = cfg  # update the config
-            self.logger.info("Client reprogrammed.")
-            return
-        if not force and cfg == self.cfg:  # not force
+            msg = "Client reprogrammed with new configuration."
+        else:
             msg = "Configuration unchanged, skipping reprogram."
-            self.logger.info(msg)
-            self.redis.send_status(level=logging.INFO, status=msg)
+        self.logger.info(msg)
+        self.redis.send_status(level=logging.INFO, status=msg)
 
     def _send_heartbeat(self, ex=60):
         """
@@ -267,7 +270,7 @@ class PandaClient:
             except KeyError:
                 self.logger.warning(
                     f"Unknown pico class {name}. "
-                    "Must be in picos.PICO_CLASSES."
+                    f"Must be in {self.PICO_CLASSES}."
                 )
                 continue
 
