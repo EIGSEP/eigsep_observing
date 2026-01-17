@@ -8,30 +8,10 @@ from cmt_vna.testing import DummyVNA
 
 # Import dummy classes before importing client to ensure mocking works
 from eigsep_observing.testing import DummyEigsepRedis
-from picohost.testing import (
-    DummyPicoDevice,
-    DummyPicoRFSwitch,
-    DummyPicoPeltier,
-    DummyPicoMotor,
-)
 
 import eigsep_observing
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
-
-
-# use dummy classes to simulate hardware
-@pytest.fixture(autouse=True)
-def dummies(monkeypatch):
-    # Mock picohost at import time
-    import picohost
-
-    picohost.PicoDevice = DummyPicoDevice
-    picohost.PicoRFSwitch = DummyPicoRFSwitch
-    picohost.PicoPeltier = DummyPicoPeltier
-    picohost.PicoMotor = DummyPicoMotor
-
-    monkeypatch.setattr("eigsep_observing.client.VNA", DummyVNA)
 
 
 @pytest.fixture(scope="module")
@@ -84,7 +64,7 @@ def test_get_cfg(caplog, dummy_cfg):
     r = DummyEigsepRedis(port=6380)  # different port to avoid conflicts
     with pytest.raises(ValueError):
         r.get_config()
-    client2 = PandaClient(r, default_cfg={})
+    client2 = DummyPandaClient(r, default_cfg={})
     # should have created a logger warning about missing config
     for record in caplog.records:
         if "No configuration found in Redis" in record.getMessage():
@@ -108,7 +88,7 @@ def test_get_cfg(caplog, dummy_cfg):
     compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
 
     # if reinit client2, it should get the config from redis
-    client3 = PandaClient(r, default_cfg={})
+    client3 = DummyPandaClient(r, default_cfg={})
     retrieved_cfg2 = client3._get_cfg()
     compare_dicts(client3.cfg, retrieved_cfg2)
     # retrieved_cfg was directly uploaded so didn't have picos
