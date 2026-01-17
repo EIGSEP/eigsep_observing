@@ -40,9 +40,10 @@ class DummyPandaClient(PandaClient):
         super().__init__(redis, default_cfg=default_cfg)
 
     def _add_redis_ctrl(self):
-        self.redis_ctrl = DummyEigsepRedis(
+        rc = DummyEigsepRedis(
             host=self.redis.host, port=self.redis.port
         )
+        return rc
 
     def get_pico_config(self, fname, app_mapping):
         """

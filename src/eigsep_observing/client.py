@@ -80,13 +80,10 @@ class PandaClient:
         self._initialize()  # initialize the client
 
     def _add_redis_ctrl(self):
-        # Create a Redis instance of the same type as the one passed in
-        # This ensures that if a DummyEigsepRedis was passed for testing,
-        # the control Redis will also be a DummyEigsepRedis
-        redis_class = type(self.redis)
-        self.redis_ctrl = redis_class(
+        rc = EigsepRedis(
             host=self.redis.host, port=self.redis.port
         )
+        return rc
 
     def _get_cfg(self):
         """
