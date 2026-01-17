@@ -568,13 +568,12 @@ class TestClientEdgeCases:
         path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
         with open(path, "r") as f:
             dummy_cfg = yaml.safe_load(f)
+        dummy_cfg["use_vna"] = True
         dummy_cfg["vna_save_dir"] = str(tmp_path)
-        # Force VNA initialization by having a switch
         dummy_cfg["picos"] = {"switch": "/dev/switch"}
 
         def patched_init_picos(self):
             self.switch_nw = DummyPicoRFSwitch("/dev/switch")
-            self.switch_nw.connect()
             self.motor = None
             self.peltier = None
             self.picos = {"switch": self.switch_nw}
