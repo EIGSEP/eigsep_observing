@@ -104,6 +104,7 @@ class PandaClient:
         self._switch_nw = value
         self.redis.r.sadd("ctrl_commands", "switch")
         self.switch_lock = threading.Lock()
+        self.current_switch_state = None
 
     def get_pico_config(self, fname, app_mapping):
         """
@@ -346,6 +347,7 @@ class PandaClient:
                     with self.switch_lock:
                         self.logger.info(f"Switching to {mode} measurements")
                         self.switch_nw.switch(mode)
+                        self.current_switch_state = mode
                     # release the lock during sky wait time
                     if self.stop_client.wait(wait_time):
                         self.logger.info("Switching stopped by event")
@@ -354,6 +356,7 @@ class PandaClient:
                     with self.switch_lock:
                         self.logger.info(f"Switching to {mode} measurements")
                         self.switch_nw.switch(mode)
+                        self.current_switch_state = mode
                         if self.stop_client.wait(wait_time):  # wait with stop
                             self.logger.info("Switching stopped by event")
                             return
@@ -426,15 +429,10 @@ class PandaClient:
             threading.Event().wait(5)  # wait for VNA to be initialized
         while not self.stop_client.is_set():
             with self.switch_lock:
-                try:
-                    sw_status = self.redis.get_live_metadata(keys="rfswitch")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Failed to get switch status from Redis: {e}. "
-                    )
-                    sw_status = {}
                 # default to RFANT if not found
-                prev_mode = sw_status.get("sw_state", "RFANT")
+                prev_mode = self.current_switch_state
+                if prev_mode is None:
+                    prev_mode = "RFANT"
                 for mode in ["ant", "rec"]:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode)
