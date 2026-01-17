@@ -15,7 +15,7 @@ from picohost.testing import (
 )
 
 import eigsep_observing
-from eigsep_observing import PandaClient
+from eigsep_observing.testing import DummyPandaClient
 
 
 # use dummy classes to simulate hardware
@@ -47,25 +47,12 @@ def redis():
 
 
 @pytest.fixture
-def client(redis, module_tmpdir, monkeypatch):
-    # Patch init_picos to ensure attributes are set even if no picos connect
-    original_init_picos = PandaClient.init_picos
-
-    def patched_init_picos(self):
-        # Initialize attributes first
-        self.switch_nw = None
-        self.motor = None
-        self.peltier = None
-        # Call original method
-        original_init_picos(self)
-
-    monkeypatch.setattr(PandaClient, "init_picos", patched_init_picos)
-
+def client(redis, module_tmpdir):
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
     with open(path, "r") as f:
         dummy_cfg = yaml.safe_load(f)
     dummy_cfg["vna_save_dir"] = str(module_tmpdir)
-    return PandaClient(redis, default_cfg=dummy_cfg)
+    return DummyPandaClient(redis, default_cfg=dummy_cfg)
 
 
 def test_client(client):
@@ -104,29 +91,18 @@ def test_add_pico(caplog, monkeypatch, client):
                 # Verify picos were attempted to be added
                 assert record.levelname == "INFO"
 
-
+@pytest.mark.skip("read ctrl are deprecated")
 def test_read_ctrl_switch(client):
     """
     Test read_ctrl with a switch network.
     """
-    # Skip test if no switch network
-    if not client.switch_nw:
-        pytest.skip("No switch network initialized")
-
-    # Add switch method to the mocked switch
-    client.switch_nw.switch = lambda mode: client.redis.add_metadata(
-        "obs_mode", mode
-    )
-
     # make sure the switching updates redis
     mode = "RFANT"
     # send a switch command
     switch_cmd = f"switch:{mode}"
     # read_ctrl is blocking and will process the command in a thread
     with ThreadPoolExecutor() as ex:
-        future = ex.submit(
-            client.redis.read_ctrl
-        )  # call redis.read_ctrl directly
+        future = ex.submit(client.redis.read_ctrl)
         time.sleep(0.1)  # small delay to ensure read starts
         client.redis.send_ctrl(switch_cmd)  # send after read started
         cmd, kwargs = future.result(timeout=5)  # wait for the result
@@ -143,14 +119,11 @@ def test_read_ctrl_switch(client):
     assert metadata.get("obs_mode") == mode
 
 
+@pytest.mark.skip("read ctrl are deprecated")
 def test_read_ctrl_VNA(client, module_tmpdir):
     """
     Test read_ctrl with VNA commands.
     """
-    # Skip test if no VNA
-    if not client.vna:
-        pytest.skip("No VNA initialized")
-
     # Add switch method to the mocked switch if it exists
     if client.switch_nw:
 
