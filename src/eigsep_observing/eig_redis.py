@@ -34,6 +34,8 @@ class EigsepRedis:
         self._last_read_ids["stream:status"] = "$"
         self.logger.info(f"{self._last_read_ids=}")
         self.r = self._make_redis(host, port)
+        self.host = host
+        self.port = port
 
     def _make_redis(self, host, port):
         """
