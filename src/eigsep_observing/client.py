@@ -325,7 +325,8 @@ class PandaClient:
             )
             return
         # Validate that all wait_time values are positive numbers
-        for mode, wait_time in schedule.items:
+        remove_modes = []
+        for mode, wait_time in schedule.items():
             if not isinstance(wait_time, (int, float)) or wait_time < 0:
                 self.logger.warning(
                     f"Invalid wait_time for mode {mode}: {wait_time}. "
@@ -336,7 +337,9 @@ class PandaClient:
                 self.logger.info(
                     f"Zero wait_time for mode {mode}: skipping this mode."
                 )
-                schedule.pop(mode)
+                remove_modes.append(mode)
+        for mode in remove_modes:
+            del schedule[mode]
         while not self.stop_client.is_set():
             for mode, wait_time in schedule.items():
                 if mode == "RFANT":
