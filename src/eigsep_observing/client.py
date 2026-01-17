@@ -6,7 +6,7 @@ import yaml
 from cmt_vna import VNA
 import picohost
 
-from .eig_redis import EigsepRedis
+from .eig_redis import EigsepRedis  # noqa: F401
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,11 @@ class PandaClient:
         self._initialize()  # initialize the client
 
     def _add_redis_ctrl(self):
-        self.redis_ctrl = EigsepRedis(
+        # Create a Redis instance of the same type as the one passed in
+        # This ensures that if a DummyEigsepRedis was passed for testing,
+        # the control Redis will also be a DummyEigsepRedis
+        redis_class = type(self.redis)
+        self.redis_ctrl = redis_class(
             host=self.redis.host, port=self.redis.port
         )
 
