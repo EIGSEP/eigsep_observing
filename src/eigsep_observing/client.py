@@ -44,7 +44,7 @@ class PandaClient:
         self.logger = logger
         self.redis = redis
         # separete redis instance for control loop
-        self.redis_ctrl = EigsepRedis(host=redis.host, port=redis.port)
+        self.redis_ctrl = self._add_redis_ctrl()
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
@@ -78,6 +78,11 @@ class PandaClient:
         self._switch_nw = None
         self.switch_lock = None
         self._initialize()  # initialize the client
+
+    def _add_redis_ctrl(self):
+        self.redis_ctrl = EigsepRedis(
+            host=self.redis.host, port=self.redis.port
+        )
 
     def _get_cfg(self):
         """
