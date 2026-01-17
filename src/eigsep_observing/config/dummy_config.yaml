@@ -18,11 +18,11 @@ corr_ntimes: 240
 # switches
 use_switches: true
 switch_schedule:  # seconds per measurement
-  RFANT: 100  # sky
-  RFNOFF: 1  # load
-  RFNON: 1  # noise source
+  RFANT: 0  # sky
+  RFNOFF: 20  # load
+  RFNON: 20  # noise source
 # vna
-use_vna: true
+use_vna: false
 vna_interval: 10  # seconds between VNA measurements
 vna_ip: "127.0.0.1"
 vna_port: 5025

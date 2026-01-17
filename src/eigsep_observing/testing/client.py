@@ -3,6 +3,7 @@ from cmt_vna.testing import DummyVNA
 import picohost
 
 from .. import PandaClient
+from .eig_redis import DummyEigsepRedis
 
 default_cfg_file = (
     "/home/christian/Documents/research/eigsep/eigsep_observing/src/"
@@ -37,6 +38,12 @@ class DummyPandaClient(PandaClient):
             except FileNotFoundError:
                 default_cfg = {}
         super().__init__(redis, default_cfg=default_cfg)
+
+    def _add_redis_ctrl(self):
+        rc = DummyEigsepRedis(
+            host=self.redis.host, port=self.redis.port
+        )
+        return rc
 
     def get_pico_config(self, fname, app_mapping):
         """
