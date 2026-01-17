@@ -6,6 +6,7 @@ import yaml
 from cmt_vna import VNA
 import picohost
 
+from .eig_redis import EigsepRedis
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,8 @@ class PandaClient:
         """
         self.logger = logger
         self.redis = redis
+        # separete redis instance for control loop
+        self.redis_ctrl = EigsepRedis(host=redis.host, port=redis.port)
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
@@ -462,11 +465,11 @@ class PandaClient:
 
         """
         try:
-            msg = self.redis.read_ctrl(timeout=0.1)
+            msg = self.redis_ctrl.read_ctrl(timeout=None)
         except TypeError as e:
             err = f"Error reading control command: {e}"
             self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
+            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
             return
 
         if msg is None:
@@ -481,23 +484,23 @@ class PandaClient:
         if cmd == "ctrl:reprogram":
             self.logger.warning("Reprogramming client.")
             self.reprogram(**kwargs)
-            self.redis.send_status(
+            self.redis_ctrl.send_status(
                 level=logging.INFO, status="Client reprogrammed."
             )
-        elif cmd in self.redis.switch_commands:
+        elif cmd in self.redis_ctrl.switch_commands:
             if self.switch_nw is None:
                 err = (
                     "Switch network not initialized. Cannot execute "
                     "switch commands."
                 )
                 self.logger.error(err)
-                self.redis.send_status(level=logging.ERROR, status=err)
+                self.redis_ctrl.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
             with self.switch_lock:
                 self.logger.info(f"Switching to {mode} measurements")
                 self.switch_nw.switch(mode)
-        elif cmd in self.redis.vna_commands:
+        elif cmd in self.redis_ctrl.vna_commands:
             mode = cmd.split(":")[1]
             with self.switch_lock:
                 try:
@@ -505,11 +508,13 @@ class PandaClient:
                 except (ValueError, RuntimeError) as e:
                     err = f"Error executing VNA command {cmd}: {e}"
                     self.logger.error(err)
-                    self.redis.send_status(level=logging.ERROR, status=err)
+                    self.redis_ctrl.send_status(
+                        level=logging.ERROR, status=err
+                    )
         else:
             err = f"Unknown command: {msg=}, {cmd=}, {kwargs=}. "
             self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
+            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
 
     def ctrl_loop(self):
         """
