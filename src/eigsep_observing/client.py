@@ -6,7 +6,7 @@ import yaml
 from cmt_vna import VNA
 import picohost
 
-from .eig_redis import EigsepRedis
+from .eig_redis import EigsepRedis  # noqa: F401
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
