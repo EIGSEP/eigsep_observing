@@ -10,7 +10,20 @@ from datetime import datetime
 from eigsep_observing import EigsepRedis
 
 """
-Hello. This script pulls meta data from redis.
+Records metadata from redis for the purposes of in-lab testing. 
+
+Author: Richard Saeed
+
+Parser:
+--------
+--output: Specify metadata save directory.
+--format: Default 'json', can change to "both" or "hdf5"'
+--interval: Default 1.0s interval between saves. 
+--keys: Default ["tempctrl", "tempctrl_ts"] keys
+
+Output:
+--------
+JSON file: metadata_{timestamp}.json
 
 """
 def save_to_json(data_buffer, filepath):
@@ -71,8 +84,8 @@ def main():
                         help='Output filename (without extension)')
     parser.add_argument('--format', '-f', type=str,
                         choices=['json', 'hdf5', 'both'],
-                        default='both',
-                        help='Output format (default: both)')
+                        default='json',
+                        help='Output format (default: json)')
     parser.add_argument('--interval', '-i', type=float,
                         default=1.0,
                         help='Sampling interval in seconds (default: 1.0)')
