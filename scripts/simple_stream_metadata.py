@@ -12,7 +12,6 @@ from eigsep_observing import EigsepRedis
 """
 Records metadata from redis for the purposes of in-lab testing. 
 
-Author: Richard Saeed
 
 Parser:
 --------
@@ -20,6 +19,7 @@ Parser:
 --format: Default 'json', can change to "both" or "hdf5"'
 --interval: Default 1.0s interval between saves. 
 --keys: Default ["tempctrl", "tempctrl_ts"] keys
+--host: Default 10.10.10.11 
 
 Output:
 --------
@@ -93,7 +93,7 @@ def main():
                         default=["tempctrl", "tempctrl_ts"],
                         help='Metadata keys to retrieve')
     parser.add_argument('--host', type=str,
-                        default="10.10.10.11",
+                        default="localhost",
                         help='Redis host address')
     parser.add_argument('--autosave-interval', type=int,
                         default=0,
