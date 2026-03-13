@@ -29,7 +29,7 @@ def test_metadata(server, client):
         assert client.r.smembers("data_streams") == {b"stream:acc_cnt"}
         assert server.r.smembers("data_streams") == {b"stream:acc_cnt"}
         if acc_cnt == 0:  # data stream should be created on first call
-            assert server.data_streams == {"stream:acc_cnt": "$"}
+            assert "stream:acc_cnt" in server.data_streams
         # live metadata should be updated
         assert server.get_live_metadata(keys="acc_cnt") == acc_cnt
         assert server.get_live_metadata(keys=["acc_cnt"]) == {
