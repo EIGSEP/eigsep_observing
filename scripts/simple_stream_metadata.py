@@ -10,7 +10,20 @@ from datetime import datetime
 from eigsep_observing import EigsepRedis
 
 """
-Hello. This script pulls meta data from redis.
+Records metadata from redis for the purposes of in-lab testing. 
+
+
+Parser:
+--------
+--output: Specify metadata save directory.
+--format: Default 'json', can change to "both" or "hdf5"'
+--interval: Default 1.0s interval between saves. 
+--keys: Default ["tempctrl", "tempctrl_ts"] keys
+--host: Default 10.10.10.11 
+
+Output:
+--------
+JSON file: metadata_{timestamp}.json
 
 """
 
