@@ -43,7 +43,7 @@ if client.cfg["use_vna"]:
     vna_thd.start()
 
 # ctrl
-ctrl_thd = Thread(target=client.ctrl_loop)
+ctrl_thd = Thread(target=client.ctrl_loop, daemon=True)
 thds["ctrl"] = ctrl_thd
 logger.info("Starting control thread")
 ctrl_thd.start()
@@ -56,6 +56,9 @@ except KeyboardInterrupt:
 finally:
     client.stop_client.set()
     for name, t in thds.items():
+        if name == "ctrl":
+            continue  # ctrl thread is daemon, no need to join
         logger.info(f"Joining thread {name}")
         t.join()
+        logger.info(f"Thread {name} joined")
     logger.info("All threads joined, exiting.")

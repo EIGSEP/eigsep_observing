@@ -1,52 +1,18 @@
 import json
 import logging
 import threading
-import time
 import yaml
 
 from cmt_vna import VNA
 import picohost
 
+from .eig_redis import EigsepRedis  # noqa: F401
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
 default_cfg_file = get_config_path("obs_config.yaml")
 with open(default_cfg_file, "r") as f:
     default_cfg = yaml.safe_load(f)
-
-
-# custom switch lock that always return to sky measurements
-class SwitchLock:
-    """
-    A lock that ensures that the switch network is always in sky
-    measurements mode after the lock is released.
-    """
-
-    def __init__(self, switch_nw):
-        self.switch_nw = switch_nw
-        self._lock = threading.Lock()
-
-    def acquire(self, blocking=True, timeout=-1):
-        self._lock.acquire(blocking=blocking, timeout=timeout)
-
-    def release(self):
-        self._lock.release()
-        try:
-            self.switch_nw.switch("RFANT")  # switch back to sky measurements
-        except Exception as e:
-            logger.warning(
-                f"Failed to switch back to sky measurements: {e}. "
-                "Switch network may not be initialized."
-            )
-
-    __enter__ = acquire
-
-    def __exit__(self, exc_type, exc, tb):
-        self.release()
-        return False
-
-    def locked(self):
-        return self._lock.locked()
 
 
 class PandaClient:
@@ -77,6 +43,8 @@ class PandaClient:
         """
         self.logger = logger
         self.redis = redis
+        # separete redis instance for control loop
+        self.redis_ctrl = self._add_redis_ctrl()
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
@@ -110,6 +78,12 @@ class PandaClient:
         self.switch_lock = None
         self._initialize()  # initialize the client
 
+    def _add_redis_ctrl(self):
+        rc = EigsepRedis(
+            host=self.redis.host, port=self.redis.port
+        )
+        return rc
+
     def _get_cfg(self):
         """
         Try to get the current configuration from Redis. If it fails,
@@ -137,7 +111,8 @@ class PandaClient:
     def switch_nw(self, value):
         self._switch_nw = value
         self.redis.r.sadd("ctrl_commands", "switch")
-        self.switch_lock = SwitchLock(self._switch_nw)
+        self.switch_lock = threading.Lock()
+        self.current_switch_state = None
 
     def get_pico_config(self, fname, app_mapping):
         """
@@ -332,7 +307,8 @@ class PandaClient:
         The majority of the observing time is spent on sky
         measurements. Therefore, S11 measurements are only allowed
         to interrupt the sky measurements, and not the load or
-        noise source measurements.
+        noise source measurements. That is, we release the switch
+        lock immediately after switching to sky.
 
         """
         if self.switch_nw is None:
@@ -341,20 +317,61 @@ class PandaClient:
                 "switching commands."
             )
             return
-        self.logger.info("waiting 1 min to start switches")
-        time.sleep(60)
-        self.logger.info("starting switches")
+        schedule = self.cfg.get("switch_schedule", None)
+        if schedule is None:
+            self.logger.warning(
+                "No switch schedule found in config. Cannot execute "
+                "switching commands."
+            )
+            return
+        elif not schedule:
+            self.logger.warning(
+                "Empty switch schedule found in config. Cannot execute "
+                "switching commands."
+            )
+            return
+        elif any(k not in self.switch_nw.path_str for k in schedule):
+            self.logger.warning(
+                "Invalid switch keys found in schedule. Cannot execute "
+                "switching commands. Schedule keys must be in: "
+                f"{list(self.switch_nw.path_str.keys())}."
+            )
+            return
+        # Validate that all wait_time values are positive numbers
+        remove_modes = []
+        for mode, wait_time in schedule.items():
+            if not isinstance(wait_time, (int, float)) or wait_time < 0:
+                self.logger.warning(
+                    f"Invalid wait_time for mode {mode}: {wait_time}. "
+                    "All wait_time values must be positive numbers."
+                )
+                return
+            elif wait_time == 0:
+                self.logger.info(
+                    f"Zero wait_time for mode {mode}: skipping this mode."
+                )
+                remove_modes.append(mode)
+        for mode in remove_modes:
+            del schedule[mode]
         while not self.stop_client.is_set():
-            with self.switch_lock:
-                for mode in ["RFNOFF", "RFNON"]:
-                    self.logger.info(f"Switching to {mode} measurements")
-                    self.switch_nw.switch(mode)
-                    wait_time = self.cfg["switch_schedule"][mode]
+            for mode, wait_time in schedule.items():
+                if mode == "RFANT":
+                    with self.switch_lock:
+                        self.logger.info(f"Switching to {mode} measurements")
+                        self.switch_nw.switch(mode)
+                        self.current_switch_state = mode
+                    # release the lock during sky wait time
                     if self.stop_client.wait(wait_time):
                         self.logger.info("Switching stopped by event")
                         return
-            self.logger.debug("Switch lock released, switching to RFANT")
-            self.stop_client.wait(self.cfg["switch_schedule"]["RFANT"])
+                else:
+                    with self.switch_lock:
+                        self.logger.info(f"Switching to {mode} measurements")
+                        self.switch_nw.switch(mode)
+                        self.current_switch_state = mode
+                        if self.stop_client.wait(wait_time):  # wait with stop
+                            self.logger.info("Switching stopped by event")
+                            return
 
     def measure_s11(self, mode):
         """
@@ -422,20 +439,12 @@ class PandaClient:
                 "VNA not initialized. Cannot execute VNA commands."
             )
             threading.Event().wait(5)  # wait for VNA to be initialized
-        self.logger.info("waiting 10s to start VNA")
-        time.sleep(10)
-        self.logger.info("starting VNA")
         while not self.stop_client.is_set():
             with self.switch_lock:
-                try:
-                    sw_status = self.redis.get_live_metadata(keys="rfswitch")
-                except Exception as e:
-                    self.logger.warning(
-                        f"Failed to get switch status from Redis: {e}. "
-                    )
-                    sw_status = {}
                 # default to RFANT if not found
-                prev_mode = sw_status.get("sw_state", "RFANT")
+                prev_mode = self.current_switch_state
+                if prev_mode is None:
+                    prev_mode = "RFANT"
                 for mode in ["ant", "rec"]:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode)
@@ -465,11 +474,11 @@ class PandaClient:
 
         """
         try:
-            msg = self.redis.read_ctrl(timeout=0.1)
+            msg = self.redis_ctrl.read_ctrl(timeout=None)
         except TypeError as e:
             err = f"Error reading control command: {e}"
             self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
+            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
             return
 
         if msg is None:
@@ -484,23 +493,23 @@ class PandaClient:
         if cmd == "ctrl:reprogram":
             self.logger.warning("Reprogramming client.")
             self.reprogram(**kwargs)
-            self.redis.send_status(
+            self.redis_ctrl.send_status(
                 level=logging.INFO, status="Client reprogrammed."
             )
-        elif cmd in self.redis.switch_commands:
+        elif cmd in self.redis_ctrl.switch_commands:
             if self.switch_nw is None:
                 err = (
                     "Switch network not initialized. Cannot execute "
                     "switch commands."
                 )
                 self.logger.error(err)
-                self.redis.send_status(level=logging.ERROR, status=err)
+                self.redis_ctrl.send_status(level=logging.ERROR, status=err)
                 return
             mode = cmd.split(":")[1]
             with self.switch_lock:
                 self.logger.info(f"Switching to {mode} measurements")
                 self.switch_nw.switch(mode)
-        elif cmd in self.redis.vna_commands:
+        elif cmd in self.redis_ctrl.vna_commands:
             mode = cmd.split(":")[1]
             with self.switch_lock:
                 try:
@@ -508,11 +517,13 @@ class PandaClient:
                 except (ValueError, RuntimeError) as e:
                     err = f"Error executing VNA command {cmd}: {e}"
                     self.logger.error(err)
-                    self.redis.send_status(level=logging.ERROR, status=err)
+                    self.redis_ctrl.send_status(
+                        level=logging.ERROR, status=err
+                    )
         else:
             err = f"Unknown command: {msg=}, {cmd=}, {kwargs=}. "
             self.logger.error(err)
-            self.redis.send_status(level=logging.ERROR, status=err)
+            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
 
     def ctrl_loop(self):
         """
