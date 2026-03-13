@@ -3,7 +3,6 @@ import threading
 import time
 
 from . import io
-from .utils import require_panda
 
 logger = logging.getLogger(__name__)
 
@@ -73,27 +72,6 @@ class EigObserver:
             return False
         return self.redis_panda.client_heartbeat_check()
 
-    @require_panda
-    def reprogram_panda(self, force=False, timeout=5):
-        """
-        Reprogram the LattePanda Redis server with the current
-        configuration.
-
-        Parameters
-        ----------
-        force : bool
-            Reprogram if config appears to be the same as before.
-
-        Raises
-        ------
-        AttributeError
-            If the `redis_panda` attribute is not set.
-
-        """
-        self.logger.info("Reprogramming LattePanda with current configuration")
-        self.redis_panda.send_ctrl("ctrl:reprogram", force=force)
-        self.cfg = self.redis_panda.get_config()  # update cfg
-
     def status_logger(self):
         """
         Log status messages from the LattePanda Redis server.
@@ -117,102 +95,6 @@ class EigObserver:
             level, status = self.redis_panda.read_status(timeout=0.1)
             if status is not None:
                 self.logger.log(level, status)
-
-    @require_panda
-    def set_mode(self, mode):
-        """
-        Switch observing mode with RF switches.
-
-        Parameters
-        ----------
-        mode : str
-            Observing mode. Either `RFANT` (sky), `RFNOFF` (load), or
-            `RFNON` (noise).
-
-        Raises
-        ------
-        AttributeError
-            If the `redis_panda` attribute is not set.
-        ValueError
-            If the mode is not one of the valid modes.
-
-        """
-        modes = ("RFANT", "RFNOFF", "RFNON")
-        if mode not in modes:
-            raise ValueError(f"Invalid mode: {mode}. Must be one of {modes}.")
-        self.logger.info(f"Switching to {mode} measurements")
-        self.redis_panda.send_ctrl(f"switch:{mode}")
-
-    @require_panda
-    def measure_s11(self, mode, timeout=300, write_files=True):
-        """
-        VNA observations. Performs OSL calibration measurements and
-        measurement of the device(s) under test.
-
-        Parameters
-        ----------
-        mode : str
-            The mode to set. Either `ant` or `rec`. The former
-            case measures S11 of antenna and noise source. The latter
-            uses less power and measures S11 of the receiver.
-        timeout : int
-            The time in seconds to wait for the VNA to complete.
-        write_files : bool
-            If True, write the VNA data to files. If False, only
-            return the data without writing to files.
-
-        Returns
-        -------
-        data : dict
-            The S11 measurement data from the VNA. Only returned if
-            `write_files` is False.
-
-        Raises
-        ------
-        AttributeError
-            If the `redis_panda` attribute is not set.
-        ValueError
-            If ``mode`` is not `ant` or `rec`.
-
-        """
-        if mode not in ("ant", "rec"):
-            raise ValueError(
-                f"Invalid mode: {mode}. Must be one of 'ant' or 'rec'."
-            )
-        cmd = f"vna:{mode}"
-        kwargs = self.cfg["vna_settings"].copy()
-        kwargs["power_dBm"] = kwargs["power_dBm"][mode]
-        self.redis_panda.send_ctrl(cmd, **kwargs)
-        try:
-            out = self.redis_panda.read_vna_data(timeout=timeout)
-        except TimeoutError:
-            self.logger.error(
-                "Timeout while waiting for VNA data. "
-                "Check the VNA connection and settings."
-            )
-            return None
-        data, header, metadata = out
-        if write_files:
-            io.write_s11_file(
-                data,
-                header,
-                metadata=metadata,
-                save_dir=self.cfg["vna_save_dir"],
-            )
-        else:
-            return data
-
-    # XXX
-    @require_panda
-    def rotate_motors(self, motors):
-        """
-        Raises
-        -------
-        AttributeError
-            If the `redis_panda` attribute is not set.
-        """
-        # runs if not stop_events[motors].is_set()
-        raise NotImplementedError
 
     def record_corr_data(self, save_dir, ntimes=240, timeout=20):
         """

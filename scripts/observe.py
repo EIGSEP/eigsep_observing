@@ -94,7 +94,6 @@ if args.use_panda:
     while not observer.panda_connected:
         logger.info("Waiting for Panda to connect.")
         time.sleep(1.0)
-    observer.reprogram_panda(force=True)
 
 thds = {}
 thds["status"] = observer.status_thread

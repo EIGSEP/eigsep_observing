@@ -6,7 +6,6 @@ import yaml
 from cmt_vna import VNA
 import picohost
 
-from .eig_redis import EigsepRedis  # noqa: F401
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -43,8 +42,6 @@ class PandaClient:
         """
         self.logger = logger
         self.redis = redis
-        # separete redis instance for control loop
-        self.redis_ctrl = self._add_redis_ctrl()
         self.serial_timeout = 5  # serial port timeout in seconds
         self.stop_client = threading.Event()  # flag to stop the client
         cfg = self._get_cfg()  # get the current config from Redis
@@ -78,12 +75,6 @@ class PandaClient:
         self.switch_lock = None
         self._initialize()  # initialize the client
 
-    def _add_redis_ctrl(self):
-        rc = EigsepRedis(
-            host=self.redis.host, port=self.redis.port
-        )
-        return rc
-
     def _get_cfg(self):
         """
         Try to get the current configuration from Redis. If it fails,
@@ -110,7 +101,6 @@ class PandaClient:
     @switch_nw.setter
     def switch_nw(self, value):
         self._switch_nw = value
-        self.redis.r.sadd("ctrl_commands", "switch")
         self.switch_lock = threading.Lock()
         self.current_switch_state = None
 
@@ -171,32 +161,6 @@ class PandaClient:
         )
         self.heartbeat_thd.start()
 
-    def reprogram(self, force=False):
-        """
-        Reprogram the client by stopping all threads and reinitializing
-        the client. This is useful when the configuration in Redis
-        changes.
-
-        Parameters
-        ----------
-        force : bool
-            If True, reprogram even if the config appears to be the
-            unchanged.
-
-        Notes
-        -----
-        This method interrupts all running threads, use with caution.
-
-        """
-        cfg = self.redis.get_config()
-        if force or cfg != self.cfg:
-            self.cfg = cfg  # update the config
-            msg = "Client reprogrammed with new configuration."
-        else:
-            msg = "Configuration unchanged, skipping reprogram."
-        self.logger.info(msg)
-        self.redis.send_status(level=logging.INFO, status=msg)
-
     def _send_heartbeat(self, ex=60):
         """
         Send a heartbeat message to the Redis server to indicate that the
@@ -236,7 +200,6 @@ class PandaClient:
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
         self.logger.info(f"vna kwargs: {kwargs}")
         self.vna.setup(**kwargs)
-        self.redis.r.sadd("ctrl_commands", "VNA")
         self.logger.info("VNA initialized")
 
     def init_picos(self):
@@ -459,77 +422,3 @@ class PandaClient:
     # XXX
     def rotate_motors(self):
         raise NotImplementedError
-
-    def read_ctrl(self):
-        """
-        Read control commands from Redis.
-
-        Notes
-        -----
-        This method should be called in a loop to continuously
-        monitor for commands. If an exception occurs while reading
-        or executing the command, it is logged and an error message
-        is sent back to Redis. This prevents users from connecting
-        to the client and crashing it with invalid commands.
-
-        """
-        try:
-            msg = self.redis_ctrl.read_ctrl(timeout=None)
-        except TypeError as e:
-            err = f"Error reading control command: {e}"
-            self.logger.error(err)
-            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
-            return
-
-        if msg is None:
-            return
-
-        cmd, kwargs = msg
-        if cmd is None:
-            return  # no command to execute
-
-        self.logger.info(f"Received control message: {msg}")
-
-        if cmd == "ctrl:reprogram":
-            self.logger.warning("Reprogramming client.")
-            self.reprogram(**kwargs)
-            self.redis_ctrl.send_status(
-                level=logging.INFO, status="Client reprogrammed."
-            )
-        elif cmd in self.redis_ctrl.switch_commands:
-            if self.switch_nw is None:
-                err = (
-                    "Switch network not initialized. Cannot execute "
-                    "switch commands."
-                )
-                self.logger.error(err)
-                self.redis_ctrl.send_status(level=logging.ERROR, status=err)
-                return
-            mode = cmd.split(":")[1]
-            with self.switch_lock:
-                self.logger.info(f"Switching to {mode} measurements")
-                self.switch_nw.switch(mode)
-        elif cmd in self.redis_ctrl.vna_commands:
-            mode = cmd.split(":")[1]
-            with self.switch_lock:
-                try:
-                    self.measure_s11(mode)
-                except (ValueError, RuntimeError) as e:
-                    err = f"Error executing VNA command {cmd}: {e}"
-                    self.logger.error(err)
-                    self.redis_ctrl.send_status(
-                        level=logging.ERROR, status=err
-                    )
-        else:
-            err = f"Unknown command: {msg=}, {cmd=}, {kwargs=}. "
-            self.logger.error(err)
-            self.redis_ctrl.send_status(level=logging.ERROR, status=err)
-
-    def ctrl_loop(self):
-        """
-        Control loop that reads commands from Redis and executes them.
-        This method runs in a separate thread.
-
-        """
-        while not self.stop_client.is_set():
-            self.read_ctrl()

@@ -100,9 +100,8 @@ def test_is_alive(server, client):
 
 
 def test_status(server, client):
-    # initial state - the properties are now separate
+    # initial state
     assert client.status_stream == {"stream:status": "$"}
-    assert client.ctrl_stream == {"stream:ctrl": "$"}
 
     # Test blocking reads using ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -144,58 +143,3 @@ def test_status(server, client):
     client.send_status(status="VNA_TIMEOUT")
     level, status = server.read_status()
     assert status == "VNA_TIMEOUT"
-
-
-def test_ctrl(server, client):
-    # initial state - the properties are now separate
-    assert client.status_stream == {"stream:status": "$"}
-    assert client.ctrl_stream == {"stream:ctrl": "$"}
-
-    # Test blocking reads using ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        # Start reading in background thread (will block until message arrives)
-        read_future = executor.submit(client.read_ctrl)
-
-        # Give the read thread a moment to start
-        time.sleep(0.1)
-
-        # Send ctrl message
-        msg = "switch:RFANT"
-        server.send_ctrl(msg)
-
-        # Get the result from the read
-        cmd, kwargs = read_future.result(timeout=2.0)
-        assert cmd == msg
-        assert kwargs == {}  # no kwargs
-
-    # send invalid ctrl message
-    with pytest.raises(ValueError):
-        server.send_ctrl("invalid:command")
-
-    # send message with kwargs using threading
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        read_future = executor.submit(client.read_ctrl)
-        time.sleep(0.1)
-
-        msg = "vna:rec"
-        kwargs_dict = {
-            "ip": "127.0.0.1",
-            "port": 5025,
-            "fstart": 1e6,
-            "power_dbm": -40,
-        }
-        server.send_ctrl(msg, **kwargs_dict)
-
-        cmd, kwargs = read_future.result(timeout=2.0)
-        assert cmd == msg
-        compare_dicts(kwargs, kwargs_dict)
-
-    # send multiple ctrl messages
-    messages = ["vna:ant", "vna:rec", "switch:RFANT"]
-    for msg in messages:
-        server.send_ctrl(msg)
-
-    # read all ctrl messages
-    for expected_msg in messages:
-        cmd, kwargs = client.read_ctrl()
-        assert cmd == expected_msg
