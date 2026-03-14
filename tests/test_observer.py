@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 
 from eigsep_observing import EigObserver
 from eigsep_observing.testing import DummyEigsepRedis
-from eigsep_observing.testing.utils import generate_data, generate_s11_data
+from eigsep_observing.testing.utils import generate_data
 
 
 @pytest.fixture
@@ -27,9 +27,6 @@ def redis_snap():
 def redis_panda():
     """Mock Redis connection for LattePanda."""
     redis = DummyEigsepRedis()
-    # Set up control commands for switch and VNA
-    redis.r.sadd("ctrl_commands", "switch")
-    redis.r.sadd("ctrl_commands", "VNA")
 
     # Mock config
     redis.get_config = Mock(
@@ -45,9 +42,8 @@ def redis_panda():
             "vna_interval": 0.5,
         }
     )
-    # Mock client heartbeat check and control methods
+    # Mock client heartbeat check
     redis.client_heartbeat_check = Mock(return_value=True)
-    redis.send_ctrl = Mock()
     redis.read_vna_data = Mock()
     redis.read_status = Mock(
         return_value=(None, None)
@@ -137,121 +133,6 @@ def test_panda_connected_property(
     # clean up
     observer_none.stop_event.set()
     observer_none.status_thread.join(timeout=1)
-
-
-def test_set_mode_valid(observer_panda_only, redis_panda):
-    """Test set_mode with valid modes."""
-    observer = observer_panda_only
-
-    for mode in ["RFANT", "RFNOFF", "RFNON"]:
-        observer.set_mode(mode)
-        redis_panda.send_ctrl.assert_called()
-
-        # Check the command mapping
-        expected_cmds = {
-            "RFANT": "switch:RFANT",
-            "RFNOFF": "switch:RFNOFF",
-            "RFNON": "switch:RFNON",
-        }
-        last_call = redis_panda.send_ctrl.call_args[0][0]
-        assert last_call == expected_cmds[mode]
-
-
-def test_set_mode_invalid(observer_panda_only):
-    """Test set_mode with invalid mode."""
-    with pytest.raises(ValueError, match="Invalid mode: invalid"):
-        observer_panda_only.set_mode("invalid")
-
-
-def test_set_mode_no_panda():
-    """Test set_mode without panda connection raises AttributeError."""
-    observer = EigObserver()
-    with pytest.raises(AttributeError):
-        observer.set_mode("sky")
-
-    # clean up
-    observer.stop_event.set()
-    observer.status_thread.join(timeout=1)
-
-
-def test_measure_s11_valid_modes(observer_panda_only, redis_panda):
-    """Test measure_s11 with valid modes."""
-    observer = observer_panda_only
-
-    # Mock VNA data response
-    mock_data, mock_cal_data = generate_s11_data(cal=True)
-    # Combine data and cal_data into single dict as the actual VNA would return
-    combined_data = mock_data.copy()
-    for k, v in mock_cal_data.items():
-        combined_data[f"cal:{k}"] = v
-    redis_panda.read_vna_data.return_value = (
-        combined_data,
-        {"header": "test"},
-        {"meta": "test"},
-    )
-
-    for mode in ["ant", "rec"]:
-        result = observer.measure_s11(mode, write_files=False)
-        assert result is not None
-        # The method returns combined data (not separated)
-        assert result == combined_data
-
-        # Verify ctrl command was sent with correct mode
-        redis_panda.send_ctrl.assert_called()
-        last_call_args = redis_panda.send_ctrl.call_args
-        assert last_call_args[0][0] == f"vna:{mode}"
-
-
-def test_measure_s11_invalid_mode(observer_panda_only):
-    """Test measure_s11 with invalid mode."""
-    with pytest.raises(ValueError, match="Invalid mode: invalid"):
-        observer_panda_only.measure_s11("invalid")
-
-
-def test_measure_s11_timeout(observer_panda_only, redis_panda, caplog):
-    """Test measure_s11 timeout handling."""
-    caplog.set_level(logging.ERROR)
-    redis_panda.read_vna_data.side_effect = TimeoutError
-
-    result = observer_panda_only.measure_s11("ant", write_files=False)
-    assert result is None
-    assert "Timeout while waiting for VNA data" in caplog.text
-
-
-@patch("eigsep_observing.io.write_s11_file")
-def test_measure_s11_write_files(mock_write, observer_panda_only, redis_panda):
-    """Test measure_s11 with file writing."""
-    observer = observer_panda_only
-    mock_data, mock_cal_data = generate_s11_data(cal=True)
-    mock_header = {"header": "test"}
-    mock_metadata = {"meta": "test"}
-
-    # Combine data and cal_data as the VNA would return
-    combined_data = mock_data.copy()
-    for k, v in mock_cal_data.items():
-        combined_data[f"cal:{k}"] = v
-    redis_panda.read_vna_data.return_value = (
-        combined_data,
-        mock_header,
-        mock_metadata,
-    )
-
-    observer.measure_s11("ant", write_files=True)
-
-    # Verify write_s11_file was called with correct arguments
-    mock_write.assert_called_once_with(
-        combined_data,
-        mock_header,
-        metadata=mock_metadata,
-        save_dir="/tmp/test_vna",
-    )
-
-
-def test_measure_s11_no_panda():
-    """Test measure_s11 without panda connection raises AttributeError."""
-    observer = EigObserver()
-    with pytest.raises(AttributeError):
-        observer.measure_s11("ant")
 
 
 @patch("eigsep_observing.io.File")

@@ -10,10 +10,7 @@ class DummyEigsepRedis(EigsepRedis):
         Create a fake Redis instance for testing purposes. Overrides
         the parent class method.
         """
-        # Use fakeredis instead of real Redis
         r = fakeredis.FakeRedis(decode_responses=False)
-        # Enable all command types for testing
-        r.sadd("ctrl_commands", "ctrl", "switch", "VNA")
         return r
 
     def send_vna_data(self, data, cal_data=None, header=None, metadata=None):

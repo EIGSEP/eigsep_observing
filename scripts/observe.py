@@ -1,7 +1,7 @@
 """
-Observing script and filewriter for Eigsep. Uploads a config to the Panda,
-which then runs autonomously. Reads correlation data from the RPi Redis
-and metadata from the Panda Redis.
+Observing script and filewriter for Eigsep. Reads configuration from
+Redis (uploaded by PandaClient) and writes correlation and VNA data to
+disk. The Panda runs autonomously — start it before running this script.
 """
 
 import argparse
@@ -29,7 +29,11 @@ parser.add_argument(
     dest="cfg_file",
     type=Path,
     default=get_config_path("obs_config.yaml"),
-    help="Configuration file for the observer.",
+    help=(
+        "Configuration file for the observer. Used for IP addresses "
+        "and observer-side settings (save directories, ntimes). "
+        "The Panda reads its own config from Redis."
+    ),
 )
 parser.add_argument(
     "--snap",
@@ -78,9 +82,6 @@ else:
 if args.use_panda:
     logger.info(f"Connecting to LattePanda at {panda_ip}.")
     redis_panda = EigsepRedis(host=panda_ip, port=redis_port)
-
-    # upload the configuration file to the Redis instances
-    redis_panda.upload_config(cfg, from_file=False)
 else:
     logger.warning("Not connecting to LattePanda")
     redis_panda = None
@@ -94,7 +95,6 @@ if args.use_panda:
     while not observer.panda_connected:
         logger.info("Waiting for Panda to connect.")
         time.sleep(1.0)
-    observer.reprogram_panda(force=True)
 
 thds = {}
 thds["status"] = observer.status_thread
@@ -109,15 +109,16 @@ if args.use_snap:
     logger.info("Starting correlation file writing thread.")
     corr_thd.start()
 
-# set up VNA measurements
-if args.use_panda and cfg["use_vna"]:
+# set up VNA file writing — use panda config from Redis
+panda_cfg = observer.cfg if hasattr(observer, "cfg") else {}
+if args.use_panda and panda_cfg.get("use_vna", False):
     logger.info(f"panda connected: {observer.panda_connected}")
     vna_thd = threading.Thread(
         target=observer.record_vna_data,
-        args=(cfg["vna_save_dir"],),
+        args=(panda_cfg["vna_save_dir"],),
     )
     thds["vna"] = vna_thd
-    logger.info("Starting VNA measurement thread.")
+    logger.info("Starting VNA file writing thread.")
     vna_thd.start()
 
 
