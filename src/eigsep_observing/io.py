@@ -4,6 +4,10 @@ import h5py
 import json
 import logging
 import numpy as np
+import os
+import queue
+import tempfile
+import threading
 from pathlib import Path
 
 from eigsep_corr.utils import calc_times, calc_freqs_dfreq
@@ -159,19 +163,44 @@ def _write_dataset(grp, key, value):
         HDF5 group to write the dataset to.
     key : str
         Name of the dataset.
-    value : np.ndarray or serializable object
-        Object to be written as a dataset. If it is a numpy array,
-        it is written directly. Otherwise it is serialized to JSON.
+    value : np.ndarray, np.generic, or serializable object
+        Object to be written as a dataset. Numeric numpy arrays and
+        scalars are written natively. Everything else is serialized
+        to JSON.
 
     """
-    if isinstance(value, np.ndarray):
-        # grp.create_dataset(key, data=value)
-        # return
+    # np.generic covers numpy scalars (e.g. np.float64, np.int32)
+    if isinstance(value, (np.ndarray, np.generic)):
+        if value.dtype.kind in ("f", "i", "u", "c", "b"):
+            grp.create_dataset(key, data=value)
+            return
+        # non-numeric (strings, objects): JSON-encode
         data = json.dumps(value.tolist())
     else:
         data = json.dumps(value)
-
     grp.create_dataset(key, data=data)
+
+
+def _read_dataset(obj):
+    """
+    Read an HDF5 dataset, handling both native arrays and
+    JSON-encoded data (for backward compatibility).
+
+    Parameters
+    ----------
+    obj : h5py.Dataset
+        HDF5 dataset to read.
+
+    Returns
+    -------
+    data : np.ndarray, scalar, list, dict, or str
+        The dataset contents.
+
+    """
+    data = obj[()]
+    if isinstance(data, (bytes, str)):
+        return json.loads(data)
+    return data
 
 
 def _write_header_item(grp, key, value):
@@ -294,14 +323,14 @@ def read_hdf5(fname):
             if isinstance(obj, h5py.Group):
                 header[name] = {k: v for k, v in obj.attrs.items()}
             else:
-                header[name] = json.loads(obj[()])
+                header[name] = _read_dataset(obj)
         # metadata
         metadata = {}
         for name, obj in f.get("metadata", {}).items():
             if isinstance(obj, h5py.Group):
                 metadata[name] = {k: v for k, v in obj.attrs.items()}
             else:
-                metadata[name] = json.loads(obj[()])
+                metadata[name] = _read_dataset(obj)
     return data, header, metadata
 
 
@@ -388,10 +417,122 @@ def read_s11_file(fname):
     return data, cal_data, header, metadata
 
 
+def avg_metadata(value):
+    """
+    Average metadata readings down to one entry per sample.
+
+    Parameters
+    ----------
+    value : list of dicts
+        Output from ``redis.get_metadata``. List of at least one
+        dict with 'status' and 'app_id' keys and data keys.
+
+    Returns
+    -------
+    avg : dict or str or None
+        Averaged metadata. For rfswitch, returns the switch state
+        string or ``"SWITCHING"`` if the state changed.
+
+    """
+    if not value or not isinstance(value[0], dict):
+        return None
+
+    app_name = value[0].get("sensor_name", "")
+
+    if app_name in ("temp_mon", "tempctrl"):
+        return _avg_temp_metadata(value, app_name)
+
+    if app_name == "rfswitch":
+        return _avg_rfswitch_metadata(value)
+
+    # generic sensor (e.g. IMU)
+    return _avg_sensor_values(value)
+
+
+def _avg_temp_metadata(value, app_name):
+    """
+    Average temp_mon / tempctrl metadata, handling A/B channels.
+
+    """
+    avgs = {
+        "app_id": value[0].get("app_id"),
+        "sensor_name": app_name,
+    }
+    for subkey in ("A", "B"):
+        prefix = f"{subkey}_"
+        keys = [k for k in value[0] if k.startswith(prefix)]
+        if not keys:
+            continue
+        subvals = []
+        for v in value:
+            sub = {}
+            for k in keys:
+                if k in v:
+                    sub[k[len(prefix) :]] = v[k]
+            if sub:
+                sub.setdefault("status", v.get(f"{subkey}_status"))
+                subvals.append(sub)
+        if subvals:
+            avgs[subkey] = _avg_sensor_values(subvals)
+    return avgs
+
+
+def _avg_rfswitch_metadata(value):
+    """
+    Average rfswitch metadata.  Returns the switch state if
+    constant, or ``"SWITCHING"`` if it changed or errored.
+
+    """
+    status_list = [v.get("status") for v in value]
+    states = [v.get("sw_state") for v in value]
+    if "error" in status_list:
+        return "SWITCHING"
+    unique = set(s for s in states if s is not None)
+    if len(unique) > 1:
+        return "SWITCHING"
+    return states[0] if states else None
+
+
+def _avg_sensor_values(value):
+    """
+    Average numeric sensor values, keep first string/bool value.
+
+    """
+    if not value:
+        return None
+    avg = {}
+    status_list = [v.get("status", "update") for v in value]
+    for data_key in value[0]:
+        first_val = value[0].get(data_key)
+        if first_val is None or isinstance(first_val, (str, bool)):
+            avg[data_key] = first_val
+            continue
+        try:
+            raw = []
+            for v, st in zip(value, status_list):
+                val = v.get(data_key)
+                if (
+                    st != "error"
+                    and isinstance(val, (int, float))
+                    and not isinstance(val, bool)
+                ):
+                    raw.append(val)
+            if raw:
+                avg[data_key] = float(np.mean(raw))
+            else:
+                avg[data_key] = None
+        except Exception as e:
+            logger.warning(f"Could not average key '{data_key}': {e}")
+            avg[data_key] = first_val
+    return avg
+
+
 class File:
     def __init__(self, save_dir, pairs, ntimes, cfg):
         """
         Initialize the File object for saving correlation data.
+        Uses a double-buffered async writer so that HDF5 I/O never
+        blocks the data-reading loop.
 
         Parameters
         ----------
@@ -417,25 +558,45 @@ class File:
         nchan = cfg["nchan"]
         dtype = np.dtype(cfg["dtype"])
 
+        # active buffer
         self.acc_cnts = np.zeros(self.ntimes)
         self.sync_times = np.zeros(self.ntimes)
-        self.metadata = defaultdict(list)  # dynamic metadata
+        self.metadata = defaultdict(list)
         self.data = {}
         for p in pairs:
             shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
             self.data[p] = np.zeros(shape, dtype=dtype)
 
+        # standby buffer
+        self._standby_acc_cnts = np.zeros(self.ntimes)
+        self._standby_sync_times = np.zeros(self.ntimes)
+        self._standby_metadata = defaultdict(list)
+        self._standby_data = {}
+        for p in pairs:
+            shape = data_shape(self.ntimes, acc_bins, nchan, cross=len(p) > 1)
+            self._standby_data[p] = np.zeros(shape, dtype=dtype)
+
         self.counter = 0
+
+        # async writer
+        self._write_queue = queue.Queue(maxsize=1)
+        self._write_error = None  # set by writer thread on failure
+        self._standby_ready = threading.Event()
+        self._standby_ready.set()
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, daemon=True
+        )
+        self._writer_thread.start()
 
     def __len__(self):
         return self.counter
 
     def reset(self):
         """
-        Reset the data arrays to zero.
+        Reset the active data arrays to zero.
 
         """
-        self.metadata.clear()  # clear metadata
+        self.metadata.clear()
         for p in self.pairs:
             self.data[p].fill(0)
         self.acc_cnts.fill(0)
@@ -479,6 +640,8 @@ class File:
             Dictionary of data arrays to be added for one time step.
         metadata : dict
             Dynamic metadata, such as sensor readings, timestamps, etc.
+            Expected format from ``get_metadata()``:
+            ``{stream_name: [list_of_dicts]}``.
 
         """
         if acc_cnt is None or data is None:
@@ -488,83 +651,167 @@ class File:
             delta_cnt = acc_cnt - self._prev_cnt
         except AttributeError:  # first call
             delta_cnt = 1
-        if delta_cnt > 1:  # fill with zeros
-            self.add_data(
-                self._prev_cnt + 1,
-                sync_time,
-                {p: np.zeros_like(self.data[p][0]) for p in self.pairs},
-            )
+
+        # iterative gap-fill with zeros (avoids recursion for large gaps)
+        if delta_cnt > 1:
+            zero_data = {p: np.zeros_like(self.data[p][0]) for p in self.pairs}
+            base_cnt = self._prev_cnt
+            for i in range(1, delta_cnt):
+                self._insert_sample(base_cnt + i, sync_time, zero_data)
+
+        # process metadata (stream format from get_metadata:
+        # {stream_name: [list_of_dicts]}). Each list contains all
+        # readings since the last call; we average them down to one
+        # entry per sample to resample onto the correlator cadence.
+        processed_md = {}
         metadata = metadata or {}
+        for key in metadata:
+            value = metadata[key]
+            if isinstance(value, list) and len(value) > 0:
+                processed_md[key] = avg_metadata(value)
+            else:
+                # should not happen with get_metadata() (streams with
+                # no new data are omitted entirely)
+                self.logger.warning(
+                    f"Unexpected metadata for '{key}': {value!r}"
+                )
+                processed_md[key] = None
+        self._insert_sample(acc_cnt, sync_time, data, processed_md)
+
+    def _insert_sample(
+        self, acc_cnt, sync_time, sample_data, sample_metadata=None
+    ):
+        """
+        Insert one sample into the active buffer, flushing to disk
+        when the buffer is full.
+
+        Parameters
+        ----------
+        acc_cnt : int
+            Accumulation count for this sample.
+        sync_time : float
+            Synchronization time.
+        sample_data : dict
+            One spectrum per correlation pair.
+        sample_metadata : dict, optional
+            Pre-processed metadata: ``{key: scalar_value}``.
+            Keys absent from the active metadata are back-filled
+            with ``None``; active keys absent from
+            *sample_metadata* get ``None`` appended.
+
+        """
+        sample_metadata = sample_metadata or {}
         self.acc_cnts[self.counter] = acc_cnt
         self.sync_times[self.counter] = sync_time
-        for p, d in data.items():
-            arr = self.data[p]
-            arr[self.counter] = d
-        # process metadata
-        for key in metadata:
-            # value: list of dicts with keys data, status, cadence
-            value = metadata[key]
-            # md = self._avg_metadata(value)
-            # self.metadata[key].append(md)
-            self.metadata[key].append(value)
+        for p in self.pairs:
+            self.data[p][self.counter] = sample_data[p]
+        # pad new keys so indices align 1:1 with samples
+        for key in sample_metadata:
+            if key not in self.metadata:
+                self.metadata[key] = [None] * self.counter
+            self.metadata[key].append(sample_metadata[key])
+        # pad missing keys with None for 1:1 correspondence
+        for key in self.metadata:
+            if key not in sample_metadata:
+                self.metadata[key].append(None)
         self.counter += 1
         self._prev_cnt = acc_cnt
         if self.counter == self.ntimes:
             self.corr_write()
 
-    def _avg_metadata(self, value):
+    # ----------- double-buffered async writer -----------
+
+    def _swap_buffers(self):
+        """O(1) reference swap between active and standby buffers."""
+        self.data, self._standby_data = (
+            self._standby_data,
+            self.data,
+        )
+        self.acc_cnts, self._standby_acc_cnts = (
+            self._standby_acc_cnts,
+            self.acc_cnts,
+        )
+        self.sync_times, self._standby_sync_times = (
+            self._standby_sync_times,
+            self.sync_times,
+        )
+        self.metadata, self._standby_metadata = (
+            self._standby_metadata,
+            self.metadata,
+        )
+
+    def _writer_loop(self):
+        """Background thread that dequeues write jobs."""
+        while True:
+            job = self._write_queue.get()
+            if job is None:  # shutdown signal
+                self._standby_ready.set()
+                self._write_queue.task_done()
+                break
+            (
+                fname,
+                data,
+                acc_cnts,
+                sync_times,
+                metadata,
+                counter,
+                header,
+            ) = job
+            try:
+                self._do_write(
+                    fname,
+                    data,
+                    acc_cnts,
+                    sync_times,
+                    metadata,
+                    counter,
+                    header,
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to write {fname}: {e}")
+                self._write_error = e
+            finally:
+                self._standby_ready.set()
+                self._write_queue.task_done()
+
+    def _do_write(
+        self, fname, data, acc_cnts, sync_times, metadata, counter, header
+    ):
         """
-        Average the metadata value if needed.
-
-        Parameters
-        ----------
-        value : list of dicts
-            Output from `redis.get_metadata`. List of at least one dict
-            with 'status' and 'app_id' keys and some number of data keys.
-
-        Returns
-        -------
-        avg : dict
-            Average value of the metadata where 'status' is not 'error'.
+        Atomic write: write to a temp file, then rename. This prevents
+        a crash mid-write from leaving a corrupted .h5 file — either
+        the complete file exists or it doesn't (rename is atomic on
+        POSIX).
 
         """
-        app_name = value[0]["sensor_name"]
-        if app_name in ("temp_mon", "tempctrl"):  # need to handle A/B
-            avgs = {}
-            for subkey in ("A", "B"):
-                keys = [k for k in value[0].keys() if k.startswith(subkey)]
-                subval = [{k[2:]: v[k] for k in keys if k in v} for v in value]
-                # keys.extend(["app_id", "sensor_name"])
-                subavg = self._avg_metadata(subval)
-                subavg["app_id"] = value[0]["app_id"]
-                subavg["sensor_name"] = value[0]["sensor_name"]
-                avgs[subkey] = subavg
-            return avgs
+        if fname is None:
+            date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            fname = self.save_dir / f"corr_{date}.h5"
+        self.logger.info(f"Writing correlation data to {fname}")
 
-        status_list = [v["status"] for v in value]
-        if app_name == "rfswitch":
-            state = [v["sw_state"] for v in value]
-            if "error" in status_list or any(s != state[0] for s in state):
-                return "SWITCHING"
-            return state[0]  # all states are the same
+        # slice to counter so short final files don't include trailing zeros
+        data = {p: d[:counter] for p, d in data.items()}
+        acc_cnts = acc_cnts[:counter]
+        sync_times = sync_times[:counter]
+        metadata = {k: v[:counter] for k, v in metadata.items()}
 
-        avg = {}  # avg metadata for this pico
-        for data_key in value[0].keys():  # loop over the data keys
-            if isinstance(value[0][data_key], str):
-                # if string, just return the first one
-                avg[data_key] = value[0][data_key]
-                continue
-            data = np.where(
-                np.array(status_list) != "error",
-                np.array([v[data_key] for v in value]),
-                np.nan,
-            )
-            avg[data_key] = np.nanmean(data)
-        return avg
+        reshaped = reshape_data(data, avg_even_odd=True)
+        full_header = append_corr_header(header, acc_cnts, sync_times)
+
+        fd, tmp_path = tempfile.mkstemp(dir=self.save_dir, suffix=".h5.tmp")
+        os.close(fd)
+        try:
+            write_hdf5(tmp_path, reshaped, full_header, metadata=metadata)
+            os.rename(tmp_path, fname)
+        except Exception:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
 
     def corr_write(self, fname=None):
         """
-        Write the data to a file.
+        Enqueue the current buffer for async writing, swap to the
+        standby buffer, and reset.
 
         Parameters
         ----------
@@ -573,13 +820,49 @@ class File:
             timestamped filename will be generated.
 
         """
-        if fname is None:
-            date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            fname = self.save_dir / f"corr_{date}.h5"
-        self.logger.info(f"Writing correlation data to {fname}")
-        data = reshape_data(self.data, avg_even_odd=True)
-        header = append_corr_header(
-            self.header, self.acc_cnts, self.sync_times
+        if self.counter == 0:
+            return
+
+        if self._write_error is not None:
+            self.logger.error(
+                f"Previous write failed: {self._write_error}. "
+                "Data from that buffer was lost."
+            )
+            self._write_error = None
+
+        # pad any short metadata lists to match counter
+        for key in self.metadata:
+            while len(self.metadata[key]) < self.counter:
+                self.metadata[key].append(None)
+
+        # wait for writer to finish with standby buffer
+        self._standby_ready.wait()
+        self._standby_ready.clear()
+
+        # package job with current buffer references
+        job = (
+            fname,
+            self.data,
+            self.acc_cnts,
+            self.sync_times,
+            self.metadata,
+            self.counter,
+            self.header.copy(),
         )
-        write_hdf5(fname, data, header, metadata=self.metadata)
+
+        # swap buffers and reset active
+        self._swap_buffers()
         self.reset()
+
+        # enqueue for async write
+        self._write_queue.put(job)
+
+    def close(self):
+        """
+        Shut down the writer thread and wait for pending writes.
+
+        """
+        self._write_queue.put(None)
+        self._writer_thread.join(timeout=30)
+        if self._writer_thread.is_alive():
+            self.logger.error("Writer thread did not shut down within timeout")
