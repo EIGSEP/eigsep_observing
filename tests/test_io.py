@@ -140,10 +140,13 @@ def test_write_dataset():
                 key = typ.__name__
                 io._write_dataset(group, key, value)
                 assert key in group
-                back = json.loads(group[key][()])
                 if key == "ndarray":
-                    back = np.array(back)
-                assert np.all(back == list(value))
+                    # numeric numpy arrays are written natively
+                    back = group[key][()]
+                    np.testing.assert_array_equal(back, value)
+                else:
+                    back = json.loads(group[key][()])
+                    assert np.all(back == list(value))
             # write invalid type
             with pytest.raises(TypeError):
                 io._write_dataset(group, "fcn", lambda x: x + 1)
@@ -291,7 +294,7 @@ def test_file():
             assert np.array_equal(test_file.data[p][i], to_add[p])
     to_add = {p: d[-1] for p, d in data.items()}
     test_file.add_data(acc_cnt, sync_time, to_add)
-    # reset has been called
+    # reset has been called (buffer swapped)
     assert test_file.counter == 0
     for p in pairs:
         if len(p) == 1:
@@ -302,6 +305,9 @@ def test_file():
         assert d.shape == shape
         assert d.dtype == dtype
         np.testing.assert_array_equal(d, np.zeros(shape, dtype=dtype))
+
+    # wait for async writer to finish
+    test_file.close()
 
     # corr_write has been called by add_data
     files = glob.glob(str(save_dir / "*.h5"))
@@ -317,3 +323,264 @@ def test_file():
     assert read_meta == {}
 
     temp_dir.cleanup()
+
+
+def test_gap_filling():
+    """Verify large gap fills correctly without RecursionError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0", "1"]
+        ntimes = 100
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        rng = np.random.default_rng(42)
+        dtype = np.dtype(HEADER["dtype"])
+        nchan = HEADER["nchan"]
+        acc_bins = HEADER["acc_bins"]
+
+        # add first sample at acc_cnt=1
+        d = {
+            p: rng.integers(
+                0,
+                high=1000,
+                size=io.data_shape(1, acc_bins, nchan)[1],
+                dtype="=i4",
+            ).astype(dtype)
+            for p in pairs
+        }
+        md = {
+            "stream:rfswitch": [
+                {
+                    "sensor_name": "rfswitch",
+                    "status": "update",
+                    "app_id": 5,
+                    "sw_state": 0,
+                }
+            ]
+        }
+        f.add_data(1, 0.0, d, metadata=md)
+        assert f.counter == 1
+
+        # jump to acc_cnt=52 (gap of 50)
+        d2 = {
+            p: rng.integers(
+                0,
+                high=1000,
+                size=io.data_shape(1, acc_bins, nchan)[1],
+                dtype="=i4",
+            ).astype(dtype)
+            for p in pairs
+        }
+        f.add_data(52, 0.0, d2, metadata=md)
+
+        # 1 real + 50 gap-fills + 1 real = 52 entries
+        assert f.counter == 52
+
+        # gap-filled data should be zeros
+        for p in pairs:
+            for i in range(1, 51):
+                np.testing.assert_array_equal(
+                    f.data[p][i], np.zeros_like(f.data[p][0])
+                )
+
+        # metadata should have None for gap-filled samples
+        md_list = f.metadata["stream:rfswitch"]
+        assert len(md_list) == 52
+        assert md_list[0] is not None  # first sample
+        for i in range(1, 51):
+            assert md_list[i] is None  # gap-filled
+        assert md_list[51] is not None  # last sample
+
+        f.close()
+
+
+def test_gap_filling_no_recursion_error():
+    """Ensure a large gap does not cause RecursionError."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 2000
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        nchan = HEADER["nchan"]
+        acc_bins = HEADER["acc_bins"]
+        spec_len = io.data_shape(1, acc_bins, nchan)[1]
+        d = {"0": np.ones(spec_len, dtype=dtype)}
+
+        f.add_data(1, 0.0, d)
+        # gap of 1500 - would overflow stack with recursive approach
+        f.add_data(1501, 0.0, d)
+        # 1 + 1499 gap-fills + 1 = 1501
+        assert f.counter == 1501
+        f.close()
+
+
+def test_write_error_recovery():
+    """Verify buffer data is preserved when write fails."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 5
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        nchan = HEADER["nchan"]
+        acc_bins = HEADER["acc_bins"]
+        spec_len = io.data_shape(1, acc_bins, nchan)[1]
+
+        # fill the buffer
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+
+        # wait for the write to complete
+        f._write_queue.join()
+
+        # the file should have been written
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+
+        # now make the directory read-only to force a write failure
+        import os
+        import stat
+
+        os.chmod(save_dir, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            # fill another buffer - write should fail
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 100, dtype=dtype)}
+                f.add_data(ntimes + i + 1, 0.0, d)
+            # wait for the (failed) write attempt
+            f._write_queue.join()
+            # the second file should not exist (write failed)
+            files = glob.glob(str(save_dir / "*.h5"))
+            assert len(files) == 1
+        finally:
+            os.chmod(
+                save_dir,
+                stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO,
+            )
+        f.close()
+
+
+def test_backward_compat_read():
+    """Verify read_hdf5 can read files with JSON-encoded numpy datasets."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "old_format.h5"
+        arr = np.array([1.0, 2.0, 3.0])
+        # write numpy array as JSON (old format)
+        with h5py.File(fname, "w") as f:
+            data_grp = f.create_group("data")
+            data_grp.create_dataset("test", data=arr)
+            header_grp = f.create_group("header")
+            # write a numpy array as JSON string (old format)
+            header_grp.create_dataset("freqs", data=json.dumps(arr.tolist()))
+            io._write_attr(header_grp, "nchan", 3)
+            meta_grp = f.create_group("metadata")
+            meta_grp.create_dataset(
+                "temps", data=json.dumps([30.0, 31.0, 32.0])
+            )
+
+        data, header, metadata = io.read_hdf5(fname)
+        np.testing.assert_array_equal(data["test"], arr)
+        # JSON-decoded arrays come back as Python lists
+        assert header["freqs"] == [1.0, 2.0, 3.0]
+        assert header["nchan"] == 3
+        assert metadata["temps"] == [30.0, 31.0, 32.0]
+
+
+def test_avg_metadata():
+    """Test metadata averaging for different sensor types."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        f = io.File(save_dir, pairs, 10, HEADER)
+
+        # rfswitch: consistent state
+        sw_data = [
+            {
+                "sensor_name": "rfswitch",
+                "status": "update",
+                "app_id": 5,
+                "sw_state": 42,
+            },
+            {
+                "sensor_name": "rfswitch",
+                "status": "update",
+                "app_id": 5,
+                "sw_state": 42,
+            },
+        ]
+        assert f._avg_metadata(sw_data) == 42
+
+        # rfswitch: inconsistent state
+        sw_data[1] = dict(sw_data[1], sw_state=99)
+        assert f._avg_metadata(sw_data) == "SWITCHING"
+
+        # rfswitch: error status
+        sw_data[1] = dict(sw_data[0], status="error")
+        assert f._avg_metadata(sw_data) == "SWITCHING"
+
+        # temp_mon: A/B channels
+        temp_data = [
+            {
+                "sensor_name": "temp_mon",
+                "app_id": 2,
+                "A_status": "update",
+                "A_temp": 30.0,
+                "A_timestamp": 1.0,
+                "B_status": "update",
+                "B_temp": 25.0,
+                "B_timestamp": 2.0,
+            },
+            {
+                "sensor_name": "temp_mon",
+                "app_id": 2,
+                "A_status": "update",
+                "A_temp": 32.0,
+                "A_timestamp": 3.0,
+                "B_status": "error",
+                "B_temp": 0.0,
+                "B_timestamp": 4.0,
+            },
+        ]
+        result = f._avg_metadata(temp_data)
+        assert result["sensor_name"] == "temp_mon"
+        assert result["A"]["temp"] == 31.0  # average of 30 and 32
+        # B has one error entry, so only non-error value used
+        assert result["B"]["temp"] == 25.0
+
+        # generic sensor (IMU)
+        imu_data = [
+            {
+                "sensor_name": "imu_panda",
+                "status": "update",
+                "app_id": 3,
+                "quat_i": 0.1,
+                "calibrated": "True",
+            },
+            {
+                "sensor_name": "imu_panda",
+                "status": "update",
+                "app_id": 3,
+                "quat_i": 0.3,
+                "calibrated": "True",
+            },
+        ]
+        result = f._avg_metadata(imu_data)
+        assert result["quat_i"] == pytest.approx(0.2)
+        assert result["calibrated"] == "True"
+
+        f.close()
+
+
+def test_close():
+    """Test that close() shuts down the writer thread."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        f = io.File(save_dir, pairs, 10, HEADER)
+        assert f._writer_thread.is_alive()
+        f.close()
+        assert not f._writer_thread.is_alive()
