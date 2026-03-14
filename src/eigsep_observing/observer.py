@@ -146,8 +146,7 @@ class EigObserver:
             )
             self.logger.info(f"{acc_cnt=}")
             if self.panda_connected:
-                # metadata = self.redis_panda.get_metadata()
-                metadata = self.redis_panda.get_live_metadata()
+                metadata = self.redis_panda.get_metadata()
             else:
                 metadata = None
             file.add_data(acc_cnt, sync_time, data, metadata=metadata)
@@ -156,6 +155,7 @@ class EigObserver:
         if len(file) > 0:
             self.logger.info("Writing short final file.")
             file.corr_write()
+        file.close()
 
     def record_vna_data(self, save_dir, timeout=60):
         """
