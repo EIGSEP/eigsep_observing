@@ -157,7 +157,7 @@ class EigObserver:
             self.logger.info("Writing short final file.")
             file.corr_write()
 
-    def record_vna_data(self, save_dir):
+    def record_vna_data(self, save_dir, timeout=60):
         """
         Read VNA data from the LattePanda Redis server and write it to
         file.
@@ -166,18 +166,34 @@ class EigObserver:
         ----------
         save_dir : str or Path
             Directory to save the VNA data files.
+        timeout : int
+            Timeout in seconds for each blocking read. The loop retries
+            after each timeout, allowing it to check for stop events
+            and panda reconnection.
 
         """
         while not self.panda_connected:
             self.logger.warning(
-                "Waiting for LattePanda Redis connection to be established."
+                "Waiting for LattePanda Redis connection to be " "established."
             )
-            self.stop_event.wait(1)
+            if self.stop_event.wait(1):
+                return
         while not self.stop_event.is_set():
-            data, header, metadata = self.redis_panda.read_vna_data(timeout=0)
+            if not self.panda_connected:
+                self.logger.warning("Panda disconnected, waiting.")
+                if self.stop_event.wait(1):
+                    return
+                continue
+            try:
+                data, header, metadata = self.redis_panda.read_vna_data(
+                    timeout=timeout
+                )
+            except TimeoutError:
+                continue
             if data is None:
                 self.logger.warning("No VNA data available. Waiting.")
-                self.stop_event.wait(1)
+                if self.stop_event.wait(1):
+                    return
                 continue
             io.write_s11_file(
                 data,
