@@ -16,12 +16,12 @@ class DummyPandaClient(PandaClient):
     implementations of the VNA and PicoHost.
     """
 
-    # override pico classes with dummies
+    # override pico classes with emulator-backed dummies
     PICO_CLASSES = {
-        "imu": picohost.testing.DummyPicoDevice,
-        "therm": picohost.testing.DummyPicoDevice,
+        "imu": picohost.testing.DummyPicoIMU,
+        "therm": picohost.testing.DummyPicoTempMon,
         "peltier": picohost.testing.DummyPicoPeltier,
-        "lidar": picohost.testing.DummyPicoDevice,
+        "lidar": picohost.testing.DummyPicoLidar,
         "switch": picohost.testing.DummyPicoRFSwitch,
         "motor": picohost.testing.DummyPicoMotor,
     }
