@@ -110,7 +110,7 @@ def test_app_with_dummy_data():
     print("\n All tests passed! The Live Status App is working correctly.")
     print("\n To run the app with real Redis connections:")
     print(
-        "   python live_status.py --panda-host 10.10.10.12 "
+        "   python live_status.py --panda-host 10.10.10.11 "
         "--snap-host 10.10.10.10"
     )
     print(

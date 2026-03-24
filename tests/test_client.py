@@ -1,12 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor
 import json
 import pytest
-import time
 import yaml
 
 from cmt_vna.testing import DummyVNA
 
-# Import dummy classes before importing client to ensure mocking works
 from eigsep_observing.testing import DummyEigsepRedis
 
 import eigsep_observing
@@ -120,67 +117,3 @@ def test_add_pico(caplog, monkeypatch, client):
             if "Adding sensor" in record.getMessage():
                 # Verify picos were attempted to be added
                 assert record.levelname == "INFO"
-
-@pytest.mark.skip("read ctrl are deprecated")
-def test_read_ctrl_switch(client):
-    """
-    Test read_ctrl with a switch network.
-    """
-    # make sure the switching updates redis
-    mode = "RFANT"
-    # send a switch command
-    switch_cmd = f"switch:{mode}"
-    # read_ctrl is blocking and will process the command in a thread
-    with ThreadPoolExecutor() as ex:
-        future = ex.submit(client.redis.read_ctrl)
-        time.sleep(0.1)  # small delay to ensure read starts
-        client.redis.send_ctrl(switch_cmd)  # send after read started
-        cmd, kwargs = future.result(timeout=5)  # wait for the result
-    # verify the command was read correctly
-    assert cmd == switch_cmd
-    # now test that client.read_ctrl() processes the command correctly
-    with ThreadPoolExecutor() as ex:
-        future = ex.submit(client.read_ctrl)  # client processes the command
-        time.sleep(0.1)  # small delay to ensure read starts
-        client.redis.send_ctrl(switch_cmd)  # send another command
-        future.result(timeout=5)  # wait for processing to complete
-
-
-@pytest.mark.skip("read ctrl are deprecated")
-def test_read_ctrl_VNA(client, module_tmpdir):
-    """
-    Test read_ctrl with VNA commands.
-    """
-    # Add switch method to the mocked switch if it exists
-    if client.switch_nw:
-
-        def mock_switch(mode, verify=False):
-            client.redis.add_metadata("obs_mode", mode)
-
-        client.switch_nw.switch = mock_switch
-
-    # Test that VNA commands work correctly
-    mode = "ant"
-    vna_cmd = f"vna:{mode}"
-
-    # First test that redis.read_ctrl() can read VNA commands
-    with ThreadPoolExecutor() as ex:
-        future = ex.submit(client.redis.read_ctrl)
-        time.sleep(0.1)  # ensure read starts
-        client.redis.send_ctrl(vna_cmd)
-        cmd, kwargs = future.result(timeout=5)
-
-    # verify the command was read correctly
-    assert cmd == vna_cmd
-    assert kwargs == {}
-
-    # Now test that client.read_ctrl() processes VNA commands correctly
-    with ThreadPoolExecutor() as ex:
-        future = ex.submit(client.read_ctrl)
-        time.sleep(0.1)  # ensure read starts
-        client.redis.send_ctrl(vna_cmd)
-        future.result(timeout=10)  # VNA operations might take longer
-
-    # Verify VNA was initialized and used
-    assert client.vna is not None
-    assert isinstance(client.vna, DummyVNA)

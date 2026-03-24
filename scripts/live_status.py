@@ -19,7 +19,7 @@ class LiveStatusApp:
     """Live status monitoring application for EIGSEP observations."""
 
     def __init__(
-        self, panda_host="10.10.10.12", snap_host="10.10.10.10", port=6379
+        self, panda_host="10.10.10.11", snap_host="10.10.10.10", port=6379
     ):
         """
         Initialize the live status app.
@@ -319,7 +319,7 @@ def main():
     )
     parser.add_argument(
         "--panda-host",
-        default="10.10.10.12",
+        default="10.10.10.11",
         help="IP address of redis_panda (PANDA computer)",
     )
     parser.add_argument(

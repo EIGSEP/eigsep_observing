@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 class EigsepRedis:
 
-    maxlen = {"ctrl": 5, "status": 5, "data": 5000, "vna_data": 1000}
+    maxlen = {"status": 5, "data": 5000, "vna_data": 1000}
 
     def __init__(self, host="localhost", port=6379):
         """
@@ -29,8 +29,6 @@ class EigsepRedis:
         self.logger = logger
         self._stream_lock = threading.RLock()
         self._last_read_ids = {}
-        # initialize the last read ids for control and status streams
-        self._last_read_ids["stream:ctrl"] = "$"
         self._last_read_ids["stream:status"] = "$"
         self.logger.info(f"{self._last_read_ids=}")
         self.r = self._make_redis(host, port)
@@ -123,7 +121,6 @@ class EigsepRedis:
         self.r.flushdb()
         with self._stream_lock:
             self._last_read_ids.clear()
-            self._last_read_ids["stream:ctrl"] = "$"
             self._last_read_ids["stream:status"] = "$"
 
     @property
@@ -155,10 +152,6 @@ class EigsepRedis:
                         last = "$"
                 d[s.decode()] = last
             return d
-
-    @property
-    def ctrl_stream(self):
-        return {"stream:ctrl": self._get_last_read_id("stream:ctrl")}
 
     @property
     def status_stream(self):
@@ -693,186 +686,6 @@ class EigsepRedis:
                 self._set_last_read_id(stream, eid)
             redis_hdr[stream] = out
         return redis_hdr
-
-    # ------------------- control commands -----------------
-
-    @property
-    def ctrl_commands(self):
-        """
-        Return allowed control commands. See also the property
-        ``all_commands`` which returns the same information in a flat list.
-
-        Returns
-        -------
-        commands : dict
-            Dictonary of commands. Key is the command type. Values are
-            the allowed commands for that type.
-
-        """
-        # ctrl command is always valid
-        self.r.sadd("ctrl_commands", "ctrl")
-        commands = {
-            "ctrl": ["ctrl:reprogram"],  # reset the panda config
-            "switch": [
-                # s11 measurements
-                "switch:VNAO",  # open cal standard
-                "switch:VNAS",  # short cal standard
-                "switch:VNAL",  # load cal standard
-                "switch:VNAANT",  # antenna
-                "switch:VNANON",  # noise source on
-                "switch:VNANOFF",  # noise source off
-                "switch:VNARF",  # receiver
-                # snap observing
-                "switch:RFNON",  # noise source on
-                "switch:RFNOFF",  # noise source off
-                "switch:RFLOAD",  # load
-                "switch:RFANT",  # antenna
-            ],
-            "VNA": [
-                "vna:ant",  # antenna
-                "vna:rec",  # receiver
-            ],
-        }
-        return {
-            k: v
-            for k, v in commands.items()
-            if self.r.sismember("ctrl_commands", k.encode("utf-8"))
-        }
-
-    @property
-    def all_commands(self):
-        """
-        Return all allowed commands.
-
-        Returns
-        -------
-        commands : list
-            List of all allowed commands.
-
-        """
-        commands = []
-        for v in self.ctrl_commands.values():
-            commands.extend(v)
-        return commands
-
-    @property
-    def switch_commands(self):
-        """
-        Return allowed RF switch commands.
-
-        Returns
-        -------
-        commands : list
-            List of allowed RF switch commands.
-
-        """
-        if "switch" not in self.ctrl_commands:
-            return []
-        return self.ctrl_commands["switch"]
-
-    @property
-    def vna_commands(self):
-        """
-        Return allowed VNA commands.
-
-        Returns
-        -------
-        commands : list
-            List of allowed VNA commands.
-
-        """
-        if "VNA" not in self.ctrl_commands:
-            return []
-        return self.ctrl_commands["VNA"]
-
-    def send_ctrl(self, cmd, **kwargs):
-        """
-        Stream control message to Redis. Used by server.
-
-        Parameters
-        ----------
-        cmd : str
-            Command to execute.
-        kwargs : dict
-            Additional arguments for the command.
-
-        Raises
-        ------
-        TypeError
-            If cmd is not a string.
-        ValueError
-            If the command is not in the list of allowed commands as defined
-            by the property ``control_commands''.
-
-        """
-        # Validate command
-        if not isinstance(cmd, str):
-            raise TypeError("cmd must be a string")
-        if not cmd or not cmd.strip():
-            raise ValueError("cmd cannot be empty or whitespace only")
-
-        if cmd not in self.all_commands:
-            valid_cmds = self.all_commands
-            raise ValueError(
-                f"Command {cmd} not allowed. Valid commands: {valid_cmds}"
-            )
-
-        # Validate kwargs are JSON serializable
-        try:
-            if kwargs:
-                json.dumps(kwargs)
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"kwargs are not JSON serializable: {e}")
-
-        payload = {"cmd": cmd}
-        if kwargs:
-            payload["kwargs"] = kwargs
-        self.r.xadd(
-            "stream:ctrl",
-            {"msg": json.dumps(payload)},
-            maxlen=self.maxlen["ctrl"],
-        )
-
-    def read_ctrl(self, timeout=None):
-        """
-        Read control stream from Redis. Used on client (Panda).
-
-        Parameters
-        ----------
-        timeout : int, optional
-            Timeout in seconds for blocking read. If None, blocks indefinitely.
-
-        Returns
-        -------
-        cmd : tuple of (str, dict)
-            Len 2 tuple with the first element being the command to execute
-            and the second element being a dictionary of keyword arguments.
-            If None, no message was received or the message was not
-            properly formatted.
-
-        Notes
-        -----
-        This is a blocking call which may wait indefinitely for a
-        message if timeout is None.
-
-        """
-        # blocking read with optional timeout
-        block_time = 0 if timeout is None else int(timeout * 1000)
-        msg = self.r.xread(self.ctrl_stream, count=1, block=block_time)
-        if not msg:
-            return None, {}
-        # msg is stream_name, entries
-        entries = msg[0][1]
-        entry_id, dat = entries[0]  # since count=1, it's a list of 1
-        # update the stream id
-        self._set_last_read_id("stream:ctrl", entry_id)
-        # dat is a dict with key msg
-        raw = dat.get(b"msg")
-        decoded = json.loads(raw)
-        # msg is a dict with keys cmd and kwargs
-        cmd = decoded.get("cmd")
-        kwargs = decoded.get("kwargs", {})
-        return (cmd, kwargs)
 
     # ------------------- heartbeat and status -----------------
 

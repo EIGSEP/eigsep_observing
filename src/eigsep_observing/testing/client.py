@@ -3,7 +3,6 @@ from cmt_vna.testing import DummyVNA
 import picohost
 
 from .. import PandaClient
-from .eig_redis import DummyEigsepRedis
 
 default_cfg_file = (
     "/home/christian/Documents/research/eigsep/eigsep_observing/src/"
@@ -39,12 +38,6 @@ class DummyPandaClient(PandaClient):
                 default_cfg = {}
         super().__init__(redis, default_cfg=default_cfg)
 
-    def _add_redis_ctrl(self):
-        rc = DummyEigsepRedis(
-            host=self.redis.host, port=self.redis.port
-        )
-        return rc
-
     def get_pico_config(self, fname, app_mapping):
         """
         Override the pico config loading to use the default dummy config.
@@ -73,4 +66,3 @@ class DummyPandaClient(PandaClient):
         kwargs = self.cfg["vna_settings"].copy()
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
         self.vna.setup(**kwargs)
-        self.redis.r.sadd("ctrl_commands", "VNA")
