@@ -22,7 +22,6 @@ class PandaClient:
         "peltier": picohost.PicoPeltier,
         "lidar": picohost.PicoDevice,
         "switch": picohost.PicoRFSwitch,
-        #        "motor": picohost.PicoMotor,
     }
 
     def __init__(self, redis, default_cfg=default_cfg):
@@ -69,7 +68,6 @@ class PandaClient:
         self.cfg = json.loads(json.dumps(cfg))
 
         # initialize the picos and VNA
-        # self.motor = None
         self.peltier = None
         self._switch_nw = None
         self.switch_lock = None
@@ -257,7 +255,6 @@ class PandaClient:
 
         # create reference to switch_nw, motor, peltier if they exist
         self.switch_nw = self.picos.get("switch", None)
-        # self.motor = self.picos.get("motor", None)
         self.peltier = self.picos.get("peltier", None)
 
     def switch_loop(self):
@@ -418,7 +415,3 @@ class PandaClient:
                 self.switch_nw.switch(prev_mode)
             # wait for the next iteration
             self.stop_client.wait(self.cfg["vna_interval"])
-
-    # XXX
-    def rotate_motors(self):
-        raise NotImplementedError

@@ -86,15 +86,20 @@ else:
     logger.warning("Not connecting to LattePanda")
     redis_panda = None
 
+if args.use_panda:
+    logger.info("Waiting for Panda config in Redis.")
+    while True:
+        try:
+            redis_panda.get_config()
+            break
+        except ValueError:
+            logger.info("Panda config not yet available, retrying...")
+            time.sleep(1.0)
+
 if args.dummy:
     observer = DummyEigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
 else:
     observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
-
-if args.use_panda:
-    while not observer.panda_connected:
-        logger.info("Waiting for Panda to connect.")
-        time.sleep(1.0)
 
 thds = {}
 thds["status"] = observer.status_thread
@@ -110,12 +115,11 @@ if args.use_snap:
     corr_thd.start()
 
 # set up VNA file writing — use panda config from Redis
-panda_cfg = observer.cfg if hasattr(observer, "cfg") else {}
-if args.use_panda and panda_cfg.get("use_vna", False):
+if args.use_panda and observer.cfg.get("use_vna", False):
     logger.info(f"panda connected: {observer.panda_connected}")
     vna_thd = threading.Thread(
         target=observer.record_vna_data,
-        args=(panda_cfg["vna_save_dir"],),
+        args=(observer.cfg["vna_save_dir"],),
     )
     thds["vna"] = vna_thd
     logger.info("Starting VNA file writing thread.")

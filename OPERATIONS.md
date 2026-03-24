@@ -30,10 +30,7 @@ LOGS
 python scripts/panda_observe.py          # on panda
 python scripts/observe.py                # on ground
 
-# Observer only (no panda connection)
-python scripts/observe.py --no-panda
-
-# SNAP only (no panda, no VNA)
+# Observer only (no panda connection, SNAP correlator only)
 python scripts/observe.py --no-panda
 
 # Panda only (no SNAP)
@@ -271,6 +268,9 @@ To change config:
 ```
 
 ### Network Addresses
+
+These are the defaults from `obs_config.yaml`. Actual IPs may differ
+per deployment — check your config file.
 
 ```
 Ground computer:  user machine (runs observe.py)

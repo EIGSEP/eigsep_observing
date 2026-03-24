@@ -4,6 +4,8 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 from eigsep_observing import EigObserver
 from eigsep_observing.testing import DummyEigsepRedis
 from eigsep_observing.testing.utils import generate_data
@@ -223,3 +225,105 @@ def test_logger_attribute(observer_both):
     assert observer_both.logger == logging.getLogger(
         "eigsep_observing.observer"
     )
+
+
+# --- record_vna_data tests ---
+
+
+@patch("eigsep_observing.io.write_s11_file")
+def test_record_vna_data(mock_write, observer_panda_only, redis_panda):
+    """Test record_vna_data writes data to file."""
+    observer = observer_panda_only
+    vna_data = {"ant": np.array([1 + 2j, 3 + 4j])}
+    vna_header = {"mode": "ant", "fstart": 1e6}
+    vna_metadata = {"temp": 25.0}
+
+    call_count = [0]
+
+    def side_effect(timeout=0):
+        call_count[0] += 1
+        if call_count[0] >= 2:
+            observer.stop_event.set()
+        return vna_data, vna_header, vna_metadata
+
+    redis_panda.read_vna_data = Mock(side_effect=side_effect)
+
+    observer.record_vna_data("/tmp/test_vna", timeout=1)
+
+    mock_write.assert_called_with(
+        vna_data,
+        vna_header,
+        metadata=vna_metadata,
+        save_dir="/tmp/test_vna",
+    )
+
+
+def test_record_vna_data_timeout(observer_panda_only, redis_panda):
+    """Test record_vna_data retries on timeout."""
+    observer = observer_panda_only
+
+    call_count = [0]
+
+    def side_effect(timeout=0):
+        call_count[0] += 1
+        if call_count[0] >= 2:
+            observer.stop_event.set()
+        raise TimeoutError("No VNA data received within timeout.")
+
+    redis_panda.read_vna_data = Mock(side_effect=side_effect)
+
+    observer.record_vna_data("/tmp/test_vna", timeout=1)
+
+    assert call_count[0] >= 2
+
+
+def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
+    """Test record_vna_data waits when panda disconnects."""
+    observer = observer_panda_only
+
+    call_count = [0]
+
+    def heartbeat_side_effect():
+        call_count[0] += 1
+        if call_count[0] <= 2:
+            return False  # disconnected
+        return True  # reconnected
+
+    redis_panda.client_heartbeat_check = Mock(
+        side_effect=heartbeat_side_effect
+    )
+    redis_panda.read_vna_data = Mock(side_effect=TimeoutError)
+
+    def stop_after_delay():
+        time.sleep(0.3)
+        observer.stop_event.set()
+
+    stop_thread = threading.Thread(target=stop_after_delay)
+    stop_thread.start()
+
+    observer.record_vna_data("/tmp/test_vna", timeout=1)
+    stop_thread.join()
+
+    # Verify heartbeat was checked multiple times
+    assert redis_panda.client_heartbeat_check.call_count >= 2
+
+
+def test_record_vna_data_stop_event(observer_panda_only, redis_panda):
+    """Test record_vna_data exits on stop_event during initial wait."""
+    observer = observer_panda_only
+
+    # Panda not connected — will enter the initial wait loop
+    redis_panda.client_heartbeat_check = Mock(return_value=False)
+
+    def stop_after_delay():
+        time.sleep(0.1)
+        observer.stop_event.set()
+
+    stop_thread = threading.Thread(target=stop_after_delay)
+    stop_thread.start()
+
+    observer.record_vna_data("/tmp/test_vna", timeout=1)
+    stop_thread.join()
+
+    # Should have exited without calling read_vna_data
+    redis_panda.read_vna_data.assert_not_called()

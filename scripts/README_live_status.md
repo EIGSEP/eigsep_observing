@@ -29,7 +29,7 @@ The Live Status App provides a comprehensive view of your EIGSEP observation sys
 python live_status.py
 
 # Specify custom Redis hosts
-python live_status.py --panda-host 10.10.10.12 --snap-host 10.10.10.10
+python live_status.py --panda-host 10.10.10.11 --snap-host 10.10.10.10
 
 # Run on different web port
 python live_status.py --web-port 8080
@@ -41,7 +41,7 @@ python live_status.py --no-debug --web-host 0.0.0.0
 ### Network Configuration
 
 The app expects the following default network setup:
-- **redis_panda**: `10.10.10.12:6379` (PANDA computer sensors/client data)
+- **redis_panda**: `10.10.10.11:6379` (PANDA computer sensors/client data)
 - **redis_snap**: `10.10.10.10:6379` (SNAP correlator data)
 - **Web server**: `localhost:5000` (dashboard interface)
 
@@ -53,7 +53,7 @@ usage: live_status.py [-h] [--panda-host PANDA_HOST] [--snap-host SNAP_HOST]
                       [--web-port WEB_PORT] [--no-debug]
 
 options:
-  --panda-host PANDA_HOST    IP address of redis_panda (default: 10.10.10.12)
+  --panda-host PANDA_HOST    IP address of redis_panda (default: 10.10.10.11)
   --snap-host SNAP_HOST      IP address of redis_snap (default: 10.10.10.10)
   --redis-port REDIS_PORT    Redis port number (default: 6379)
   --web-host WEB_HOST        Web server host address (default: localhost)
@@ -126,13 +126,13 @@ If you see Redis connection errors:
 
 1. **Check network connectivity**:
    ```bash
-   ping 10.10.10.12  # PANDA
+   ping 10.10.10.11  # PANDA
    ping 10.10.10.10  # SNAP
    ```
 
 2. **Verify Redis is running**:
    ```bash
-   redis-cli -h 10.10.10.12 ping
+   redis-cli -h 10.10.10.11 ping
    redis-cli -h 10.10.10.10 ping
    ```
 
@@ -165,7 +165,7 @@ Make sure the following ports are accessible:
                     │                         │
             ┌───────▼────────┐       ┌────────▼──────┐
             │ redis_panda    │       │ redis_snap    │
-            │ (10.10.10.12)  │       │ (10.10.10.10) │
+            │ (10.10.10.11)  │       │ (10.10.10.10) │
             │                │       │               │
             │ • Sensors      │       │ • Correlator  │
             │ • Client       │       │ • SNAP FPGA   │

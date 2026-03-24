@@ -77,7 +77,7 @@ Sensors must inherit from abstract `Sensor` base class and implement:
 
 ### Network Configuration
 - Raspberry Pi (SNAP): 10.10.10.10
-- PANDA Computer: 10.10.10.12
+- PANDA Computer: 10.10.10.11
 - SNAP Board: 10.10.10.13
 - VNA: 127.0.0.1:5025
 

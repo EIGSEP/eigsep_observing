@@ -115,7 +115,7 @@ class EigObserver:
         t_int = self.corr_cfg["integration_time"]
         file_time = ntimes * t_int
         self.logger.info(
-            "Reading correlator data from SNAP"
+            "Reading correlator data from SNAP. "
             f"Integration time: {t_int} s, "
             f"File time: {file_time} s"
         )
@@ -130,7 +130,8 @@ class EigObserver:
             self.logger.warning(
                 "Waiting for SNAP Redis connection to be established."
             )
-            self.stop_event.wait(1)
+            if self.stop_event.wait(1):
+                return
 
         while not self.stop_event.is_set():
             if file.counter == 0:  # look up header in Redis once per file
@@ -176,9 +177,12 @@ class EigObserver:
             self.logger.warning(
                 "Waiting for LattePanda Redis connection to be established."
             )
+            # wait(1) returns True when stop is requested
             if self.stop_event.wait(1):
                 return
         while not self.stop_event.is_set():
+            # Panda can disconnect mid-operation after the initial
+            # wait above; check here to avoid a full timeout cycle.
             if not self.panda_connected:
                 self.logger.warning("Panda disconnected, waiting.")
                 if self.stop_event.wait(1):
