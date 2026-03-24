@@ -174,7 +174,7 @@ class EigObserver:
         """
         while not self.panda_connected:
             self.logger.warning(
-                "Waiting for LattePanda Redis connection to be " "established."
+                "Waiting for LattePanda Redis connection to be established."
             )
             if self.stop_event.wait(1):
                 return
