@@ -4,7 +4,8 @@ import threading
 import time
 from unittest.mock import Mock, patch
 
-import numpy as np
+from cmt_vna.testing import DummyVNA
+from picohost.testing import DummyPicoRFSwitch
 
 from eigsep_observing import EigObserver
 from eigsep_observing.testing import DummyEigsepRedis
@@ -46,7 +47,6 @@ def redis_panda():
     )
     # Mock client heartbeat check
     redis.client_heartbeat_check = Mock(return_value=True)
-    redis.read_vna_data = Mock()
     redis.read_status = Mock(
         return_value=(None, None)
     )  # Default return to avoid thread warnings
@@ -230,47 +230,73 @@ def test_logger_attribute(observer_both):
 # --- record_vna_data tests ---
 
 
+@pytest.fixture
+def dummy_vna():
+    """DummyVNA instance for generating realistic VNA test data."""
+    switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
+    vna = DummyVNA(switch_network=switch)
+    vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
+    return vna
+
+
+def _make_vna_payload(vna):
+    """Generate VNA data, header, and metadata from a DummyVNA."""
+    s11 = vna.measure_ant(measure_noise=True, measure_load=True)
+    header = dict(vna.header)
+    header["freqs"] = header["freqs"].tolist()  # JSON serializable
+    header["mode"] = "ant"
+    metadata = {"temp": 25.0}
+    return s11, header, metadata
+
+
 @patch("eigsep_observing.io.write_s11_file")
-def test_record_vna_data(mock_write, observer_panda_only, redis_panda):
-    """Test record_vna_data writes data to file."""
+def test_record_vna_data(
+    mock_write, observer_panda_only, redis_panda, dummy_vna
+):
+    """Test record_vna_data reads from stream and writes to file."""
     observer = observer_panda_only
-    vna_data = {"ant": np.array([1 + 2j, 3 + 4j])}
-    vna_header = {"mode": "ant", "fstart": 1e6}
-    vna_metadata = {"temp": 25.0}
+    s11, header, metadata = _make_vna_payload(dummy_vna)
 
-    call_count = [0]
+    # Push data into the Redis stream and reset read position so
+    # read_vna_data picks it up on the first call.
+    redis_panda.add_vna_data(s11, header=header, metadata=metadata)
+    redis_panda._set_last_read_id("stream:vna", "0-0")
 
-    def side_effect(timeout=0):
-        call_count[0] += 1
-        if call_count[0] >= 2:
-            observer.stop_event.set()
-        return vna_data, vna_header, vna_metadata
+    def stop_after_read():
+        """Wait for the write, then stop."""
+        while not mock_write.called:
+            time.sleep(0.01)
+        observer.stop_event.set()
 
-    redis_panda.read_vna_data = Mock(side_effect=side_effect)
+    stop_thread = threading.Thread(target=stop_after_read)
+    stop_thread.start()
 
-    observer.record_vna_data("/tmp/test_vna", timeout=1)
+    observer.record_vna_data("/tmp/test_vna", timeout=5)
+    stop_thread.join()
 
-    mock_write.assert_called_with(
-        vna_data,
-        vna_header,
-        metadata=vna_metadata,
-        save_dir="/tmp/test_vna",
-    )
+    mock_write.assert_called_once()
+    call_args = mock_write.call_args
+    assert set(call_args[0][0].keys()) == {"ant", "load", "noise"}
+    assert call_args[0][1]["mode"] == "ant"
+    assert call_args[1]["save_dir"] == "/tmp/test_vna"
 
 
 def test_record_vna_data_timeout(observer_panda_only, redis_panda):
-    """Test record_vna_data retries on timeout."""
+    """Test record_vna_data retries on timeout (no data in stream)."""
     observer = observer_panda_only
 
+    # No data pushed — read_vna_data returns (None, None, None) because
+    # the stream doesn't exist yet. After two None responses, stop.
     call_count = [0]
+    real_read = redis_panda.read_vna_data
 
-    def side_effect(timeout=0):
+    def counting_read(timeout=0):
         call_count[0] += 1
         if call_count[0] >= 2:
             observer.stop_event.set()
-        raise TimeoutError("No VNA data received within timeout.")
+        return real_read(timeout=timeout)
 
-    redis_panda.read_vna_data = Mock(side_effect=side_effect)
+    redis_panda.read_vna_data = counting_read
 
     observer.record_vna_data("/tmp/test_vna", timeout=1)
 
@@ -292,7 +318,6 @@ def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
     redis_panda.client_heartbeat_check = Mock(
         side_effect=heartbeat_side_effect
     )
-    redis_panda.read_vna_data = Mock(side_effect=TimeoutError)
 
     def stop_after_delay():
         time.sleep(0.3)
@@ -324,6 +349,3 @@ def test_record_vna_data_stop_event(observer_panda_only, redis_panda):
 
     observer.record_vna_data("/tmp/test_vna", timeout=1)
     stop_thread.join()
-
-    # Should have exited without calling read_vna_data
-    redis_panda.read_vna_data.assert_not_called()
