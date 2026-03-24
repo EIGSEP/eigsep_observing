@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 
 class EigsepRedis:
-
     maxlen = {"status": 5, "data": 5000, "vna_data": 1000}
 
     def __init__(self, host="localhost", port=6379):

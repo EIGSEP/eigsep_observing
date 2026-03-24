@@ -13,8 +13,8 @@ pip install -e ".[dev]"           # Install with dev dependencies
 pytest                            # Run all tests (includes coverage)
 pytest -k "test_name"             # Run specific test
 pytest -x                         # Stop on first failure
-black . --check                   # Check formatting (line length 79)
-flake8                            # Lint
+ruff check .                      # Lint
+ruff format --check .             # Check formatting (line length 79)
 ```
 
 ## Architecture
@@ -47,5 +47,5 @@ Each core class has a `Dummy*` counterpart (`DummyEigsepRedis`, `DummyPandaClien
 
 ## Code Style
 
-- Black with line length 79
+- Ruff with line length 79 (linting and formatting)
 - Python 3.9+ compatibility

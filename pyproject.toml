@@ -21,16 +21,17 @@ dependencies = [
   "numpy",
   "pyyaml",
   "flask",
-  "picohost==0.0.3",
-  "cmt_vna @ git+https://github.com/EIGSEP/CMT-VNA.git@main",
-  "eigsep_corr @ git+https://github.com/EIGSEP/eigsep_corr.git@main",
+  "picohost>=0.0.3",
+  "cmt_vna",
+  "eigsep_corr",
   "fakeredis",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "black",
-  "flake8",
+  "build",
+  "twine",
+  "ruff",
   "pyserial-mock",
   "pytest",
   "pytest-cov",
@@ -50,7 +51,7 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
-  "--cov=src",
+  "--cov=eigsep_observing",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--junitxml=junit.xml",
@@ -58,5 +59,12 @@ addopts = [
   "--timeout=60",
 ]
 
-[tool.black]
+[tool.ruff]
 line-length = 79
+
+[tool.ruff.lint]
+extend-ignore = ["E203"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/*/__init__.py" = ["F401"]
+"scripts/*.py" = ["E402"]

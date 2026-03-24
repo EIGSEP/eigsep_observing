@@ -389,7 +389,6 @@ def read_s11_file(fname):
 
 
 class File:
-
     def __init__(self, save_dir, pairs, ntimes, cfg):
         """
         Initialize the File object for saving correlation data.

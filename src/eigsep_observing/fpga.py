@@ -8,7 +8,6 @@ from .eig_redis import EigsepRedis
 
 
 class EigsepFpga(CorrEigsepFpga):
-
     @staticmethod
     def _create_redis(host: str, port: int) -> EigsepRedis:
         """

@@ -54,9 +54,9 @@ def compare_dicts(dict1, dict2):
             )
         # For other types, use standard equality
         else:
-            assert (
-                val1 == val2
-            ), f"Values for key '{key}' are not equal: {val1} != {val2}"
+            assert val1 == val2, (
+                f"Values for key '{key}' are not equal: {val1} != {val2}"
+            )
 
 
 def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
