@@ -21,9 +21,9 @@ dependencies = [
   "numpy",
   "pyyaml",
   "flask",
-  "picohost>=0.0.3",
+  "picohost==0.0.3",
   "cmt_vna",
-  "eigsep_corr",
+  "eigsep_corr==1.0.0",
   "fakeredis",
 ]
 
