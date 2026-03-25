@@ -65,15 +65,17 @@ if args.interactive:
         daemon=True,
     )
     thd.start()
-    IPython.embed(
-        banner1=(
-            "EIGSEP interactive shell. The `fpga` object is live.\n"
-            "Type `exit` or Ctrl-D to stop observing and exit."
-        ),
-    )
-    fpga.end_observing()
-    thd.join(timeout=5)
-    logger.info("Observing done.")
+    try:
+        IPython.embed(
+            banner1=(
+                "EIGSEP interactive shell. The `fpga` object is live.\n"
+                "Type `exit` or Ctrl-D to stop observing and exit."
+            ),
+        )
+    finally:
+        fpga.end_observing()
+        thd.join(timeout=5)
+        logger.info("Observing done.")
 else:
     try:
         fpga.observe(pairs=None, timeout=10)
