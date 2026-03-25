@@ -23,7 +23,7 @@ dependencies = [
   "flask",
   "picohost==0.0.3",
   "eigsep-vna==0.0.2",
-  "eigsep_corr==1.0.0",
+  "eigsep_corr==2.0.0",
   "fakeredis",
 ]
 
