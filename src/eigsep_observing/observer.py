@@ -8,7 +8,6 @@ logger = logging.getLogger(__name__)
 
 
 class EigObserver:
-
     def __init__(self, redis_snap=None, redis_panda=None):
         """
         Main controll class and filewriter for Eigsep observing.

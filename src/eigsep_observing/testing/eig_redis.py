@@ -4,7 +4,6 @@ from .. import EigsepRedis
 
 
 class DummyEigsepRedis(EigsepRedis):
-
     def _make_redis(self, *args, **kwargs):
         """
         Create a fake Redis instance for testing purposes. Overrides

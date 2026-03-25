@@ -15,7 +15,6 @@ with open(default_cfg_file, "r") as f:
 
 
 class PandaClient:
-
     PICO_CLASSES = {
         "imu": picohost.PicoIMU,
         "therm": picohost.PicoDevice,
@@ -56,8 +55,7 @@ class PandaClient:
             pico_cfg = self.get_pico_config(fname, app_mapping=apps)
         except Exception as e:
             self.logger.warning(
-                f"Failed to read pico config file: {e}. "
-                "Running without picos."
+                f"Failed to read pico config file: {e}. Running without picos."
             )
             pico_cfg = {}
         # add pico config to the cfg
@@ -364,8 +362,7 @@ class PandaClient:
             )
         if self.switch_nw is None:
             raise RuntimeError(
-                "Switch network not initialized. Cannot execute "
-                "VNA commands."
+                "Switch network not initialized. Cannot execute VNA commands."
             )
         if self.vna is None:
             raise RuntimeError(

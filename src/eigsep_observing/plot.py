@@ -121,7 +121,7 @@ class LivePlotter:
             elif i == 1:
                 colors[p] = "lime"
             else:
-                colors[p] = f"C{i-2}"
+                colors[p] = f"C{i - 2}"
         return colors
 
     def _setup_plots(self):

@@ -56,12 +56,12 @@ def test_sensor_metadata_in_redis(client, redis):
     # Each emulator writes its sensor_name as the Redis metadata key.
     # RFSwitchWithImuEmulator writes both "rfswitch" and "imu_antenna".
     expected_sensors = {
-        "tempctrl",    # from peltier pico
-        "temp_mon",    # from therm pico
-        "imu_panda",   # from imu pico (app_id=3)
-        "lidar",       # from lidar pico
-        "rfswitch",    # from switch pico (composite emulator)
-        "imu_antenna", # from switch pico (composite emulator)
+        "tempctrl",  # from peltier pico
+        "temp_mon",  # from therm pico
+        "imu_panda",  # from imu pico (app_id=3)
+        "lidar",  # from lidar pico
+        "rfswitch",  # from switch pico (composite emulator)
+        "imu_antenna",  # from switch pico (composite emulator)
     }
     for sensor in expected_sensors:
         assert sensor in metadata, (

@@ -9,7 +9,6 @@ CFG_PATH = utils.get_config_path("dummy_config.yaml")
 
 
 class DummyEigObserver(EigObserver):
-
     def __init__(self, redis_snap=None, redis_panda=None):
         """
         Override constrcutor to use dummy configs.
