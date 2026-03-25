@@ -37,6 +37,10 @@ dev = [
   "pytest-cov",
   "pytest-timeout",
 ]
+interactive = [
+  "matplotlib",
+  "ipython",
+]
 
 [tool.setuptools]
 include-package-data = true
