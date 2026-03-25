@@ -4,6 +4,9 @@ from eigsep_observing.utils import configure_eig_logger
 logger = configure_eig_logger(level=logging.INFO)
 
 import argparse  # noqa: E402
+from threading import Thread  # noqa: E402
+
+import IPython  # noqa: E402
 from eigsep_corr.config import load_config  # noqa: E402
 from eigsep_corr.fpga import add_args  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
@@ -19,6 +22,13 @@ add_args(
         "/home/eigsep/eigsep/eigsep_observing/src/eigsep_observing/"
         "config/corr_config.yaml"
     ),
+)
+parser.add_argument(
+    "-i",
+    "--interactive",
+    action="store_true",
+    default=False,
+    help="Drop into an IPython shell with live access to the fpga object.",
 )
 args = parser.parse_args()
 cfg = load_config(args.config_file)
@@ -48,10 +58,29 @@ fpga.upload_config(validate=True)
 
 # start observing
 logger.info("Starting observation.")
-try:
-    fpga.observe(pairs=None, timeout=10)
-except KeyboardInterrupt:
-    logger.info("Observation interrupted by user.")
-finally:
-    fpga.end_observing()
-    logger.info("Observing done.")
+if args.interactive:
+    thd = Thread(
+        target=fpga.observe,
+        kwargs={"pairs": None, "timeout": 10},
+        daemon=True,
+    )
+    thd.start()
+    try:
+        IPython.embed(
+            banner1=(
+                "EIGSEP interactive shell. The `fpga` object is live.\n"
+                "Type `exit` or Ctrl-D to stop observing and exit."
+            ),
+        )
+    finally:
+        fpga.end_observing()
+        thd.join(timeout=5)
+        logger.info("Observing done.")
+else:
+    try:
+        fpga.observe(pairs=None, timeout=10)
+    except KeyboardInterrupt:
+        logger.info("Observation interrupted by user.")
+    finally:
+        fpga.end_observing()
+        logger.info("Observing done.")
