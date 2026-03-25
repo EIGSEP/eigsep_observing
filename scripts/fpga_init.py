@@ -20,6 +20,13 @@ add_args(
         "config/corr_config.yaml"
     ),
 )
+parser.add_argument(
+    "-i",
+    "--interactive",
+    action="store_true",
+    default=False,
+    help="Drop into an IPython shell with live access to the fpga object.",
+)
 args = parser.parse_args()
 cfg = load_config(args.config_file)
 
@@ -48,10 +55,31 @@ fpga.upload_config(validate=True)
 
 # start observing
 logger.info("Starting observation.")
-try:
-    fpga.observe(pairs=None, timeout=10)
-except KeyboardInterrupt:
-    logger.info("Observation interrupted by user.")
-finally:
+if args.interactive:
+    from threading import Thread
+
+    thd = Thread(
+        target=fpga.observe,
+        kwargs={"pairs": None, "timeout": 10},
+        daemon=True,
+    )
+    thd.start()
+    import IPython
+
+    IPython.embed(
+        banner1=(
+            "EIGSEP interactive shell. The `fpga` object is live.\n"
+            "Type `exit` or Ctrl-D to stop observing and exit."
+        ),
+    )
     fpga.end_observing()
+    thd.join(timeout=5)
     logger.info("Observing done.")
+else:
+    try:
+        fpga.observe(pairs=None, timeout=10)
+    except KeyboardInterrupt:
+        logger.info("Observation interrupted by user.")
+    finally:
+        fpga.end_observing()
+        logger.info("Observing done.")
