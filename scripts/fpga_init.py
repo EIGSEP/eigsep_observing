@@ -4,6 +4,9 @@ from eigsep_observing.utils import configure_eig_logger
 logger = configure_eig_logger(level=logging.INFO)
 
 import argparse  # noqa: E402
+from threading import Thread  # noqa: E402
+
+import IPython  # noqa: E402
 from eigsep_corr.config import load_config  # noqa: E402
 from eigsep_corr.fpga import add_args  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
@@ -56,16 +59,12 @@ fpga.upload_config(validate=True)
 # start observing
 logger.info("Starting observation.")
 if args.interactive:
-    from threading import Thread
-
     thd = Thread(
         target=fpga.observe,
         kwargs={"pairs": None, "timeout": 10},
         daemon=True,
     )
     thd.start()
-    import IPython
-
     IPython.embed(
         banner1=(
             "EIGSEP interactive shell. The `fpga` object is live.\n"
