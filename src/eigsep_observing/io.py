@@ -417,6 +417,134 @@ def read_s11_file(fname):
     return data, cal_data, header, metadata
 
 
+# Sensor schemas: field name -> expected Python type.
+# The type is what the field should be when the sensor is healthy.
+# None values are always allowed (sensor error may null out fields).
+_IMU_SCHEMA = {
+    "sensor_name": str,
+    "status": str,
+    "app_id": int,
+    "quat_i": float,
+    "quat_j": float,
+    "quat_k": float,
+    "quat_real": float,
+    "accel_x": float,
+    "accel_y": float,
+    "accel_z": float,
+    "lin_accel_x": float,
+    "lin_accel_y": float,
+    "lin_accel_z": float,
+    "gyro_x": float,
+    "gyro_y": float,
+    "gyro_z": float,
+    "mag_x": float,
+    "mag_y": float,
+    "mag_z": float,
+    "calibrated": bool,
+    "accel_cal": int,
+    "mag_cal": int,
+}
+
+SENSOR_SCHEMAS = {
+    "imu_panda": _IMU_SCHEMA,
+    "imu_antenna": _IMU_SCHEMA,
+    "temp_mon": {
+        "sensor_name": str,
+        "app_id": int,
+        "A_status": str,
+        "A_temp": float,
+        "A_timestamp": float,
+        "B_status": str,
+        "B_temp": float,
+        "B_timestamp": float,
+    },
+    "tempctrl": {
+        "sensor_name": str,
+        "app_id": int,
+        "watchdog_tripped": bool,
+        "watchdog_timeout_ms": int,
+        "A_status": str,
+        "A_T_now": float,
+        "A_timestamp": float,
+        "A_T_target": float,
+        "A_drive_level": float,
+        "A_enabled": bool,
+        "A_active": bool,
+        "A_int_disabled": bool,
+        "A_hysteresis": float,
+        "A_clamp": float,
+        "B_status": str,
+        "B_T_now": float,
+        "B_timestamp": float,
+        "B_T_target": float,
+        "B_drive_level": float,
+        "B_enabled": bool,
+        "B_active": bool,
+        "B_int_disabled": bool,
+        "B_hysteresis": float,
+        "B_clamp": float,
+    },
+    "rfswitch": {
+        "sensor_name": str,
+        "status": str,
+        "app_id": int,
+        "sw_state": int,
+    },
+    "lidar": {
+        "sensor_name": str,
+        "status": str,
+        "app_id": int,
+        "distance_m": float,
+    },
+}
+
+
+def _validate_metadata(entry, schema):
+    """
+    Validate a single metadata dict against its schema.
+
+    Parameters
+    ----------
+    entry : dict
+        A single sensor reading.
+    schema : dict
+        Mapping of field name to expected Python type.
+
+    Returns
+    -------
+    violations : list of str
+        Human-readable descriptions of contract violations.
+        Empty list means the entry is valid.
+
+    """
+    violations = []
+    schema_keys = set(schema)
+    entry_keys = set(entry)
+    missing = schema_keys - entry_keys
+    extra = entry_keys - schema_keys
+    if missing:
+        violations.append(f"missing keys: {sorted(missing)}")
+    if extra:
+        violations.append(f"extra keys: {sorted(extra)}")
+    for key in schema_keys & entry_keys:
+        val = entry[key]
+        if val is None:
+            continue
+        expected = schema[key]
+        if expected is float:
+            ok = isinstance(val, (int, float)) and not isinstance(val, bool)
+        elif expected is int:
+            ok = isinstance(val, int) and not isinstance(val, bool)
+        else:
+            ok = isinstance(val, expected)
+        if not ok:
+            violations.append(
+                f"key '{key}': expected {expected.__name__}, "
+                f"got {type(val).__name__}"
+            )
+    return violations
+
+
 def avg_metadata(value):
     """
     Average metadata readings down to one entry per sample.
@@ -438,18 +566,35 @@ def avg_metadata(value):
         return None
 
     app_name = value[0].get("sensor_name", "")
+    schema = SENSOR_SCHEMAS.get(app_name)
+
+    if schema is not None:
+        for i, entry in enumerate(value):
+            violations = _validate_metadata(entry, schema)
+            if violations:
+                logger.warning(
+                    "Metadata contract violation in '%s' (entry %d): %s",
+                    app_name,
+                    i,
+                    "; ".join(violations),
+                )
+    else:
+        logger.warning(
+            "No schema for sensor '%s'; skipping validation",
+            app_name,
+        )
 
     if app_name in ("temp_mon", "tempctrl"):
-        return _avg_temp_metadata(value, app_name)
+        return _avg_temp_metadata(value, app_name, schema)
 
     if app_name == "rfswitch":
         return _avg_rfswitch_metadata(value)
 
-    # generic sensor (e.g. IMU)
-    return _avg_sensor_values(value)
+    # generic sensor (e.g. IMU, lidar)
+    return _avg_sensor_values(value, schema)
 
 
-def _avg_temp_metadata(value, app_name):
+def _avg_temp_metadata(value, app_name, schema):
     """
     Average temp_mon / tempctrl metadata, handling A/B channels.
 
@@ -458,9 +603,15 @@ def _avg_temp_metadata(value, app_name):
         "app_id": value[0].get("app_id"),
         "sensor_name": app_name,
     }
+    # Build a sub-schema for each channel by stripping the prefix.
     for subkey in ("A", "B"):
         prefix = f"{subkey}_"
-        keys = [k for k in value[0] if k.startswith(prefix)]
+        if schema is not None:
+            keys = [k for k in schema if k.startswith(prefix)]
+            sub_schema = {k[len(prefix) :]: schema[k] for k in keys}
+        else:
+            keys = [k for k in value[0] if k.startswith(prefix)]
+            sub_schema = None
         if not keys:
             continue
         subvals = []
@@ -473,7 +624,7 @@ def _avg_temp_metadata(value, app_name):
                 sub.setdefault("status", v.get(f"{subkey}_status"))
                 subvals.append(sub)
         if subvals:
-            avgs[subkey] = _avg_sensor_values(subvals)
+            avgs[subkey] = _avg_sensor_values(subvals, sub_schema)
     return avgs
 
 
@@ -493,37 +644,62 @@ def _avg_rfswitch_metadata(value):
     return states[0] if states else None
 
 
-def _avg_sensor_values(value):
+def _avg_sensor_values(value, schema=None):
     """
     Average numeric sensor values, keep first string/bool value.
+
+    When *schema* is provided, it determines which keys to process
+    and whether each key is numeric (``float``/``int``) or
+    categorical (``str``/``bool``).  Without a schema, falls back
+    to type-sniffing from the first non-None value.
 
     """
     if not value:
         return None
+
     avg = {}
     status_list = [v.get("status", "update") for v in value]
-    for data_key in value[0]:
-        first_val = value[0].get(data_key)
-        if first_val is None or isinstance(first_val, (str, bool)):
-            avg[data_key] = first_val
+
+    # Determine the set of keys to iterate over.
+    if schema is not None:
+        all_keys = list(schema)
+    else:
+        all_keys = list(value[0])
+
+    for data_key in all_keys:
+        # Determine whether this field is numeric.
+        if schema is not None:
+            is_numeric = schema[data_key] in (float, int)
+        else:
+            # Fallback: sniff type from first non-None value.
+            first_val = None
+            for v in value:
+                first_val = v.get(data_key)
+                if first_val is not None:
+                    break
+            is_numeric = isinstance(first_val, (int, float)) and (
+                not isinstance(first_val, bool)
+            )
+
+        if not is_numeric:
+            avg[data_key] = value[0].get(data_key)
             continue
+
         try:
             raw = []
             for v, st in zip(value, status_list):
                 val = v.get(data_key)
                 if (
                     st != "error"
+                    and val is not None
                     and isinstance(val, (int, float))
                     and not isinstance(val, bool)
                 ):
                     raw.append(val)
-            if raw:
-                avg[data_key] = float(np.mean(raw))
-            else:
-                avg[data_key] = None
+            avg[data_key] = float(np.mean(raw)) if raw else None
         except Exception as e:
-            logger.warning(f"Could not average key '{data_key}': {e}")
-            avg[data_key] = first_val
+            logger.warning("Could not average key '%s': %s", data_key, e)
+            avg[data_key] = None
     return avg
 
 
