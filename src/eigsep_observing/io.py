@@ -559,7 +559,7 @@ def avg_metadata(value):
     -------
     avg : dict or str or None
         Averaged metadata. For rfswitch, returns the switch state
-        string or ``"SWITCHING"`` if the state changed.
+        string or ``"UNKNOWN"`` if the state changed.
 
     """
     if not value or not isinstance(value[0], dict):
@@ -631,16 +631,16 @@ def _avg_temp_metadata(value, app_name, schema):
 def _avg_rfswitch_metadata(value):
     """
     Average rfswitch metadata.  Returns the switch state if
-    constant, or ``"SWITCHING"`` if it changed or errored.
+    constant, or ``"UNKNOWN"`` if it changed or errored.
 
     """
     status_list = [v.get("status") for v in value]
     states = [v.get("sw_state") for v in value]
     if "error" in status_list:
-        return "SWITCHING"
+        return "UNKNOWN"
     unique = set(s for s in states if s is not None)
     if len(unique) > 1:
-        return "SWITCHING"
+        return "UNKNOWN"
     return states[0] if states else None
 
 
@@ -835,23 +835,31 @@ class File:
             for i in range(1, delta_cnt):
                 self._insert_sample(base_cnt + i, sync_time, zero_data)
 
-        # process metadata (stream format from get_metadata:
-        # {stream_name: [list_of_dicts]}). Each list contains all
+        # Process metadata from get_metadata (stream format:
+        # {stream_name: [list_of_dicts]}).  Each list contains all
         # readings since the last call; we average them down to one
         # entry per sample to resample onto the correlator cadence.
+        # Strip the "stream:" prefix — it's a Redis artifact — and
+        # split temp sensors' A/B channels into separate entries.
         processed_md = {}
         metadata = metadata or {}
         for key in metadata:
             value = metadata[key]
-            if isinstance(value, list) and len(value) > 0:
-                processed_md[key] = avg_metadata(value)
-            else:
-                # should not happen with get_metadata() (streams with
-                # no new data are omitted entirely)
+            if not (isinstance(value, list) and len(value) > 0):
                 self.logger.warning(
                     f"Unexpected metadata for '{key}': {value!r}"
                 )
-                processed_md[key] = None
+                continue
+            # strip stream prefix
+            name = key.removeprefix("stream:")
+            averaged = avg_metadata(value)
+            if isinstance(averaged, dict) and "A" in averaged:
+                # temp sensor: split A/B into separate flat entries
+                for ch in ("A", "B"):
+                    if ch in averaged:
+                        processed_md[f"{name}_{ch.lower()}"] = averaged[ch]
+            else:
+                processed_md[name] = averaged
         self._insert_sample(acc_cnt, sync_time, data, processed_md)
 
     def _insert_sample(
