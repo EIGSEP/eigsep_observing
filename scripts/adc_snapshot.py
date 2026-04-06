@@ -83,6 +83,11 @@ parser.add_argument(
     help="Plot power spectrum instead of time-domain samples",
 )
 parser.add_argument(
+    "--rms",
+    action="store_true",
+    help="Show live RMS readout on the plot",
+)
+parser.add_argument(
     "--acc-len",
     type=int,
     default=1,
@@ -147,8 +152,19 @@ else:
         ax.set_ylabel("ADC counts")
         ax.grid(True)
 
-axes[0].set_title(f"Antenna {ant} — Pol X")
-axes[1].set_title(f"Antenna {ant} — Pol Y")
+axes[0].set_title(f"Input N{ant*4}")
+axes[1].set_title(f"Input E{ant*4+2}")
+
+rms_texts = []
+if args.rms:
+    for ax in axes:
+        txt = ax.text(
+            0.02, 0.95, "", transform=ax.transAxes,
+            va="top", fontsize=12, fontfamily="monospace",
+            bbox=dict(boxstyle="round", fc="wheat", alpha=0.8),
+        )
+        rms_texts.append(txt)
+
 plt.tight_layout()
 
 
@@ -161,6 +177,11 @@ def update(frame):
         for ax in axes:
             ax.relim()
             ax.autoscale_view()
+    if args.rms:
+        rms_x = np.std(px)
+        rms_y = np.std(py)
+        rms_texts[0].set_text(f"RMS: {rms_x:.1f}")
+        rms_texts[1].set_text(f"RMS: {rms_y:.1f}")
     if args.save:
         snapshots.append(
             {"time": time.time(), "pol_x": px, "pol_y": py}
