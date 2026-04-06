@@ -54,6 +54,32 @@ METADATA = {
     "el_motor": np.arange(100) * 1.8,
 }
 
+# Schema-conformant IMU reading for use in metadata tests.
+IMU_READING = {
+    "sensor_name": "imu_panda",
+    "status": "update",
+    "app_id": 3,
+    "quat_i": 0.0,
+    "quat_j": 0.0,
+    "quat_k": 0.0,
+    "quat_real": 1.0,
+    "accel_x": 0.0,
+    "accel_y": 0.0,
+    "accel_z": 9.8,
+    "lin_accel_x": 0.0,
+    "lin_accel_y": 0.0,
+    "lin_accel_z": 0.0,
+    "gyro_x": 0.0,
+    "gyro_y": 0.0,
+    "gyro_z": 0.0,
+    "mag_x": 0.0,
+    "mag_y": 0.0,
+    "mag_z": 0.0,
+    "calibrated": True,
+    "accel_cal": 3,
+    "mag_cal": 3,
+}
+
 S11_HEADER = {
     "fstart": 1e6,
     "fstop": 250e6,
@@ -545,26 +571,14 @@ def test_avg_metadata():
     # B has one error entry, so only non-error value used
     assert result["B"]["temp"] == 25.0
 
-    # generic sensor (IMU)
+    # generic sensor (IMU) — full schema-conformant data
     imu_data = [
-        {
-            "sensor_name": "imu_panda",
-            "status": "update",
-            "app_id": 3,
-            "quat_i": 0.1,
-            "calibrated": "True",
-        },
-        {
-            "sensor_name": "imu_panda",
-            "status": "update",
-            "app_id": 3,
-            "quat_i": 0.3,
-            "calibrated": "True",
-        },
+        {**IMU_READING, "quat_i": 0.1},
+        {**IMU_READING, "quat_i": 0.3},
     ]
     result = io.avg_metadata(imu_data)
     assert result["quat_i"] == pytest.approx(0.2)
-    assert result["calibrated"] == "True"
+    assert result["calibrated"] is True
 
 
 def test_gap_fill_acc_cnts_linear():
@@ -635,28 +649,14 @@ def test_metadata_new_key_alignment():
 
         # add 3 samples with key A only
         md_a = {
-            "stream:a": [
-                {
-                    "sensor_name": "imu_panda",
-                    "status": "update",
-                    "app_id": 1,
-                    "x": 1.0,
-                }
-            ]
+            "stream:a": [{**IMU_READING, "quat_i": 1.0}],
         }
         for i in range(3):
             f.add_data(i + 1, 0.0, d, metadata=md_a)
 
         # add sample with new key B
         md_b = {
-            "stream:a": [
-                {
-                    "sensor_name": "imu_panda",
-                    "status": "update",
-                    "app_id": 1,
-                    "x": 2.0,
-                }
-            ],
+            "stream:a": [{**IMU_READING, "quat_i": 2.0}],
             "stream:b": [
                 {
                     "sensor_name": "rfswitch",
@@ -695,18 +695,8 @@ def test_stream_metadata_averaging():
         # stream format: multiple readings per stream, averaged down
         md = {
             "stream:imu": [
-                {
-                    "sensor_name": "imu_panda",
-                    "status": "update",
-                    "app_id": 3,
-                    "quat_i": 0.1,
-                },
-                {
-                    "sensor_name": "imu_panda",
-                    "status": "update",
-                    "app_id": 3,
-                    "quat_i": 0.3,
-                },
+                {**IMU_READING, "quat_i": 0.1},
+                {**IMU_READING, "quat_i": 0.3},
             ],
             "stream:rfswitch": [
                 {
@@ -726,14 +716,7 @@ def test_stream_metadata_averaging():
 
         # second sample without rfswitch stream — should pad with None
         md2 = {
-            "stream:imu": [
-                {
-                    "sensor_name": "imu_panda",
-                    "status": "update",
-                    "app_id": 3,
-                    "quat_i": 0.5,
-                },
-            ],
+            "stream:imu": [{**IMU_READING, "quat_i": 0.5}],
         }
         f.add_data(2, 0.0, d, metadata=md2)
         assert f.metadata["stream:rfswitch"][1] is None
@@ -785,36 +768,120 @@ def test_avg_metadata_edge_cases():
     # non-dict entries
     assert io.avg_metadata(["not", "dicts"]) is None
 
-    # all error status
+    # all error status — use schema-conformant lidar (simplest)
     err_data = [
         {
-            "sensor_name": "imu_panda",
+            "sensor_name": "lidar",
             "status": "error",
-            "app_id": 1,
-            "x": 0.0,
+            "app_id": 4,
+            "distance_m": 0.0,
         },
         {
-            "sensor_name": "imu_panda",
+            "sensor_name": "lidar",
             "status": "error",
-            "app_id": 1,
-            "x": 0.0,
+            "app_id": 4,
+            "distance_m": 0.0,
         },
     ]
     result = io.avg_metadata(err_data)
     # all values are error, so numeric keys should be None
-    assert result["x"] is None
+    assert result["distance_m"] is None
 
-    # None values in dict
+    # None values in numeric field
     none_data = [
         {
-            "sensor_name": "test",
+            "sensor_name": "lidar",
             "status": "update",
-            "app_id": 1,
-            "val": None,
+            "app_id": 4,
+            "distance_m": None,
         }
     ]
     result = io.avg_metadata(none_data)
-    assert result["val"] is None
+    assert result["distance_m"] is None
+
+    # unknown sensor: falls back to generic path with warning
+    unknown_data = [
+        {
+            "sensor_name": "unknown_sensor",
+            "status": "update",
+            "app_id": 99,
+            "val": 1.0,
+        },
+        {
+            "sensor_name": "unknown_sensor",
+            "status": "update",
+            "app_id": 99,
+            "val": 3.0,
+        },
+    ]
+    result = io.avg_metadata(unknown_data)
+    assert result["val"] == pytest.approx(2.0)
+
+
+def test_validate_metadata():
+    """Test schema validation for sensor metadata."""
+    schema = io.SENSOR_SCHEMAS["lidar"]
+
+    # valid entry: no violations
+    valid = {
+        "sensor_name": "lidar",
+        "status": "update",
+        "app_id": 4,
+        "distance_m": 1.5,
+    }
+    assert io._validate_metadata(valid, schema) == []
+
+    # None values are allowed (sensor error)
+    none_entry = {**valid, "distance_m": None}
+    assert io._validate_metadata(none_entry, schema) == []
+
+    # int accepted for float field
+    int_entry = {**valid, "distance_m": 2}
+    assert io._validate_metadata(int_entry, schema) == []
+
+    # missing key
+    missing = {k: v for k, v in valid.items() if k != "distance_m"}
+    violations = io._validate_metadata(missing, schema)
+    assert len(violations) == 1
+    assert "missing" in violations[0]
+
+    # extra key
+    extra = {**valid, "bogus": 42}
+    violations = io._validate_metadata(extra, schema)
+    assert len(violations) == 1
+    assert "extra" in violations[0]
+
+    # wrong type
+    bad_type = {**valid, "distance_m": "not_a_number"}
+    violations = io._validate_metadata(bad_type, schema)
+    assert len(violations) == 1
+    assert "expected float" in violations[0]
+
+    # bool should not pass as int
+    bool_as_int = {**valid, "app_id": True}
+    violations = io._validate_metadata(bool_as_int, schema)
+    assert len(violations) == 1
+    assert "expected int" in violations[0]
+
+
+def test_avg_metadata_schema_violation_no_crash():
+    """Schema-violating data produces warnings but still returns."""
+    # Data with extra key and missing keys — should warn, not crash
+    bad_data = [
+        {
+            "sensor_name": "lidar",
+            "status": "update",
+            "app_id": 4,
+            "bogus_field": 99.0,
+        },
+    ]
+    result = io.avg_metadata(bad_data)
+    # Should still return a dict (best-effort from schema keys)
+    assert isinstance(result, dict)
+    # Schema key "distance_m" is missing from data, so should be None
+    assert result["distance_m"] is None
+    # Extra key "bogus_field" is not in schema, so not in result
+    assert "bogus_field" not in result
 
 
 def test_close():
