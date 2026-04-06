@@ -412,7 +412,7 @@ def test_gap_filling():
                 )
 
         # metadata should have None for gap-filled samples
-        md_list = f.metadata["stream:rfswitch"]
+        md_list = f.metadata["rfswitch"]
         assert len(md_list) == 52
         assert md_list[0] is not None  # first sample
         for i in range(1, 51):
@@ -536,11 +536,11 @@ def test_avg_metadata():
 
     # rfswitch: inconsistent state
     sw_data[1] = dict(sw_data[1], sw_state=99)
-    assert io.avg_metadata(sw_data) == "SWITCHING"
+    assert io.avg_metadata(sw_data) == "UNKNOWN"
 
     # rfswitch: error status
     sw_data[1] = dict(sw_data[0], status="error")
-    assert io.avg_metadata(sw_data) == "SWITCHING"
+    assert io.avg_metadata(sw_data) == "UNKNOWN"
 
     # temp_mon: A/B channels
     temp_data = [
@@ -649,15 +649,15 @@ def test_metadata_new_key_alignment():
 
         # add 3 samples with key A only
         md_a = {
-            "stream:a": [{**IMU_READING, "quat_i": 1.0}],
+            "stream:imu_panda": [{**IMU_READING, "quat_i": 1.0}],
         }
         for i in range(3):
             f.add_data(i + 1, 0.0, d, metadata=md_a)
 
         # add sample with new key B
         md_b = {
-            "stream:a": [{**IMU_READING, "quat_i": 2.0}],
-            "stream:b": [
+            "stream:imu_panda": [{**IMU_READING, "quat_i": 2.0}],
+            "stream:rfswitch": [
                 {
                     "sensor_name": "rfswitch",
                     "status": "update",
@@ -668,14 +668,14 @@ def test_metadata_new_key_alignment():
         }
         f.add_data(4, 0.0, d, metadata=md_b)
 
-        # key A should have 4 entries
-        assert len(f.metadata["stream:a"]) == 4
+        # imu_panda should have 4 entries
+        assert len(f.metadata["imu_panda"]) == 4
 
-        # key B should also have 4 entries: 3 None pads + 1 real
-        assert len(f.metadata["stream:b"]) == 4
+        # rfswitch should also have 4 entries: 3 None pads + 1 real
+        assert len(f.metadata["rfswitch"]) == 4
         for i in range(3):
-            assert f.metadata["stream:b"][i] is None
-        assert f.metadata["stream:b"][3] is not None
+            assert f.metadata["rfswitch"][i] is None
+        assert f.metadata["rfswitch"][3] is not None
 
         f.close()
 
@@ -694,7 +694,7 @@ def test_stream_metadata_averaging():
 
         # stream format: multiple readings per stream, averaged down
         md = {
-            "stream:imu": [
+            "stream:imu_panda": [
                 {**IMU_READING, "quat_i": 0.1},
                 {**IMU_READING, "quat_i": 0.3},
             ],
@@ -709,18 +709,56 @@ def test_stream_metadata_averaging():
         }
         f.add_data(1, 0.0, d, metadata=md)
 
-        # IMU values should be averaged
-        assert f.metadata["stream:imu"][0]["quat_i"] == pytest.approx(0.2)
+        # IMU values should be averaged (stream: prefix stripped)
+        assert f.metadata["imu_panda"][0]["quat_i"] == pytest.approx(0.2)
         # rfswitch should return the state directly
-        assert f.metadata["stream:rfswitch"][0] == 0
+        assert f.metadata["rfswitch"][0] == 0
 
         # second sample without rfswitch stream — should pad with None
         md2 = {
-            "stream:imu": [{**IMU_READING, "quat_i": 0.5}],
+            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.5}],
         }
         f.add_data(2, 0.0, d, metadata=md2)
-        assert f.metadata["stream:rfswitch"][1] is None
-        assert f.metadata["stream:imu"][1]["quat_i"] == pytest.approx(0.5)
+        assert f.metadata["rfswitch"][1] is None
+        assert f.metadata["imu_panda"][1]["quat_i"] == pytest.approx(0.5)
+
+        f.close()
+
+
+def test_temp_metadata_split():
+    """Verify temp sensor A/B channels are split into separate entries."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 10
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        d = {"0": np.ones(spec_len, dtype=dtype)}
+
+        md = {
+            "stream:temp_mon": [
+                {
+                    "sensor_name": "temp_mon",
+                    "app_id": 2,
+                    "A_status": "update",
+                    "A_temp": 30.0,
+                    "A_timestamp": 1.0,
+                    "B_status": "update",
+                    "B_temp": 25.0,
+                    "B_timestamp": 2.0,
+                },
+            ],
+        }
+        f.add_data(1, 0.0, d, metadata=md)
+
+        # A and B should be separate flat entries, not nested
+        assert "temp_mon" not in f.metadata
+        assert "temp_mon_a" in f.metadata
+        assert "temp_mon_b" in f.metadata
+        assert f.metadata["temp_mon_a"][0]["temp"] == 30.0
+        assert f.metadata["temp_mon_b"][0]["temp"] == 25.0
 
         f.close()
 
