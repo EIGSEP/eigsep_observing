@@ -359,7 +359,8 @@ def test_file():
 
 
 def test_gap_filling():
-    """Verify large gap fills correctly without RecursionError."""
+    """Verify large gap fills correctly without RecursionError, and
+    that close() flushes the partial buffer (52 < ntimes=100) to disk."""
     with tempfile.TemporaryDirectory() as tmpdir:
         save_dir = Path(tmpdir)
         pairs = ["0", "1"]
@@ -424,7 +425,23 @@ def test_gap_filling():
             assert md_list[i] is None  # gap-filled
         assert md_list[51] is not None  # last sample
 
+        # close() must flush the partial buffer to disk — buffer is
+        # only 52/100 full so a normal corr_write was not triggered.
         f.close()
+
+        files = sorted(glob.glob(str(save_dir / "*.h5")))
+        assert len(files) == 1, (
+            f"close() did not flush partial buffer; files: {files}"
+        )
+        on_disk_data, _, on_disk_md = io.read_hdf5(files[0])
+        # Slicing must respect counter — exactly 52 samples on disk,
+        # not the full ntimes=100 with trailing zeros.
+        for p in pairs:
+            assert on_disk_data[p].shape[0] == 52, (
+                f"pair {p}: expected 52 samples on disk, got "
+                f"{on_disk_data[p].shape[0]}"
+            )
+        assert len(on_disk_md["rfswitch"]) == 52
 
 
 def test_gap_filling_no_recursion_error():
@@ -491,6 +508,64 @@ def test_write_error_recovery():
                 save_dir,
                 stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO,
             )
+        f.close()
+
+
+def test_rename_failure_preserves_temp_file(monkeypatch, caplog):
+    """If ``write_hdf5`` succeeds but ``os.rename`` then raises (e.g.
+    a transient NFS / filesystem error), the just-written temp file
+    must be preserved on disk so an operator can recover it by hand.
+    Corr data is sacred — never destroy a successful write because of
+    a downstream filesystem hiccup."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 3
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+
+        # Make os.rename always fail. Patch the os reference inside the
+        # io module so the writer thread sees the failing rename without
+        # affecting the rest of the test process.
+        def failing_rename(*args, **kwargs):
+            raise OSError("simulated rename failure")
+
+        monkeypatch.setattr(io.os, "rename", failing_rename)
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                f.add_data(i + 1, 0.0, d)
+            f._write_queue.join()
+
+        # Final .h5 file does NOT exist — rename failed.
+        final_files = glob.glob(str(save_dir / "*.h5"))
+        assert final_files == [], (
+            f"unexpected final file(s) after rename failure: {final_files}"
+        )
+
+        # The .h5.tmp file IS preserved on disk for manual recovery.
+        tmp_files = glob.glob(str(save_dir / "*.h5.tmp"))
+        assert len(tmp_files) == 1, (
+            f"expected exactly one preserved .h5.tmp, got: {tmp_files}"
+        )
+
+        # The preserved temp file is a real, readable HDF5 with the
+        # data we just wrote — proves rename failure didn't corrupt it.
+        data, header, _ = io.read_hdf5(tmp_files[0])
+        assert "0" in data
+        assert data["0"].shape[0] == ntimes
+
+        # The writer surfaced the failure via _write_error and ERROR log.
+        assert isinstance(f._write_error, OSError)
+        assert "simulated rename failure" in str(f._write_error)
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("Failed to write" in r.getMessage() for r in errors), (
+            f"expected a 'Failed to write' ERROR, got: {[r.getMessage() for r in errors]}"
+        )
+
         f.close()
 
 
@@ -2093,6 +2168,59 @@ def test_close():
         assert not f._writer_thread.is_alive()
 
 
+def test_close_flushes_pending_buffer():
+    """close() must flush a non-empty active buffer to disk before
+    shutting down the writer thread. This is the contract that lets
+    callers simply call ``close()`` at end-of-run without remembering
+    to manually call ``corr_write()`` first — the previous behavior
+    silently dropped the partial buffer."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 10
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # Add fewer than ntimes samples so corr_write is NOT triggered
+        # by add_data — the buffer is partial when close() runs.
+        n_partial = 4
+        for i in range(n_partial):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+        assert f.counter == n_partial
+
+        # close() must flush the partial buffer.
+        f.close()
+        assert not f._writer_thread.is_alive()
+
+        # Exactly one file with exactly n_partial samples on disk —
+        # no trailing zero padding from the preallocated buffer.
+        files = sorted(glob.glob(str(save_dir / "*.h5")))
+        assert len(files) == 1, (
+            f"close() did not flush partial buffer; files: {files}"
+        )
+        on_disk_data, _, _ = io.read_hdf5(files[0])
+        assert on_disk_data["0"].shape[0] == n_partial
+        # Sanity-check the actual sample values made it through.
+        for i in range(n_partial):
+            assert np.all(on_disk_data["0"][i] == i + 1)
+
+
+def test_close_with_empty_buffer_writes_no_file():
+    """close() with counter == 0 must NOT write a file. The flush
+    is conditional on having data — calling close() on an empty
+    File (e.g. immediately after init) is a no-op write-wise."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        f = io.File(save_dir, ["0"], 10, HEADER)
+        assert f.counter == 0
+        f.close()
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert files == [], f"unexpected files written by empty close: {files}"
+
+
 # ----------------------------------------------------------------------
 # Phase 4b — Buffer/metadata invariant enforcement.
 #
@@ -2734,8 +2862,9 @@ def test_rfswitch_transition_within_buffer_flags_forward_window(caplog):
         # Two samples in state 0 (no transition).
         f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
         f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(0))
-        # Now switch to state 1 — transition.
-        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+        # Now switch to state 1 — transition. Logged at INFO because
+        # a scheduled switch is normal operation, not an anomaly.
+        with caplog.at_level(logging.INFO, logger="eigsep_observing.io"):
             f.add_data(3, 0.0, d, metadata=_make_rfswitch_md(1))
         # Continue feeding state 1 samples — need enough to outlast
         # the 5-sample flagging window AND have a couple of clean
@@ -2757,28 +2886,26 @@ def test_rfswitch_transition_within_buffer_flags_forward_window(caplog):
         assert f.metadata["rfswitch"][7] == 1
         assert f.metadata["rfswitch"][8] == 1
 
-        # WARNING log was emitted.
-        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        # INFO log was emitted.
+        infos = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
-            "transition detected" in w.getMessage() and "0→1" in w.getMessage()
-            for w in warnings
-        ), (
-            f"expected transition WARNING, got: {[w.getMessage() for w in warnings]}"
-        )
+            "transition detected" in r.getMessage() and "0→1" in r.getMessage()
+            for r in infos
+        ), f"expected transition INFO, got: {[r.getMessage() for r in infos]}"
 
         f.close()
 
 
 def test_rfswitch_no_transition_no_flagging(caplog):
     """Consecutive samples with the same switch state must not
-    trigger any flagging or warnings."""
+    trigger any flagging or transition logs."""
     with tempfile.TemporaryDirectory() as tmpdir:
         f = io.File(tmpdir, ["0"], 10, HEADER)
         spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
         dtype = np.dtype(HEADER["dtype"])
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
 
-        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+        with caplog.at_level(logging.INFO, logger="eigsep_observing.io"):
             for i in range(5):
                 f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md(3))
 
@@ -2786,11 +2913,9 @@ def test_rfswitch_no_transition_no_flagging(caplog):
         for i in range(5):
             assert f.metadata["rfswitch"][i] == 3
 
-        # No transition WARNING.
+        # No transition log at any level.
         assert not any(
-            "transition detected" in w.getMessage()
-            for w in caplog.records
-            if w.levelno == logging.WARNING
+            "transition detected" in r.getMessage() for r in caplog.records
         )
 
         f.close()
