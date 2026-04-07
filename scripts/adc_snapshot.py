@@ -152,15 +152,20 @@ else:
         ax.set_ylabel("ADC counts")
         ax.grid(True)
 
-axes[0].set_title(f"Input N{ant*4}")
-axes[1].set_title(f"Input E{ant*4+2}")
+axes[0].set_title(f"Input N{ant * 4}")
+axes[1].set_title(f"Input E{ant * 4 + 2}")
 
 rms_texts = []
 if args.rms:
     for ax in axes:
         txt = ax.text(
-            0.02, 0.95, "", transform=ax.transAxes,
-            va="top", fontsize=12, fontfamily="monospace",
+            0.02,
+            0.95,
+            "",
+            transform=ax.transAxes,
+            va="top",
+            fontsize=12,
+            fontfamily="monospace",
             bbox=dict(boxstyle="round", fc="wheat", alpha=0.8),
         )
         rms_texts.append(txt)
@@ -183,9 +188,7 @@ def update(frame):
         rms_texts[0].set_text(f"RMS: {rms_x:.1f}")
         rms_texts[1].set_text(f"RMS: {rms_y:.1f}")
     if args.save:
-        snapshots.append(
-            {"time": time.time(), "pol_x": px, "pol_y": py}
-        )
+        snapshots.append({"time": time.time(), "pol_x": px, "pol_y": py})
         snapshot_count += 1
         if args.nsamples and snapshot_count >= args.nsamples:
             ani.event_source.stop()
@@ -194,7 +197,10 @@ def update(frame):
 
 
 ani = FuncAnimation(
-    fig, update, interval=args.interval, blit=False,
+    fig,
+    update,
+    interval=args.interval,
+    blit=False,
     cache_frame_data=False,
 )
 

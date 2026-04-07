@@ -14,12 +14,8 @@ parser = argparse.ArgumentParser(
     description="Correlator linearity test",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-parser.add_argument(
-    "--redis-host", default="10.10.10.10", help="Redis host"
-)
-parser.add_argument(
-    "--redis-port", type=int, default=6379, help="Redis port"
-)
+parser.add_argument("--redis-host", default="10.10.10.10", help="Redis host")
+parser.add_argument("--redis-port", type=int, default=6379, help="Redis port")
 parser.add_argument(
     "--nsamples",
     type=int,
@@ -64,9 +60,7 @@ while True:
     last_cnt = None
     collected = 0
     while collected < args.nsamples:
-        acc_cnt, _, data = redis.read_corr_data(
-            pairs=pairs, timeout=10
-        )
+        acc_cnt, _, data = redis.read_corr_data(pairs=pairs, timeout=10)
         if acc_cnt == last_cnt:
             continue
         last_cnt = acc_cnt
