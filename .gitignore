@@ -1,6 +1,9 @@
+*.claude
+
 # eigsep data files
 *.h5
 *.eig
+*.npz
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
