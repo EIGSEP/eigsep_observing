@@ -1,6 +1,7 @@
 import json
 import logging
 import threading
+import time
 import yaml
 
 from cmt_vna import VNA
@@ -383,6 +384,13 @@ class PandaClient:
 
         header = self.vna.header
         header["mode"] = mode
+        # Stamp the snapshot time so downstream can sanity-check that
+        # the metadata is contemporaneous with the VNA measurement.
+        # get_live_metadata() reads the latest hash values, which can
+        # be arbitrarily stale if a sensor stopped updating; this
+        # timestamp lets a researcher detect that case at file
+        # inspection time without needing the original Redis state.
+        header["metadata_snapshot_unix"] = time.time()
         metadata = self.redis.get_live_metadata()
         self.redis.add_vna_data(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")

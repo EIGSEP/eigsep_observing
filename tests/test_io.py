@@ -1,22 +1,53 @@
 import datetime
 import glob
 import json
+import logging
 import numpy as np
 import os
 from pathlib import Path
 import pytest
 import stat
 import tempfile
+import threading
+import time
 
 import h5py
+from picohost.testing import (
+    ImuEmulator,
+    LidarEmulator,
+    RFSwitchWithImuEmulator,
+    TempCtrlEmulator,
+    TempMonEmulator,
+)
+
 from eigsep_observing import io
+from eigsep_observing.testing import DummyEigsepFpga
 from eigsep_observing.testing.utils import (
     compare_dicts,
     generate_data,
     generate_s11_data,
 )
 
-# header to use for testing, mimics EigsepFpga().header
+# ---------------------------------------------------------------------------
+# Shared fixtures
+#
+# These fixtures are deliberately constructed to mirror the shape and types
+# of real production data. See the "Testing philosophy" section in CLAUDE.md:
+# fixtures should look like what producers actually emit so tests catch
+# contract drift, and any deviations should be called out explicitly.
+# ---------------------------------------------------------------------------
+
+# One corr file accumulates NTIMES integrations, each of duration
+# INTEGRATION_TIME seconds. FILE_TIME = NTIMES * INTEGRATION_TIME is the
+# wall-clock duration of the file and is included in HEADER so the
+# relationship is explicit at the fixture level (rather than being two
+# independently-set numbers that can drift apart).
+NTIMES = 60
+INTEGRATION_TIME = 1.0  # seconds
+FILE_TIME = NTIMES * INTEGRATION_TIME  # seconds
+
+# HEADER mimics EigsepFpga().header: the static-configuration portion of a
+# corr file. Units match corr_config.yaml: sample_rate is in MHz (NOT Hz).
 HEADER = {
     "dtype": ">i4",
     "acc_bins": 2,
@@ -29,32 +60,17 @@ HEADER = {
     "pol23_delay": 0,
     "pol45_delay": 0,
     "fft_shift": 0x00FF,
-    "sample_rate": 500e6,
+    "sample_rate": 500.0,  # MHz, matching corr_config.yaml convention
     "gain": 4,
     "pam_atten": {"0": 8, "1": 8, "2": 8},
     "sync_time": 1748732903.4203713,
-    "integration_time": 0.1,
-    "file_time": 60.3,
+    "integration_time": INTEGRATION_TIME,
+    "file_time": FILE_TIME,
 }
 
-# metadata to use for testing, mimics output of EigsepRedis.get_metadata
-METADATA = {
-    "acc_cnt": np.arange(60),
-    "updated_unix": np.array([881494457.8234632, 1748734379.905014]),
-    "updated_date": np.array(
-        ["2025-05-31T16:35:48.324275", "1999-12-03T06:37:00.134234"]
-    ),
-    "obs_mode": np.array(["VNAO", "VNAS", "VNAL", "VNAANT", "RFN"]),
-    "temp_lna": np.linspace(30, 60, 60) + 273.15,
-    "temp_vna_load": np.linspace(20, 40, 60) + 273.15,
-    "temp_load": np.linspace(10, 20, 60) + 273.15,
-    "az_imu": np.array([[0, 10, -30], [0, 20, -40], [0, 30, -50]]),
-    "el_imu": np.array([[0, 10, -30], [0, 20, -40], [0, 30, -50]]),
-    "az_motor": np.arange(100) * 1.8,
-    "el_motor": np.arange(100) * 1.8,
-}
-
-# Schema-conformant IMU reading for use in metadata tests.
+# Schema-conformant raw IMU reading (as emitted by a pico and pushed into
+# stream:imu_panda by picohost). Used to build CORR_METADATA entries and by
+# tests that feed raw stream data into File.add_data.
 IMU_READING = {
     "sensor_name": "imu_panda",
     "status": "update",
@@ -80,6 +96,134 @@ IMU_READING = {
     "mag_cal": 3,
 }
 
+
+def _imu_avg_entry(quat_i):
+    """One per-sample IMU entry as avg_metadata would emit it.
+
+    Types match SENSOR_SCHEMAS: ``int`` fields stay ``int`` (categorical
+    path in ``_avg_sensor_values``), ``float`` fields stay ``float``
+    (averaged), ``bool``/``str`` fields take the first value.
+    """
+    return {
+        "sensor_name": "imu_panda",
+        "status": "update",
+        "app_id": 3,
+        "quat_i": quat_i,
+        "quat_j": 0.0,
+        "quat_k": 0.0,
+        "quat_real": 1.0,
+        "accel_x": 0.0,
+        "accel_y": 0.0,
+        "accel_z": 9.8,
+        "lin_accel_x": 0.0,
+        "lin_accel_y": 0.0,
+        "lin_accel_z": 0.0,
+        "gyro_x": 0.0,
+        "gyro_y": 0.0,
+        "gyro_z": 0.0,
+        "mag_x": 0.0,
+        "mag_y": 0.0,
+        "mag_z": 0.0,
+        "calibrated": True,
+        "accel_cal": 3,
+        "mag_cal": 3,
+    }
+
+
+def _lidar_avg_entry(distance_m):
+    """One per-sample lidar entry as avg_metadata would emit it."""
+    return {
+        "sensor_name": "lidar",
+        "status": "update",
+        "app_id": 4,
+        "distance_m": distance_m,
+    }
+
+
+def _temp_channel_entry(temp, timestamp):
+    """One per-sample temp_mon channel (A or B) after add_data's A/B split.
+
+    The top-level ``sensor_name``/``app_id`` returned by ``_avg_temp_metadata``
+    are dropped by the split in ``File.add_data``; only the per-channel
+    sub-dict survives.
+    """
+    return {
+        "status": "update",
+        "temp": temp,
+        "timestamp": timestamp,
+    }
+
+
+# CORR_METADATA mirrors what ``File.metadata`` looks like after NTIMES calls
+# to ``add_data``: one dict-of-lists, one key per stream, every list of
+# length NTIMES. Each list element is the output of ``avg_metadata`` for
+# that stream on that integration (a dict for generic sensors, an int or
+# "UNKNOWN" for rfswitch, or ``None`` for gap-filled samples).
+#
+# The rfswitch list in particular exercises the three real-world shapes:
+# raw int states, the "UNKNOWN" sentinel from transition flagging, and
+# ``None`` padding for samples where the stream carried no reading.
+# See io.py:_insert_sample for where the None padding is produced.
+CORR_METADATA = {
+    "imu_panda": [_imu_avg_entry(0.001 * i) for i in range(NTIMES)],
+    "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
+    "temp_mon_a": [
+        _temp_channel_entry(30.0 + 0.01 * i, 1.0 + i) for i in range(NTIMES)
+    ],
+    "temp_mon_b": [
+        _temp_channel_entry(25.0 + 0.01 * i, 1.0 + i) for i in range(NTIMES)
+    ],
+    "rfswitch": (
+        [0] * 20  # steady state
+        + ["UNKNOWN"] * 5  # transition window
+        + [1] * 20  # new steady state
+        + [None] * 5  # sensor dropout (gap-fill pad in _insert_sample)
+        + [1] * 10  # recovery
+    ),
+}
+
+# VNA_METADATA mirrors the flat ``{key: value}`` dict returned by
+# ``EigsepRedis.get_live_metadata()`` — the snapshot path used by the VNA
+# code in ``PandaClient.measure_s11``. Values are whatever the producer
+# last pushed via ``add_metadata``:
+#   - picohost pushes the raw sensor dict for each sensor key
+#   - ``add_metadata`` auto-appends a ``{key}_ts`` ISO-8601 string
+#   - misc. scalars (e.g. ``corr_sync_time``) go in as floats
+# There is NO averaging on this path; unlike CORR_METADATA, values are
+# scalars or nested dicts, never per-sample lists.
+_SNAPSHOT_TS = "2026-04-07T12:34:56.789012+00:00"
+VNA_METADATA = {
+    "imu_panda": IMU_READING,
+    "imu_panda_ts": _SNAPSHOT_TS,
+    "lidar": {
+        "sensor_name": "lidar",
+        "status": "update",
+        "app_id": 4,
+        "distance_m": 1.52,
+    },
+    "lidar_ts": _SNAPSHOT_TS,
+    "temp_mon": {
+        "sensor_name": "temp_mon",
+        "app_id": 2,
+        "A_status": "update",
+        "A_temp": 42.5,
+        "A_timestamp": 1748734379.9,
+        "B_status": "update",
+        "B_temp": 18.0,
+        "B_timestamp": 1748734379.9,
+    },
+    "temp_mon_ts": _SNAPSHOT_TS,
+    "rfswitch": {
+        "sensor_name": "rfswitch",
+        "status": "update",
+        "app_id": 5,
+        "sw_state": 3,
+    },
+    "rfswitch_ts": _SNAPSHOT_TS,
+    "corr_sync_time": 1748732903.4203713,
+    "corr_sync_time_ts": _SNAPSHOT_TS,
+}
+
 S11_HEADER = {
     "fstart": 1e6,
     "fstop": 250e6,
@@ -88,6 +232,10 @@ S11_HEADER = {
     "power_dBm": 0,
     "freqs": np.linspace(1e6, 250e6, 1000),
     "mode": "ant",
+    # PandaClient.measure_s11 stamps this on the VNA file header so
+    # downstream can detect stale get_live_metadata snapshots. Included in
+    # the fixture so the test matches what production actually writes.
+    "metadata_snapshot_unix": 1748734379.905014,
 }
 
 
@@ -135,23 +283,85 @@ def test_reshape_data():
 
 
 def test_write_attr():
+    # Python natives + numpy scalars must all round-trip through attrs.
+    # 3.5 is exact in float32, so float32 → float64 round-trip is lossless.
     values = {
-        bool: True,
-        int: 42,
-        float: 3.14,
-        str: "test",
+        "bool_py": True,
+        "int_py": 42,
+        "float_py": 3.14,
+        "str_py": "test",
+        "bool_np": np.bool_(True),
+        "int8_np": np.int8(42),
+        "int64_np": np.int64(42),
+        "uint16_np": np.uint16(42),
+        "float32_np": np.float32(3.5),
+        "float64_np": np.float64(3.14),
     }
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = Path(tmpdir) / "test.h5"
         with h5py.File(fname, "w") as f:
             group = f.create_group("test_group")
-            for typ, value in values.items():
-                key = typ.__name__
+            for key, value in values.items():
                 io._write_attr(group, key, value)
+                # All numeric scalars compare equal across types.
                 assert group.attrs[key] == value
+            # All bool values stored as np.bool_ regardless of source.
+            assert group.attrs["bool_py"].dtype == np.bool_
+            assert group.attrs["bool_np"].dtype == np.bool_
+            # All int values stored as int64.
+            assert group.attrs["int_py"].dtype == np.int64
+            assert group.attrs["int8_np"].dtype == np.int64
+            # All float values stored as float64.
+            assert group.attrs["float_py"].dtype == np.float64
+            assert group.attrs["float32_np"].dtype == np.float64
             # write invalid type
             with pytest.raises(TypeError):
                 io._write_attr(group, "list", [1, 2, 3])
+
+
+def test_header_numpy_python_equivalence():
+    """Headers built with numpy scalars must be layout-equivalent to
+    headers built with Python natives. C1: numpy scalars route to
+    attrs (via _write_attr), not datasets — so header["nchan"] = 1024
+    and header["nchan"] = np.int64(1024) produce identical files."""
+    py_header = {
+        "nchan": 1024,
+        "sample_rate": 500e6,
+        "calibrated": True,
+        "name": "snap",
+    }
+    np_header = {
+        "nchan": np.int64(1024),
+        "sample_rate": np.float64(500e6),
+        "calibrated": np.bool_(True),
+        "name": "snap",
+    }
+
+    data = generate_data(reshape=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        py_path = Path(tmpdir) / "py.h5"
+        np_path = Path(tmpdir) / "np.h5"
+        io.write_hdf5(py_path, data, py_header)
+        io.write_hdf5(np_path, data, np_header)
+
+        # Both files must store the scalar header keys as attrs, not
+        # as datasets — this is the layout invariant the C1 fix enforces.
+        for path in (py_path, np_path):
+            with h5py.File(path, "r") as f:
+                hdr = f["header"]
+                for key in ("nchan", "sample_rate", "calibrated", "name"):
+                    assert key in hdr.attrs, (
+                        f"{path.name}: {key} should be an attr"
+                    )
+                    assert key not in hdr, (
+                        f"{path.name}: {key} should NOT be a dataset"
+                    )
+
+        # And the read-back header values must match across both.
+        _, py_read, _ = io.read_hdf5(py_path)
+        _, np_read, _ = io.read_hdf5(np_path)
+        for key in py_header:
+            assert py_read[key] == np_read[key], f"mismatch on {key}"
 
 
 def test_write_dataset():
@@ -224,18 +434,35 @@ def test_write_read_hdf5():
         compare_dicts(HEADER, read_header)
         assert read_meta == {}
 
-        # test with metadata
-        io.write_hdf5(filename, data, HEADER, metadata=METADATA)
+        # test with metadata — uses CORR_METADATA which mirrors what
+        # File.metadata holds after NTIMES averaged samples (per-stream
+        # lists of length NTIMES, with realistic gap-fill None entries
+        # and the rfswitch UNKNOWN sentinel). The list-of-dicts shape
+        # round-trips through write_hdf5 → read_hdf5 because
+        # _write_dataset JSON-encodes any non-numeric value and
+        # _read_dataset symmetrically JSON-decodes it. None ↔ null.
+        io.write_hdf5(filename, data, HEADER, metadata=CORR_METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
         compare_dicts(data, read_data)
         compare_dicts(HEADER, read_header)
-        compare_dicts(METADATA, read_meta)
+        compare_dicts(CORR_METADATA, read_meta)
 
-        # test with invalid type in header
+        # test with invalid type in header — write_hdf5 must NOT
+        # raise (corr data is sacred). Bad fields are skipped + logged
+        # and the rest of the file is written. See
+        # test_corr_data_saved_despite_bad_header_field below for the
+        # full sacred-data assertion.
         invalid_header = HEADER.copy()
-        invalid_header["bad"] = b"invalid"  # bytes not allowed
-        with pytest.raises(TypeError):
-            io.write_hdf5(filename, data, invalid_header)
+        invalid_header["bad"] = b"invalid"  # bytes → json.dumps fails
+        bad_filename = Path(tmpdir) / "test_bad.h5"
+        io.write_hdf5(bad_filename, data, invalid_header)
+        assert bad_filename.exists()
+        bad_read_data, bad_read_header, _ = io.read_hdf5(bad_filename)
+        # corr data still present
+        compare_dicts(data, bad_read_data)
+        # bad field skipped, other fields present
+        assert "bad" not in bad_read_header
+        assert "nchan" in bad_read_header
 
 
 def test_write_read_s11_file():
@@ -248,12 +475,15 @@ def test_write_read_s11_file():
         # might be off by a second, so we use glob to find the file
         # filename format is {mode}s11_{timestamp}.h5, where mode="ant" here
         assert len(list(Path(tmpdir).glob(f"ants11_{now[:-2]}*.h5"))) == 1
-        # create a filename manually
+        # create a filename manually — uses VNA_METADATA which mirrors
+        # the flat snapshot from get_live_metadata() that measure_s11
+        # actually writes. Unlike CORR_METADATA, values are scalars or
+        # nested sensor dicts rather than per-sample lists.
         filename = Path(tmpdir) / "test_s11.h5"
         io.write_s11_file(
             data,
             S11_HEADER,
-            metadata=METADATA,
+            metadata=VNA_METADATA,
             cal_data=cal_data,
             fname=filename,
         )
@@ -263,13 +493,13 @@ def test_write_read_s11_file():
         compare_dicts(data, read_data)
         compare_dicts(cal_data, read_cal_data)
         compare_dicts(S11_HEADER, read_header)
-        compare_dicts(METADATA, read_meta)
+        compare_dicts(VNA_METADATA, read_meta)
         # not absolute path
         filename = Path("test_relative.h5")
         io.write_s11_file(
             data,
             S11_HEADER,
-            metadata=METADATA,
+            metadata=VNA_METADATA,
             cal_data=cal_data,
             fname=filename,
             save_dir=tmpdir,
@@ -579,6 +809,91 @@ def test_avg_metadata():
     result = io.avg_metadata(imu_data)
     assert result["quat_i"] == pytest.approx(0.2)
     assert result["calibrated"] is True
+    # int-typed schema fields take the categorical path: they stay int
+    # (not float), and they take value[0] rather than np.mean. See the
+    # _avg_sensor_values docstring for the rationale.
+    assert result["app_id"] == 3
+    assert isinstance(result["app_id"], int)
+    assert result["accel_cal"] == 3
+    assert isinstance(result["accel_cal"], int)
+    assert result["mag_cal"] == 3
+    assert isinstance(result["mag_cal"], int)
+
+
+def test_avg_metadata_tempctrl_forwards_top_level_fields():
+    """tempctrl has top-level (non A_/B_-prefixed) fields like
+    watchdog_tripped (bool) and watchdog_timeout_ms (int) that earlier
+    versions of _avg_temp_metadata silently dropped because the helper
+    only enumerated A_/B_ keys. Lock in the fix: top-level fields must
+    survive into the averaged output, with types preserved per schema.
+    """
+    tc_data = [
+        {
+            "sensor_name": "tempctrl",
+            "app_id": 6,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "A_status": "update",
+            "A_T_now": 30.0,
+            "A_timestamp": 1.0,
+            "A_T_target": 25.0,
+            "A_drive_level": 0.5,
+            "A_enabled": True,
+            "A_active": True,
+            "A_int_disabled": False,
+            "A_hysteresis": 0.1,
+            "A_clamp": 1.0,
+            "B_status": "update",
+            "B_T_now": 32.0,
+            "B_timestamp": 2.0,
+            "B_T_target": 25.0,
+            "B_drive_level": 0.6,
+            "B_enabled": True,
+            "B_active": True,
+            "B_int_disabled": False,
+            "B_hysteresis": 0.1,
+            "B_clamp": 1.0,
+        },
+        {
+            "sensor_name": "tempctrl",
+            "app_id": 6,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "A_status": "update",
+            "A_T_now": 32.0,  # average with 30.0 → 31.0
+            "A_timestamp": 3.0,
+            "A_T_target": 25.0,
+            "A_drive_level": 0.5,
+            "A_enabled": True,
+            "A_active": True,
+            "A_int_disabled": False,
+            "A_hysteresis": 0.1,
+            "A_clamp": 1.0,
+            "B_status": "update",
+            "B_T_now": 32.0,
+            "B_timestamp": 4.0,
+            "B_T_target": 25.0,
+            "B_drive_level": 0.6,
+            "B_enabled": True,
+            "B_active": True,
+            "B_int_disabled": False,
+            "B_hysteresis": 0.1,
+            "B_clamp": 1.0,
+        },
+    ]
+    result = io.avg_metadata(tc_data)
+
+    # Top-level fields are forwarded with types preserved.
+    assert result["sensor_name"] == "tempctrl"
+    assert result["app_id"] == 6
+    assert isinstance(result["app_id"], int)
+    assert result["watchdog_tripped"] is False
+    assert result["watchdog_timeout_ms"] == 5000
+    assert isinstance(result["watchdog_timeout_ms"], int)
+
+    # A/B sub-dicts still produced and floats still averaged.
+    assert result["A"]["T_now"] == pytest.approx(31.0)
+    assert result["B"]["T_now"] == pytest.approx(32.0)
 
 
 def test_gap_fill_acc_cnts_linear():
@@ -763,6 +1078,119 @@ def test_temp_metadata_split():
         f.close()
 
 
+def test_metadata_end_to_end_round_trip():
+    """Contract test for the full producer → File → HDF5 → reader chain.
+
+    Drives ``File.add_data`` with raw stream-format metadata for every
+    sensor kind (IMU, lidar, temp_mon, rfswitch) across NTIMES samples,
+    lets the double-buffered writer flush the file, reads it back, and
+    asserts the metadata matches what CORR_METADATA predicts. This is
+    the guard rail that keeps:
+
+      producer emits stream dict
+        → avg_metadata averages / splits / normalizes
+        → _insert_sample accumulates per-sample list
+        → write_hdf5 JSON-encodes
+        → read_hdf5 JSON-decodes
+
+    consistent end-to-end. If any of these links drifts, the assertion
+    against CORR_METADATA fires. See CLAUDE.md "Testing philosophy".
+    """
+
+    def _stream_payload(i):
+        # Raw stream dicts shaped exactly like what picohost pushes to
+        # Redis. Numeric values vary per sample so avg_metadata has
+        # something to average (each integration averages a single
+        # reading here, which is degenerate but contract-identical).
+        return {
+            "stream:imu_panda": [
+                {**IMU_READING, "quat_i": 0.001 * i},
+            ],
+            "stream:lidar": [
+                {
+                    "sensor_name": "lidar",
+                    "status": "update",
+                    "app_id": 4,
+                    "distance_m": 1.5 + 0.001 * i,
+                },
+            ],
+            "stream:temp_mon": [
+                {
+                    "sensor_name": "temp_mon",
+                    "app_id": 2,
+                    "A_status": "update",
+                    "A_temp": 30.0 + 0.01 * i,
+                    "A_timestamp": 1.0 + i,
+                    "B_status": "update",
+                    "B_temp": 25.0 + 0.01 * i,
+                    "B_timestamp": 1.0 + i,
+                },
+            ],
+        }
+
+    def _rfswitch_payload(state):
+        return {
+            "stream:rfswitch": [
+                {
+                    "sensor_name": "rfswitch",
+                    "status": "update",
+                    "app_id": 5,
+                    "sw_state": state,
+                },
+            ],
+        }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        # Use int_time = 0.1s so the rfswitch transition window is 5
+        # samples — matches the pattern baked into CORR_METADATA's
+        # rfswitch list (20 steady · 5 UNKNOWN · 20 steady · 5 None · 10
+        # steady). With HEADER's default 1.0s window would be 1 and the
+        # pattern would not line up.
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(save_dir, pairs, NTIMES, cfg)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # Drive NTIMES samples. rfswitch is fed in a pattern that
+        # produces the same per-sample sequence as CORR_METADATA:
+        #   indices  0..19  → raw state 0
+        #   index    20     → raw state 1 (triggers window, flagged UNKNOWN)
+        #   indices 21..24  → state 1 still inside forward window → UNKNOWN
+        #   indices 25..44  → raw state 1 (window expired)
+        #   indices 45..49  → NO rfswitch stream at all → None pad
+        #   indices 50..59  → raw state 1
+        for i in range(NTIMES):
+            md = _stream_payload(i)
+            if i < 20:
+                md.update(_rfswitch_payload(0))
+            elif i < 45:
+                md.update(_rfswitch_payload(1))
+            elif i < 50:
+                pass  # no rfswitch → None pad
+            else:
+                md.update(_rfswitch_payload(1))
+            f.add_data(i + 1, 0.0, d, metadata=md)
+
+        # The active buffer was swapped to standby on the NTIMES-th
+        # add_data, so f.metadata is now empty — that's why we don't
+        # check the in-memory dict here. Flush the writer and read
+        # the file back.
+        f.close()
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1, f"expected one file, got {files}"
+        _data, _hdr, read_meta = io.read_hdf5(files[0])
+
+        # The read-back metadata also matches CORR_METADATA, proving
+        # the full round-trip (including JSON encode / decode of
+        # list-of-dicts with None gap-fill entries).
+        compare_dicts(CORR_METADATA, read_meta)
+
+
 def test_write_error_surfaced():
     """Verify _write_error is set on failure and logged on next write."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -856,6 +1284,65 @@ def test_avg_metadata_edge_cases():
     assert result["val"] == pytest.approx(2.0)
 
 
+# ----------------------------------------------------------------------
+# Phase 6 — Negative tests for the per-sensor averaging helpers.
+#
+# These functions are called inside the per-stream safety net in
+# add_data, which is designed to catch their exceptions and keep
+# corr data flowing. The contract here is that the helpers MUST
+# raise on malformed input — adding broad try/except inside them
+# would silently swallow producer bugs that the safety net is
+# supposed to surface as ERROR logs.
+#
+# These tests lock in the raise-don't-swallow contract so a future
+# refactor that "hardens" the helpers also has to update these
+# tests, which forces the conversation about whether the helper
+# should swallow or propagate.
+# ----------------------------------------------------------------------
+
+
+def test_avg_rfswitch_metadata_raises_on_unhashable_state():
+    """Unhashable sw_state (e.g., a list) trips the set() call →
+    TypeError. Must propagate to the safety net, not be swallowed."""
+    value = [
+        {
+            "sensor_name": "rfswitch",
+            "status": "update",
+            "app_id": 5,
+            "sw_state": [1, 2],
+        }
+    ]
+    with pytest.raises(TypeError):
+        io._avg_rfswitch_metadata(value)
+
+
+def test_avg_rfswitch_metadata_raises_on_non_dict_entry():
+    """A non-dict entry trips v.get('status') → AttributeError.
+    Must propagate."""
+    value = [
+        {
+            "sensor_name": "rfswitch",
+            "status": "update",
+            "app_id": 5,
+            "sw_state": 0,
+        },
+        "not a dict",
+    ]
+    with pytest.raises(AttributeError):
+        io._avg_rfswitch_metadata(value)
+
+
+def test_avg_temp_metadata_raises_on_non_dict_first_entry():
+    """A non-dict first entry trips value[0].get('app_id') →
+    AttributeError. Must propagate."""
+    with pytest.raises(AttributeError):
+        io._avg_temp_metadata(
+            ["not a dict"],
+            "temp_mon",
+            io.SENSOR_SCHEMAS["temp_mon"],
+        )
+
+
 def test_validate_metadata():
     """Test schema validation for sensor metadata."""
     schema = io.SENSOR_SCHEMAS["lidar"]
@@ -902,7 +1389,7 @@ def test_validate_metadata():
     assert "expected int" in violations[0]
 
 
-def test_avg_metadata_schema_violation_no_crash():
+def test_avg_metadata_schema_violation_no_crash(caplog):
     """Schema-violating data produces warnings but still returns."""
     # Data with extra key and missing keys — should warn, not crash
     bad_data = [
@@ -913,13 +1400,669 @@ def test_avg_metadata_schema_violation_no_crash():
             "bogus_field": 99.0,
         },
     ]
-    result = io.avg_metadata(bad_data)
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+        result = io.avg_metadata(bad_data)
     # Should still return a dict (best-effort from schema keys)
     assert isinstance(result, dict)
     # Schema key "distance_m" is missing from data, so should be None
     assert result["distance_m"] is None
     # Extra key "bogus_field" is not in schema, so not in result
     assert "bogus_field" not in result
+    # The validator should have warned about the schema violation —
+    # this locks in that avg_metadata actually invokes _validate_metadata
+    # and surfaces the contract issue (defense in depth on top of the
+    # best-effort result).
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(
+        "lidar" in w.getMessage() and "violation" in w.getMessage().lower()
+        for w in warnings
+    ), (
+        f"expected a contract-violation warning, got: {[w.getMessage() for w in warnings]}"
+    )
+
+
+def test_corr_data_saved_despite_metadata_crash(monkeypatch, caplog):
+    """Corr data must survive a metadata-processing exception.
+
+    Contract: corr data is sacred. Producer-side contract violations
+    that escape ``avg_metadata`` must be logged at ERROR level but
+    must not prevent the corr sample from being inserted or the file
+    from being written. The safety net is per-stream, so a crash on
+    one stream must not affect processing of a sibling stream.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        ntimes = 3
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+
+        # Make avg_metadata raise for the imu stream but succeed for
+        # rfswitch — verifies the safety net is per-stream, not a
+        # blanket catch around the whole metadata loop.
+        real_avg = io.avg_metadata
+
+        def picky(value):
+            if (
+                value
+                and isinstance(value[0], dict)
+                and value[0].get("sensor_name") == "imu_panda"
+            ):
+                raise RuntimeError("simulated producer contract violation")
+            return real_avg(value)
+
+        monkeypatch.setattr(io, "avg_metadata", picky)
+
+        md = {
+            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}],
+            "stream:rfswitch": [
+                {
+                    "sensor_name": "rfswitch",
+                    "status": "update",
+                    "app_id": 5,
+                    "sw_state": 7,
+                }
+            ],
+        }
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                # Must not raise — corr data is sacred.
+                f.add_data(i + 1, 0.0, d, metadata=md)
+
+        # Buffer was full → corr_write was called → counter reset.
+        assert f.counter == 0
+        f._write_queue.join()
+
+        # File was written despite the metadata crashes.
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+
+        read_data, _, read_meta = io.read_hdf5(files[0])
+        # Corr data is intact and matches what was passed in.
+        assert read_data["0"].shape[0] == ntimes
+        for i in range(ntimes):
+            assert np.all(read_data["0"][i] == i + 1)
+
+        # rfswitch processing succeeded despite imu crash —
+        # confirms the safety net is per-stream, not blanket.
+        assert "rfswitch" in read_meta
+        # imu_panda was never successfully processed → absent.
+        assert "imu_panda" not in read_meta
+
+        # An ERROR-level contract-violation log was emitted for each
+        # add_data call (so the producer bug is loudly visible).
+        contract_errors = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.ERROR
+            and "contract violation" in r.getMessage().lower()
+        ]
+        assert len(contract_errors) == ntimes
+
+        f.close()
+
+
+def test_add_data_data_none_logs_error_drops_sample(caplog):
+    """data=None is a producer contract violation: drop + ERROR."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        f = io.File(save_dir, ["0"], 5, HEADER)
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f.add_data(1, 0.0, None)
+
+        # Sample dropped (nothing to save).
+        assert f.counter == 0
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        msg = errors[0].getMessage()
+        assert "data is None" in msg
+        assert "contract violation" in msg.lower()
+
+        f.close()
+
+
+def test_add_data_acc_cnt_none_stores_nan_saves_sample(caplog):
+    """acc_cnt=None: keep the sample, store NaN, log ERROR loudly.
+
+    Corr data is sacred — a broken acc_cnt must not cost us the
+    spectrum. The NaN sentinel preserves the data and gives downstream
+    an unambiguous signal that the timestamp is unknown.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 5
+        f = io.File(save_dir, ["0"], ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 7, dtype=dtype)}
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f.add_data(None, 0.0, d)
+
+        # Sample saved (counter advanced — A1 from the design discussion).
+        assert f.counter == 1
+        assert np.isnan(f.acc_cnts[0])
+        np.testing.assert_array_equal(f.data["0"][0], d["0"])
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        msg = errors[0].getMessage()
+        assert "acc_cnt is None" in msg
+        assert "contract violation" in msg.lower()
+
+        # Subsequent valid sample is inserted normally; the NaN
+        # _prev_cnt suppresses gap-fill across the boundary, which is
+        # the documented tradeoff.
+        d2 = {"0": np.full(spec_len, 8, dtype=dtype)}
+        f.add_data(10, 0.0, d2)
+        assert f.counter == 2
+        assert f.acc_cnts[1] == 10
+        np.testing.assert_array_equal(f.data["0"][1], d2["0"])
+
+        f.close()
+
+
+def test_add_data_malformed_metadata_shape_logs_error(caplog):
+    """Malformed metadata shape is a producer contract violation."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        f = io.File(save_dir, ["0"], 5, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        d = {"0": np.full(spec_len, 1, dtype=np.dtype(HEADER["dtype"]))}
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            # Pass a string instead of a list of dicts — bad shape.
+            f.add_data(1, 0.0, d, metadata={"stream:imu_panda": "not a list"})
+
+        # Corr data still saved despite the bad metadata.
+        assert f.counter == 1
+        # The bad stream is dropped from the active metadata.
+        assert "imu_panda" not in f.metadata
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "imu_panda" in e.getMessage()
+            and "non-empty list" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected a producer-contract-violation log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_close_logs_pending_write_error(caplog):
+    """close() must surface any pending _write_error so the operator
+    sees end-of-run failures even if no further add_data ever runs."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        f = io.File(save_dir, ["0"], ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # Force the write to fail by making the directory read-only.
+        os.chmod(save_dir, stat.S_IRUSR | stat.S_IXUSR)
+        try:
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                f.add_data(i + 1, 0.0, d)
+            f._write_queue.join()
+            assert f._write_error is not None
+
+            with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+                f.close()
+        finally:
+            os.chmod(
+                save_dir,
+                stat.S_IRWXU | stat.S_IRWXG | stat.S_IRWXO,
+            )
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "shutdown" in e.getMessage().lower()
+            and "write error" in e.getMessage().lower()
+            for e in errors
+        ), (
+            f"expected a shutdown write-error log, got: {[e.getMessage() for e in errors]}"
+        )
+
+
+def test_validate_corr_header():
+    """Schema validation returns descriptive violations, no exceptions."""
+    valid = {
+        "acc_bins": 2,
+        "nchan": 1024,
+        "dtype": ">i4",
+        "integration_time": 0.1,
+        "sample_rate": 500.0,  # MHz
+    }
+    assert io._validate_corr_header(valid) == []
+
+    # missing key
+    bad = {k: v for k, v in valid.items() if k != "integration_time"}
+    violations = io._validate_corr_header(bad)
+    assert len(violations) == 1
+    assert "integration_time" in violations[0]
+    assert "missing" in violations[0]
+
+    # wrong type
+    bad = {**valid, "sample_rate": "fast"}
+    violations = io._validate_corr_header(bad)
+    assert len(violations) == 1
+    assert "sample_rate" in violations[0]
+    assert "expected float" in violations[0]
+
+    # int accepted for float field
+    assert (
+        io._validate_corr_header({**valid, "sample_rate": 500_000_000}) == []
+    )
+    # numpy scalar accepted
+    assert io._validate_corr_header({**valid, "nchan": np.int64(1024)}) == []
+
+    # bool not accepted as int
+    violations = io._validate_corr_header({**valid, "acc_bins": True})
+    assert any("acc_bins" in v and "expected int" in v for v in violations)
+
+    # unparseable dtype
+    violations = io._validate_corr_header({**valid, "dtype": "not-a-dtype"})
+    assert any("dtype" in v and "cannot parse" in v for v in violations)
+
+
+def test_set_header_logs_on_bad_header_no_raise(caplog):
+    """set_header logs ERROR per CORR_HEADER_SCHEMA violation but
+    must NOT raise — corr data is sacred and a header bug must not
+    stop the script."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        bad_cfg = HEADER.copy()
+        del bad_cfg["integration_time"]
+        bad_cfg["sample_rate"] = "not a number"
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f = io.File(tmpdir, ["0"], 5, bad_cfg)
+
+        # Construction succeeded.
+        assert f._writer_thread.is_alive()
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "integration_time" in e.getMessage()
+            and "missing" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected missing-integration_time log, got: {[e.getMessage() for e in errors]}"
+        )
+        assert any(
+            "sample_rate" in e.getMessage()
+            and "expected float" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected wrong-type sample_rate log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_corr_data_saved_despite_missing_integration_time(caplog):
+    """A header missing integration_time must not block the
+    corr-data write. The 'times' field is omitted with an ERROR log;
+    everything else is intact."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        bad_cfg = HEADER.copy()
+        del bad_cfg["integration_time"]
+        f = io.File(save_dir, ["0"], ntimes, bad_cfg)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                f.add_data(i + 1, 0.0, d)
+            f._write_queue.join()
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+
+        read_data, read_header, _ = io.read_hdf5(files[0])
+        # Corr data intact.
+        assert read_data["0"].shape[0] == ntimes
+        for i in range(ntimes):
+            assert np.all(read_data["0"][i] == i + 1)
+        # 'times' could not be computed → omitted from the file.
+        assert "times" not in read_header
+        # 'freqs' is independent (uses sample_rate + nchan) → still present.
+        assert "freqs" in read_header
+
+        # ERROR log naming the failing computation.
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "times" in e.getMessage()
+            and "Header contract violation" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected a 'times' contract-violation log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_corr_data_saved_despite_bad_header_field(caplog):
+    """A header field whose value can't be serialized must not block
+    the corr-data write. The bad field is logged + skipped; the rest
+    of the header and the corr data are saved."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        f = io.File(save_dir, ["0"], ntimes, HEADER)
+        # Inject a header field that breaks _write_header_item:
+        # bytes routes to _write_dataset → json.dumps(bytes) → TypeError.
+        f.header["unwriteable"] = b"bad"
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                f.add_data(i + 1, 0.0, d)
+            f._write_queue.join()
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+
+        read_data, read_header, _ = io.read_hdf5(files[0])
+        # Corr data intact.
+        assert read_data["0"].shape[0] == ntimes
+        for i in range(ntimes):
+            assert np.all(read_data["0"][i] == i + 1)
+        # Bad field skipped, other fields present.
+        assert "unwriteable" not in read_header
+        assert "nchan" in read_header
+        assert "freqs" in read_header
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "unwriteable" in e.getMessage()
+            and "Header contract violation" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected a header-contract-violation log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_partial_sample_missing_pair_logs_error_saves_others(caplog):
+    """A SNAP batch missing one pair must not cost us the other pairs.
+    Per-pair contract violation: log ERROR, leave the missing pair's
+    slot at zero, save the other pairs, advance counter."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 5
+        f = io.File(save_dir, ["0", "1"], ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # Sample missing pair "1" entirely.
+        partial_data = {"0": np.full(spec_len, 7, dtype=dtype)}
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f.add_data(1, 0.0, partial_data)
+
+        # Sample inserted; counter advanced.
+        assert f.counter == 1
+        # Pair 0 has its data.
+        np.testing.assert_array_equal(f.data["0"][0], partial_data["0"])
+        # Pair 1 is zero (visually distinguishable from real data).
+        np.testing.assert_array_equal(
+            f.data["1"][0], np.zeros(spec_len, dtype=dtype)
+        )
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "pair '1'" in e.getMessage()
+            and "contract violation" in e.getMessage().lower()
+            for e in errors
+        ), (
+            f"expected pair '1' contract-violation log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_partial_sample_wrong_shape_drops_pair_saves_others(caplog):
+    """A SNAP batch with one pair as a half-spectrum must drop that
+    pair wholesale (no half-spectra accepted) and save the others."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 5
+        f = io.File(save_dir, ["0", "1"], ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # Pair 0 has the wrong shape (half spectrum); pair 1 is fine.
+        bad_data = {
+            "0": np.full(spec_len // 2, 9, dtype=dtype),
+            "1": np.full(spec_len, 7, dtype=dtype),
+        }
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f.add_data(1, 0.0, bad_data)
+
+        # Sample inserted; counter advanced.
+        assert f.counter == 1
+        # Pair 0 dropped wholesale (not half-saved) → zero.
+        np.testing.assert_array_equal(
+            f.data["0"][0], np.zeros(spec_len, dtype=dtype)
+        )
+        # Pair 1 saved.
+        np.testing.assert_array_equal(f.data["1"][0], bad_data["1"])
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "pair '0'" in e.getMessage()
+            and "contract violation" in e.getMessage().lower()
+            for e in errors
+        ), (
+            f"expected pair '0' contract-violation log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        f.close()
+
+
+def test_corr_write_drops_buffer_on_writer_hang(caplog):
+    """When the writer thread is stuck, corr_write must time out
+    and drop the active buffer rather than block the data loop
+    forever. The script stays alive, _dropped_buffers is
+    incremented, and a loud ERROR is logged. After the writer
+    unblocks, subsequent writes proceed normally."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        # Aggressive timeout to keep the test fast.
+        f = io.File(save_dir, ["0"], ntimes, HEADER, writer_timeout=0.5)
+
+        # Block the writer inside _do_write on an event we control.
+        # We replace the bound method on the instance — the writer
+        # loop reads self._do_write at call time, so this takes
+        # effect immediately for any future writes.
+        unblock = threading.Event()
+        original_do_write = f._do_write
+
+        def blocked_do_write(*args, **kwargs):
+            unblock.wait(timeout=10)
+            return original_do_write(*args, **kwargs)
+
+        f._do_write = blocked_do_write
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # First buffer fill → enqueued, writer starts and blocks in
+        # blocked_do_write. _standby_ready is now cleared.
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+
+        # Second buffer fill → corr_write should hit the timeout
+        # and drop. The data loop must NOT block.
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, ntimes + i + 1, dtype=dtype)}
+                f.add_data(ntimes + i + 1, 0.0, d)
+
+        # Buffer dropped → counter reset, drop counter incremented.
+        assert f.counter == 0
+        assert f._dropped_buffers == 1
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "Writer thread blocked" in e.getMessage()
+            and "dropping buffer" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected a writer-hang drop log, got: {[e.getMessage() for e in errors]}"
+        )
+
+        # Release the writer; the first (still-pending) write
+        # completes and the writer becomes idle.
+        unblock.set()
+        f._write_queue.join()
+
+        # Third buffer → must write normally now that the writer
+        # is free. Recovery contract: no further drops AND the
+        # write hits disk.
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, 100 + i, dtype=dtype)}
+            f.add_data(2 * ntimes + i + 1, 0.0, d)
+        f._write_queue.join()
+
+        # Drop counter unchanged → third buffer was NOT dropped,
+        # the writer is healthy again.
+        assert f._dropped_buffers == 1
+        # Exactly 2 files on disk: the first batch (after unblock)
+        # and the third (post-recovery). The second was dropped.
+        # Phase 5b filename disambiguation ensures the two writes
+        # don't collide on the same second-resolution timestamp.
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 2
+
+        f.close()
+
+
+def test_close_logs_dropped_buffer_count(caplog):
+    """If any buffers were dropped during the run, close() must
+    surface the total at shutdown so the operator sees the loss."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        f = io.File(save_dir, ["0"], ntimes, HEADER, writer_timeout=0.3)
+
+        unblock = threading.Event()
+        original_do_write = f._do_write
+
+        def blocked_do_write(*args, **kwargs):
+            unblock.wait(timeout=10)
+            return original_do_write(*args, **kwargs)
+
+        f._do_write = blocked_do_write
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # First buffer → blocks the writer
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+        # Second buffer → dropped
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, ntimes + i + 1, dtype=dtype)}
+            f.add_data(ntimes + i + 1, 0.0, d)
+
+        assert f._dropped_buffers == 1
+
+        # Release and close.
+        unblock.set()
+        f._write_queue.join()
+
+        with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+            f.close()
+
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert any(
+            "Total buffers dropped" in e.getMessage() and "1" in e.getMessage()
+            for e in errors
+        ), (
+            f"expected a shutdown drop-count log, got: {[e.getMessage() for e in errors]}"
+        )
+
+
+def test_corr_filename_disambiguation_on_same_second_collision():
+    """When two corr writes hit the same second-resolution timestamp,
+    the second filename must be disambiguated with -1, -2, ... so
+    no data is silently overwritten. In production this almost never
+    happens (file_time is 60-240s), but it's still a real data-loss
+    risk and the fix is essentially free."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 2
+        f = io.File(save_dir, ["0"], ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+
+        # Three rapid back-to-back fills. With second-resolution
+        # timestamps these would all collide on the same filename
+        # without disambiguation. With disambiguation: 3 distinct
+        # files.
+        for batch in range(3):
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, batch + 1, dtype=dtype)}
+                f.add_data(batch * ntimes + i + 1, 0.0, d)
+            f._write_queue.join()
+
+        files = sorted(glob.glob(str(save_dir / "*.h5")))
+        assert len(files) == 3, f"expected 3 files, got: {files}"
+        # Filenames: corr_<ts>.h5, corr_<ts>-1.h5, corr_<ts>-2.h5
+        # (or with different timestamps if the test crossed a second
+        # boundary, in which case some won't have suffixes — both
+        # outcomes are correct).
+        names = [Path(p).name for p in files]
+        # All three filenames must be distinct (no overwrites).
+        assert len(set(names)) == 3
+
+        f.close()
+
+
+def test_s11_filename_disambiguation_on_same_second_collision():
+    """write_s11_file must also disambiguate same-second collisions
+    on auto-generated filenames (mirrors the corr fix)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data, _ = generate_s11_data(npoints=S11_HEADER["npoints"], cal=True)
+
+        # Two back-to-back writes with auto-generated names.
+        io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
+        io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
+        io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
+
+        files = sorted(glob.glob(str(Path(tmpdir) / "*.h5")))
+        assert len(files) == 3, f"expected 3 files, got: {files}"
+        names = [Path(p).name for p in files]
+        assert len(set(names)) == 3
 
 
 def test_close():
@@ -931,3 +2074,991 @@ def test_close():
         assert f._writer_thread.is_alive()
         f.close()
         assert not f._writer_thread.is_alive()
+
+
+# ----------------------------------------------------------------------
+# Phase 4b — Buffer/metadata invariant enforcement.
+#
+# Lock in the contracts that the per-pair safety net (and downstream
+# interpretation of "zero == dropped pair") depend on:
+#   - __init__ produces zero-filled buffers
+#   - reset() zeros buffers and clears metadata
+#   - corr_write swap leaves the new active buffer zero
+#   - After every add_data, every metadata key list has length ==
+#     counter (the 1:1 alignment invariant)
+# ----------------------------------------------------------------------
+
+
+def test_init_creates_zero_filled_buffers():
+    """File.__init__ must produce all-zero data buffers, empty
+    metadata, and counter=0. Locks in the contract the per-pair
+    safety net depends on."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0", "02"]  # one auto, one cross
+        ntimes = 10
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        assert f.counter == 0
+        assert len(f.metadata) == 0
+
+        dtype = np.dtype(HEADER["dtype"])
+        for p in pairs:
+            cross = len(p) > 1
+            expected_shape = io.data_shape(
+                ntimes, HEADER["acc_bins"], HEADER["nchan"], cross=cross
+            )
+            assert f.data[p].shape == expected_shape
+            assert f.data[p].dtype == dtype
+            np.testing.assert_array_equal(
+                f.data[p], np.zeros(expected_shape, dtype=dtype)
+            )
+
+        np.testing.assert_array_equal(f.acc_cnts, np.zeros(ntimes))
+        np.testing.assert_array_equal(f.sync_times, np.zeros(ntimes))
+
+        f.close()
+
+
+def test_reset_zeros_buffers_and_clears_metadata():
+    """File.reset() must restore __init__-equivalent state."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0"]
+        ntimes = 5
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 7, dtype=dtype)}
+        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+        f.add_data(1, 0.0, d, metadata=md)
+        f.add_data(2, 0.0, d, metadata=md)
+
+        # Sanity: state is dirty before reset.
+        assert f.counter == 2
+        assert len(f.metadata) > 0
+        assert not np.all(f.data["0"] == 0)
+
+        f.reset()
+
+        assert f.counter == 0
+        assert len(f.metadata) == 0
+        np.testing.assert_array_equal(f.data["0"], np.zeros_like(f.data["0"]))
+        np.testing.assert_array_equal(f.acc_cnts, np.zeros_like(f.acc_cnts))
+        np.testing.assert_array_equal(
+            f.sync_times, np.zeros_like(f.sync_times)
+        )
+
+        f.close()
+
+
+def test_swap_buffers_preserves_zero_invariant():
+    """After corr_write triggers a swap + reset, the new active
+    buffer must be zero-filled and metadata empty. The downstream
+    "zero == dropped pair" interpretation depends on this."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0"]
+        ntimes = 3
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+        f._write_queue.join()
+
+        # After the swap + reset, the active buffer is fresh.
+        assert f.counter == 0
+        assert len(f.metadata) == 0
+        np.testing.assert_array_equal(f.data["0"], np.zeros_like(f.data["0"]))
+
+        f.close()
+
+
+def test_metadata_invariant_after_normal_add_data():
+    """After normal add_data calls, every metadata key has a list
+    of length equal to counter (1:1 alignment)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0"]
+        ntimes = 10
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+
+        for i in range(3):
+            f.add_data(i + 1, 0.0, d, metadata=md)
+            for key, lst in f.metadata.items():
+                assert len(lst) == f.counter, (
+                    f"metadata['{key}'] length {len(lst)} != "
+                    f"counter {f.counter} after sample {i + 1}"
+                )
+
+        f.close()
+
+
+def test_metadata_invariant_after_dropped_pair():
+    """A per-pair drop must not break the metadata 1:1 alignment.
+    The sample is still inserted; metadata still tracks it."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0", "1"]
+        ntimes = 10
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        # Pair 1 missing — will be dropped + zeroed.
+        partial = {"0": np.full(spec_len, 1, dtype=dtype)}
+        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+
+        f.add_data(1, 0.0, partial, metadata=md)
+
+        assert f.counter == 1
+        for key, lst in f.metadata.items():
+            assert len(lst) == f.counter, (
+                f"metadata['{key}'] length {len(lst)} != counter "
+                f"{f.counter} after dropped-pair sample"
+            )
+
+        f.close()
+
+
+def test_metadata_invariant_after_gap_fill():
+    """A gap-fill burst (multiple synthetic samples in one add_data
+    call) must preserve the metadata 1:1 alignment AND fill the
+    synthetic positions with None — the documented "no reading at
+    this sample" sentinel that downstream consumers rely on."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0"]
+        ntimes = 100
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+
+        # First sample at acc_cnt=1.
+        f.add_data(1, 0.0, d, metadata=md)
+        # Jump to acc_cnt=20 → gap-fill 18 samples + insert 1 real.
+        f.add_data(20, 0.0, d, metadata=md)
+
+        assert f.counter == 20
+        for key, lst in f.metadata.items():
+            assert len(lst) == f.counter, (
+                f"metadata['{key}'] length {len(lst)} != counter "
+                f"{f.counter} after gap-fill"
+            )
+
+        # Filler invariant: gap-filled positions are None, real
+        # positions are not. Locks in the None sentinel against
+        # future drift to other values (0, "", {}, NaN, ...).
+        imu_list = f.metadata["imu_panda"]
+        assert imu_list[0] is not None  # real (acc_cnt=1)
+        for i in range(1, 19):
+            assert imu_list[i] is None, (
+                f"gap-filled imu_list[{i}] expected None, got {imu_list[i]!r}"
+            )
+        assert imu_list[19] is not None  # real (acc_cnt=20)
+
+        f.close()
+
+
+def test_metadata_filler_is_none_when_stream_appears_late():
+    """A metadata stream that first appears on sample N must be
+    back-filled with None for samples 0..N-1, NOT zero, empty
+    string, empty dict, or any other sentinel. Locks in the None
+    filler invariant explicitly so a future refactor can't silently
+    swap in a different sentinel."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pairs = ["0"]
+        ntimes = 5
+        f = io.File(tmpdir, pairs, ntimes, HEADER)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # First two samples with no metadata at all.
+        f.add_data(1, 0.0, d)
+        f.add_data(2, 0.0, d)
+        assert "imu_panda" not in f.metadata
+
+        # Third sample introduces imu_panda — back-fill must be None.
+        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.5}]}
+        f.add_data(3, 0.0, d, metadata=md)
+
+        assert f.counter == 3
+        imu_list = f.metadata["imu_panda"]
+        assert len(imu_list) == 3
+        assert imu_list[0] is None
+        assert imu_list[1] is None
+        assert imu_list[2] is not None
+        assert imu_list[2]["quat_i"] == pytest.approx(0.5)
+
+        f.close()
+
+
+# ----------------------------------------------------------------------
+# Phase 7 — Producer/fixture contract conformance tests.
+#
+# These tests bridge the schema validators to real producers, so any
+# future drift in either side fails CI immediately. This is the
+# difference between a "safety net test" (proves the consumer
+# survives) and a "contract enforcement test" (proves the producer
+# stays in spec). Both are needed; this section adds the latter.
+# ----------------------------------------------------------------------
+
+
+def test_test_header_conforms_to_corr_schema():
+    """The HEADER fixture used by every test in this file must
+    itself satisfy CORR_HEADER_SCHEMA. Catches drift in the fixture."""
+    assert io._validate_corr_header(HEADER) == []
+
+
+def test_test_imu_reading_conforms_to_imu_panda_schema():
+    """The IMU_READING fixture used by metadata tests must satisfy
+    the imu_panda schema. Catches drift in the fixture."""
+    assert (
+        io._validate_metadata(IMU_READING, io.SENSOR_SCHEMAS["imu_panda"])
+        == []
+    )
+
+
+def test_dummy_eigsep_fpga_header_conforms_to_corr_schema():
+    """The DummyEigsepFpga in eigsep_observing/testing must produce
+    a header that satisfies CORR_HEADER_SCHEMA. This is the consumer
+    asserting its contract on the producer side: any future change
+    to the dummy or to the schema that breaks conformance fails CI
+    immediately."""
+    fpga = DummyEigsepFpga(program=False)
+    violations = io._validate_corr_header(fpga.header)
+    assert violations == [], f"DummyEigsepFpga header drift: {violations}"
+
+
+def test_picohost_imu_emulator_conforms_to_schema():
+    """picohost.testing.ImuEmulator output must satisfy imu_panda
+    schema. Locks in the producer ↔ schema contract."""
+    reading = ImuEmulator().get_status()
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["imu_panda"]) == []
+
+
+def test_picohost_lidar_emulator_conforms_to_schema():
+    """picohost.testing.LidarEmulator output must satisfy lidar
+    schema."""
+    reading = LidarEmulator().get_status()
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["lidar"]) == []
+
+
+def test_picohost_tempmon_emulator_conforms_to_schema():
+    """picohost.testing.TempMonEmulator output must satisfy temp_mon
+    schema."""
+    reading = TempMonEmulator().get_status()
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["temp_mon"]) == []
+
+
+def test_picohost_tempctrl_emulator_conforms_to_schema():
+    """picohost.testing.TempCtrlEmulator output must satisfy tempctrl
+    schema."""
+    reading = TempCtrlEmulator().get_status()
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["tempctrl"]) == []
+
+
+def test_picohost_rfswitch_emulator_conforms_to_schemas():
+    """picohost.testing.RFSwitchWithImuEmulator returns a list of
+    two readings (imu_antenna + rfswitch) that must each validate
+    against their respective schemas."""
+    readings = RFSwitchWithImuEmulator().get_status()
+    assert isinstance(readings, list)
+    imu_reading = next(
+        r for r in readings if r["sensor_name"] == "imu_antenna"
+    )
+    rfsw_reading = next(r for r in readings if r["sensor_name"] == "rfswitch")
+    assert (
+        io._validate_metadata(imu_reading, io.SENSOR_SCHEMAS["imu_antenna"])
+        == []
+    )
+    assert (
+        io._validate_metadata(rfsw_reading, io.SENSOR_SCHEMAS["rfswitch"])
+        == []
+    )
+
+
+def test_dummy_fpga_header_round_trips_through_file():
+    """End-to-end contract enforcement: a DummyEigsepFpga header
+    flows through File → corr_write → read_hdf5, and the read-back
+    header still satisfies CORR_HEADER_SCHEMA. Catches drift between
+    the producer, the file format, and the schema all at once — the
+    most load-bearing conformance test in the suite."""
+    fpga = DummyEigsepFpga(program=False)
+    cfg = fpga.cfg
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        f = io.File(save_dir, ["0"], ntimes, cfg)
+
+        spec_len = io.data_shape(1, cfg["acc_bins"], cfg["nchan"])[1]
+        dtype = np.dtype(cfg["dtype"])
+        for i in range(ntimes):
+            d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+            f.add_data(i + 1, 0.0, d)
+        f._write_queue.join()
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+        _, read_header, _ = io.read_hdf5(files[0])
+
+        violations = io._validate_corr_header(read_header)
+        assert violations == [], f"round-trip header drift: {violations}"
+
+        f.close()
+
+
+# Production correlation pair lists. CURRENT is what corr_config.yaml
+# ships today (12 pairs). FUTURE is what the upcoming firmware change
+# will produce after the main antenna becomes single-pol (11 pairs:
+# 5 autos with input 1 dropped + 6 crosses involving input 0 with all
+# others, plus the existing matched-pol aux-aux crosses). The test
+# below is parametrized over both so the contract is locked in for
+# the migration window. See issue #35 — when the firmware change
+# lands, drop PRODUCTION_PAIRS_CURRENT and the future case becomes
+# the new baseline.
+PRODUCTION_PAIRS_CURRENT = [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "02",
+    "04",
+    "13",
+    "15",
+    "24",
+    "35",
+]
+PRODUCTION_PAIRS_FUTURE = [
+    "0",
+    "2",
+    "3",
+    "4",
+    "5",
+    "02",
+    "03",
+    "04",
+    "05",
+    "24",
+    "35",
+]
+
+
+@pytest.mark.parametrize(
+    "pairs,expected_count",
+    [
+        (PRODUCTION_PAIRS_CURRENT, 12),
+        (PRODUCTION_PAIRS_FUTURE, 11),
+    ],
+    ids=["current_12", "future_11"],
+)
+def test_file_writes_all_configured_pairs_with_aligned_axes(
+    pairs, expected_count
+):
+    """Every configured correlation pair must end up in the written
+    file with a per-sample length matching every other per-sample
+    axis (acc_cnt, times, every metadata stream).
+
+    Three contracts in one test:
+      1. **No missing pairs:** every entry in the configured pairs
+         list appears as a dataset in the read file.
+      2. **No extra pairs:** the file contains exactly the
+         configured pairs, nothing else.
+      3. **Equal length on the time axis:** data per pair, header
+         acc_cnt, header times, and every metadata stream all have
+         the same first-axis length (== ntimes for full files).
+
+    Parametrized over the current 12-pair and upcoming 11-pair
+    layouts so the contract holds across the migration. The
+    expected_count sanity check catches silent config drift in
+    either direction.
+    """
+    assert len(pairs) == expected_count, (
+        f"PRODUCTION_PAIRS_* drifted: expected {expected_count} pairs, "
+        f"got {len(pairs)}. If this is intentional, update the test."
+    )
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 5
+        f = io.File(save_dir, pairs, ntimes, HEADER)
+
+        dtype = np.dtype(HEADER["dtype"])
+        nchan = HEADER["nchan"]
+        acc_bins = HEADER["acc_bins"]
+        rng = np.random.default_rng(2026)
+
+        # Synthesize one full buffer's worth of samples. We don't
+        # use generate_data() because it's hardcoded to the current
+        # 12-pair layout — see issue #35.
+        md_template = {
+            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}],
+            "stream:rfswitch": [
+                {
+                    "sensor_name": "rfswitch",
+                    "status": "update",
+                    "app_id": 5,
+                    "sw_state": 0,
+                }
+            ],
+        }
+        for i in range(ntimes):
+            sample = {}
+            for p in pairs:
+                spec_len = io.data_shape(1, acc_bins, nchan, cross=len(p) > 1)[
+                    1
+                ]
+                sample[p] = rng.integers(
+                    0, 1000, size=spec_len, dtype="=i4"
+                ).astype(dtype)
+            f.add_data(i + 1, 0.0, sample, metadata=md_template)
+        f._write_queue.join()
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1
+        read_data, read_header, read_meta = io.read_hdf5(files[0])
+
+        # Contract 1 + 2: read_data contains exactly the configured
+        # pairs — no missing, no extras.
+        assert set(read_data.keys()) == set(pairs), (
+            f"pair set mismatch — missing: {set(pairs) - set(read_data)}, "
+            f"extra: {set(read_data) - set(pairs)}"
+        )
+
+        # Contract 3: equal length on the time axis everywhere.
+        for p in pairs:
+            assert read_data[p].shape[0] == ntimes, (
+                f"pair {p!r}: data length {read_data[p].shape[0]} "
+                f"!= ntimes {ntimes}"
+            )
+        assert len(read_header["acc_cnt"]) == ntimes, (
+            f"header acc_cnt length {len(read_header['acc_cnt'])} "
+            f"!= ntimes {ntimes}"
+        )
+        assert len(read_header["times"]) == ntimes, (
+            f"header times length {len(read_header['times'])} "
+            f"!= ntimes {ntimes}"
+        )
+        for key, vals in read_meta.items():
+            assert len(vals) == ntimes, (
+                f"metadata key {key!r}: length {len(vals)} != ntimes {ntimes}"
+            )
+
+        # Sanity: autos and crosses should each have a consistent
+        # frequency-axis length within their type.
+        autos = [p for p in pairs if len(p) == 1]
+        crosses = [p for p in pairs if len(p) == 2]
+        if autos:
+            auto_freq_len = read_data[autos[0]].shape[1]
+            for p in autos:
+                assert read_data[p].shape[1] == auto_freq_len, (
+                    f"auto pair {p!r}: freq length "
+                    f"{read_data[p].shape[1]} != {auto_freq_len}"
+                )
+        if crosses:
+            cross_freq_len = read_data[crosses[0]].shape[1]
+            for p in crosses:
+                assert read_data[p].shape[1] == cross_freq_len, (
+                    f"cross pair {p!r}: freq length "
+                    f"{read_data[p].shape[1]} != {cross_freq_len}"
+                )
+
+        f.close()
+
+
+# ----------------------------------------------------------------------
+# Phase 9 — VNA / S11 write contracts.
+#
+# Constraints:
+#   1. VNA data is written when it arrives (synchronous in
+#      record_vna_data, no buffering).
+#   2. The file contains the DUT measurement (antenna/noise/load or
+#      receiver) AND the OSL calibration data.
+#   3. The file contains relevant metadata.
+#   4. A hung VNA write must not block the corr-write path.
+#
+# The production VNA path (PandaClient.execute_vna at client.py:
+# 381-382) bundles cal data INTO the data dict with a 'cal:' prefix
+# rather than passing it via the explicit cal_data kwarg of
+# write_s11_file. The first test below exercises that exact flow.
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "dut_keys,mode",
+    [
+        (["ant", "noise", "load"], "ant"),
+        (["rec"], "rec"),
+    ],
+    ids=["ant_mode", "rec_mode"],
+)
+def test_vna_production_path_writes_dut_cal_and_metadata(dut_keys, mode):
+    """Locks in the actual production VNA flow:
+    PandaClient.execute_vna bundles cal:OSL data into the data dict
+    with 'cal:' prefix and ships it through the redis stream as one
+    flat dict. record_vna_data reads it and calls write_s11_file
+    WITHOUT the explicit cal_data kwarg. The file format must split
+    DUT vs cal correctly on read, and metadata must round-trip."""
+    npoints = 100
+    rng = np.random.default_rng(2026)
+
+    # Build the data dict the way client.py:381-387 does:
+    # DUT measurements + cal:open/cal:short/cal:load all in one dict.
+    s11 = {}
+    for k in dut_keys:
+        s11[k] = rng.normal(size=npoints) + 1j * rng.normal(size=npoints)
+    for cal_key in ("open", "short", "load"):
+        s11[f"cal:{cal_key}"] = rng.normal(size=npoints) + 1j * rng.normal(
+            size=npoints
+        )
+
+    # PandaClient.execute_vna stamps metadata_snapshot_unix right
+    # before get_live_metadata() so downstream can sanity-check that
+    # the metadata snapshot is contemporaneous with the VNA.
+    snapshot_t = time.time()
+    header = {
+        **S11_HEADER,
+        "mode": mode,
+        "freqs": np.linspace(1e6, 250e6, npoints),
+        "npoints": npoints,
+        "metadata_snapshot_unix": snapshot_t,
+    }
+    metadata = {
+        "imu_panda": {**IMU_READING, "quat_i": 0.5},
+        "rfswitch": 7,
+    }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        # Note: cal_data kwarg deliberately NOT passed — the cal
+        # data is already embedded in s11 with cal: prefixes,
+        # mirroring the production code path.
+        io.write_s11_file(s11, header, metadata=metadata, save_dir=save_dir)
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1, f"expected 1 file, got: {files}"
+
+        read_data, read_cal, read_header, read_meta = io.read_s11_file(
+            files[0]
+        )
+
+        # DUT data is in the data section (no cal: prefix leaked).
+        for k in dut_keys:
+            assert k in read_data, f"DUT key {k!r} missing from read_data"
+            np.testing.assert_array_equal(read_data[k], s11[k])
+        for k in read_data.keys():
+            assert not k.startswith("cal:"), (
+                f"cal-prefixed key {k!r} leaked into read_data"
+            )
+        assert set(read_data.keys()) == set(dut_keys), (
+            f"read_data keys {set(read_data)} != DUT keys {set(dut_keys)}"
+        )
+
+        # OSL cal data is in cal_data with the prefix stripped.
+        for cal_key in ("open", "short", "load"):
+            assert cal_key in read_cal, (
+                f"cal key {cal_key!r} missing from read_cal"
+            )
+            np.testing.assert_array_equal(
+                read_cal[cal_key], s11[f"cal:{cal_key}"]
+            )
+        assert set(read_cal.keys()) == {"open", "short", "load"}
+
+        # Header preserved (mode, freqs, npoints, fstart, etc.).
+        assert read_header["mode"] == mode
+        assert read_header["fstart"] == header["fstart"]
+        assert read_header["npoints"] == npoints
+        np.testing.assert_array_equal(read_header["freqs"], header["freqs"])
+        # metadata_snapshot_unix round-trips and is the value we set.
+        assert read_header["metadata_snapshot_unix"] == pytest.approx(
+            snapshot_t
+        )
+
+        # Metadata round-tripped including the nested IMU dict.
+        assert read_meta["rfswitch"] == 7
+        assert read_meta["imu_panda"]["quat_i"] == pytest.approx(0.5)
+        assert read_meta["imu_panda"]["calibrated"] is True
+
+
+def test_corr_write_independent_of_hung_vna_write(monkeypatch):
+    """A hung VNA write in a sibling thread must not block the corr
+    write path. Locks in that the two paths share no Python-level
+    synchronization — corr proceeds even when the VNA path is stuck.
+
+    Note: this verifies Python-level independence (no shared locks,
+    queues, or globals between corr and VNA writes). It does not
+    exercise h5py's internal global mutex, which can serialize
+    *file open* across threads in some builds. In production, real
+    VNA writes are sub-second so any h5py serialization is bounded;
+    a truly hung VNA file write is the failure mode this test
+    simulates."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        vna_dir = save_dir / "vna"
+        vna_dir.mkdir()
+
+        ntimes = 3
+        f = io.File(save_dir, ["0"], ntimes, HEADER)
+
+        # Patch write_hdf5 to hang only on s11 paths. Corr writes
+        # use temp filenames like /tmp/.../tmpXXX.h5.tmp (no "s11"),
+        # so they fall through to the original.
+        original_write_hdf5 = io.write_hdf5
+        vna_unblock = threading.Event()
+        vna_started = threading.Event()
+
+        def hanging_write_hdf5(fname, *args, **kwargs):
+            if "s11" in str(fname):
+                vna_started.set()
+                vna_unblock.wait(timeout=10)
+            return original_write_hdf5(fname, *args, **kwargs)
+
+        monkeypatch.setattr(io, "write_hdf5", hanging_write_hdf5)
+
+        # Spawn the VNA write in a daemon thread; it will hang
+        # inside hanging_write_hdf5 until vna_unblock is set.
+        vna_data = generate_s11_data(npoints=100, cal=False)
+        vna_thd = threading.Thread(
+            target=io.write_s11_file,
+            args=(vna_data, S11_HEADER),
+            kwargs={"save_dir": vna_dir},
+            daemon=True,
+        )
+        vna_thd.start()
+
+        try:
+            # Confirm the VNA write actually reached the hang point.
+            assert vna_started.wait(timeout=2), (
+                "VNA write didn't start — test setup is broken"
+            )
+
+            # Run a full corr buffer fill while the VNA write is
+            # hung. This must not block.
+            spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+            dtype = np.dtype(HEADER["dtype"])
+
+            t_start = time.monotonic()
+            for i in range(ntimes):
+                d = {"0": np.full(spec_len, i + 1, dtype=dtype)}
+                f.add_data(i + 1, 0.0, d)
+            f._write_queue.join()
+            elapsed = time.monotonic() - t_start
+
+            # Corr file written despite the hung sibling VNA write.
+            corr_files = glob.glob(str(save_dir / "corr_*.h5"))
+            assert len(corr_files) == 1, (
+                f"expected 1 corr file, got: {corr_files}"
+            )
+
+            # And the corr write completed quickly — it didn't sit
+            # waiting on the hung VNA path.
+            assert elapsed < 5.0, (
+                f"corr write took {elapsed:.2f}s while VNA was hung; "
+                f"likely blocked on shared state"
+            )
+        finally:
+            vna_unblock.set()
+            vna_thd.join(timeout=5)
+            f.close()
+
+
+# ----------------------------------------------------------------------
+# Phase 11 — RF switch transition window.
+#
+# The pico reports the COMMANDED switch state synchronously when it
+# receives a switch command, but the physical actuation takes ~200ms
+# and the pico has no way to know when it actually finished. So when
+# consecutive samples disagree on switch state, the data in the new
+# sample (and possibly the next few, depending on integration time)
+# could be contaminated by the transition. We flag a forward window
+# of samples as UNKNOWN to cover the contamination — never mutate
+# previously-written data, never go back to old files.
+#
+# Window = ceil(RFSWITCH_TRANSITION_WINDOW_S / integration_time)
+# samples, with a minimum of 1.
+# ----------------------------------------------------------------------
+
+
+def _make_rfswitch_md(state):
+    """Build a stream:rfswitch metadata dict with a single update
+    reading at the given switch state."""
+    return {
+        "stream:rfswitch": [
+            {
+                "sensor_name": "rfswitch",
+                "status": "update",
+                "app_id": 5,
+                "sw_state": state,
+            }
+        ]
+    }
+
+
+def test_rfswitch_transition_within_buffer_flags_forward_window(caplog):
+    """When two consecutive samples have different switch states,
+    the new sample (and the next ceil(0.5/int_time) - 1 samples)
+    are flagged UNKNOWN. The OLD sample is left untouched per the
+    forward-only design."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ntimes = 10
+        # Override int_time → 0.1s so the flagging window is
+        # ceil(0.5/0.1) = 5 samples. HEADER's INTEGRATION_TIME (1.0s)
+        # would give a window of 1, which doesn't exercise multi-sample
+        # forward flagging.
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(tmpdir, ["0"], ntimes, cfg)
+
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # Two samples in state 0 (no transition).
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(0))
+        # Now switch to state 1 — transition.
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+            f.add_data(3, 0.0, d, metadata=_make_rfswitch_md(1))
+        # Continue feeding state 1 samples — need enough to outlast
+        # the 5-sample flagging window AND have a couple of clean
+        # samples after. Total: 9 samples in a 10-slot buffer.
+        for i in range(4, 10):
+            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(1))
+
+        # The first two samples (state 0) are unchanged.
+        assert f.metadata["rfswitch"][0] == 0
+        assert f.metadata["rfswitch"][1] == 0
+        # Sample 3 (index 2) is the transition trigger — flagged.
+        # Window = ceil(0.5 / 0.1) = 5, so indices 2, 3, 4, 5, 6 are
+        # flagged UNKNOWN.
+        for i in range(2, 7):
+            assert f.metadata["rfswitch"][i] == "UNKNOWN", (
+                f"index {i} expected UNKNOWN, got {f.metadata['rfswitch'][i]!r}"
+            )
+        # Indices 7 and 8 are back to the new state.
+        assert f.metadata["rfswitch"][7] == 1
+        assert f.metadata["rfswitch"][8] == 1
+
+        # WARNING log was emitted.
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any(
+            "transition detected" in w.getMessage() and "0→1" in w.getMessage()
+            for w in warnings
+        ), (
+            f"expected transition WARNING, got: {[w.getMessage() for w in warnings]}"
+        )
+
+        f.close()
+
+
+def test_rfswitch_no_transition_no_flagging(caplog):
+    """Consecutive samples with the same switch state must not
+    trigger any flagging or warnings."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        f = io.File(tmpdir, ["0"], 10, HEADER)
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+            for i in range(5):
+                f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md(3))
+
+        # All five samples carry the raw state, no UNKNOWN.
+        for i in range(5):
+            assert f.metadata["rfswitch"][i] == 3
+
+        # No transition WARNING.
+        assert not any(
+            "transition detected" in w.getMessage()
+            for w in caplog.records
+            if w.levelno == logging.WARNING
+        )
+
+        f.close()
+
+
+def test_rfswitch_transition_at_buffer_boundary_flags_only_new_buffer():
+    """A transition that straddles a buffer boundary flags samples
+    in the NEW buffer only — the previous buffer (already swapped
+    to standby and being written) is never touched per the
+    forward-only design. Locks in: never mutate previously-written
+    data, never touch a previous file."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        ntimes = 3
+        # Use 1.0s int_time so the flagging window is exactly 1
+        # sample — keeps the buffer arithmetic simple.
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 1.0
+        f = io.File(save_dir, ["0"], ntimes, cfg)
+        spec_len = io.data_shape(1, cfg["acc_bins"], cfg["nchan"])[1]
+        dtype = np.dtype(cfg["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # Fill the first buffer entirely with state 0. The 3rd
+        # sample triggers corr_write → swap → reset.
+        for i in range(ntimes):
+            f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md(0))
+        f._write_queue.join()
+
+        # The first file is on disk with all state 0.
+        files_before = sorted(glob.glob(str(save_dir / "*.h5")))
+        assert len(files_before) == 1
+        _, _, first_meta_before = io.read_hdf5(files_before[0])
+        for v in first_meta_before["rfswitch"]:
+            assert v == 0
+
+        # Now add the FIRST sample of the second buffer with state 1.
+        # _prev_rfswitch_state survived the buffer swap, so this
+        # triggers a cross-boundary transition detection. Window=1
+        # at this int_time, so only this one sample is flagged.
+        f.add_data(ntimes + 1, 0.0, d, metadata=_make_rfswitch_md(1))
+
+        # Active buffer's first sample is UNKNOWN (forward flag).
+        assert f.metadata["rfswitch"][0] == "UNKNOWN"
+
+        # The first file on disk is UNCHANGED — never touched by
+        # the cross-boundary detection.
+        files_after = sorted(glob.glob(str(save_dir / "*.h5")))
+        assert files_after == files_before
+        _, _, first_meta_after = io.read_hdf5(files_after[0])
+        # Same content as before the transition was detected.
+        np.testing.assert_array_equal(
+            first_meta_after["rfswitch"], first_meta_before["rfswitch"]
+        )
+
+        f.close()
+
+
+def test_rfswitch_transition_window_scales_with_integration_time(caplog):
+    """The number of samples flagged is ceil(0.5s / integration_time),
+    minimum 1. Verify against several integration times."""
+    cases = [
+        (1.0, 1),  # ceil(0.5/1.0) = 1
+        (0.5, 1),  # ceil(0.5/0.5) = 1
+        (0.25, 2),  # ceil(0.5/0.25) = 2
+        (0.1, 5),  # ceil(0.5/0.1) = 5
+    ]
+    for int_time, expected_n in cases:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = HEADER.copy()
+            cfg["integration_time"] = int_time
+            ntimes = expected_n + 5
+            f = io.File(tmpdir, ["0"], ntimes, cfg)
+            spec_len = io.data_shape(1, cfg["acc_bins"], cfg["nchan"])[1]
+            dtype = np.dtype(cfg["dtype"])
+            d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+            # Anchor with state 0, then transition to state 1.
+            f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+            for i in range(2, 2 + expected_n + 2):
+                f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(1))
+
+            # Index 0 is state 0 (anchor).
+            assert f.metadata["rfswitch"][0] == 0
+            # Indices 1..expected_n are flagged UNKNOWN.
+            for i in range(1, 1 + expected_n):
+                assert f.metadata["rfswitch"][i] == "UNKNOWN", (
+                    f"int_time={int_time}: index {i} expected UNKNOWN, "
+                    f"got {f.metadata['rfswitch'][i]!r}"
+                )
+            # The next sample (after the window) is back to state 1.
+            assert f.metadata["rfswitch"][1 + expected_n] == 1, (
+                f"int_time={int_time}: window did not end at "
+                f"expected index {1 + expected_n}"
+            )
+
+            f.close()
+
+
+def test_rfswitch_missing_reading_mid_window_still_flagged():
+    """If a sample inside the transition window has no rfswitch
+    reading at all, it must still be flagged UNKNOWN — the corr
+    data is contaminated regardless of whether the switch was
+    reported on that integration."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Override int_time → 0.1s so the window is 5 samples (see
+        # test_rfswitch_transition_within_buffer_flags_forward_window).
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(tmpdir, ["0"], 10, cfg)
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # Anchor and trigger transition.
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(1))
+        # Now feed samples WITHOUT any rfswitch metadata at all
+        # while still in the transition window.
+        f.add_data(3, 0.0, d, metadata=None)
+        f.add_data(4, 0.0, d, metadata=None)
+
+        # Sample 0 = anchor state.
+        assert f.metadata["rfswitch"][0] == 0
+        # Samples 1, 2, 3 are inside the window (window=5 here).
+        # Sample 1 was the trigger and has raw state 1 forced to UNKNOWN.
+        # Samples 2, 3 had no rfswitch reading but still get flagged.
+        assert f.metadata["rfswitch"][1] == "UNKNOWN"
+        assert f.metadata["rfswitch"][2] == "UNKNOWN"
+        assert f.metadata["rfswitch"][3] == "UNKNOWN"
+
+        f.close()
+
+
+def test_rfswitch_consecutive_transitions_reset_window(caplog):
+    """A second transition while still inside the first transition's
+    window resets the window to the full count from the new
+    transition. Detection compares against the last *valid raw*
+    state, not the flagged UNKNOWN."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Override int_time → 0.1s so the window is 5 samples (see
+        # test_rfswitch_transition_within_buffer_flags_forward_window).
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(tmpdir, ["0"], 20, cfg)
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        dtype = np.dtype(HEADER["dtype"])
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        # Anchor with state 0.
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+        # Transition to state 1 → window of 5.
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(1))
+        # Two samples into the window, transition to state 2 →
+        # window resets to 5.
+        f.add_data(3, 0.0, d, metadata=_make_rfswitch_md(1))
+        f.add_data(4, 0.0, d, metadata=_make_rfswitch_md(2))
+        # Now five more samples of state 2.
+        for i in range(5, 10):
+            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(2))
+
+        # Index 0: anchor state 0.
+        assert f.metadata["rfswitch"][0] == 0
+        # Index 1, 2: first window (state 1 transition).
+        assert f.metadata["rfswitch"][1] == "UNKNOWN"
+        assert f.metadata["rfswitch"][2] == "UNKNOWN"
+        # Index 3: second transition trigger (state 2). UNKNOWN.
+        # Window resets to 5 starting here, so indices 3-7 are
+        # UNKNOWN.
+        for i in range(3, 8):
+            assert f.metadata["rfswitch"][i] == "UNKNOWN", (
+                f"index {i} expected UNKNOWN (in reset window), "
+                f"got {f.metadata['rfswitch'][i]!r}"
+            )
+        # Index 8: back to raw state 2.
+        assert f.metadata["rfswitch"][8] == 2
+
+        f.close()

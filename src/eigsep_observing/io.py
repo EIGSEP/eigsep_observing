@@ -3,6 +3,7 @@ import datetime
 import h5py
 import json
 import logging
+import math
 import numpy as np
 import os
 import queue
@@ -13,6 +14,18 @@ from pathlib import Path
 from eigsep_corr.utils import calc_times, calc_freqs_dfreq
 
 logger = logging.getLogger(__name__)
+
+# Conservative window for the RF switch actuation + pico cadence.
+# The physical switch takes ~200ms to actuate, and the pico reports
+# its commanded state on a ~200ms cadence. The pico has no way to
+# know when actuation is *actually* complete (no feedback sensing),
+# so we use a forward-only timing assumption: when sample N has a
+# different switch state than sample N-1, we flag the next
+# ceil(RFSWITCH_TRANSITION_WINDOW_S / integration_time) samples as
+# UNKNOWN to cover the contamination window. The 500ms includes the
+# 200ms actuation, the up-to-200ms pico cadence delay before the
+# new state is reported, and ~100ms safety margin.
+RFSWITCH_TRANSITION_WINDOW_S = 0.5
 
 
 def data_shape(ntimes, acc_bins, nchan, cross=False):
@@ -86,6 +99,12 @@ def append_corr_header(header, acc_cnts, sync_times):
     Append header for correlation files with useful computed
     quantities: times and frequencies.
 
+    Each computed field is wrapped in a try/except so that a missing
+    or malformed header field cannot prevent the corr data from being
+    written. On failure, the field is omitted from the output and an
+    ERROR is logged. Producers must fix the header to restore the
+    field.
+
     Parameters
     ----------
     header : dict
@@ -100,24 +119,34 @@ def append_corr_header(header, acc_cnts, sync_times):
     -------
     new_header : dict
         Updated header dictionary with additional computed quantities.
-
-    Raises
-    ------
-    KeyError
-        If the header does not contain the required keys.
+        Computed fields may be missing if the source header was
+        malformed (the failure is logged at ERROR level).
 
     """
-    times = calc_times(
-        acc_cnts,
-        header["integration_time"],
-        sync_times,
-    )
-    freqs, dfreq = calc_freqs_dfreq(header["sample_rate"], header["nchan"])
     new_header = header.copy()
-    new_header["times"] = times
-    new_header["freqs"] = freqs
-    new_header["dfreq"] = dfreq
     new_header["acc_cnt"] = acc_cnts
+    try:
+        new_header["times"] = calc_times(
+            acc_cnts,
+            header["integration_time"],
+            sync_times,
+        )
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error(
+            f"Header contract violation: cannot compute 'times' "
+            f"({type(e).__name__}: {e}). 'times' will be missing "
+            f"from the file. Producer must be fixed."
+        )
+    try:
+        freqs, dfreq = calc_freqs_dfreq(header["sample_rate"], header["nchan"])
+        new_header["freqs"] = freqs
+        new_header["dfreq"] = dfreq
+    except (KeyError, TypeError, ValueError) as e:
+        logger.error(
+            f"Header contract violation: cannot compute 'freqs' "
+            f"({type(e).__name__}: {e}). 'freqs' and 'dfreq' will be "
+            f"missing from the file. Producer must be fixed."
+        )
     return new_header
 
 
@@ -131,20 +160,26 @@ def _write_attr(grp, key, value):
         HDF5 group to write the attribute to.
     key : str
         Name of the attribute.
-    value : bool, int, float, str
-        Value of the attribute. Must be a simple type (not a list or dict).
+    value : bool, int, float, str (Python or numpy scalar)
+        Value of the attribute. Must be a simple type (not a list or
+        dict). Numpy scalars (np.bool_, np.integer, np.floating) are
+        accepted and stored as their canonical numpy types so a header
+        built with numpy values is layout-equivalent to one built with
+        Python natives.
 
     Raises
     -------
     TypeError
-        If the value is not a simple type (bool, int, float, str).
+        If the value is not a simple type.
 
     """
-    if isinstance(value, bool):
+    # bool MUST be checked before int — Python bool is a subclass of
+    # int, and we want True/False stored as bool, not int.
+    if isinstance(value, (bool, np.bool_)):
         grp.attrs[key] = np.bool_(value)
-    elif isinstance(value, int):
+    elif isinstance(value, (int, np.integer)):
         grp.attrs[key] = np.int64(value)
-    elif isinstance(value, float):
+    elif isinstance(value, (float, np.floating)):
         grp.attrs[key] = np.float64(value)
     elif isinstance(value, str):
         dtype = h5py.string_dtype(encoding="utf-8")
@@ -243,7 +278,10 @@ def _write_header_item(grp, key, value):
     if isinstance(value, complex):
         _write_dataset(grp, key, np.complex128(value))
         return
-    if isinstance(value, (bool, int, float, str)):
+    if isinstance(
+        value,
+        (bool, int, float, str, np.bool_, np.integer, np.floating),
+    ):
         _write_attr(grp, key, value)
         return
     if isinstance(value, (list, tuple, bytes, dict, np.ndarray)):
@@ -256,6 +294,11 @@ def _write_header_item(grp, key, value):
 def write_hdf5(fname, data, header, metadata=None):
     """
     Write data to an HDF5 file.
+
+    Corr data is sacred: the ``data`` group is written first, and
+    every header/metadata item is wrapped in a per-key safety net.
+    A single bad header or metadata field is logged at ERROR level
+    and skipped — the corr data is always preserved.
 
     Parameters
     ----------
@@ -273,26 +316,39 @@ def write_hdf5(fname, data, header, metadata=None):
         Additional metadata. Usually numpy arrays or lists, e.g.,
         sensor readings, timestamps, etc.
 
-    Raises
-    ------
-    TypeError
-        If the header contains unsupported types.
-
     """
     with h5py.File(fname, "w") as f:
-        # data
+        # data — written first so corr data is always in the file even
+        # if every other write fails.
         data_grp = f.create_group("data")
         for key, value in data.items():
             data_grp.create_dataset(key, data=value)
-        # header
+        # header — per-key safety net: a contract violation on one
+        # field must not prevent the rest of the header from being
+        # written.
         header_grp = f.create_group("header")
         for key, value in header.items():
-            _write_header_item(header_grp, key, value)
-        # metadata
+            try:
+                _write_header_item(header_grp, key, value)
+            except (TypeError, ValueError) as e:
+                logger.error(
+                    f"Header contract violation: failed to write "
+                    f"key '{key}' ({type(e).__name__}: {e}). "
+                    f"Skipping this field. Producer must be fixed."
+                )
+        # metadata — same per-key safety net.
         if metadata is not None:
             metadata_grp = f.create_group("metadata")
             for key, value in metadata.items():
-                _write_header_item(metadata_grp, key, value)
+                try:
+                    _write_header_item(metadata_grp, key, value)
+                except (TypeError, ValueError) as e:
+                    logger.error(
+                        f"Metadata contract violation: failed to "
+                        f"write key '{key}' ({type(e).__name__}: "
+                        f"{e}). Skipping this field. Producer must "
+                        f"be fixed."
+                    )
 
 
 def read_hdf5(fname):
@@ -324,13 +380,25 @@ def read_hdf5(fname):
                 header[name] = {k: v for k, v in obj.attrs.items()}
             else:
                 header[name] = _read_dataset(obj)
-        # metadata
+        # metadata — like the header, this group can carry both
+        # attrs (scalar metadata stored via _write_attr) and
+        # datasets/subgroups (lists, dicts, arrays). Read both,
+        # mirroring the header read above. The earlier version of
+        # this loop only read .items() and silently dropped any
+        # scalar metadata stored as an attribute — which is the
+        # path VNA metadata takes (get_live_metadata() returns
+        # scalars). Corr metadata always goes through datasets
+        # because it's stored as per-sample lists.
         metadata = {}
-        for name, obj in f.get("metadata", {}).items():
-            if isinstance(obj, h5py.Group):
-                metadata[name] = {k: v for k, v in obj.attrs.items()}
-            else:
-                metadata[name] = _read_dataset(obj)
+        if "metadata" in f:
+            meta_grp = f["metadata"]
+            for k, v in meta_grp.attrs.items():
+                metadata[k] = v
+            for name, obj in meta_grp.items():
+                if isinstance(obj, h5py.Group):
+                    metadata[name] = {k: v for k, v in obj.attrs.items()}
+                else:
+                    metadata[name] = _read_dataset(obj)
     return data, header, metadata
 
 
@@ -371,6 +439,13 @@ def write_s11_file(
         date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         mode = "ant" if "ant" in data else "rec"
         file_path = Path(save_dir) / f"{mode}s11_{date}.h5"
+        # Disambiguate same-second collisions on auto-generated
+        # names. Mirrors the corr-file disambiguation in
+        # File._do_write.
+        suffix = 1
+        while file_path.exists():
+            file_path = Path(save_dir) / f"{mode}s11_{date}-{suffix}.h5"
+            suffix += 1
     else:
         fname = Path(fname)
         if not fname.is_absolute():
@@ -415,6 +490,73 @@ def read_s11_file(fname):
     for k in cal_keys:
         cal_data[k[4:]] = data.pop(k)  # remove 'cal:' prefix
     return data, cal_data, header, metadata
+
+
+# Required keys for the corr-write path. Validation logs ERROR per
+# violation but does NOT raise — the script keeps running so corr
+# data continues to flow, and the writer path is hardened to skip
+# fields that depend on missing or malformed header values.
+#
+# Unit conventions (NOT enforced by the type-only schema; producers
+# must follow these or downstream computations will be wrong):
+#   - sample_rate is in MHz (matches corr_config.yaml)
+#   - integration_time is in seconds
+#   - sync_time (when present) is a Unix timestamp in seconds
+CORR_HEADER_SCHEMA = {
+    "acc_bins": int,
+    "nchan": int,
+    "dtype": str,  # must also be parseable by np.dtype
+    "integration_time": float,
+    "sample_rate": float,
+}
+
+
+def _validate_corr_header(header):
+    """
+    Validate a correlation header against ``CORR_HEADER_SCHEMA``.
+
+    Parameters
+    ----------
+    header : dict
+        Header to validate.
+
+    Returns
+    -------
+    violations : list of str
+        Human-readable contract violations. Empty list means valid.
+
+    """
+    violations = []
+    for key, expected in CORR_HEADER_SCHEMA.items():
+        if key not in header:
+            violations.append(f"missing key '{key}'")
+            continue
+        val = header[key]
+        if expected is float:
+            ok = isinstance(
+                val, (int, float, np.integer, np.floating)
+            ) and not isinstance(val, bool)
+        elif expected is int:
+            ok = isinstance(val, (int, np.integer)) and not isinstance(
+                val, bool
+            )
+        else:
+            ok = isinstance(val, expected)
+        if not ok:
+            violations.append(
+                f"key '{key}': expected {expected.__name__}, got "
+                f"{type(val).__name__}"
+            )
+    # dtype must additionally be parseable by numpy
+    if isinstance(header.get("dtype"), str):
+        try:
+            np.dtype(header["dtype"])
+        except TypeError as e:
+            violations.append(
+                f"key 'dtype': cannot parse '{header['dtype']}' as "
+                f"numpy dtype ({e})"
+            )
+    return violations
 
 
 # Sensor schemas: field name -> expected Python type.
@@ -572,16 +714,14 @@ def avg_metadata(value):
         for i, entry in enumerate(value):
             violations = _validate_metadata(entry, schema)
             if violations:
+                joined = "; ".join(violations)
                 logger.warning(
-                    "Metadata contract violation in '%s' (entry %d): %s",
-                    app_name,
-                    i,
-                    "; ".join(violations),
+                    f"Metadata contract violation in '{app_name}' "
+                    f"(entry {i}): {joined}"
                 )
     else:
         logger.warning(
-            "No schema for sensor '%s'; skipping validation",
-            app_name,
+            f"No schema for sensor '{app_name}'; skipping validation"
         )
 
     if app_name in ("temp_mon", "tempctrl"):
@@ -598,12 +738,43 @@ def _avg_temp_metadata(value, app_name, schema):
     """
     Average temp_mon / tempctrl metadata, handling A/B channels.
 
+    Three classes of fields:
+      - Top-level non-prefixed fields (``sensor_name``, ``app_id``, plus
+        tempctrl-only ``watchdog_tripped`` / ``watchdog_timeout_ms``).
+        Run through ``_avg_sensor_values`` against the top-level subset
+        of *schema* so they appear in the output dict.
+      - ``A_``/``B_``-prefixed fields. The prefix is stripped and each
+        channel becomes its own sub-dict under key ``"A"`` / ``"B"``.
+      - ``sensor_name`` is always normalized to ``app_name`` (the schema
+        lookup key) rather than whatever the producer wrote.
+
+    Earlier versions of this function only forwarded ``sensor_name`` and
+    ``app_id`` and silently dropped any other top-level field — which
+    quietly lost tempctrl's watchdog state. Fixed by enumerating the
+    top-level schema keys explicitly.
     """
-    avgs = {
-        "app_id": value[0].get("app_id"),
-        "sensor_name": app_name,
-    }
-    # Build a sub-schema for each channel by stripping the prefix.
+    avgs = {}
+
+    if schema is not None:
+        top_keys = [
+            k
+            for k in schema
+            if not k.startswith("A_") and not k.startswith("B_")
+        ]
+        if top_keys:
+            top_sub_schema = {k: schema[k] for k in top_keys}
+            top_avgs = _avg_sensor_values(value, top_sub_schema)
+            if top_avgs:
+                avgs.update(top_avgs)
+    else:
+        # Schemaless fallback: not exercised in production today (every
+        # temp_* sensor has a schema), but preserves the historical
+        # "carry forward app_id" behavior so this branch is safe.
+        avgs["app_id"] = value[0].get("app_id")
+
+    avgs["sensor_name"] = app_name
+
+    # Per-channel A/B extraction.
     for subkey in ("A", "B"):
         prefix = f"{subkey}_"
         if schema is not None:
@@ -646,13 +817,23 @@ def _avg_rfswitch_metadata(value):
 
 def _avg_sensor_values(value, schema=None):
     """
-    Average numeric sensor values, keep first string/bool value.
+    Average ``float`` sensor values, keep first value for everything else.
 
-    When *schema* is provided, it determines which keys to process
-    and whether each key is numeric (``float``/``int``) or
-    categorical (``str``/``bool``).  Without a schema, falls back
-    to type-sniffing from the first non-None value.
+    Only ``float`` schema fields go through ``np.mean``. ``int``, ``str``,
+    and ``bool`` fields are categorical and take ``value[0]``. This keeps
+    the averager's output type-conformant with the input schema: if a
+    field is declared ``int`` in ``SENSOR_SCHEMAS`` it stays ``int`` after
+    averaging, not ``float``.
 
+    The choice to never average ints reflects the actual semantics of every
+    int field in the current schemas: ``app_id`` is constant per sensor,
+    ``accel_cal``/``mag_cal`` are 0–3 BNO085 calibration levels, and
+    ``watchdog_timeout_ms`` is a config value. None of them have a
+    meaningful arithmetic mean. ``sw_state`` (rfswitch) bypasses this
+    function entirely via ``_avg_rfswitch_metadata``.
+
+    Without a *schema*, falls back to type-sniffing from the first
+    non-None value, with the same float-only rule for consistency.
     """
     if not value:
         return None
@@ -667,21 +848,22 @@ def _avg_sensor_values(value, schema=None):
         all_keys = list(value[0])
 
     for data_key in all_keys:
-        # Determine whether this field is numeric.
+        # Determine whether this field should be averaged.
         if schema is not None:
-            is_numeric = schema[data_key] in (float, int)
+            should_average = schema[data_key] is float
         else:
-            # Fallback: sniff type from first non-None value.
+            # Fallback: sniff type from first non-None value. Only
+            # Python floats are averaged — int / bool / str / numpy
+            # ints all go through the categorical path. (numpy floats
+            # subclass Python float, so they're handled correctly.)
             first_val = None
             for v in value:
                 first_val = v.get(data_key)
                 if first_val is not None:
                     break
-            is_numeric = isinstance(first_val, (int, float)) and (
-                not isinstance(first_val, bool)
-            )
+            should_average = isinstance(first_val, float)
 
-        if not is_numeric:
+        if not should_average:
             avg[data_key] = value[0].get(data_key)
             continue
 
@@ -692,19 +874,18 @@ def _avg_sensor_values(value, schema=None):
                 if (
                     st != "error"
                     and val is not None
-                    and isinstance(val, (int, float))
-                    and not isinstance(val, bool)
+                    and isinstance(val, float)
                 ):
                     raw.append(val)
             avg[data_key] = float(np.mean(raw)) if raw else None
         except Exception as e:
-            logger.warning("Could not average key '%s': %s", data_key, e)
+            logger.warning(f"Could not average key '{data_key}': {e}")
             avg[data_key] = None
     return avg
 
 
 class File:
-    def __init__(self, save_dir, pairs, ntimes, cfg):
+    def __init__(self, save_dir, pairs, ntimes, cfg, writer_timeout=30.0):
         """
         Initialize the File object for saving correlation data.
         Uses a double-buffered async writer so that HDF5 I/O never
@@ -721,6 +902,16 @@ class File:
             Number of time steps to accumulate per file.
         cfg : dict
             Observing configuration.
+        writer_timeout : float
+            Maximum seconds ``corr_write`` will wait for the writer
+            thread to release the standby buffer before dropping the
+            active buffer with a loud ERROR. Bounds the worst-case
+            behavior on a stuck writer (slow disk, NFS stall, etc.):
+            corr data is sacred, but staying alive to capture future
+            data is more important than blocking forever to save the
+            current buffer. Default 30s — well above a normal HDF5
+            write of one buffer (sub-second) and well below the
+            shortest realistic buffer cadence.
 
         """
         self.logger = logger
@@ -728,6 +919,14 @@ class File:
         self.ntimes = ntimes
         self.pairs = pairs
         self.cfg = cfg
+        self._writer_timeout = writer_timeout
+        self._dropped_buffers = 0
+        # RF switch transition tracking — see Phase 11 in
+        # add_data. Forward-only: never mutates previously-written
+        # samples. Both fields persist across buffer swaps and
+        # writer drops since they live on File, not the buffer.
+        self._prev_rfswitch_state = None
+        self._rfswitch_unknown_remaining = 0
         self.set_header()
 
         acc_bins = cfg["acc_bins"]
@@ -783,6 +982,12 @@ class File:
         """
         Set the header for the correlation file.
 
+        Validates the merged header against ``CORR_HEADER_SCHEMA`` and
+        logs ERROR per violation. Does NOT raise: corr data is sacred,
+        and a header bug must not stop the script. The writer path is
+        hardened to skip fields that depend on missing or malformed
+        values, so producers see loud logs but data continues to flow.
+
         Parameters
         ----------
         header : dict
@@ -799,6 +1004,13 @@ class File:
         for key, val in self.cfg.items():
             if key not in self.header:
                 self.header[key] = val
+        violations = _validate_corr_header(self.header)
+        for v in violations:
+            self.logger.error(
+                f"Header contract violation: {v}. Producer must be "
+                f"fixed; affected fields will be missing from "
+                f"written files."
+            )
 
     def add_data(self, acc_cnt, sync_time, data, metadata=None):
         """
@@ -820,9 +1032,24 @@ class File:
             ``{stream_name: [list_of_dicts]}``.
 
         """
-        if acc_cnt is None or data is None:
-            self.logger.warning("Received None for acc_cnt or data, skipping.")
+        if data is None:
+            self.logger.error(
+                "SNAP contract violation: data is None, dropping "
+                "sample. Producer must be fixed."
+            )
             return
+        if acc_cnt is None:
+            # Keep the sample so corr data is preserved; mark the
+            # acc_cnt slot as NaN so downstream can detect that this
+            # row's timestamp is unknown. _prev_cnt becomes NaN too,
+            # which means gap detection across this sample is lost
+            # until the next valid acc_cnt re-anchors the sequence.
+            self.logger.error(
+                "SNAP contract violation: acc_cnt is None, storing "
+                "NaN and saving sample anyway. Producer must be "
+                "fixed."
+            )
+            acc_cnt = float("nan")
         try:
             delta_cnt = acc_cnt - self._prev_cnt
         except AttributeError:  # first call
@@ -846,20 +1073,78 @@ class File:
         for key in metadata:
             value = metadata[key]
             if not (isinstance(value, list) and len(value) > 0):
-                self.logger.warning(
-                    f"Unexpected metadata for '{key}': {value!r}"
+                self.logger.error(
+                    f"Producer contract violation: metadata for "
+                    f"stream '{key}' must be a non-empty list, got "
+                    f"{value!r}. Dropping this stream for this sample."
                 )
                 continue
-            # strip stream prefix
-            name = key.removeprefix("stream:")
-            averaged = avg_metadata(value)
-            if isinstance(averaged, dict) and "A" in averaged:
-                # temp sensor: split A/B into separate flat entries
-                for ch in ("A", "B"):
-                    if ch in averaged:
-                        processed_md[f"{name}_{ch.lower()}"] = averaged[ch]
-            else:
-                processed_md[name] = averaged
+            # Per-stream safety net: corr data is sacred. A producer
+            # contract violation that escapes avg_metadata must never
+            # block the corr-data write. Log at ERROR so the producer
+            # gets fixed; drop only this stream's metadata for this
+            # sample and fall through to _insert_sample.
+            try:
+                # strip stream prefix
+                name = key.removeprefix("stream:")
+                averaged = avg_metadata(value)
+                if isinstance(averaged, dict) and "A" in averaged:
+                    # temp sensor: split A/B into separate flat entries
+                    for ch in ("A", "B"):
+                        if ch in averaged:
+                            processed_md[f"{name}_{ch.lower()}"] = averaged[ch]
+                else:
+                    processed_md[name] = averaged
+            except Exception as e:
+                self.logger.error(
+                    f"Metadata contract violation processing stream "
+                    f"'{key}': {e}. Producer must be fixed; dropping "
+                    f"this stream's metadata for this sample."
+                )
+
+        # RF switch transition detection (Phase 11). The pico
+        # reports the *commanded* switch state synchronously when
+        # it receives a switch command, but the physical actuation
+        # takes ~200ms and the pico has no way to know when it
+        # finished. Detect transitions by comparing consecutive
+        # samples' raw rfswitch states; on a change, flag a forward
+        # window of samples as UNKNOWN to cover the contamination.
+        # Forward-only — never mutates previously-written samples.
+        new_rfswitch = processed_md.get("rfswitch")
+        if (
+            new_rfswitch not in (None, "UNKNOWN")
+            and self._prev_rfswitch_state not in (None, "UNKNOWN")
+            and new_rfswitch != self._prev_rfswitch_state
+        ):
+            try:
+                int_time = float(self.header["integration_time"])
+                n_to_flag = max(
+                    1,
+                    math.ceil(RFSWITCH_TRANSITION_WINDOW_S / int_time),
+                )
+            except (KeyError, TypeError, ValueError):
+                n_to_flag = 2  # safe default for typical 0.25s int
+            self._rfswitch_unknown_remaining = n_to_flag
+            self.logger.warning(
+                f"RF switch transition detected: "
+                f"{self._prev_rfswitch_state}→{new_rfswitch}. "
+                f"Flagging next {n_to_flag} sample(s) as UNKNOWN to "
+                f"cover the ~{int(RFSWITCH_TRANSITION_WINDOW_S * 1000)}ms "
+                f"actuation+cadence window."
+            )
+        # Update prev only when we saw a real raw state — UNKNOWN
+        # and None do not advance the comparison anchor.
+        if new_rfswitch not in (None, "UNKNOWN"):
+            self._prev_rfswitch_state = new_rfswitch
+        # Apply the forward flag if we're inside a transition
+        # window. This overrides any raw state in processed_md, and
+        # is also applied when the sample carried no rfswitch
+        # reading at all — the corr data is contaminated regardless
+        # of whether we got a switch reading.
+        if self._rfswitch_unknown_remaining > 0:
+            processed_md["rfswitch"] = "UNKNOWN"
+            self._rfswitch_unknown_remaining -= 1
+
         self._insert_sample(acc_cnt, sync_time, data, processed_md)
 
     def _insert_sample(
@@ -887,8 +1172,27 @@ class File:
         sample_metadata = sample_metadata or {}
         self.acc_cnts[self.counter] = acc_cnt
         self.sync_times[self.counter] = sync_time
+        # Per-pair safety net: a SNAP contract violation on one pair
+        # (missing pair, half-spectrum, wrong dtype) must not cost us
+        # the other pairs in the same sample. Skip the bad pair —
+        # its slot stays at zero from buffer init/reset, which is
+        # visually distinguishable from real data downstream — and
+        # keep going. Half-spectra are not partially saved (the
+        # ValueError catches them and the pair is dropped wholesale).
         for p in self.pairs:
-            self.data[p][self.counter] = sample_data[p]
+            try:
+                self.data[p][self.counter] = sample_data[p]
+            except (KeyError, ValueError, TypeError) as e:
+                self.logger.error(
+                    f"SNAP contract violation: cannot write pair "
+                    f"'{p}' at sample {self.counter} "
+                    f"({type(e).__name__}: {e}). Zeroing slot. "
+                    f"Producer must be fixed."
+                )
+                # Belt-and-suspenders: enforce the zero-on-drop
+                # contract at the use site so it does not depend on
+                # __init__/reset having previously zeroed the slot.
+                self.data[p][self.counter] = 0
         # pad new keys so indices align 1:1 with samples
         for key in sample_metadata:
             if key not in self.metadata:
@@ -971,6 +1275,17 @@ class File:
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             fname = self.save_dir / f"corr_{date}.h5"
+            # Disambiguate if a file with the same second-resolution
+            # timestamp already exists. In production, file_time is
+            # 60-240s so this almost never triggers; the loop is
+            # bounded by the number of writes per second (typically
+            # zero) and each iteration is a single stat() call (~10
+            # μs). An explicit fname (passed by the caller) is left
+            # alone — that's the existing API contract.
+            suffix = 1
+            while fname.exists():
+                fname = self.save_dir / f"corr_{date}-{suffix}.h5"
+                suffix += 1
         self.logger.info(f"Writing correlation data to {fname}")
 
         # slice to counter so short final files don't include trailing zeros
@@ -1019,8 +1334,23 @@ class File:
             while len(self.metadata[key]) < self.counter:
                 self.metadata[key].append(None)
 
-        # wait for writer to finish with standby buffer
-        self._standby_ready.wait()
+        # Bounded wait for the writer to release the standby buffer.
+        # If the writer is stuck (slow disk, NFS stall, etc.), drop
+        # the active buffer rather than block forever — corr data is
+        # sacred, but staying alive to capture future data is more
+        # important than blocking the data loop indefinitely. The
+        # script keeps running and resumes normal writes once the
+        # writer unblocks.
+        if not self._standby_ready.wait(timeout=self._writer_timeout):
+            self._dropped_buffers += 1
+            self.logger.error(
+                f"Writer thread blocked for >{self._writer_timeout}s; "
+                f"dropping buffer of {self.counter} samples (total "
+                f"dropped: {self._dropped_buffers}). Script continues; "
+                f"resolve the underlying I/O issue."
+            )
+            self.reset()
+            return
         self._standby_ready.clear()
 
         # package job with current buffer references
@@ -1050,3 +1380,14 @@ class File:
         self._writer_thread.join(timeout=30)
         if self._writer_thread.is_alive():
             self.logger.error("Writer thread did not shut down within timeout")
+        if self._write_error is not None:
+            self.logger.error(
+                f"Pending write error at shutdown: {self._write_error}. "
+                f"Final buffer data was lost."
+            )
+            self._write_error = None
+        if self._dropped_buffers > 0:
+            self.logger.error(
+                f"Total buffers dropped due to writer hang: "
+                f"{self._dropped_buffers}. Investigate I/O performance."
+            )
