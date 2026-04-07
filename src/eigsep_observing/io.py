@@ -562,75 +562,75 @@ def _validate_corr_header(header):
 #   str   → first value if unanimous, else "UNKNOWN"
 # See _avg_sensor_values for details and the rationale per type.
 #
-# `calibrated` (IMU, bool): documented quirk — the BNO085 firmware sets
-# this True for one integration when a user-triggered calibration
-# completes, then False afterwards. With the bool→any reduction an
-# integration that contains the completion event reports True, which
-# is mildly weird semantically (it's an event, not a state) but is
-# being removed in the next picohost PR; not worth special-casing.
+# IMU schema reflects the BNO085 UART RVC mode introduced in picohost
+# 1.0.0: only yaw/pitch/roll orientation and acceleration are reported.
+# All numeric fields are float so the standard float→mean reduction
+# applies cleanly across an integration. The schema is shared between
+# the two physical IMU picos: `imu_el` (panda elevation, app_id 3) and
+# `imu_az` (antenna azimuth, app_id 6).
 _IMU_SCHEMA = {
     "sensor_name": str,
     "status": str,
     "app_id": int,
-    "quat_i": float,
-    "quat_j": float,
-    "quat_k": float,
-    "quat_real": float,
+    "yaw": float,
+    "pitch": float,
+    "roll": float,
     "accel_x": float,
     "accel_y": float,
     "accel_z": float,
-    "lin_accel_x": float,
-    "lin_accel_y": float,
-    "lin_accel_z": float,
-    "gyro_x": float,
-    "gyro_y": float,
-    "gyro_z": float,
-    "mag_x": float,
-    "mag_y": float,
-    "mag_z": float,
-    "calibrated": bool,  # event flag, scheduled for removal in next picohost PR
-    "accel_cal": int,
-    "mag_cal": int,
 }
 
+# `potmon` (potentiometer monitor): the producer is `PotMonEmulator` +
+# `PicoPotentiometer._pot_redis_handler`, which augments the raw
+# voltages with calibration slope/intercept and the derived angle.
+# All published fields are scalar per the picohost scalar-only contract
+# (see `picohost.base.redis_handler`); the cal parameters are flattened
+# into per-component scalars rather than emitted as a `[m, b]` list.
+# Fields are `None` for an uncalibrated stream — `_validate_metadata`
+# short-circuits None, and `_avg_sensor_values`'s float reduction
+# filters None survivors, so an uncalibrated stream averages cleanly
+# to None for the cal/angle fields.
 SENSOR_SCHEMAS = {
-    "imu_panda": _IMU_SCHEMA,
-    "imu_antenna": _IMU_SCHEMA,
-    "temp_mon": {
-        "sensor_name": str,
-        "app_id": int,
-        "A_status": str,
-        "A_temp": float,
-        "A_timestamp": float,
-        "B_status": str,
-        "B_temp": float,
-        "B_timestamp": float,
-    },
+    "imu_el": _IMU_SCHEMA,
+    "imu_az": _IMU_SCHEMA,
     "tempctrl": {
         "sensor_name": str,
         "app_id": int,
         "watchdog_tripped": bool,
         "watchdog_timeout_ms": int,
-        "A_status": str,
-        "A_T_now": float,
-        "A_timestamp": float,
-        "A_T_target": float,
-        "A_drive_level": float,
-        "A_enabled": bool,
-        "A_active": bool,
-        "A_int_disabled": bool,
-        "A_hysteresis": float,
-        "A_clamp": float,
-        "B_status": str,
-        "B_T_now": float,
-        "B_timestamp": float,
-        "B_T_target": float,
-        "B_drive_level": float,
-        "B_enabled": bool,
-        "B_active": bool,
-        "B_int_disabled": bool,
-        "B_hysteresis": float,
-        "B_clamp": float,
+        "LNA_status": str,
+        "LNA_T_now": float,
+        "LNA_timestamp": float,
+        "LNA_T_target": float,
+        "LNA_drive_level": float,
+        "LNA_enabled": bool,
+        "LNA_active": bool,
+        "LNA_int_disabled": bool,
+        "LNA_hysteresis": float,
+        "LNA_clamp": float,
+        "LOAD_status": str,
+        "LOAD_T_now": float,
+        "LOAD_timestamp": float,
+        "LOAD_T_target": float,
+        "LOAD_drive_level": float,
+        "LOAD_enabled": bool,
+        "LOAD_active": bool,
+        "LOAD_int_disabled": bool,
+        "LOAD_hysteresis": float,
+        "LOAD_clamp": float,
+    },
+    "potmon": {
+        "sensor_name": str,
+        "status": str,
+        "app_id": int,
+        "pot_el_voltage": float,
+        "pot_az_voltage": float,
+        "pot_el_angle": float,
+        "pot_az_angle": float,
+        "pot_el_cal_slope": float,
+        "pot_el_cal_intercept": float,
+        "pot_az_cal_slope": float,
+        "pot_az_cal_intercept": float,
     },
     "rfswitch": {
         "sensor_name": str,
@@ -730,7 +730,7 @@ def avg_metadata(value):
             f"No schema for sensor '{app_name}'; skipping validation"
         )
 
-    if app_name in ("temp_mon", "tempctrl"):
+    if app_name == "tempctrl":
         return _avg_temp_metadata(value, app_name, schema)
 
     if app_name == "rfswitch":
@@ -742,15 +742,16 @@ def avg_metadata(value):
 
 def _avg_temp_metadata(value, app_name, schema):
     """
-    Average temp_mon / tempctrl metadata, handling A/B channels.
+    Average tempctrl metadata, handling LNA/LOAD channels.
 
     Three classes of fields:
-      - Top-level non-prefixed fields (``sensor_name``, ``app_id``, plus
-        tempctrl-only ``watchdog_tripped`` / ``watchdog_timeout_ms``).
-        Run through ``_avg_sensor_values`` against the top-level subset
-        of *schema* so they appear in the output dict.
-      - ``A_``/``B_``-prefixed fields. The prefix is stripped and each
-        channel becomes its own sub-dict under key ``"A"`` / ``"B"``.
+      - Top-level non-prefixed fields (``sensor_name``, ``app_id``,
+        ``watchdog_tripped``, ``watchdog_timeout_ms``). Run through
+        ``_avg_sensor_values`` against the top-level subset of *schema*
+        so they appear in the output dict.
+      - ``LNA_``/``LOAD_``-prefixed fields. The prefix is stripped and
+        each channel becomes its own sub-dict under key ``"LNA"`` /
+        ``"LOAD"``.
       - ``sensor_name`` is always normalized to ``app_name`` (the schema
         lookup key) rather than whatever the producer wrote.
 
@@ -765,7 +766,7 @@ def _avg_temp_metadata(value, app_name, schema):
         top_keys = [
             k
             for k in schema
-            if not k.startswith("A_") and not k.startswith("B_")
+            if not k.startswith("LNA_") and not k.startswith("LOAD_")
         ]
         if top_keys:
             top_sub_schema = {k: schema[k] for k in top_keys}
@@ -782,8 +783,8 @@ def _avg_temp_metadata(value, app_name, schema):
 
     avgs["sensor_name"] = app_name
 
-    # Per-channel A/B extraction.
-    for subkey in ("A", "B"):
+    # Per-channel LNA/LOAD extraction.
+    for subkey in ("LNA", "LOAD"):
         prefix = f"{subkey}_"
         if schema is not None:
             keys = [k for k in schema if k.startswith(prefix)]
@@ -1212,9 +1213,9 @@ class File:
                 # strip stream prefix
                 name = key.removeprefix("stream:")
                 averaged = avg_metadata(value)
-                if isinstance(averaged, dict) and "A" in averaged:
-                    # temp sensor: split A/B into separate flat entries
-                    for ch in ("A", "B"):
+                if isinstance(averaged, dict) and "LNA" in averaged:
+                    # tempctrl: split LNA/LOAD into separate flat entries
+                    for ch in ("LNA", "LOAD"):
                         if ch in averaged:
                             processed_md[f"{name}_{ch.lower()}"] = averaged[ch]
                 else:

@@ -622,55 +622,82 @@ def test_avg_metadata():
     sw_data[1] = dict(sw_data[0], status="error")
     assert io.avg_metadata(sw_data) == "UNKNOWN"
 
-    # temp_mon: A/B channels
-    temp_data = [
+    # tempctrl: LNA/LOAD channels (channel-split path)
+    tc_data = [
         {
-            "sensor_name": "temp_mon",
-            "app_id": 2,
-            "A_status": "update",
-            "A_temp": 30.0,
-            "A_timestamp": 1.0,
-            "B_status": "update",
-            "B_temp": 25.0,
-            "B_timestamp": 2.0,
+            "sensor_name": "tempctrl",
+            "app_id": 1,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "LNA_status": "update",
+            "LNA_T_now": 30.0,
+            "LNA_timestamp": 1.0,
+            "LNA_T_target": 25.0,
+            "LNA_drive_level": 0.5,
+            "LNA_enabled": True,
+            "LNA_active": True,
+            "LNA_int_disabled": False,
+            "LNA_hysteresis": 0.1,
+            "LNA_clamp": 1.0,
+            "LOAD_status": "update",
+            "LOAD_T_now": 25.0,
+            "LOAD_timestamp": 2.0,
+            "LOAD_T_target": 25.0,
+            "LOAD_drive_level": 0.5,
+            "LOAD_enabled": True,
+            "LOAD_active": True,
+            "LOAD_int_disabled": False,
+            "LOAD_hysteresis": 0.1,
+            "LOAD_clamp": 1.0,
         },
         {
-            "sensor_name": "temp_mon",
-            "app_id": 2,
-            "A_status": "update",
-            "A_temp": 32.0,
-            "A_timestamp": 3.0,
-            "B_status": "error",
-            "B_temp": 0.0,
-            "B_timestamp": 4.0,
+            "sensor_name": "tempctrl",
+            "app_id": 1,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "LNA_status": "update",
+            "LNA_T_now": 32.0,
+            "LNA_timestamp": 3.0,
+            "LNA_T_target": 25.0,
+            "LNA_drive_level": 0.5,
+            "LNA_enabled": True,
+            "LNA_active": True,
+            "LNA_int_disabled": False,
+            "LNA_hysteresis": 0.1,
+            "LNA_clamp": 1.0,
+            "LOAD_status": "error",
+            "LOAD_T_now": 0.0,
+            "LOAD_timestamp": 4.0,
+            "LOAD_T_target": 25.0,
+            "LOAD_drive_level": 0.5,
+            "LOAD_enabled": True,
+            "LOAD_active": True,
+            "LOAD_int_disabled": False,
+            "LOAD_hysteresis": 0.1,
+            "LOAD_clamp": 1.0,
         },
     ]
-    result = io.avg_metadata(temp_data)
-    assert result["sensor_name"] == "temp_mon"
-    assert result["A"]["temp"] == 31.0  # average of 30 and 32
-    # B has one error entry, so only non-error value used
-    assert result["B"]["temp"] == 25.0
-    # check status avgus: A has no errors, so "update"; B has one error, so "error"
-    assert result["A"]["status"] == "update"
-    assert result["B"]["status"] == "error"
+    result = io.avg_metadata(tc_data)
+    assert result["sensor_name"] == "tempctrl"
+    assert result["LNA"]["T_now"] == 31.0  # average of 30 and 32
+    # LOAD has one error entry, so only non-error value used
+    assert result["LOAD"]["T_now"] == 25.0
+    # status averages: LNA has no errors → "update"; LOAD has one → "error"
+    assert result["LNA"]["status"] == "update"
+    assert result["LOAD"]["status"] == "error"
 
     # generic sensor (IMU) — full schema-conformant data
     imu_data = [
-        {**IMU_READING, "quat_i": 0.1},
-        {**IMU_READING, "quat_i": 0.3},
+        {**IMU_READING, "yaw": 0.1},
+        {**IMU_READING, "yaw": 0.3},
     ]
     result = io.avg_metadata(imu_data)
-    assert result["quat_i"] == pytest.approx(0.2)
-    assert result["calibrated"] is True
+    assert result["yaw"] == pytest.approx(0.2)
     # int-typed schema fields take the categorical path: they stay int
     # (not float), and they take value[0] rather than np.mean. See the
     # _avg_sensor_values docstring for the rationale.
     assert result["app_id"] == 3
     assert isinstance(result["app_id"], int)
-    assert result["accel_cal"] == 3
-    assert isinstance(result["accel_cal"], int)
-    assert result["mag_cal"] == 3
-    assert isinstance(result["mag_cal"], int)
 
 
 def test_avg_metadata_tempctrl_forwards_top_level_fields():
@@ -683,70 +710,70 @@ def test_avg_metadata_tempctrl_forwards_top_level_fields():
     tc_data = [
         {
             "sensor_name": "tempctrl",
-            "app_id": 6,
+            "app_id": 1,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 5000,
-            "A_status": "update",
-            "A_T_now": 30.0,
-            "A_timestamp": 1.0,
-            "A_T_target": 25.0,
-            "A_drive_level": 0.5,
-            "A_enabled": True,
-            "A_active": True,
-            "A_int_disabled": False,
-            "A_hysteresis": 0.1,
-            "A_clamp": 1.0,
-            "B_status": "update",
-            "B_T_now": 32.0,
-            "B_timestamp": 2.0,
-            "B_T_target": 25.0,
-            "B_drive_level": 0.6,
-            "B_enabled": True,
-            "B_active": True,
-            "B_int_disabled": False,
-            "B_hysteresis": 0.1,
-            "B_clamp": 1.0,
+            "LNA_status": "update",
+            "LNA_T_now": 30.0,
+            "LNA_timestamp": 1.0,
+            "LNA_T_target": 25.0,
+            "LNA_drive_level": 0.5,
+            "LNA_enabled": True,
+            "LNA_active": True,
+            "LNA_int_disabled": False,
+            "LNA_hysteresis": 0.1,
+            "LNA_clamp": 1.0,
+            "LOAD_status": "update",
+            "LOAD_T_now": 32.0,
+            "LOAD_timestamp": 2.0,
+            "LOAD_T_target": 25.0,
+            "LOAD_drive_level": 0.6,
+            "LOAD_enabled": True,
+            "LOAD_active": True,
+            "LOAD_int_disabled": False,
+            "LOAD_hysteresis": 0.1,
+            "LOAD_clamp": 1.0,
         },
         {
             "sensor_name": "tempctrl",
-            "app_id": 6,
+            "app_id": 1,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 5000,
-            "A_status": "update",
-            "A_T_now": 32.0,  # average with 30.0 → 31.0
-            "A_timestamp": 3.0,
-            "A_T_target": 25.0,
-            "A_drive_level": 0.5,
-            "A_enabled": True,
-            "A_active": True,
-            "A_int_disabled": False,
-            "A_hysteresis": 0.1,
-            "A_clamp": 1.0,
-            "B_status": "update",
-            "B_T_now": 32.0,
-            "B_timestamp": 4.0,
-            "B_T_target": 25.0,
-            "B_drive_level": 0.6,
-            "B_enabled": True,
-            "B_active": True,
-            "B_int_disabled": False,
-            "B_hysteresis": 0.1,
-            "B_clamp": 1.0,
+            "LNA_status": "update",
+            "LNA_T_now": 32.0,  # average with 30.0 → 31.0
+            "LNA_timestamp": 3.0,
+            "LNA_T_target": 25.0,
+            "LNA_drive_level": 0.5,
+            "LNA_enabled": True,
+            "LNA_active": True,
+            "LNA_int_disabled": False,
+            "LNA_hysteresis": 0.1,
+            "LNA_clamp": 1.0,
+            "LOAD_status": "update",
+            "LOAD_T_now": 32.0,
+            "LOAD_timestamp": 4.0,
+            "LOAD_T_target": 25.0,
+            "LOAD_drive_level": 0.6,
+            "LOAD_enabled": True,
+            "LOAD_active": True,
+            "LOAD_int_disabled": False,
+            "LOAD_hysteresis": 0.1,
+            "LOAD_clamp": 1.0,
         },
     ]
     result = io.avg_metadata(tc_data)
 
     # Top-level fields are forwarded with types preserved.
     assert result["sensor_name"] == "tempctrl"
-    assert result["app_id"] == 6
+    assert result["app_id"] == 1
     assert isinstance(result["app_id"], int)
     assert result["watchdog_tripped"] is False
     assert result["watchdog_timeout_ms"] == 5000
     assert isinstance(result["watchdog_timeout_ms"], int)
 
-    # A/B sub-dicts still produced and floats still averaged.
-    assert result["A"]["T_now"] == pytest.approx(31.0)
-    assert result["B"]["T_now"] == pytest.approx(32.0)
+    # LNA/LOAD sub-dicts still produced and floats still averaged.
+    assert result["LNA"]["T_now"] == pytest.approx(31.0)
+    assert result["LOAD"]["T_now"] == pytest.approx(32.0)
 
 
 # ----------------------------------------------------------------------
@@ -772,44 +799,25 @@ def test_avg_metadata_status_collapses_to_error_on_any_error():
     integration's averaged status MUST be 'error'. This is the per-row
     fault flag downstream uses to mark suspect data."""
     data = [
-        {**IMU_READING, "status": "update", "quat_i": 0.1},
-        {**IMU_READING, "status": "error", "quat_i": 0.2},
-        {**IMU_READING, "status": "update", "quat_i": 0.3},
+        {**IMU_READING, "status": "update", "yaw": 0.1},
+        {**IMU_READING, "status": "error", "yaw": 0.2},
+        {**IMU_READING, "status": "update", "yaw": 0.3},
     ]
     result = io.avg_metadata(data)
     assert result["status"] == "error"
     # Float averaging filters errored samples → mean of 0.1 and 0.3.
-    assert result["quat_i"] == pytest.approx(0.2)
+    assert result["yaw"] == pytest.approx(0.2)
 
 
 def test_avg_metadata_status_stays_update_when_all_clean():
     """All clean samples → status passes through as 'update'."""
     data = [
-        {**IMU_READING, "status": "update", "quat_i": 0.1},
-        {**IMU_READING, "status": "update", "quat_i": 0.3},
+        {**IMU_READING, "status": "update", "yaw": 0.1},
+        {**IMU_READING, "status": "update", "yaw": 0.3},
     ]
     result = io.avg_metadata(data)
     assert result["status"] == "update"
-    assert result["quat_i"] == pytest.approx(0.2)
-
-
-def test_avg_metadata_int_min_on_disagreement():
-    """int fields take min over surviving samples — preserves the
-    worst-case calibration level. Locks in the contract that an IMU
-    integration whose cal level dropped from 3 → 1 records 1, not 3."""
-    data = [
-        {**IMU_READING, "accel_cal": 3, "mag_cal": 3},
-        {**IMU_READING, "accel_cal": 1, "mag_cal": 2},
-        {**IMU_READING, "accel_cal": 2, "mag_cal": 3},
-    ]
-    result = io.avg_metadata(data)
-    assert result["accel_cal"] == 1
-    assert isinstance(result["accel_cal"], int)
-    assert result["mag_cal"] == 2
-    assert isinstance(result["mag_cal"], int)
-    # app_id is constant (3) — min is a no-op but still int.
-    assert result["app_id"] == 3
-    assert isinstance(result["app_id"], int)
+    assert result["yaw"] == pytest.approx(0.2)
 
 
 def test_avg_metadata_bool_any_on_disagreement():
@@ -818,28 +826,28 @@ def test_avg_metadata_bool_any_on_disagreement():
     must record watchdog_tripped=True."""
     base = {
         "sensor_name": "tempctrl",
-        "app_id": 6,
+        "app_id": 1,
         "watchdog_timeout_ms": 5000,
-        "A_status": "update",
-        "A_T_now": 30.0,
-        "A_timestamp": 1.0,
-        "A_T_target": 25.0,
-        "A_drive_level": 0.5,
-        "A_enabled": True,
-        "A_active": True,
-        "A_int_disabled": False,
-        "A_hysteresis": 0.1,
-        "A_clamp": 1.0,
-        "B_status": "update",
-        "B_T_now": 30.0,
-        "B_timestamp": 1.0,
-        "B_T_target": 25.0,
-        "B_drive_level": 0.5,
-        "B_enabled": True,
-        "B_active": True,
-        "B_int_disabled": False,
-        "B_hysteresis": 0.1,
-        "B_clamp": 1.0,
+        "LNA_status": "update",
+        "LNA_T_now": 30.0,
+        "LNA_timestamp": 1.0,
+        "LNA_T_target": 25.0,
+        "LNA_drive_level": 0.5,
+        "LNA_enabled": True,
+        "LNA_active": True,
+        "LNA_int_disabled": False,
+        "LNA_hysteresis": 0.1,
+        "LNA_clamp": 1.0,
+        "LOAD_status": "update",
+        "LOAD_T_now": 30.0,
+        "LOAD_timestamp": 1.0,
+        "LOAD_T_target": 25.0,
+        "LOAD_drive_level": 0.5,
+        "LOAD_enabled": True,
+        "LOAD_active": True,
+        "LOAD_int_disabled": False,
+        "LOAD_hysteresis": 0.1,
+        "LOAD_clamp": 1.0,
     }
     data = [
         {**base, "watchdog_tripped": False},
@@ -884,10 +892,10 @@ def test_avg_metadata_invariant_disagreement_logs_error(caplog):
     # An ERROR was logged naming the stream and field.
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert any(
-        "app_id" in r.getMessage() and "imu_panda" in r.getMessage()
+        "app_id" in r.getMessage() and "imu_el" in r.getMessage()
         for r in errors
     ), (
-        f"expected app_id ERROR for imu_panda, got: {[r.getMessage() for r in errors]}"
+        f"expected app_id ERROR for imu_el, got: {[r.getMessage() for r in errors]}"
     )
 
 
@@ -918,38 +926,13 @@ def test_avg_metadata_invariant_disagreement_throttled(caplog):
 
     # If we manually expire the throttle, the next call logs again.
     # This proves the throttle is time-based, not "log once and done".
-    io._last_invariant_log[("imu_panda", "app_id")] = 0.0
+    io._last_invariant_log[("imu_el", "app_id")] = 0.0
     caplog.clear()
     with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
         io.avg_metadata(data)
     third_count = sum(1 for r in caplog.records if r.levelno == logging.ERROR)
     assert third_count >= 1, (
         f"expected unthrottled re-log after manual expiry, got {third_count}"
-    )
-
-
-def test_avg_metadata_non_invariant_disagreement_silent(caplog):
-    """accel_cal disagreement is NOT logged — it's a non-invariant
-    field whose disagreement is encoded in the saved value via min().
-    Silent reduction keeps the log file from being bloated by
-    legitimate cal-level changes during a long observation."""
-    io._last_invariant_log.clear()
-
-    data = [
-        {**IMU_READING, "accel_cal": 3},
-        {**IMU_READING, "accel_cal": 1},
-    ]
-    with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
-        result = io.avg_metadata(data)
-
-    assert result["accel_cal"] == 1  # min reduction visible in the file
-
-    # No WARNING or ERROR for the non-invariant disagreement.
-    assert not any(
-        r.levelno >= logging.WARNING
-        and "accel_cal" in r.getMessage()
-        and "disagreed" in r.getMessage()
-        for r in caplog.records
     )
 
 
@@ -1021,14 +1004,14 @@ def test_metadata_new_key_alignment():
 
         # add 3 samples with key A only
         md_a = {
-            "stream:imu_panda": [{**IMU_READING, "quat_i": 1.0}],
+            "stream:imu_el": [{**IMU_READING, "yaw": 1.0}],
         }
         for i in range(3):
             f.add_data(i + 1, 0.0, d, metadata=md_a)
 
         # add sample with new key B
         md_b = {
-            "stream:imu_panda": [{**IMU_READING, "quat_i": 2.0}],
+            "stream:imu_el": [{**IMU_READING, "yaw": 2.0}],
             "stream:rfswitch": [
                 {
                     "sensor_name": "rfswitch",
@@ -1040,8 +1023,8 @@ def test_metadata_new_key_alignment():
         }
         f.add_data(4, 0.0, d, metadata=md_b)
 
-        # imu_panda should have 4 entries
-        assert len(f.metadata["imu_panda"]) == 4
+        # imu_el should have 4 entries
+        assert len(f.metadata["imu_el"]) == 4
 
         # rfswitch should also have 4 entries: 3 None pads + 1 real
         assert len(f.metadata["rfswitch"]) == 4
@@ -1066,9 +1049,9 @@ def test_stream_metadata_averaging():
 
         # stream format: multiple readings per stream, averaged down
         md = {
-            "stream:imu_panda": [
-                {**IMU_READING, "quat_i": 0.1},
-                {**IMU_READING, "quat_i": 0.3},
+            "stream:imu_el": [
+                {**IMU_READING, "yaw": 0.1},
+                {**IMU_READING, "yaw": 0.3},
             ],
             "stream:rfswitch": [
                 {
@@ -1082,23 +1065,23 @@ def test_stream_metadata_averaging():
         f.add_data(1, 0.0, d, metadata=md)
 
         # IMU values should be averaged (stream: prefix stripped)
-        assert f.metadata["imu_panda"][0]["quat_i"] == pytest.approx(0.2)
+        assert f.metadata["imu_el"][0]["yaw"] == pytest.approx(0.2)
         # rfswitch should return the state directly
         assert f.metadata["rfswitch"][0] == 0
 
         # second sample without rfswitch stream — should pad with None
         md2 = {
-            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.5}],
+            "stream:imu_el": [{**IMU_READING, "yaw": 0.5}],
         }
         f.add_data(2, 0.0, d, metadata=md2)
         assert f.metadata["rfswitch"][1] is None
-        assert f.metadata["imu_panda"][1]["quat_i"] == pytest.approx(0.5)
+        assert f.metadata["imu_el"][1]["yaw"] == pytest.approx(0.5)
 
         f.close()
 
 
 def test_temp_metadata_split():
-    """Verify temp sensor A/B channels are split into separate entries."""
+    """Verify tempctrl LNA/LOAD channels split into separate entries."""
     with tempfile.TemporaryDirectory() as tmpdir:
         save_dir = Path(tmpdir)
         pairs = ["0"]
@@ -1110,27 +1093,43 @@ def test_temp_metadata_split():
         d = {"0": np.ones(spec_len, dtype=dtype)}
 
         md = {
-            "stream:temp_mon": [
+            "stream:tempctrl": [
                 {
-                    "sensor_name": "temp_mon",
-                    "app_id": 2,
-                    "A_status": "update",
-                    "A_temp": 30.0,
-                    "A_timestamp": 1.0,
-                    "B_status": "update",
-                    "B_temp": 25.0,
-                    "B_timestamp": 2.0,
+                    "sensor_name": "tempctrl",
+                    "app_id": 1,
+                    "watchdog_tripped": False,
+                    "watchdog_timeout_ms": 5000,
+                    "LNA_status": "update",
+                    "LNA_T_now": 30.0,
+                    "LNA_timestamp": 1.0,
+                    "LNA_T_target": 25.0,
+                    "LNA_drive_level": 0.5,
+                    "LNA_enabled": True,
+                    "LNA_active": True,
+                    "LNA_int_disabled": False,
+                    "LNA_hysteresis": 0.1,
+                    "LNA_clamp": 1.0,
+                    "LOAD_status": "update",
+                    "LOAD_T_now": 25.0,
+                    "LOAD_timestamp": 2.0,
+                    "LOAD_T_target": 25.0,
+                    "LOAD_drive_level": 0.5,
+                    "LOAD_enabled": True,
+                    "LOAD_active": True,
+                    "LOAD_int_disabled": False,
+                    "LOAD_hysteresis": 0.1,
+                    "LOAD_clamp": 1.0,
                 },
             ],
         }
         f.add_data(1, 0.0, d, metadata=md)
 
-        # A and B should be separate flat entries, not nested
-        assert "temp_mon" not in f.metadata
-        assert "temp_mon_a" in f.metadata
-        assert "temp_mon_b" in f.metadata
-        assert f.metadata["temp_mon_a"][0]["temp"] == 30.0
-        assert f.metadata["temp_mon_b"][0]["temp"] == 25.0
+        # LNA and LOAD should be separate flat entries, not nested
+        assert "tempctrl" not in f.metadata
+        assert "tempctrl_lna" in f.metadata
+        assert "tempctrl_load" in f.metadata
+        assert f.metadata["tempctrl_lna"][0]["T_now"] == 30.0
+        assert f.metadata["tempctrl_load"][0]["T_now"] == 25.0
 
         f.close()
 
@@ -1139,7 +1138,8 @@ def test_metadata_end_to_end_round_trip():
     """Contract test for the full producer → File → HDF5 → reader chain.
 
     Drives ``File.add_data`` with raw stream-format metadata for every
-    sensor kind (IMU, lidar, temp_mon, rfswitch) across NTIMES samples,
+    sensor kind (IMU, lidar, tempctrl, rfswitch, potmon) across NTIMES
+    samples,
     lets the double-buffered writer flush the file, reads it back, and
     asserts the metadata matches what CORR_METADATA predicts. This is
     the guard rail that keeps:
@@ -1160,8 +1160,16 @@ def test_metadata_end_to_end_round_trip():
         # something to average (each integration averages a single
         # reading here, which is degenerate but contract-identical).
         return {
-            "stream:imu_panda": [
-                {**IMU_READING, "quat_i": 0.001 * i},
+            "stream:imu_el": [
+                {**IMU_READING, "yaw": 0.001 * i},
+            ],
+            "stream:imu_az": [
+                {
+                    **IMU_READING,
+                    "sensor_name": "imu_az",
+                    "app_id": 6,
+                    "yaw": 0.002 * i,
+                },
             ],
             "stream:lidar": [
                 {
@@ -1171,16 +1179,47 @@ def test_metadata_end_to_end_round_trip():
                     "distance_m": 1.5 + 0.001 * i,
                 },
             ],
-            "stream:temp_mon": [
+            "stream:potmon": [
                 {
-                    "sensor_name": "temp_mon",
+                    "sensor_name": "potmon",
+                    "status": "update",
                     "app_id": 2,
-                    "A_status": "update",
-                    "A_temp": 30.0 + 0.01 * i,
-                    "A_timestamp": 1.0 + i,
-                    "B_status": "update",
-                    "B_temp": 25.0 + 0.01 * i,
-                    "B_timestamp": 1.0 + i,
+                    "pot_el_voltage": 1.5 + 0.001 * i,
+                    "pot_az_voltage": 1.5,
+                    "pot_el_cal_slope": 100.0,
+                    "pot_el_cal_intercept": -50.0,
+                    "pot_az_cal_slope": 200.0,
+                    "pot_az_cal_intercept": -100.0,
+                    "pot_el_angle": 100.0 * (1.5 + 0.001 * i) - 50.0,
+                    "pot_az_angle": 200.0 * 1.5 - 100.0,
+                },
+            ],
+            "stream:tempctrl": [
+                {
+                    "sensor_name": "tempctrl",
+                    "app_id": 1,
+                    "watchdog_tripped": False,
+                    "watchdog_timeout_ms": 5000,
+                    "LNA_status": "update",
+                    "LNA_T_now": 30.0 + 0.01 * i,
+                    "LNA_timestamp": 1.0 + i,
+                    "LNA_T_target": 30.0 + 0.01 * i,
+                    "LNA_drive_level": 0.0,
+                    "LNA_enabled": True,
+                    "LNA_active": True,
+                    "LNA_int_disabled": False,
+                    "LNA_hysteresis": 0.5,
+                    "LNA_clamp": 100.0,
+                    "LOAD_status": "update",
+                    "LOAD_T_now": 25.0 + 0.01 * i,
+                    "LOAD_timestamp": 1.0 + i,
+                    "LOAD_T_target": 25.0 + 0.01 * i,
+                    "LOAD_drive_level": 0.0,
+                    "LOAD_enabled": True,
+                    "LOAD_active": True,
+                    "LOAD_int_disabled": False,
+                    "LOAD_hysteresis": 0.5,
+                    "LOAD_clamp": 100.0,
                 },
             ],
         }
@@ -1232,11 +1271,11 @@ def test_metadata_end_to_end_round_trip():
         for i in range(NTIMES):
             md = _stream_payload(i)
             if i == ERROR_INTEGRATION_INDEX:
-                md["stream:imu_panda"].append(
+                md["stream:imu_el"].append(
                     {
                         **IMU_READING,
                         "status": "error",
-                        "quat_i": 999.0,  # garbage; must NOT reach the file
+                        "yaw": 999.0,  # garbage; must NOT reach the file
                     }
                 )
             if i < 20:
@@ -1265,20 +1304,20 @@ def test_metadata_end_to_end_round_trip():
 
         # Belt-and-suspenders for the partial-error case: assert
         # explicitly that the errored integration's status flag landed
-        # in the file as "error" and that the garbage 999.0 quat_i
+        # in the file as "error" and that the garbage 999.0 yaw
         # from the errored raw sample was filtered out.
-        errored_entry = read_meta["imu_panda"][ERROR_INTEGRATION_INDEX]
+        errored_entry = read_meta["imu_el"][ERROR_INTEGRATION_INDEX]
         assert errored_entry["status"] == "error"
-        assert errored_entry["quat_i"] == pytest.approx(
+        assert errored_entry["yaw"] == pytest.approx(
             0.001 * ERROR_INTEGRATION_INDEX
         )
         # Surrounding integrations stay clean.
         assert (
-            read_meta["imu_panda"][ERROR_INTEGRATION_INDEX - 1]["status"]
+            read_meta["imu_el"][ERROR_INTEGRATION_INDEX - 1]["status"]
             == "update"
         )
         assert (
-            read_meta["imu_panda"][ERROR_INTEGRATION_INDEX + 1]["status"]
+            read_meta["imu_el"][ERROR_INTEGRATION_INDEX + 1]["status"]
             == "update"
         )
 
@@ -1430,8 +1469,8 @@ def test_avg_temp_metadata_raises_on_non_dict_first_entry():
     with pytest.raises(AttributeError):
         io._avg_temp_metadata(
             ["not a dict"],
-            "temp_mon",
-            io.SENSOR_SCHEMAS["temp_mon"],
+            "tempctrl",
+            io.SENSOR_SCHEMAS["tempctrl"],
         )
 
 
@@ -1540,7 +1579,7 @@ def test_corr_data_saved_despite_metadata_crash(monkeypatch, caplog):
             if (
                 value
                 and isinstance(value[0], dict)
-                and value[0].get("sensor_name") == "imu_panda"
+                and value[0].get("sensor_name") == "imu_el"
             ):
                 raise RuntimeError("simulated producer contract violation")
             return real_avg(value)
@@ -1548,7 +1587,7 @@ def test_corr_data_saved_despite_metadata_crash(monkeypatch, caplog):
         monkeypatch.setattr(io, "avg_metadata", picky)
 
         md = {
-            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}],
+            "stream:imu_el": [{**IMU_READING, "yaw": 0.1}],
             "stream:rfswitch": [
                 {
                     "sensor_name": "rfswitch",
@@ -1582,8 +1621,8 @@ def test_corr_data_saved_despite_metadata_crash(monkeypatch, caplog):
         # rfswitch processing succeeded despite imu crash —
         # confirms the safety net is per-stream, not blanket.
         assert "rfswitch" in read_meta
-        # imu_panda was never successfully processed → absent.
-        assert "imu_panda" not in read_meta
+        # imu_el was never successfully processed → absent.
+        assert "imu_el" not in read_meta
 
         # An ERROR-level contract-violation log was emitted for each
         # add_data call (so the producer bug is loudly visible).
@@ -1672,17 +1711,16 @@ def test_add_data_malformed_metadata_shape_logs_error(caplog):
 
         with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
             # Pass a string instead of a list of dicts — bad shape.
-            f.add_data(1, 0.0, d, metadata={"stream:imu_panda": "not a list"})
+            f.add_data(1, 0.0, d, metadata={"stream:imu_el": "not a list"})
 
         # Corr data still saved despite the bad metadata.
         assert f.counter == 1
         # The bad stream is dropped from the active metadata.
-        assert "imu_panda" not in f.metadata
+        assert "imu_el" not in f.metadata
 
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert any(
-            "imu_panda" in e.getMessage()
-            and "non-empty list" in e.getMessage()
+            "imu_el" in e.getMessage() and "non-empty list" in e.getMessage()
             for e in errors
         ), (
             f"expected a producer-contract-violation log, got: {[e.getMessage() for e in errors]}"
@@ -2274,7 +2312,7 @@ def test_reset_zeros_buffers_and_clears_metadata():
         spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
         dtype = np.dtype(HEADER["dtype"])
         d = {"0": np.full(spec_len, 7, dtype=dtype)}
-        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+        md = {"stream:imu_el": [{**IMU_READING, "yaw": 0.1}]}
         f.add_data(1, 0.0, d, metadata=md)
         f.add_data(2, 0.0, d, metadata=md)
 
@@ -2331,7 +2369,7 @@ def test_metadata_invariant_after_normal_add_data():
         spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
         dtype = np.dtype(HEADER["dtype"])
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
-        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+        md = {"stream:imu_el": [{**IMU_READING, "yaw": 0.1}]}
 
         for i in range(3):
             f.add_data(i + 1, 0.0, d, metadata=md)
@@ -2356,7 +2394,7 @@ def test_metadata_invariant_after_dropped_pair():
         dtype = np.dtype(HEADER["dtype"])
         # Pair 1 missing — will be dropped + zeroed.
         partial = {"0": np.full(spec_len, 1, dtype=dtype)}
-        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+        md = {"stream:imu_el": [{**IMU_READING, "yaw": 0.1}]}
 
         f.add_data(1, 0.0, partial, metadata=md)
 
@@ -2383,7 +2421,7 @@ def test_metadata_invariant_after_gap_fill():
         spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
         dtype = np.dtype(HEADER["dtype"])
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
-        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}]}
+        md = {"stream:imu_el": [{**IMU_READING, "yaw": 0.1}]}
 
         # First sample at acc_cnt=1.
         f.add_data(1, 0.0, d, metadata=md)
@@ -2400,7 +2438,7 @@ def test_metadata_invariant_after_gap_fill():
         # Filler invariant: gap-filled positions are None, real
         # positions are not. Locks in the None sentinel against
         # future drift to other values (0, "", {}, NaN, ...).
-        imu_list = f.metadata["imu_panda"]
+        imu_list = f.metadata["imu_el"]
         assert imu_list[0] is not None  # real (acc_cnt=1)
         for i in range(1, 19):
             assert imu_list[i] is None, (
@@ -2429,19 +2467,19 @@ def test_metadata_filler_is_none_when_stream_appears_late():
         # First two samples with no metadata at all.
         f.add_data(1, 0.0, d)
         f.add_data(2, 0.0, d)
-        assert "imu_panda" not in f.metadata
+        assert "imu_el" not in f.metadata
 
-        # Third sample introduces imu_panda — back-fill must be None.
-        md = {"stream:imu_panda": [{**IMU_READING, "quat_i": 0.5}]}
+        # Third sample introduces imu_el — back-fill must be None.
+        md = {"stream:imu_el": [{**IMU_READING, "yaw": 0.5}]}
         f.add_data(3, 0.0, d, metadata=md)
 
         assert f.counter == 3
-        imu_list = f.metadata["imu_panda"]
+        imu_list = f.metadata["imu_el"]
         assert len(imu_list) == 3
         assert imu_list[0] is None
         assert imu_list[1] is None
         assert imu_list[2] is not None
-        assert imu_list[2]["quat_i"] == pytest.approx(0.5)
+        assert imu_list[2]["yaw"] == pytest.approx(0.5)
 
         f.close()
 
@@ -2538,7 +2576,7 @@ def test_file_writes_all_configured_pairs_with_aligned_axes(
         # use generate_data() because it's hardcoded to the current
         # 12-pair layout — see issue #35.
         md_template = {
-            "stream:imu_panda": [{**IMU_READING, "quat_i": 0.1}],
+            "stream:imu_el": [{**IMU_READING, "yaw": 0.1}],
             "stream:rfswitch": [
                 {
                     "sensor_name": "rfswitch",
@@ -2670,7 +2708,7 @@ def test_vna_production_path_writes_dut_cal_and_metadata(dut_keys, mode):
         "metadata_snapshot_unix": snapshot_t,
     }
     metadata = {
-        "imu_panda": {**IMU_READING, "quat_i": 0.5},
+        "imu_el": {**IMU_READING, "yaw": 0.5},
         "rfswitch": 7,
     }
 
@@ -2722,8 +2760,7 @@ def test_vna_production_path_writes_dut_cal_and_metadata(dut_keys, mode):
 
         # Metadata round-tripped including the nested IMU dict.
         assert read_meta["rfswitch"] == 7
-        assert read_meta["imu_panda"]["quat_i"] == pytest.approx(0.5)
-        assert read_meta["imu_panda"]["calibrated"] is True
+        assert read_meta["imu_el"]["yaw"] == pytest.approx(0.5)
 
 
 def test_corr_write_independent_of_hung_vna_write(monkeypatch):
