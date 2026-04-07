@@ -24,12 +24,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from picohost import PicoPotentiometer
 from picohost.testing import (
     ImuEmulator,
     LidarEmulator,
-    RFSwitchWithImuEmulator,
+    PotMonEmulator,
+    RFSwitchEmulator,
     TempCtrlEmulator,
-    TempMonEmulator,
 )
 
 from conftest import HEADER, IMU_READING
@@ -37,10 +38,36 @@ from eigsep_observing import io
 from eigsep_observing.testing import DummyEigsepFpga
 
 
-def _rfswitch_subreading(sensor_name):
-    """Extract one sub-reading from the multi-sensor rfswitch emulator."""
-    readings = RFSwitchWithImuEmulator().get_status()
-    return next(r for r in readings if r["sensor_name"] == sensor_name)
+def _potmon_post_handler_reading():
+    """Return a calibrated potmon reading after _pot_redis_handler.
+
+    The actual ``potmon`` producer is the composition
+    ``PotMonEmulator.get_status()`` + ``PicoPotentiometer._pot_redis_handler``
+    — the emulator only emits raw voltages, and the device handler is
+    where the calibration slope/intercept and the derived angle are
+    added. The contract this test enforces is the *post-handler* shape
+    (what reaches Redis), not the raw emulator shape, so the fixture
+    has to compose the two.
+
+    We bypass ``PicoPotentiometer.__init__`` (which would open a real
+    serial port) by constructing the instance via ``__new__`` and
+    populating just the attributes ``_pot_redis_handler`` reads. The
+    base handler is stubbed to capture the published dict. A calibrated
+    reading is used so every cal/angle field is exercised as a real
+    float — an uncalibrated reading would publish ``None`` for those
+    fields, which the validator silently passes (per ``_validate_metadata``
+    short-circuit on ``None``) but tells us less about producer drift.
+    """
+    pot = PicoPotentiometer.__new__(PicoPotentiometer)
+    pot._cal = {
+        "pot_el": (100.0, -50.0),
+        "pot_az": (200.0, -100.0),
+    }
+    captured = {}
+    pot._base_redis_handler = lambda d: captured.update(d)
+    raw = PotMonEmulator().get_status()
+    pot._pot_redis_handler(raw)
+    return captured
 
 
 # Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
@@ -50,12 +77,12 @@ def _rfswitch_subreading(sensor_name):
 # real-producer contract test is impossible: the parametrized test runs
 # over SENSOR_SCHEMAS keys, so a missing registration fails CI loudly.
 SENSOR_EMULATORS = {
-    "imu_panda": lambda: ImuEmulator().get_status(),
-    "imu_antenna": lambda: _rfswitch_subreading("imu_antenna"),
-    "rfswitch": lambda: _rfswitch_subreading("rfswitch"),
-    "temp_mon": lambda: TempMonEmulator().get_status(),
+    "imu_el": lambda: ImuEmulator(app_id=3).get_status(),
+    "imu_az": lambda: ImuEmulator(app_id=6).get_status(),
+    "rfswitch": lambda: RFSwitchEmulator().get_status(),
     "tempctrl": lambda: TempCtrlEmulator().get_status(),
     "lidar": lambda: LidarEmulator().get_status(),
+    "potmon": _potmon_post_handler_reading,
 }
 
 
@@ -65,12 +92,11 @@ def test_test_header_conforms_to_corr_schema():
     assert io._validate_corr_header(HEADER) == []
 
 
-def test_test_imu_reading_conforms_to_imu_panda_schema():
+def test_test_imu_reading_conforms_to_imu_el_schema():
     """The IMU_READING fixture used by metadata tests must satisfy
-    the imu_panda schema. Catches drift in the fixture."""
+    the imu_el schema. Catches drift in the fixture."""
     assert (
-        io._validate_metadata(IMU_READING, io.SENSOR_SCHEMAS["imu_panda"])
-        == []
+        io._validate_metadata(IMU_READING, io.SENSOR_SCHEMAS["imu_el"]) == []
     )
 
 

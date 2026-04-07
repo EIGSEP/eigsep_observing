@@ -53,64 +53,40 @@ HEADER = {
 }
 
 # Schema-conformant raw IMU reading (as emitted by a pico and pushed into
-# stream:imu_panda by picohost). Used to build CORR_METADATA entries and by
-# tests that feed raw stream data into File.add_data.
+# stream:imu_el by picohost). Mirrors the BNO085 UART RVC payload
+# introduced in picohost 1.0.0: yaw/pitch/roll orientation in degrees and
+# accel_x/y/z in m/s². Used to build CORR_METADATA entries and by tests
+# that feed raw stream data into File.add_data.
 IMU_READING = {
-    "sensor_name": "imu_panda",
+    "sensor_name": "imu_el",
     "status": "update",
     "app_id": 3,
-    "quat_i": 0.0,
-    "quat_j": 0.0,
-    "quat_k": 0.0,
-    "quat_real": 1.0,
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
     "accel_x": 0.0,
     "accel_y": 0.0,
-    "accel_z": 9.8,
-    "lin_accel_x": 0.0,
-    "lin_accel_y": 0.0,
-    "lin_accel_z": 0.0,
-    "gyro_x": 0.0,
-    "gyro_y": 0.0,
-    "gyro_z": 0.0,
-    "mag_x": 0.0,
-    "mag_y": 0.0,
-    "mag_z": 0.0,
-    "calibrated": True,
-    "accel_cal": 3,
-    "mag_cal": 3,
+    "accel_z": 9.81,
 }
 
 
-def _imu_avg_entry(quat_i):
+def _imu_avg_entry(yaw):
     """One per-sample IMU entry as avg_metadata would emit it.
 
-    Types match SENSOR_SCHEMAS: ``int`` fields stay ``int`` (categorical
-    path in ``_avg_sensor_values``), ``float`` fields stay ``float``
-    (averaged), ``bool``/``str`` fields take the first value.
+    All numeric fields are float and take the float→mean reduction in
+    ``_avg_sensor_values``. ``yaw`` is the per-sample varying axis used
+    by tests that need to assert on a non-constant float field.
     """
     return {
-        "sensor_name": "imu_panda",
+        "sensor_name": "imu_el",
         "status": "update",
         "app_id": 3,
-        "quat_i": quat_i,
-        "quat_j": 0.0,
-        "quat_k": 0.0,
-        "quat_real": 1.0,
+        "yaw": yaw,
+        "pitch": 0.0,
+        "roll": 0.0,
         "accel_x": 0.0,
         "accel_y": 0.0,
-        "accel_z": 9.8,
-        "lin_accel_x": 0.0,
-        "lin_accel_y": 0.0,
-        "lin_accel_z": 0.0,
-        "gyro_x": 0.0,
-        "gyro_y": 0.0,
-        "gyro_z": 0.0,
-        "mag_x": 0.0,
-        "mag_y": 0.0,
-        "mag_z": 0.0,
-        "calibrated": True,
-        "accel_cal": 3,
-        "mag_cal": 3,
+        "accel_z": 9.81,
     }
 
 
@@ -124,40 +100,79 @@ def _lidar_avg_entry(distance_m):
     }
 
 
-def _temp_channel_entry(temp, timestamp):
-    """One per-sample temp_mon channel (A or B) after add_data's A/B split.
+def _tempctrl_channel_entry(t_now, timestamp):
+    """One per-sample tempctrl channel (LNA or LOAD) after add_data's split.
 
-    The top-level ``sensor_name``/``app_id`` returned by ``_avg_temp_metadata``
-    are dropped by the split in ``File.add_data``; only the per-channel
-    sub-dict survives.
+    The top-level fields returned by ``_avg_temp_metadata`` are dropped
+    by the LNA/LOAD split in ``File.add_data``; only the per-channel
+    sub-dict survives. The bool/float fault flags are constant in this
+    fixture (steady-state operation); tests that need to exercise
+    fault-flag transitions construct their own samples.
     """
     return {
         "status": "update",
-        "temp": temp,
+        "T_now": t_now,
         "timestamp": timestamp,
+        "T_target": t_now,
+        "drive_level": 0.0,
+        "enabled": True,
+        "active": True,
+        "int_disabled": False,
+        "hysteresis": 0.5,
+        "clamp": 100.0,
+    }
+
+
+def _potmon_avg_entry(pot_el_voltage):
+    """One per-sample potmon entry as avg_metadata would emit it.
+
+    Mirrors the post-``_pot_redis_handler`` shape that lands in Redis:
+    raw voltages plus the flattened cal slope/intercept and the derived
+    angle. All-scalar per the picohost scalar-only contract; the cal
+    fields are de-facto invariants for the lifetime of a stream.
+    """
+    return {
+        "sensor_name": "potmon",
+        "status": "update",
+        "app_id": 2,
+        "pot_el_voltage": pot_el_voltage,
+        "pot_az_voltage": 1.5,
+        "pot_el_cal_slope": 100.0,
+        "pot_el_cal_intercept": -50.0,
+        "pot_az_cal_slope": 200.0,
+        "pot_az_cal_intercept": -100.0,
+        "pot_el_angle": 100.0 * pot_el_voltage - 50.0,
+        "pot_az_angle": 200.0 * 1.5 - 100.0,
     }
 
 
 ERROR_INTEGRATION_INDEX = 30
 
 
-def _imu_errored_integration_entry(quat_i):
-    return {**_imu_avg_entry(quat_i), "status": "error"}
+def _imu_errored_integration_entry(yaw):
+    return {**_imu_avg_entry(yaw), "status": "error"}
 
 
 CORR_METADATA = {
-    "imu_panda": [
+    "imu_el": [
         _imu_avg_entry(0.001 * i)
         if i != ERROR_INTEGRATION_INDEX
         else _imu_errored_integration_entry(0.001 * i)
         for i in range(NTIMES)
     ],
-    "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
-    "temp_mon_a": [
-        _temp_channel_entry(30.0 + 0.01 * i, 1.0 + i) for i in range(NTIMES)
+    "imu_az": [
+        {**_imu_avg_entry(0.002 * i), "sensor_name": "imu_az", "app_id": 6}
+        for i in range(NTIMES)
     ],
-    "temp_mon_b": [
-        _temp_channel_entry(25.0 + 0.01 * i, 1.0 + i) for i in range(NTIMES)
+    "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
+    "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
+    "tempctrl_lna": [
+        _tempctrl_channel_entry(30.0 + 0.01 * i, 1.0 + i)
+        for i in range(NTIMES)
+    ],
+    "tempctrl_load": [
+        _tempctrl_channel_entry(25.0 + 0.01 * i, 1.0 + i)
+        for i in range(NTIMES)
     ],
     "rfswitch": (
         [0] * 20  # steady state
@@ -179,8 +194,10 @@ CORR_METADATA = {
 # scalars or nested dicts, never per-sample lists.
 _SNAPSHOT_TS = "2026-04-07T12:34:56.789012+00:00"
 VNA_METADATA = {
-    "imu_panda": IMU_READING,
-    "imu_panda_ts": _SNAPSHOT_TS,
+    "imu_el": IMU_READING,
+    "imu_el_ts": _SNAPSHOT_TS,
+    "imu_az": {**IMU_READING, "sensor_name": "imu_az", "app_id": 6},
+    "imu_az_ts": _SNAPSHOT_TS,
     "lidar": {
         "sensor_name": "lidar",
         "status": "update",
@@ -188,17 +205,20 @@ VNA_METADATA = {
         "distance_m": 1.52,
     },
     "lidar_ts": _SNAPSHOT_TS,
-    "temp_mon": {
-        "sensor_name": "temp_mon",
+    "potmon": {
+        "sensor_name": "potmon",
+        "status": "update",
         "app_id": 2,
-        "A_status": "update",
-        "A_temp": 42.5,
-        "A_timestamp": 1748734379.9,
-        "B_status": "update",
-        "B_temp": 18.0,
-        "B_timestamp": 1748734379.9,
+        "pot_el_voltage": 1.5,
+        "pot_az_voltage": 1.5,
+        "pot_el_cal_slope": 100.0,
+        "pot_el_cal_intercept": -50.0,
+        "pot_az_cal_slope": 200.0,
+        "pot_az_cal_intercept": -100.0,
+        "pot_el_angle": 100.0,
+        "pot_az_angle": 200.0,
     },
-    "temp_mon_ts": _SNAPSHOT_TS,
+    "potmon_ts": _SNAPSHOT_TS,
     "rfswitch": {
         "sensor_name": "rfswitch",
         "status": "update",

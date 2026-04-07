@@ -114,7 +114,7 @@ directly from `SENSOR_SCHEMAS`:
 | schema type | reduction                                       | rationale |
 |-------------|-------------------------------------------------|-----------|
 | `float`     | `np.mean` over non-error survivors              | the actual averaging path; matches the integration's physical meaning |
-| `int`       | `min` over non-error survivors                  | every int field today is either a constant (`app_id`, `watchdog_timeout_ms`) or a worst-case-wins quality level (`accel_cal`/`mag_cal` 0–3); `min` preserves the worst case |
+| `int`       | `min` over non-error survivors                  | every int field today is an invariant constant (`app_id`, `watchdog_timeout_ms`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path |
 | `bool`      | `any` over non-error survivors                  | bool fields are fault flags (`watchdog_tripped`); `any` preserves a fault that occurred mid-integration |
 | `str`       | first value if unanimous, else `"UNKNOWN"`      | matches the rfswitch convention |
 
@@ -153,16 +153,30 @@ normal operation.
   additional forward-window flagging that fires on consecutive-sample switch
   state changes.
 - `_avg_temp_metadata` first averages the top-level (non-prefixed) fields via
-  `_avg_sensor_values`, then splits the `A_*`/`B_*` channel keys into
-  `temp_mon_a`/`temp_mon_b` (etc.) sub-dicts and runs `_avg_sensor_values` on
+  `_avg_sensor_values`, then splits the `LNA_*`/`LOAD_*` channel keys into
+  `tempctrl_lna`/`tempctrl_load` sub-dicts and runs `_avg_sensor_values` on
   each. The split happens in `File.add_data`, not here, so the streams in the
-  saved file are flat per-channel.
+  saved file are flat per-channel. Only `tempctrl` exercises this helper —
+  the standalone `temp_mon` Pico app was retired in picohost 1.0.0.
 
-**Documented quirk:** the IMU's `calibrated` field is a `bool` event flag
-(set briefly when a user-triggered BNO085 calibration completes), not a state.
-With the `bool → any` reduction, an integration that contains the completion
-event reports `True`, which is mildly weird semantically. It's scheduled for
-removal in the next picohost PR; not worth special-casing.
+**IMU mode (picohost 1.0.0).** The two IMU picos (`imu_el` panda elevation,
+app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:
+just `yaw`/`pitch`/`roll` (degrees) and `accel_x/y/z` (m/s²). No quaternion,
+linear-accel, gyro, mag, or calibration-level fields. Both share the
+`_IMU_SCHEMA` body in `io.py`.
+
+**`potmon` producer-contract quirk.** The `potmon` schema is enforced
+against the **post-`_pot_redis_handler`** shape, not the raw
+`PotMonEmulator.get_status()` output. The emulator only emits voltages;
+the slope/intercept and derived angle fields are added by
+`PicoPotentiometer._pot_redis_handler` at Redis-publish time. The
+producer-contract test (`tests/test_producer_contracts.py`) composes the
+two by bypassing `PicoPotentiometer.__init__` and calling
+`_pot_redis_handler` directly with a calibrated cal dict — see
+`_potmon_post_handler_reading` there. The picohost scalar-only contract
+(documented on `picohost.base.redis_handler`) means every field is
+scalar, including the cal slope/intercept which were flattened from the
+old `[m, b]` list shape.
 
 ## Testing philosophy: fixtures must match production data
 

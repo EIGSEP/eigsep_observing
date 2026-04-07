@@ -43,10 +43,10 @@ def test_client(client):
     # client is initialized with redis commands
     assert client.redis.client_heartbeat_check()  # check heartbeat
     if hasattr(client, "picos") and client.picos:
-        if "switch" in client.picos:
+        if "rfswitch" in client.picos:
             assert client.switch_nw is not None
             # Since picohost is mocked, we just check it exists
-            assert client.switch_nw is client.picos["switch"]
+            assert client.switch_nw is client.picos["rfswitch"]
     # vna should be initialized if switch exists and use_vna is true
     if client.switch_nw is not None and client.cfg.get("use_vna", False):
         assert isinstance(client.vna, DummyVNA)
@@ -108,9 +108,9 @@ def test_add_pico(caplog, monkeypatch, client):
         assert len(client.picos) > 0
 
         # Check that switch_nw was set if switch pico exists
-        if "switch" in client.picos:
+        if "rfswitch" in client.picos:
             assert client.switch_nw is not None
-            assert client.switch_nw is client.picos["switch"]
+            assert client.switch_nw is client.picos["rfswitch"]
 
         # Check logging
         for record in caplog.records:

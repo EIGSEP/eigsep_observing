@@ -17,11 +17,12 @@ with open(default_cfg_file, "r") as f:
 
 class PandaClient:
     PICO_CLASSES = {
-        "imu": picohost.PicoIMU,
-        "therm": picohost.PicoDevice,
-        "peltier": picohost.PicoPeltier,
+        "imu_el": picohost.PicoIMU,
+        "imu_az": picohost.PicoIMU,
+        "potmon": picohost.PicoPotentiometer,
+        "tempctrl": picohost.PicoPeltier,
         "lidar": picohost.PicoDevice,
-        "switch": picohost.PicoRFSwitch,
+        "rfswitch": picohost.PicoRFSwitch,
     }
 
     def __init__(self, redis, default_cfg=default_cfg):
@@ -253,8 +254,8 @@ class PandaClient:
             return
 
         # create reference to switch_nw, motor, peltier if they exist
-        self.switch_nw = self.picos.get("switch", None)
-        self.peltier = self.picos.get("peltier", None)
+        self.switch_nw = self.picos.get("rfswitch", None)
+        self.peltier = self.picos.get("tempctrl", None)
 
     def switch_loop(self):
         """

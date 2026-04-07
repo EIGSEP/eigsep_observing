@@ -41,8 +41,16 @@ def client(redis, dummy_cfg):
 
 def test_picos_initialized(client):
     """DummyPandaClient should initialize picos from the dummy config."""
-    # motor is skipped in init_picos, so we expect 5 picos
-    expected = {"imu", "therm", "peltier", "lidar", "switch"}
+    # motor is skipped in init_picos; the dummy config has six picos
+    # left after that (tempctrl, potmon, imu_el, imu_az, lidar, rfswitch).
+    expected = {
+        "tempctrl",
+        "potmon",
+        "imu_el",
+        "imu_az",
+        "lidar",
+        "rfswitch",
+    }
     assert set(client.picos.keys()) == expected
 
 
@@ -53,15 +61,16 @@ def test_sensor_metadata_in_redis(client, redis):
 
     metadata = redis.get_live_metadata()
 
-    # Each emulator writes its sensor_name as the Redis metadata key.
-    # RFSwitchWithImuEmulator writes both "rfswitch" and "imu_antenna".
+    # Each emulator writes its sensor_name as the Redis metadata key. The
+    # two IMU picos use distinct app_id-based names (imu_el / imu_az) per
+    # picohost 1.0.0.
     expected_sensors = {
-        "tempctrl",  # from peltier pico
-        "temp_mon",  # from therm pico
-        "imu_panda",  # from imu pico (app_id=3)
+        "tempctrl",  # from tempctrl pico (PicoPeltier class)
+        "potmon",  # from potmon pico
+        "imu_el",  # from imu_el pico (app_id=3)
+        "imu_az",  # from imu_az pico (app_id=6)
         "lidar",  # from lidar pico
-        "rfswitch",  # from switch pico (composite emulator)
-        "imu_antenna",  # from switch pico (composite emulator)
+        "rfswitch",  # from rfswitch pico
     }
     for sensor in expected_sensors:
         assert sensor in metadata, (
@@ -76,17 +85,17 @@ def test_metadata_has_expected_fields(client, redis):
 
     metadata = redis.get_live_metadata()
 
-    # Check motor-like fields from tempctrl
+    # Check tempctrl LNA/LOAD channels
     tempctrl = metadata.get("tempctrl", {})
-    assert "A_T_now" in tempctrl
-    assert "B_T_now" in tempctrl
+    assert "LNA_T_now" in tempctrl
+    assert "LOAD_T_now" in tempctrl
     assert tempctrl.get("sensor_name") == "tempctrl"
 
-    # Check IMU fields
-    imu = metadata.get("imu_panda", {})
-    assert "quat_i" in imu
+    # Check IMU (BNO085 RVC mode in picohost 1.0.0)
+    imu = metadata.get("imu_el", {})
+    assert "yaw" in imu
     assert "accel_x" in imu
-    assert imu.get("sensor_name") == "imu_panda"
+    assert imu.get("sensor_name") == "imu_el"
 
     # Check lidar
     lidar = metadata.get("lidar", {})
@@ -95,6 +104,14 @@ def test_metadata_has_expected_fields(client, redis):
     # Check rfswitch
     rfswitch = metadata.get("rfswitch", {})
     assert "sw_state" in rfswitch
+
+    # Check potmon (post-_pot_redis_handler shape: voltages always
+    # present, cal/angle fields are None for an uncalibrated stream)
+    potmon = metadata.get("potmon", {})
+    assert "pot_el_voltage" in potmon
+    assert "pot_az_voltage" in potmon
+    assert "pot_el_cal_slope" in potmon
+    assert "pot_el_angle" in potmon
 
 
 def test_get_live_metadata_single_key(client, redis):
