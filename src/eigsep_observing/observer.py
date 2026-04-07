@@ -151,10 +151,8 @@ class EigObserver:
                 metadata = None
             file.add_data(acc_cnt, sync_time, data, metadata=metadata)
 
-        # write short final file if there is more data
-        if len(file) > 0:
-            self.logger.info("Writing short final file.")
-            file.corr_write()
+        # close() flushes any pending buffer to disk before shutting
+        # down the writer thread, so no manual flush is needed.
         file.close()
 
     def record_vna_data(self, save_dir, timeout=60):

@@ -1395,6 +1395,14 @@ class File:
         the complete file exists or it doesn't (rename is atomic on
         POSIX).
 
+        The rename is deliberately *outside* the cleanup ``try/except``:
+        if ``write_hdf5`` succeeds but ``os.rename`` then raises (e.g.
+        a transient NFS / filesystem error), we let the exception
+        propagate without deleting the temp file. The just-written data
+        is preserved on disk as ``corr_*.h5.tmp`` for an operator to
+        recover by hand. Corr data is sacred — never destroy a
+        successful write because of a downstream filesystem hiccup.
+
         """
         if fname is None:
             date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1425,11 +1433,11 @@ class File:
         os.close(fd)
         try:
             write_hdf5(tmp_path, reshaped, full_header, metadata=metadata)
-            os.rename(tmp_path, fname)
         except Exception:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
             raise
+        os.rename(tmp_path, fname)
 
     def corr_write(self, fname=None):
         """
@@ -1497,9 +1505,19 @@ class File:
 
     def close(self):
         """
-        Shut down the writer thread and wait for pending writes.
+        Flush any pending data, shut down the writer thread, and
+        surface final-state errors.
+
+        Calls ``corr_write`` first if the active buffer is non-empty,
+        so a caller can simply call ``close()`` at the end of a run
+        without remembering to flush manually. The flush goes through
+        the normal writer path (bounded wait, drop-on-timeout, full
+        ERROR logging) — corr data is sacred but ``close()`` must
+        remain bounded.
 
         """
+        if self.counter > 0:
+            self.corr_write()
         self._write_queue.put(None)
         self._writer_thread.join(timeout=30)
         if self._writer_thread.is_alive():
