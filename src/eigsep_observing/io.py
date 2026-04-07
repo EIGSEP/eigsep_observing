@@ -18,12 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Conservative window for the RF switch actuation + pico cadence.
 # The physical switch takes ~200ms to actuate, and the pico reports
-# its commanded state on a ~200ms cadence. The pico has no way to
-# know when actuation is *actually* complete (no feedback sensing),
-# so we use a forward-only timing assumption: when sample N has a
-# different switch state than sample N-1, we flag the next
-# ceil(RFSWITCH_TRANSITION_WINDOW_S / integration_time) samples as
-# UNKNOWN to cover the contamination window. The 500ms includes the
+# its commanded state on a ~200ms cadence. The 500ms includes the
 # 200ms actuation, the up-to-200ms pico cadence delay before the
 # new state is reported, and ~100ms safety margin.
 RFSWITCH_TRANSITION_WINDOW_S = 0.5
@@ -384,12 +379,7 @@ def read_hdf5(fname):
         # metadata — like the header, this group can carry both
         # attrs (scalar metadata stored via _write_attr) and
         # datasets/subgroups (lists, dicts, arrays). Read both,
-        # mirroring the header read above. The earlier version of
-        # this loop only read .items() and silently dropped any
-        # scalar metadata stored as an attribute — which is the
-        # path VNA metadata takes (get_live_metadata() returns
-        # scalars). Corr metadata always goes through datasets
-        # because it's stored as per-sample lists.
+        # mirroring the header read above.
         metadata = {}
         if "metadata" in f:
             meta_grp = f["metadata"]
@@ -1259,7 +1249,7 @@ class File:
             except (KeyError, TypeError, ValueError):
                 n_to_flag = 2  # safe default for typical 0.25s int
             self._rfswitch_unknown_remaining = n_to_flag
-            self.logger.warning(
+            self.logger.info(
                 f"RF switch transition detected: "
                 f"{self._prev_rfswitch_state}→{new_rfswitch}. "
                 f"Flagging next {n_to_flag} sample(s) as UNKNOWN to "
