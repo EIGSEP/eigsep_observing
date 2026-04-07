@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 from picohost.testing import (
     ImuEmulator,
     LidarEmulator,
@@ -34,6 +35,28 @@ from picohost.testing import (
 from conftest import HEADER, IMU_READING
 from eigsep_observing import io
 from eigsep_observing.testing import DummyEigsepFpga
+
+
+def _rfswitch_subreading(sensor_name):
+    """Extract one sub-reading from the multi-sensor rfswitch emulator."""
+    readings = RFSwitchWithImuEmulator().get_status()
+    return next(r for r in readings if r["sensor_name"] == sensor_name)
+
+
+# Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
+# that returns a single fresh reading from the corresponding picohost
+# emulator. Used by test_every_schema_has_conforming_emulator below to
+# mechanically enforce that adding an entry to SENSOR_SCHEMAS without a
+# real-producer contract test is impossible: the parametrized test runs
+# over SENSOR_SCHEMAS keys, so a missing registration fails CI loudly.
+SENSOR_EMULATORS = {
+    "imu_panda": lambda: ImuEmulator().get_status(),
+    "imu_antenna": lambda: _rfswitch_subreading("imu_antenna"),
+    "rfswitch": lambda: _rfswitch_subreading("rfswitch"),
+    "temp_mon": lambda: TempMonEmulator().get_status(),
+    "tempctrl": lambda: TempCtrlEmulator().get_status(),
+    "lidar": lambda: LidarEmulator().get_status(),
+}
 
 
 def test_test_header_conforms_to_corr_schema():
@@ -62,52 +85,22 @@ def test_dummy_eigsep_fpga_header_conforms_to_corr_schema():
     assert violations == [], f"DummyEigsepFpga header drift: {violations}"
 
 
-def test_picohost_imu_emulator_conforms_to_schema():
-    """picohost.testing.ImuEmulator output must satisfy imu_panda
-    schema. Locks in the producer ↔ schema contract."""
-    reading = ImuEmulator().get_status()
-    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["imu_panda"]) == []
-
-
-def test_picohost_lidar_emulator_conforms_to_schema():
-    """picohost.testing.LidarEmulator output must satisfy lidar
-    schema."""
-    reading = LidarEmulator().get_status()
-    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["lidar"]) == []
-
-
-def test_picohost_tempmon_emulator_conforms_to_schema():
-    """picohost.testing.TempMonEmulator output must satisfy temp_mon
-    schema."""
-    reading = TempMonEmulator().get_status()
-    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["temp_mon"]) == []
-
-
-def test_picohost_tempctrl_emulator_conforms_to_schema():
-    """picohost.testing.TempCtrlEmulator output must satisfy tempctrl
-    schema."""
-    reading = TempCtrlEmulator().get_status()
-    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["tempctrl"]) == []
-
-
-def test_picohost_rfswitch_emulator_conforms_to_schemas():
-    """picohost.testing.RFSwitchWithImuEmulator returns a list of
-    two readings (imu_antenna + rfswitch) that must each validate
-    against their respective schemas."""
-    readings = RFSwitchWithImuEmulator().get_status()
-    assert isinstance(readings, list)
-    imu_reading = next(
-        r for r in readings if r["sensor_name"] == "imu_antenna"
+@pytest.mark.parametrize("sensor_name", sorted(io.SENSOR_SCHEMAS))
+def test_every_schema_has_conforming_emulator(sensor_name):
+    """For every entry in SENSOR_SCHEMAS, a real picohost emulator
+    must produce output that validates against it. The parametrize
+    iterates over SENSOR_SCHEMAS (not SENSOR_EMULATORS), so adding a
+    schema without registering an emulator fails CI by construction —
+    the rule "if you add a sensor, add a contract test" is enforced
+    mechanically rather than by reviewer discipline."""
+    assert sensor_name in SENSOR_EMULATORS, (
+        f"SENSOR_SCHEMAS has '{sensor_name}' but no emulator is "
+        f"registered in SENSOR_EMULATORS. Add one so producer drift "
+        f"in this sensor is caught by CI."
     )
-    rfsw_reading = next(r for r in readings if r["sensor_name"] == "rfswitch")
-    assert (
-        io._validate_metadata(imu_reading, io.SENSOR_SCHEMAS["imu_antenna"])
-        == []
-    )
-    assert (
-        io._validate_metadata(rfsw_reading, io.SENSOR_SCHEMAS["rfswitch"])
-        == []
-    )
+    reading = SENSOR_EMULATORS[sensor_name]()
+    violations = io._validate_metadata(reading, io.SENSOR_SCHEMAS[sensor_name])
+    assert violations == [], f"{sensor_name} producer drift: {violations}"
 
 
 def test_dummy_fpga_header_round_trips_through_file():
