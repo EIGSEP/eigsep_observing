@@ -598,6 +598,23 @@ class EigsepRedis:
         Get live metadata from Redis, i.e. the current values stored
         in the metadata hash.
 
+        This is the **snapshot** path. It is used by ``PandaClient``
+        when packaging VNA measurements (client.py): a VNA reading
+        is point-in-time, taken at ~1/hour cadence, and the right
+        metadata semantics are "what was the latest sensor reading
+        at the moment the VNA was triggered." Use this for any
+        consumer that wants a current snapshot rather than a
+        cadence-matched average. **Do not use this for the corr
+        loop** — corr metadata is averaged over the integration via
+        ``get_metadata`` instead (see that method's docstring).
+
+        Caveat: ``get_live_metadata`` reads the latest hash values
+        with no freshness check. If a sensor stopped updating an
+        hour ago, you silently get the stale value. The VNA file
+        header includes ``metadata_snapshot_unix`` (set by
+        PandaClient) to let downstream detect this at inspection
+        time, but there is no runtime warning today.
+
         Parameters
         ----------
         keys : str or list of str
@@ -639,6 +656,23 @@ class EigsepRedis:
     def get_metadata(self, stream_keys=None):
         """
         Get all metadata from redis stream for file writing.
+
+        This is the **streaming** path. It is used by
+        ``EigObserver.record_corr_data`` per integration: corr
+        spectra are an *integration* over a sub-second window, and
+        the right metadata semantics are "average all sensor
+        readings that happened during this integration." Each call
+        drains the stream since the last call (advances a per-stream
+        position pointer) and returns a list of dicts that the
+        caller averages down to one entry per spectrum via
+        ``io.avg_metadata``. **Do not use this for VNA** — VNA wants
+        a point-in-time snapshot, not a drain since the previous
+        VNA an hour ago (see ``get_live_metadata``).
+
+        Because ``get_metadata`` advances the position pointer,
+        only one consumer per ``EigsepRedis`` instance can call it
+        per stream — otherwise consumers race for stream entries.
+        Today only the corr loop calls it.
 
         Parameters
         ----------
