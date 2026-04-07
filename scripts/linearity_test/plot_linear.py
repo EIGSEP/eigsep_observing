@@ -11,6 +11,10 @@ import argparse
 import numpy as np
 import matplotlib.pyplot as plt
 
+NOISE_DENSITY_DBM_HZ = -75  # noise source power spectral density
+BANDWIDTH_HZ = 225e6  # lowpass filter cutoff
+TOTAL_POWER_DBM = NOISE_DENSITY_DBM_HZ + 10 * np.log10(BANDWIDTH_HZ)
+
 parser = argparse.ArgumentParser(
     description="Plot linearity test results",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
@@ -31,10 +35,11 @@ idx = 0
 if args.adc:
     ax = axes[idx]
     d = np.load(args.adc)
-    ax.plot(d["attenuation_dB"], d["rms_x"], "o-", label="Input N0")
-    ax.plot(d["attenuation_dB"], d["rms_y"], "s-", label="Input E2")
+    input_power = TOTAL_POWER_DBM - d["attenuation_dB"]
+    ax.plot(input_power, d["rms_x"], "o-", label="Input N0")
+    ax.plot(input_power, d["rms_y"], "s-", label="Input E2")
     ax.set_yscale("log")
-    ax.set_xlabel("Attenuation (dB)")
+    ax.set_xlabel("Input power (dBm)")
     ax.set_ylabel("RMS (ADC counts)")
     ax.set_title("ADC Linearity")
     ax.legend()
@@ -44,10 +49,11 @@ if args.adc:
 if args.corr:
     ax = axes[idx]
     d = np.load(args.corr)
-    ax.plot(d["attenuation_dB"], d["power_0"], "o-", label="Input N0")
-    ax.plot(d["attenuation_dB"], d["power_1"], "s-", label="Input E2")
+    input_power = TOTAL_POWER_DBM - d["attenuation_dB"]
+    ax.plot(input_power, d["power_0"], "o-", label="Input N0")
+    ax.plot(input_power, d["power_1"], "s-", label="Input E2")
     ax.set_yscale("log")
-    ax.set_xlabel("Attenuation (dB)")
+    ax.set_xlabel("Input power (dBm)")
     ax.set_ylabel("Total power (correlator units)")
     ax.set_title("Correlator Linearity")
     ax.legend()
