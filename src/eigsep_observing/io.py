@@ -9,6 +9,7 @@ import os
 import queue
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from eigsep_corr.utils import calc_times, calc_freqs_dfreq
@@ -562,6 +563,21 @@ def _validate_corr_header(header):
 # Sensor schemas: field name -> expected Python type.
 # The type is what the field should be when the sensor is healthy.
 # None values are always allowed (sensor error may null out fields).
+#
+# Type → averaging policy in _avg_sensor_values:
+#   float → np.mean over non-error samples (the "real" averaging path)
+#   int   → min over non-error samples (worst-case for cal levels;
+#           no-op for the constants)
+#   bool  → any over non-error samples (worst-case for fault flags)
+#   str   → first value if unanimous, else "UNKNOWN"
+# See _avg_sensor_values for details and the rationale per type.
+#
+# `calibrated` (IMU, bool): documented quirk — the BNO085 firmware sets
+# this True for one integration when a user-triggered calibration
+# completes, then False afterwards. With the bool→any reduction an
+# integration that contains the completion event reports True, which
+# is mildly weird semantically (it's an event, not a state) but is
+# being removed in the next picohost PR; not worth special-casing.
 _IMU_SCHEMA = {
     "sensor_name": str,
     "status": str,
@@ -582,7 +598,7 @@ _IMU_SCHEMA = {
     "mag_x": float,
     "mag_y": float,
     "mag_z": float,
-    "calibrated": bool,
+    "calibrated": bool,  # event flag, scheduled for removal in next picohost PR
     "accel_cal": int,
     "mag_cal": int,
 }
@@ -731,7 +747,7 @@ def avg_metadata(value):
         return _avg_rfswitch_metadata(value)
 
     # generic sensor (e.g. IMU, lidar)
-    return _avg_sensor_values(value, schema)
+    return _avg_sensor_values(value, schema, app_name=app_name)
 
 
 def _avg_temp_metadata(value, app_name, schema):
@@ -763,7 +779,9 @@ def _avg_temp_metadata(value, app_name, schema):
         ]
         if top_keys:
             top_sub_schema = {k: schema[k] for k in top_keys}
-            top_avgs = _avg_sensor_values(value, top_sub_schema)
+            top_avgs = _avg_sensor_values(
+                value, top_sub_schema, app_name=app_name
+            )
             if top_avgs:
                 avgs.update(top_avgs)
     else:
@@ -795,7 +813,9 @@ def _avg_temp_metadata(value, app_name, schema):
                 sub.setdefault("status", v.get(f"{subkey}_status"))
                 subvals.append(sub)
         if subvals:
-            avgs[subkey] = _avg_sensor_values(subvals, sub_schema)
+            avgs[subkey] = _avg_sensor_values(
+                subvals, sub_schema, app_name=app_name
+            )
     return avgs
 
 
@@ -815,72 +835,186 @@ def _avg_rfswitch_metadata(value):
     return states[0] if states else None
 
 
-def _avg_sensor_values(value, schema=None):
+# ----------------------------------------------------------------------
+# Categorical-disagreement detection for invariant fields.
+#
+# A handful of fields in SENSOR_SCHEMAS should be physical constants for
+# the lifetime of a stream: a Pico's app_id is hardcoded in firmware, a
+# stream's sensor_name is fixed, the tempctrl watchdog timeout is config.
+# If two readings inside a single integration disagree on one of these,
+# something is wrong upstream — Pico misconfiguration, stream cross-talk,
+# memory corruption, etc.
+#
+# We log this as ERROR (not WARNING) because it should never happen and
+# always wants attention. We throttle per (stream, field) at 60s so a
+# persistent producer bug doesn't drown the log file: the corr loop runs
+# at ~4 Hz, so an unthrottled log of every disagreement could emit
+# ~14k events/hour for a chronically-broken sensor.
+#
+# Non-invariant fields that legitimately change inside an integration
+# (accel_cal/mag_cal cal levels, watchdog_tripped fault flag, A_enabled
+# / A_active mode flags) are NOT logged — the per-type reduction in
+# _avg_sensor_values already encodes the disagreement in the saved value
+# (min for ints, any for bools, "UNKNOWN" for strings) so downstream can
+# detect the issue from the file alone.
+# ----------------------------------------------------------------------
+_INVARIANT_FIELDS = frozenset({"sensor_name", "app_id", "watchdog_timeout_ms"})
+_INVARIANT_LOG_THROTTLE_S = 60.0
+_last_invariant_log = {}  # {(app_name, field): unix_timestamp}
+
+
+def _log_invariant_disagreement(app_name, field, observed):
+    """Throttled ERROR log for an invariant-field disagreement.
+
+    Logs at most once per (``app_name``, ``field``) per
+    ``_INVARIANT_LOG_THROTTLE_S`` seconds. The throttle state is
+    module-level so it survives across calls; tests that need to
+    exercise the throttle can clear ``_last_invariant_log``.
     """
-    Average ``float`` sensor values, keep first value for everything else.
+    key = (app_name, field)
+    now = time.time()
+    last = _last_invariant_log.get(key, 0.0)
+    if now - last < _INVARIANT_LOG_THROTTLE_S:
+        return
+    _last_invariant_log[key] = now
+    logger.error(
+        f"Invariant metadata field '{field}' for stream '{app_name}' "
+        f"disagreed within an integration: observed "
+        f"{sorted(set(observed), key=str)}. This should never happen; "
+        f"check the producer for misconfiguration or stream cross-talk."
+    )
 
-    Only ``float`` schema fields go through ``np.mean``. ``int``, ``str``,
-    and ``bool`` fields are categorical and take ``value[0]``. This keeps
-    the averager's output type-conformant with the input schema: if a
-    field is declared ``int`` in ``SENSOR_SCHEMAS`` it stays ``int`` after
-    averaging, not ``float``.
 
-    The choice to never average ints reflects the actual semantics of every
-    int field in the current schemas: ``app_id`` is constant per sensor,
-    ``accel_cal``/``mag_cal`` are 0–3 BNO085 calibration levels, and
-    ``watchdog_timeout_ms`` is a config value. None of them have a
-    meaningful arithmetic mean. ``sw_state`` (rfswitch) bypasses this
-    function entirely via ``_avg_rfswitch_metadata``.
+def _avg_sensor_values(value, schema=None, *, app_name=""):
+    """
+    Reduce per-integration sensor readings to one entry, per type.
+
+    See the "Metadata averaging: per-type reduction policy" section in
+    CLAUDE.md for the canonical rationale and downstream-consumer guide.
+    The summary below is the local cheat sheet for code edits.
+
+    Reduction policy by schema type (Design C):
+
+    ====  ====================================================  =========================
+    type  reduction                                              filter errored?
+    ====  ====================================================  =========================
+    float ``np.mean`` over surviving samples                    yes
+    int   ``min`` over surviving samples (worst-case)           yes
+    bool  ``any`` over surviving samples (fault-flag worst-case)yes
+    str   first value if unanimous, else ``"UNKNOWN"``          yes
+    ====  ====================================================  =========================
+
+    Plus, **before** the per-key loop, the integration's own ``status``
+    field collapses to ``"error"`` if *any* sample errored. This is the
+    integration-level fault flag downstream uses to mark suspect rows.
+    Without this, an integration where 9 of 10 samples errored would
+    silently average over the survivor and the file would say
+    ``status: "update"`` for the row.
+
+    For ``int``/``str`` fields in :data:`_INVARIANT_FIELDS`
+    (``sensor_name``, ``app_id``, ``watchdog_timeout_ms``), a
+    disagreement also emits a throttled ERROR log via
+    :func:`_log_invariant_disagreement`. ``app_name`` is the stream
+    name used as log context.
 
     Without a *schema*, falls back to type-sniffing from the first
-    non-None value, with the same float-only rule for consistency.
+    non-None value, using the same per-type reductions.
+
+    Returns ``None`` if *value* is empty.
     """
     if not value:
         return None
 
-    avg = {}
     status_list = [v.get("status", "update") for v in value]
+    any_error = any(s == "error" for s in status_list)
 
-    # Determine the set of keys to iterate over.
-    if schema is not None:
-        all_keys = list(schema)
-    else:
-        all_keys = list(value[0])
+    # Step 1: collapse status before the per-key loop. Doing it here
+    # means downstream can read a single per-row status flag instead
+    # of inspecting every numeric field for None to infer that errors
+    # happened. The first-value fallback handles the all-update case.
+    avg = {}
+    if "status" in (schema if schema is not None else value[0]):
+        avg["status"] = "error" if any_error else value[0].get("status")
+
+    all_keys = list(schema) if schema is not None else list(value[0])
 
     for data_key in all_keys:
-        # Determine whether this field should be averaged.
+        if data_key == "status":
+            continue  # already collapsed above
+
+        # Resolve the field's type, either from the schema or by
+        # sniffing the first non-None value. bool is checked before
+        # int because Python bool subclasses int.
         if schema is not None:
-            should_average = schema[data_key] is float
+            typ = schema[data_key]
         else:
-            # Fallback: sniff type from first non-None value. Only
-            # Python floats are averaged — int / bool / str / numpy
-            # ints all go through the categorical path. (numpy floats
-            # subclass Python float, so they're handled correctly.)
             first_val = None
             for v in value:
                 first_val = v.get(data_key)
                 if first_val is not None:
                     break
-            should_average = isinstance(first_val, float)
+            if isinstance(first_val, bool):
+                typ = bool
+            elif isinstance(first_val, float):
+                typ = float
+            elif isinstance(first_val, int):
+                typ = int
+            elif isinstance(first_val, str):
+                typ = str
+            else:
+                typ = None  # unknown — fall through to first-value default
 
-        if not should_average:
+        # Collect non-error, non-None values for this key. All four
+        # reductions filter errored samples for consistency: an errored
+        # reading's value is not trustworthy, and the status collapse
+        # above already encodes "this integration had errors" so the
+        # signal isn't lost.
+        survivors = [
+            v.get(data_key)
+            for v, st in zip(value, status_list)
+            if st != "error" and v.get(data_key) is not None
+        ]
+
+        if typ is float:
+            # Strict isinstance(float) check rejects ints/bools that
+            # might sneak through a producer contract violation.
+            floats = [s for s in survivors if isinstance(s, float)]
+            try:
+                avg[data_key] = float(np.mean(floats)) if floats else None
+            except Exception as e:
+                logger.warning(f"Could not average key '{data_key}': {e}")
+                avg[data_key] = None
+        elif typ is int:
+            ints = [
+                s
+                for s in survivors
+                if isinstance(s, int) and not isinstance(s, bool)
+            ]
+            if not ints:
+                avg[data_key] = None
+            else:
+                if data_key in _INVARIANT_FIELDS and len(set(ints)) > 1:
+                    _log_invariant_disagreement(app_name, data_key, ints)
+                avg[data_key] = min(ints)
+        elif typ is bool:
+            bools = [s for s in survivors if isinstance(s, bool)]
+            avg[data_key] = any(bools) if bools else None
+        elif typ is str:
+            strs = [s for s in survivors if isinstance(s, str)]
+            if not strs:
+                avg[data_key] = None
+            elif len(set(strs)) == 1:
+                avg[data_key] = strs[0]
+            else:
+                if data_key in _INVARIANT_FIELDS:
+                    _log_invariant_disagreement(app_name, data_key, strs)
+                avg[data_key] = "UNKNOWN"
+        else:
+            # Unknown type (schemaless and first value was None or an
+            # unsupported type). Preserve the historical fallback of
+            # carrying value[0] forward.
             avg[data_key] = value[0].get(data_key)
-            continue
 
-        try:
-            raw = []
-            for v, st in zip(value, status_list):
-                val = v.get(data_key)
-                if (
-                    st != "error"
-                    and val is not None
-                    and isinstance(val, float)
-                ):
-                    raw.append(val)
-            avg[data_key] = float(np.mean(raw)) if raw else None
-        except Exception as e:
-            logger.warning(f"Could not average key '{data_key}': {e}")
-            avg[data_key] = None
     return avg
 
 

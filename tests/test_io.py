@@ -154,18 +154,20 @@ def _temp_channel_entry(temp, timestamp):
     }
 
 
-# CORR_METADATA mirrors what ``File.metadata`` looks like after NTIMES calls
-# to ``add_data``: one dict-of-lists, one key per stream, every list of
-# length NTIMES. Each list element is the output of ``avg_metadata`` for
-# that stream on that integration (a dict for generic sensors, an int or
-# "UNKNOWN" for rfswitch, or ``None`` for gap-filled samples).
-#
-# The rfswitch list in particular exercises the three real-world shapes:
-# raw int states, the "UNKNOWN" sentinel from transition flagging, and
-# ``None`` padding for samples where the stream carried no reading.
-# See io.py:_insert_sample for where the None padding is produced.
+ERROR_INTEGRATION_INDEX = 30
+
+
+def _imu_errored_integration_entry(quat_i):
+    return {**_imu_avg_entry(quat_i), "status": "error"}
+
+
 CORR_METADATA = {
-    "imu_panda": [_imu_avg_entry(0.001 * i) for i in range(NTIMES)],
+    "imu_panda": [
+        _imu_avg_entry(0.001 * i)
+        if i != ERROR_INTEGRATION_INDEX
+        else _imu_errored_integration_entry(0.001 * i)
+        for i in range(NTIMES)
+    ],
     "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "temp_mon_a": [
         _temp_channel_entry(30.0 + 0.01 * i, 1.0 + i) for i in range(NTIMES)
@@ -232,9 +234,6 @@ S11_HEADER = {
     "power_dBm": 0,
     "freqs": np.linspace(1e6, 250e6, 1000),
     "mode": "ant",
-    # PandaClient.measure_s11 stamps this on the VNA file header so
-    # downstream can detect stale get_live_metadata snapshots. Included in
-    # the fixture so the test matches what production actually writes.
     "metadata_snapshot_unix": 1748734379.905014,
 }
 
@@ -434,24 +433,12 @@ def test_write_read_hdf5():
         compare_dicts(HEADER, read_header)
         assert read_meta == {}
 
-        # test with metadata — uses CORR_METADATA which mirrors what
-        # File.metadata holds after NTIMES averaged samples (per-stream
-        # lists of length NTIMES, with realistic gap-fill None entries
-        # and the rfswitch UNKNOWN sentinel). The list-of-dicts shape
-        # round-trips through write_hdf5 → read_hdf5 because
-        # _write_dataset JSON-encodes any non-numeric value and
-        # _read_dataset symmetrically JSON-decodes it. None ↔ null.
         io.write_hdf5(filename, data, HEADER, metadata=CORR_METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
         compare_dicts(data, read_data)
         compare_dicts(HEADER, read_header)
         compare_dicts(CORR_METADATA, read_meta)
 
-        # test with invalid type in header — write_hdf5 must NOT
-        # raise (corr data is sacred). Bad fields are skipped + logged
-        # and the rest of the file is written. See
-        # test_corr_data_saved_despite_bad_header_field below for the
-        # full sacred-data assertion.
         invalid_header = HEADER.copy()
         invalid_header["bad"] = b"invalid"  # bytes → json.dumps fails
         bad_filename = Path(tmpdir) / "test_bad.h5"
@@ -475,10 +462,6 @@ def test_write_read_s11_file():
         # might be off by a second, so we use glob to find the file
         # filename format is {mode}s11_{timestamp}.h5, where mode="ant" here
         assert len(list(Path(tmpdir).glob(f"ants11_{now[:-2]}*.h5"))) == 1
-        # create a filename manually — uses VNA_METADATA which mirrors
-        # the flat snapshot from get_live_metadata() that measure_s11
-        # actually writes. Unlike CORR_METADATA, values are scalars or
-        # nested sensor dicts rather than per-sample lists.
         filename = Path(tmpdir) / "test_s11.h5"
         io.write_s11_file(
             data,
@@ -800,6 +783,9 @@ def test_avg_metadata():
     assert result["A"]["temp"] == 31.0  # average of 30 and 32
     # B has one error entry, so only non-error value used
     assert result["B"]["temp"] == 25.0
+    # check status avgus: A has no errors, so "update"; B has one error, so "error"
+    assert result["A"]["status"] == "update"
+    assert result["B"]["status"] == "error"
 
     # generic sensor (IMU) — full schema-conformant data
     imu_data = [
@@ -894,6 +880,210 @@ def test_avg_metadata_tempctrl_forwards_top_level_fields():
     # A/B sub-dicts still produced and floats still averaged.
     assert result["A"]["T_now"] == pytest.approx(31.0)
     assert result["B"]["T_now"] == pytest.approx(32.0)
+
+
+# ----------------------------------------------------------------------
+# Per-type reduction policy in _avg_sensor_values (Design C):
+#
+#   float → np.mean over non-error survivors
+#   int   → min over non-error survivors (worst-case for cal levels)
+#   bool  → any over non-error survivors (worst-case for fault flags)
+#   str   → first if unanimous, else "UNKNOWN"
+#
+# Plus: integration "status" collapses to "error" if any sample errored,
+# so downstream gets a single per-row fault flag rather than having to
+# inspect every numeric field for None to detect that errors happened.
+#
+# For invariant fields (sensor_name, app_id, watchdog_timeout_ms),
+# disagreement also emits a throttled ERROR log — these should never
+# change inside an integration.
+# ----------------------------------------------------------------------
+
+
+def test_avg_metadata_status_collapses_to_error_on_any_error():
+    """If any sample inside an integration has status='error', the
+    integration's averaged status MUST be 'error'. This is the per-row
+    fault flag downstream uses to mark suspect data."""
+    data = [
+        {**IMU_READING, "status": "update", "quat_i": 0.1},
+        {**IMU_READING, "status": "error", "quat_i": 0.2},
+        {**IMU_READING, "status": "update", "quat_i": 0.3},
+    ]
+    result = io.avg_metadata(data)
+    assert result["status"] == "error"
+    # Float averaging filters errored samples → mean of 0.1 and 0.3.
+    assert result["quat_i"] == pytest.approx(0.2)
+
+
+def test_avg_metadata_status_stays_update_when_all_clean():
+    """All clean samples → status passes through as 'update'."""
+    data = [
+        {**IMU_READING, "status": "update", "quat_i": 0.1},
+        {**IMU_READING, "status": "update", "quat_i": 0.3},
+    ]
+    result = io.avg_metadata(data)
+    assert result["status"] == "update"
+    assert result["quat_i"] == pytest.approx(0.2)
+
+
+def test_avg_metadata_int_min_on_disagreement():
+    """int fields take min over surviving samples — preserves the
+    worst-case calibration level. Locks in the contract that an IMU
+    integration whose cal level dropped from 3 → 1 records 1, not 3."""
+    data = [
+        {**IMU_READING, "accel_cal": 3, "mag_cal": 3},
+        {**IMU_READING, "accel_cal": 1, "mag_cal": 2},
+        {**IMU_READING, "accel_cal": 2, "mag_cal": 3},
+    ]
+    result = io.avg_metadata(data)
+    assert result["accel_cal"] == 1
+    assert isinstance(result["accel_cal"], int)
+    assert result["mag_cal"] == 2
+    assert isinstance(result["mag_cal"], int)
+    # app_id is constant (3) — min is a no-op but still int.
+    assert result["app_id"] == 3
+    assert isinstance(result["app_id"], int)
+
+
+def test_avg_metadata_bool_any_on_disagreement():
+    """bool fields take any() — fault-flag worst-case. A tempctrl
+    integration whose watchdog tripped at any point in the integration
+    must record watchdog_tripped=True."""
+    base = {
+        "sensor_name": "tempctrl",
+        "app_id": 6,
+        "watchdog_timeout_ms": 5000,
+        "A_status": "update",
+        "A_T_now": 30.0,
+        "A_timestamp": 1.0,
+        "A_T_target": 25.0,
+        "A_drive_level": 0.5,
+        "A_enabled": True,
+        "A_active": True,
+        "A_int_disabled": False,
+        "A_hysteresis": 0.1,
+        "A_clamp": 1.0,
+        "B_status": "update",
+        "B_T_now": 30.0,
+        "B_timestamp": 1.0,
+        "B_T_target": 25.0,
+        "B_drive_level": 0.5,
+        "B_enabled": True,
+        "B_active": True,
+        "B_int_disabled": False,
+        "B_hysteresis": 0.1,
+        "B_clamp": 1.0,
+    }
+    data = [
+        {**base, "watchdog_tripped": False},
+        {**base, "watchdog_tripped": True},  # tripped mid-integration
+        {**base, "watchdog_tripped": False},
+    ]
+    result = io.avg_metadata(data)
+    assert result["watchdog_tripped"] is True
+
+
+def test_avg_metadata_str_unknown_on_disagreement_for_non_invariant():
+    """str fields take first-if-unanimous, else 'UNKNOWN'. Tested via
+    a synthetic schemaless 'unknown_sensor' so we exercise the str
+    fallback path. (Every str field in the real schemas is invariant
+    today, so this test guards the general policy.)"""
+    data = [
+        {"sensor_name": "unknown_sensor", "status": "update", "mode": "high"},
+        {"sensor_name": "unknown_sensor", "status": "update", "mode": "low"},
+    ]
+    result = io.avg_metadata(data)
+    assert result["mode"] == "UNKNOWN"
+
+
+def test_avg_metadata_invariant_disagreement_logs_error(caplog):
+    """Disagreement on an invariant field (app_id, sensor_name,
+    watchdog_timeout_ms) emits an ERROR log. These should never change
+    inside an integration, so an ERROR is the right severity."""
+    # Reset throttle so the test starts from a clean slate.
+    io._last_invariant_log.clear()
+
+    data = [
+        {**IMU_READING, "app_id": 3},
+        {**IMU_READING, "app_id": 99},  # impossible — Pico misconfig
+    ]
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+        result = io.avg_metadata(data)
+
+    # The reduction still picks min (3) and the value is int.
+    assert result["app_id"] == 3
+    assert isinstance(result["app_id"], int)
+
+    # An ERROR was logged naming the stream and field.
+    errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any(
+        "app_id" in r.getMessage() and "imu_panda" in r.getMessage()
+        for r in errors
+    ), (
+        f"expected app_id ERROR for imu_panda, got: {[r.getMessage() for r in errors]}"
+    )
+
+
+def test_avg_metadata_invariant_disagreement_throttled(caplog):
+    """A second disagreement within the throttle window must NOT
+    re-log. The throttle keeps a chronic producer bug from drowning
+    the log file at 14k events/hour."""
+    io._last_invariant_log.clear()
+
+    data = [
+        {**IMU_READING, "app_id": 3},
+        {**IMU_READING, "app_id": 99},
+    ]
+    # First call should log.
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+        io.avg_metadata(data)
+    first_count = sum(1 for r in caplog.records if r.levelno == logging.ERROR)
+    assert first_count >= 1
+
+    # Second call within the throttle window should NOT log again.
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+        io.avg_metadata(data)
+    second_count = sum(1 for r in caplog.records if r.levelno == logging.ERROR)
+    assert second_count == 0, (
+        f"expected throttled (0) ERRORs on second call, got {second_count}"
+    )
+
+    # If we manually expire the throttle, the next call logs again.
+    # This proves the throttle is time-based, not "log once and done".
+    io._last_invariant_log[("imu_panda", "app_id")] = 0.0
+    caplog.clear()
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+        io.avg_metadata(data)
+    third_count = sum(1 for r in caplog.records if r.levelno == logging.ERROR)
+    assert third_count >= 1, (
+        f"expected unthrottled re-log after manual expiry, got {third_count}"
+    )
+
+
+def test_avg_metadata_non_invariant_disagreement_silent(caplog):
+    """accel_cal disagreement is NOT logged — it's a non-invariant
+    field whose disagreement is encoded in the saved value via min().
+    Silent reduction keeps the log file from being bloated by
+    legitimate cal-level changes during a long observation."""
+    io._last_invariant_log.clear()
+
+    data = [
+        {**IMU_READING, "accel_cal": 3},
+        {**IMU_READING, "accel_cal": 1},
+    ]
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+        result = io.avg_metadata(data)
+
+    assert result["accel_cal"] == 1  # min reduction visible in the file
+
+    # No WARNING or ERROR for the non-invariant disagreement.
+    assert not any(
+        r.levelno >= logging.WARNING
+        and "accel_cal" in r.getMessage()
+        and "disagreed" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_gap_fill_acc_cnts_linear():
@@ -1164,8 +1354,24 @@ def test_metadata_end_to_end_round_trip():
         #   indices 25..44  → raw state 1 (window expired)
         #   indices 45..49  → NO rfswitch stream at all → None pad
         #   indices 50..59  → raw state 1
+        #
+        # At ERROR_INTEGRATION_INDEX, append a SECOND raw IMU sample
+        # marked status="error" alongside the normal one. The averager
+        # filters the errored sample from every numeric reduction, so
+        # the data fields come out the same as if only the normal sample
+        # was fed; what changes is that the integration's `status` field
+        # collapses to "error" — see CORR_METADATA where index
+        # ERROR_INTEGRATION_INDEX uses _imu_errored_integration_entry.
         for i in range(NTIMES):
             md = _stream_payload(i)
+            if i == ERROR_INTEGRATION_INDEX:
+                md["stream:imu_panda"].append(
+                    {
+                        **IMU_READING,
+                        "status": "error",
+                        "quat_i": 999.0,  # garbage; must NOT reach the file
+                    }
+                )
             if i < 20:
                 md.update(_rfswitch_payload(0))
             elif i < 45:
@@ -1189,6 +1395,25 @@ def test_metadata_end_to_end_round_trip():
         # the full round-trip (including JSON encode / decode of
         # list-of-dicts with None gap-fill entries).
         compare_dicts(CORR_METADATA, read_meta)
+
+        # Belt-and-suspenders for the partial-error case: assert
+        # explicitly that the errored integration's status flag landed
+        # in the file as "error" and that the garbage 999.0 quat_i
+        # from the errored raw sample was filtered out.
+        errored_entry = read_meta["imu_panda"][ERROR_INTEGRATION_INDEX]
+        assert errored_entry["status"] == "error"
+        assert errored_entry["quat_i"] == pytest.approx(
+            0.001 * ERROR_INTEGRATION_INDEX
+        )
+        # Surrounding integrations stay clean.
+        assert (
+            read_meta["imu_panda"][ERROR_INTEGRATION_INDEX - 1]["status"]
+            == "update"
+        )
+        assert (
+            read_meta["imu_panda"][ERROR_INTEGRATION_INDEX + 1]["status"]
+            == "update"
+        )
 
 
 def test_write_error_surfaced():
