@@ -1203,7 +1203,7 @@ def test_metadata_end_to_end_round_trip():
                     "LNA_status": "update",
                     "LNA_T_now": 30.0 + 0.01 * i,
                     "LNA_timestamp": 1.0 + i,
-                    "LNA_T_target": 30.0 + 0.01 * i,
+                    "LNA_T_target": 25.0,
                     "LNA_drive_level": 0.0,
                     "LNA_enabled": True,
                     "LNA_active": True,
@@ -1213,7 +1213,7 @@ def test_metadata_end_to_end_round_trip():
                     "LOAD_status": "update",
                     "LOAD_T_now": 25.0 + 0.01 * i,
                     "LOAD_timestamp": 1.0 + i,
-                    "LOAD_T_target": 25.0 + 0.01 * i,
+                    "LOAD_T_target": 25.0,
                     "LOAD_drive_level": 0.0,
                     "LOAD_enabled": True,
                     "LOAD_active": True,
@@ -1320,6 +1320,106 @@ def test_metadata_end_to_end_round_trip():
             read_meta["imu_el"][ERROR_INTEGRATION_INDEX + 1]["status"]
             == "update"
         )
+
+
+def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
+    """Round-trip the uncalibrated-potmon producer state.
+
+    The ``potmon`` schema in ``io.py`` documents that for an
+    *uncalibrated* stream the cal/angle fields are ``None``:
+
+      - ``_validate_metadata`` short-circuits ``None`` so it does not
+        flag ``None`` as a type violation;
+      - ``_avg_sensor_values``'s float reduction filters ``None``
+        survivors before computing the mean, so an integration whose
+        cal/angle samples are all ``None`` averages cleanly to ``None``;
+      - ``write_hdf5`` / ``read_hdf5`` JSON-encode the per-sample list
+        of dicts and must preserve ``None`` across the round trip.
+
+    The main ``test_metadata_end_to_end_round_trip`` exercises only the
+    *calibrated* shape (every cal/angle field is a real float), so the
+    promises above are not pinned anywhere else. This test feeds raw
+    stream samples with all-``None`` cal/angle fields through the full
+    producer → ``avg_metadata`` → ``File.add_data`` → ``write_hdf5`` →
+    ``read_hdf5`` chain and asserts (a) no contract-violation warnings
+    are logged, and (b) cal/angle survive the round trip as ``None``
+    while voltages average correctly.
+    """
+    n = 5
+
+    def _uncalibrated_payload(i):
+        return {
+            "stream:potmon": [
+                {
+                    "sensor_name": "potmon",
+                    "status": "update",
+                    "app_id": 2,
+                    "pot_el_voltage": 1.5 + 0.001 * i,
+                    "pot_az_voltage": 1.5,
+                    "pot_el_cal_slope": None,
+                    "pot_el_cal_intercept": None,
+                    "pot_az_cal_slope": None,
+                    "pot_az_cal_intercept": None,
+                    "pot_el_angle": None,
+                    "pot_az_angle": None,
+                },
+            ],
+        }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(save_dir, pairs, n, cfg)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+            for i in range(n):
+                f.add_data(i + 1, 0.0, d, metadata=_uncalibrated_payload(i))
+            f.close()
+
+        # No metadata-contract warning should fire for an
+        # all-``None`` cal/angle stream — that's the documented
+        # short-circuit in ``_validate_metadata``. If a future change
+        # tightens validation to reject ``None`` for these fields,
+        # this assertion fires loudly.
+        contract_warnings = [
+            r
+            for r in caplog.records
+            if "Metadata contract violation" in r.getMessage()
+        ]
+        assert contract_warnings == [], (
+            "uncalibrated potmon stream produced unexpected contract "
+            f"warnings: {[r.getMessage() for r in contract_warnings]}"
+        )
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1, f"expected one file, got {files}"
+        _data, _hdr, read_meta = io.read_hdf5(files[0])
+
+        assert "potmon" in read_meta
+        potmon_rows = read_meta["potmon"]
+        assert len(potmon_rows) == n
+        for i, row in enumerate(potmon_rows):
+            # Voltages averaged from a single survivor → that survivor's
+            # value, preserved as float across the JSON round trip.
+            assert row["pot_el_voltage"] == pytest.approx(1.5 + 0.001 * i)
+            assert row["pot_az_voltage"] == pytest.approx(1.5)
+            # Cal/angle survivors were all None → reduction returns None
+            # → JSON encode + decode preserves None (not 0.0, not "None",
+            # not missing key).
+            assert row["pot_el_cal_slope"] is None
+            assert row["pot_el_cal_intercept"] is None
+            assert row["pot_az_cal_slope"] is None
+            assert row["pot_az_cal_intercept"] is None
+            assert row["pot_el_angle"] is None
+            assert row["pot_az_angle"] is None
+            # The integration is clean — no errored samples.
+            assert row["status"] == "update"
 
 
 def test_write_error_surfaced():

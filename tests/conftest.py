@@ -107,13 +107,17 @@ def _tempctrl_channel_entry(t_now, timestamp):
     by the LNA/LOAD split in ``File.add_data``; only the per-channel
     sub-dict survives. The bool/float fault flags are constant in this
     fixture (steady-state operation); tests that need to exercise
-    fault-flag transitions construct their own samples.
+    fault-flag transitions construct their own samples. ``T_target`` is
+    a user-configured setpoint that is constant over the lifetime of a
+    real run, so it is hard-coded to ``25.0`` here rather than tracking
+    the per-sample ``t_now`` — matching the pattern used by every
+    inline tempctrl fixture in ``test_io.py``.
     """
     return {
         "status": "update",
         "T_now": t_now,
         "timestamp": timestamp,
-        "T_target": t_now,
+        "T_target": 25.0,
         "drive_level": 0.0,
         "enabled": True,
         "active": True,
@@ -130,6 +134,18 @@ def _potmon_avg_entry(pot_el_voltage):
     raw voltages plus the flattened cal slope/intercept and the derived
     angle. All-scalar per the picohost scalar-only contract; the cal
     fields are de-facto invariants for the lifetime of a stream.
+
+    A *calibrated* reading is used here so every cal/angle field is a
+    real float, exercising the float→mean reduction in
+    ``_avg_sensor_values``. The uncalibrated-stream case (cal/angle
+    fields all ``None``) is a first-class producer state — see the
+    ``potmon`` schema comment in ``io.py`` — but it is intentionally
+    not exercised by this golden fixture because it would force the
+    round-trip assertion to special-case ``None`` survivors and obscure
+    the steady-state contract this fixture is meant to pin. Tests that
+    need to cover the uncalibrated path should build their own samples.
+    Same rationale as ``_potmon_post_handler_reading`` in
+    ``test_producer_contracts.py``.
     """
     return {
         "sensor_name": "potmon",
