@@ -1,11 +1,61 @@
+from contextlib import contextmanager
+
 import pytest
-from threading import Thread
 from unittest.mock import Mock, patch
 
 from eigsep_observing import EigsepFpga
 from eigsep_observing.testing import DummyEigsepFpga
 from eigsep_observing.testing import DummyEigsepRedis
 from eigsep_corr.testing import DummyPam
+
+
+@contextmanager
+def _patch_observe_thread(fpga, items):
+    """
+    Patch ``eigsep_observing.fpga.Thread`` for tests of
+    ``EigsepFpga.observe()``.
+
+    Replaces the producer thread with a mock whose ``start()`` runs
+    synchronously in the calling thread, pushes ``items`` into
+    ``fpga.queue``, and sets ``fpga.event``. ``observe()``'s consumer
+    loop then runs in the main thread against deterministic input.
+
+    Parameters
+    ----------
+    fpga : DummyEigsepFpga
+        The fpga fixture under test. ``fpga.queue`` and ``fpga.event``
+        are created by ``observe()`` itself, so they are accessed
+        lazily inside the fake ``start``.
+    items : iterable
+        Items to inject. Each is either a dict
+        ``{"data": ..., "cnt": ...}`` (a normal integration) or
+        ``None`` (the end-of-stream sentinel that the real producer
+        pushes via ``end_observing``). The helper does NOT auto-append
+        a sentinel — pass one explicitly if you want the consumer to
+        log ``"End of queue, processing finished."``.
+
+    Yields
+    ------
+    Mock
+        The patched ``Thread`` class, so tests can assert on how
+        ``observe()`` constructed it (e.g. ``args``, ``kwargs``).
+    """
+    # observe() reads acc_len via fpga.read_uint to build self.header;
+    # the real test_observe_basic_functionality used to set this inline
+    # — centralize it here so every observe() test gets a sane default.
+    fpga.fpga.read_uint.return_value = 1024
+
+    with patch("eigsep_observing.fpga.Thread") as mock_thread_class:
+        mock_thread = Mock()
+        mock_thread_class.return_value = mock_thread
+
+        def fake_start():
+            for item in items:
+                fpga.queue.put(item)
+            fpga.event.set()
+
+        mock_thread.start = fake_start
+        yield mock_thread_class
 
 
 @pytest.fixture
@@ -32,7 +82,6 @@ def fpga_instance(mock_redis):
     fpga.autos = ["00", "11"]
     fpga.crosses = ["01", "10"]
     fpga.pairs = ["00", "01", "10", "11"]
-    fpga.prev_cnt = 0
     fpga.read_data = Mock(return_value={"00": [1, 2, 3], "11": [4, 5, 6]})
     return fpga
 
@@ -303,23 +352,11 @@ class TestEigsepFpga:
         fpga_instance.upload_config = Mock()
         fpga_instance.update_redis = Mock()
 
-        # Set up proper numeric values for hardware reads
-        fpga_instance.fpga.read_uint.return_value = 1024  # acc_len
-
-        # Mock the thread behavior
-        def mock_thread_run(target, args, kwargs):
-            # Put some data in the queue
-            fpga_instance.queue.put({"data": {"00": [1, 2, 3]}, "cnt": 1})
-            fpga_instance.queue.put({"data": {"00": [4, 5, 6]}, "cnt": 2})
-            # Signal thread is done
-            fpga_instance.event.set()
-            return Mock(spec=Thread)
-
-        with patch("eigsep_observing.fpga.Thread") as mock_thread_class:
-            mock_thread = Mock()
-            mock_thread_class.return_value = mock_thread
-            mock_thread.start = lambda: mock_thread_run(None, None, None)
-
+        items = [
+            {"data": {"00": [1, 2, 3]}, "cnt": 1},
+            {"data": {"00": [4, 5, 6]}, "cnt": 2},
+        ]
+        with _patch_observe_thread(fpga_instance, items):
             fpga_instance.observe(pairs=["00"], timeout=10)
 
         fpga_instance.upload_config.assert_called_once_with(validate=True)
@@ -327,52 +364,84 @@ class TestEigsepFpga:
         fpga_instance.update_redis.assert_any_call({"00": [1, 2, 3]}, 1)
         fpga_instance.update_redis.assert_any_call({"00": [4, 5, 6]}, 2)
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
     def test_observe_default_pairs(self, fpga_instance):
-        """Test observe with default pairs (None)."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        """observe() with no pairs arg defaults to self.pairs."""
+        fpga_instance.update_redis = Mock()
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
+        items = [{"data": {"00": [1, 2, 3]}, "cnt": 1}]
+        with _patch_observe_thread(fpga_instance, items) as mock_thread_cls:
+            fpga_instance.observe()  # no pairs arg → defaults to self.pairs
+
+        # Producer thread was constructed with self.pairs
+        call_kwargs = mock_thread_cls.call_args.kwargs
+        assert call_kwargs["args"] == (fpga_instance.pairs,)
+        assert call_kwargs["kwargs"] == {"timeout": 10}
+        assert call_kwargs["target"] == fpga_instance._read_integrations
+
+        # And the log line names self.pairs, not the literal "None"
+        fpga_instance.logger.info.assert_any_call(
+            f"Starting observation for pairs: {fpga_instance.pairs}."
+        )
+        # Data still drained normally
+        fpga_instance.update_redis.assert_called_once_with(
+            {"00": [1, 2, 3]}, 1
+        )
+
     def test_observe_timeout_immediate(self, fpga_instance):
-        """Test observe timeout behavior."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        """
+        observe() exits cleanly when the producer ends without ever
+        pushing data (only the None sentinel arrives).
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    def test_observe_continuous_no_data(self, fpga_instance):
-        """Test observe when continuously getting no data until timeout."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        This subsumes the old test_observe_continuous_no_data — the
+        consumer can't tell whether the producer never had data or
+        timed out without it; both surface as "sentinel only". The
+        producer-side no-data path is covered separately by
+        test_read_integrations_no_new_data.
+        """
+        fpga_instance.update_redis = Mock()
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
+        with _patch_observe_thread(fpga_instance, [None]):
+            fpga_instance.observe(pairs=["00"], timeout=1)
+
+        fpga_instance.update_redis.assert_not_called()
+        fpga_instance.logger.info.assert_any_call(
+            "End of queue, processing finished."
+        )
+
     def test_observe_logging(self, fpga_instance):
-        """Test observe logging behavior."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        """observe() emits the expected info log lines."""
+        items = [{"data": {"00": [1, 2, 3]}, "cnt": 1}, None]
+        with _patch_observe_thread(fpga_instance, items):
+            # Compute expected integration time *inside* the helper:
+            # the helper sets fpga.read_uint.return_value, which the
+            # header property needs to compute t_int.
+            expected_t_int = fpga_instance.header["integration_time"]
+            fpga_instance.observe(pairs=["00"], timeout=10)
 
-    @pytest.mark.skip(reason="Test needs rewrite - prev_cnt no longer used")
-    def test_observe_prev_cnt_update(self, fpga_instance):
-        """Test that observe updates prev_cnt correctly."""
-        # TODO: Remove or rewrite this test - prev_cnt is no longer used
-        pass
+        fpga_instance.logger.info.assert_any_call(
+            f"Integration time is {expected_t_int} seconds."
+        )
+        fpga_instance.logger.info.assert_any_call(
+            "Starting observation for pairs: ['00']."
+        )
+        fpga_instance.logger.info.assert_any_call(
+            "End of queue, processing finished."
+        )
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    @patch("time.time")
-    @patch("time.sleep")
-    def test_observe_integration_loop(
-        self, mock_sleep, mock_time, fpga_instance
-    ):
-        """Test observe integration loop with multiple data reads."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+    def test_observe_integration_loop(self, fpga_instance):
+        """
+        Consumer drains every queued integration, in order, before
+        exiting on the sentinel.
+        """
+        fpga_instance.update_redis = Mock()
+
+        items = [{"data": {"00": [i]}, "cnt": 10 + i} for i in range(5)] + [
+            None
+        ]
+        with _patch_observe_thread(fpga_instance, items):
+            fpga_instance.observe(pairs=["00", "11"], timeout=10)
+
+        assert fpga_instance.update_redis.call_count == 5
+        # Order matters — assert via call_args_list, not assert_any_call.
+        for i, call in enumerate(fpga_instance.update_redis.call_args_list):
+            assert call.args == ({"00": [i]}, 10 + i)
