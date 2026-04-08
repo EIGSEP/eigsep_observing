@@ -81,9 +81,7 @@ class EigsepFpga:
             self.fpg_file = str(fpg_file.resolve())
         self.cfg["fpg_file"] = self.fpg_file
 
-        self.fpga = casperfpga.CasperFpga(
-            self.cfg["snap_ip"], transport=TapcpTransport
-        )
+        self.fpga = self._make_fpga()
         if program:
             force = program == "force"
             self.fpga.upload_to_ram_and_program(self.fpg_file, force=force)
@@ -94,9 +92,7 @@ class EigsepFpga:
             ref = None
 
         # blocks
-        self.adc = casperfpga.snapadc.SnapAdc(
-            self.fpga, num_chans=2, resolution=8, ref=ref
-        )
+        self.adc = self._make_adc(ref=ref)
         self.sync = Sync(self.fpga, "sync")
         self.noise = NoiseGen(self.fpga, "noise", nstreams=6)
         self.inp = Input(self.fpga, "input", nstreams=12)
@@ -127,6 +123,33 @@ class EigsepFpga:
 
         """
         return EigsepRedis(host=host, port=port)
+
+    def _make_fpga(self):
+        """
+        Construct the underlying CasperFpga object. Hookable so tests
+        can substitute an in-memory register backend without patching
+        casperfpga itself (which may not be importable in dev envs).
+        """
+        return casperfpga.CasperFpga(
+            self.cfg["snap_ip"], transport=TapcpTransport
+        )
+
+    def _make_adc(self, ref):
+        """
+        Construct the SNAP ADC wrapper. Hookable for tests; see
+        `_make_fpga`.
+        """
+        return casperfpga.snapadc.SnapAdc(
+            self.fpga, num_chans=2, resolution=8, ref=ref
+        )
+
+    def _make_pam(self, num):
+        """
+        Construct a PAM block. Hookable for tests because the real
+        Pam driver talks to an I2C bus via casperfpga and cannot run
+        against an in-memory fpga backend.
+        """
+        return Pam(self.fpga, f"i2c_ant{num}")
 
     @property
     def version(self):
@@ -471,7 +494,7 @@ class EigsepFpga:
         """
         self.pams = []
         for num in range(3):
-            pam = Pam(self.fpga, f"i2c_ant{num}")
+            pam = self._make_pam(num)
             pam.initialize()
             self.pams.append(pam)
         self.blocks.extend(self.pams)

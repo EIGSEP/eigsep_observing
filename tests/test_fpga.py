@@ -1,43 +1,80 @@
+import logging
+from contextlib import contextmanager
+from queue import Queue
+from threading import Event
+
 import pytest
-from threading import Thread
 from unittest.mock import Mock, patch
 
 from eigsep_observing import EigsepFpga
 from eigsep_observing.testing import DummyEigsepFpga
-from eigsep_observing.testing import DummyEigsepRedis
-from eigsep_observing.testing.fpga import DummyPam
+
+
+@contextmanager
+def _patch_observe_thread(fpga, items):
+    """
+    Patch ``eigsep_observing.fpga.Thread`` for tests of
+    ``EigsepFpga.observe()``.
+
+    Replaces the producer thread with a mock whose ``start()`` runs
+    synchronously in the calling thread, pushes ``items`` into
+    ``fpga.queue``, and sets ``fpga.event``. ``observe()``'s consumer
+    loop then runs in the main thread against deterministic input.
+
+    Parameters
+    ----------
+    fpga : DummyEigsepFpga
+        The fpga fixture under test. ``fpga.queue`` and ``fpga.event``
+        are created by ``observe()`` itself, so they are accessed
+        lazily inside the fake ``start``.
+    items : iterable
+        Items to inject. Each is either a dict
+        ``{"data": ..., "cnt": ...}`` (a normal integration) or
+        ``None`` (the end-of-stream sentinel that the real producer
+        pushes via ``end_observing``). The helper does NOT auto-append
+        a sentinel — pass one explicitly if you want the consumer to
+        log ``"End of queue, processing finished."``.
+
+    Yields
+    ------
+    Mock
+        The patched ``Thread`` class, so tests can assert on how
+        ``observe()`` constructed it (e.g. ``args``, ``kwargs``).
+    """
+    with patch("eigsep_observing.fpga.Thread") as mock_thread_class:
+        mock_thread = Mock()
+        mock_thread_class.return_value = mock_thread
+
+        def fake_start():
+            for item in items:
+                fpga.queue.put(item)
+            fpga.event.set()
+
+        mock_thread.start = fake_start
+        yield mock_thread_class
 
 
 @pytest.fixture
-def mock_redis():
-    """Mock Redis connection for FPGA tests."""
-    redis = DummyEigsepRedis()
-    redis.upload_corr_config = Mock()
-    redis.add_metadata = Mock()
-    redis.add_corr_data = Mock()
-    return redis
+def fpga_instance():
+    """
+    DummyEigsepFpga instance for FPGA tests.
+
+    Uses the real DummyEigsepRedis (fakeredis-backed) the dummy
+    constructs in __init__. We do *not* mock fpga.fpga, fpga.logger,
+    fpga.read_data, fpga.validate_config, or fpga.redis — the dummy
+    provides working implementations of all of those, and clobbering
+    them with bare Mocks just hides what's there. Tests that need to
+    assert on outbound redis calls should use a per-test
+    ``patch.object(fpga_instance.redis, "<method>",
+    wraps=fpga_instance.redis.<method>)`` spy scoped to the specific
+    method — see ``test_upload_config_with_validation_success`` for
+    the canonical pattern. Tests that need to control a specific
+    method (e.g. ``_read_integrations`` sequencing ``read_int`` return
+    values) should use the same per-test ``patch.object`` shape.
+    """
+    return DummyEigsepFpga(program=False)
 
 
-@pytest.fixture
-def fpga_instance(mock_redis):
-    """Create a DummyEigsepFpga instance with mocked dependencies."""
-    # Use default config, don't pass custom config to avoid missing keys
-    fpga = DummyEigsepFpga(program=False)
-    # Manually set the redis instance for testing
-    fpga.redis = mock_redis
-    fpga.logger = Mock()
-    fpga.validate_config = Mock()
-    fpga.fpga = Mock()
-    fpga.sync_time = 1234567890.0
-    fpga.autos = ["00", "11"]
-    fpga.crosses = ["01", "10"]
-    fpga.pairs = ["00", "01", "10", "11"]
-    fpga.prev_cnt = 0
-    fpga.read_data = Mock(return_value={"00": [1, 2, 3], "11": [4, 5, 6]})
-    return fpga
-
-
-@patch("eigsep_observing.fpga.Pam", DummyPam)
 class TestEigsepFpga:
     """Test cases for EigsepFpga class."""
 
@@ -52,99 +89,141 @@ class TestEigsepFpga:
         mock_redis_class.assert_called_once_with(host="localhost", port=6379)
         assert redis == mock_redis_instance
 
-    def test_upload_config_with_validation_success(self, fpga_instance):
-        """Test upload_config with successful validation."""
-        fpga_instance.validate_config.return_value = None
+    def test_upload_config_with_validation_success(
+        self, fpga_instance, caplog
+    ):
+        """upload_config(validate=True) runs real validate_config and uploads."""
+        caplog.set_level(logging.DEBUG)
 
-        fpga_instance.upload_config(validate=True)
-
-        fpga_instance.validate_config.assert_called_once()
-        fpga_instance.redis.upload_corr_config.assert_called_once_with(
-            fpga_instance.cfg, from_file=False
-        )
-        fpga_instance.logger.debug.assert_called_with(
-            "Uploading configuration to Redis."
-        )
-
-    def test_upload_config_without_validation(self, fpga_instance):
-        """Test upload_config without validation."""
-        fpga_instance.upload_config(validate=False)
-
-        fpga_instance.validate_config.assert_not_called()
-        fpga_instance.redis.upload_corr_config.assert_called_once_with(
-            fpga_instance.cfg, from_file=False
-        )
-
-    def test_upload_config_validation_failure(self, fpga_instance):
-        """Test upload_config when validation fails."""
-        fpga_instance.validate_config.side_effect = RuntimeError(
-            "Config invalid"
-        )
-
-        with pytest.raises(
-            RuntimeError, match="Configuration validation failed"
-        ):
+        with patch.object(
+            fpga_instance.redis,
+            "upload_corr_config",
+            wraps=fpga_instance.redis.upload_corr_config,
+        ) as spy:
             fpga_instance.upload_config(validate=True)
 
-        fpga_instance.validate_config.assert_called_once()
-        fpga_instance.logger.error.assert_called_with(
-            "Configuration validation failed: Config invalid"
-        )
-        fpga_instance.redis.upload_corr_config.assert_not_called()
+        # Implicit success: if validate_config had raised, the upload
+        # below would never have happened.
+        spy.assert_called_once_with(fpga_instance.cfg, from_file=False)
+        assert "Uploading configuration to Redis." in caplog.text
+
+    def test_upload_config_without_validation(self, fpga_instance):
+        """upload_config(validate=False) skips validation but still uploads."""
+        with (
+            patch.object(
+                fpga_instance,
+                "validate_config",
+                wraps=fpga_instance.validate_config,
+            ) as validate_spy,
+            patch.object(
+                fpga_instance.redis,
+                "upload_corr_config",
+                wraps=fpga_instance.redis.upload_corr_config,
+            ) as upload_spy,
+        ):
+            fpga_instance.upload_config(validate=False)
+
+        validate_spy.assert_not_called()
+        upload_spy.assert_called_once_with(fpga_instance.cfg, from_file=False)
+
+    def test_upload_config_validation_failure(self, fpga_instance, caplog):
+        """upload_config raises and logs when validate_config fails."""
+        caplog.set_level(logging.ERROR)
+
+        with (
+            patch.object(
+                fpga_instance,
+                "validate_config",
+                side_effect=RuntimeError("Config invalid"),
+            ),
+            patch.object(
+                fpga_instance.redis,
+                "upload_corr_config",
+                wraps=fpga_instance.redis.upload_corr_config,
+            ) as upload_spy,
+        ):
+            with pytest.raises(
+                RuntimeError, match="Configuration validation failed"
+            ):
+                fpga_instance.upload_config(validate=True)
+
+        assert "Configuration validation failed: Config invalid" in caplog.text
+        upload_spy.assert_not_called()
 
     def test_synchronize(self, fpga_instance):
-        """Test synchronize method."""
-        # Stub the sync block so we don't exercise the low-level
-        # set_delay / arm_sync / sw_sync sequence; just verify that the
-        # high-level behavior (sync block calls + metadata publication)
-        # happens with the expected structure and timestamp.
-        fpga_instance.sync = Mock()
-        with patch(
-            "eigsep_observing.fpga.time.time", return_value=1234567890.0
+        """synchronize writes corr_sync_time and it round-trips through redis."""
+        # Spy on the real Sync block so we observe the high-level
+        # sequence (set_delay / arm_sync / sw_sync) without stubbing
+        # out the register writes — the wraps= keeps DummyFpga state
+        # in sync with what real hardware would see. add_metadata is
+        # also wraps=, so the value actually lands in fakeredis and we
+        # can read it back via the production get_live_metadata path —
+        # this is the writer↔reader contract guard for the metadata
+        # serialization round-trip.
+        sync = fpga_instance.sync
+        with (
+            patch.object(
+                sync, "set_delay", wraps=sync.set_delay
+            ) as spy_set_delay,
+            patch.object(
+                sync, "arm_sync", wraps=sync.arm_sync
+            ) as spy_arm_sync,
+            patch.object(sync, "sw_sync", wraps=sync.sw_sync) as spy_sw_sync,
+            patch(
+                "eigsep_observing.fpga.time.time",
+                return_value=1234567890.0,
+            ),
+            patch.object(
+                fpga_instance.redis,
+                "add_metadata",
+                wraps=fpga_instance.redis.add_metadata,
+            ) as spy_add_metadata,
         ):
             fpga_instance.synchronize(delay=5)
 
-        fpga_instance.sync.set_delay.assert_called_once_with(5)
-        fpga_instance.sync.arm_sync.assert_called_once()
-        assert fpga_instance.sync.sw_sync.call_count == 3
-        fpga_instance.redis.add_metadata.assert_called_once()
+        spy_set_delay.assert_called_once_with(5)
+        spy_arm_sync.assert_called_once()
+        assert spy_sw_sync.call_count == 3
+        spy_add_metadata.assert_called_once()
+        assert spy_add_metadata.call_args[0][0] == "corr_sync_time"
 
-        # Check metadata structure
-        call_args = fpga_instance.redis.add_metadata.call_args
-        assert call_args[0][0] == "corr_sync_time"
-        metadata = call_args[0][1]
-        assert "sync_time_unix" in metadata
-        assert "sync_date" in metadata
+        # Round-trip: read corr_sync_time back through the production
+        # get_live_metadata path and confirm the value survived the
+        # hset/json-encode → hgetall/json-decode pipeline intact.
+        metadata = fpga_instance.redis.get_live_metadata("corr_sync_time")
         assert metadata["sync_time_unix"] == 1234567890.0
+        assert "sync_date" in metadata
 
     def test_synchronize_default_delay(self, fpga_instance):
         """Test synchronize with default delay."""
-        # Test the behavior rather than implementation details
-        fpga_instance.synchronize()
+        with patch.object(
+            fpga_instance.redis,
+            "add_metadata",
+            wraps=fpga_instance.redis.add_metadata,
+        ) as spy_add_metadata:
+            fpga_instance.synchronize()
 
         # Verify that redis.add_metadata was called
-        fpga_instance.redis.add_metadata.assert_called_once()
+        spy_add_metadata.assert_called_once()
 
         # Verify metadata structure
-        call_args = fpga_instance.redis.add_metadata.call_args
+        call_args = spy_add_metadata.call_args
         assert call_args[0][0] == "corr_sync_time"
         metadata = call_args[0][1]
         assert "sync_time_unix" in metadata
         assert "sync_date" in metadata
 
-    def test_initialize_all_enabled(self, fpga_instance):
-        """Test initialize with all options enabled."""
-        # Track calls to synchronize method
+    def test_initialize_all_enabled(self, fpga_instance, caplog):
+        """initialize() with sync=True calls synchronize and logs."""
+        caplog.set_level(logging.DEBUG)
         with patch.object(fpga_instance, "synchronize") as mock_sync:
             fpga_instance.initialize(
                 initialize_adc=True, initialize_fpga=True, sync=True
             )
 
-            # Verify that synchronize was called when sync=True
             mock_sync.assert_called_once()
-            fpga_instance.logger.debug.assert_called_with(
-                "Synchronizing correlator clock."
-            )
+
+        assert "Synchronizing correlator clock." in caplog.text
 
     def test_initialize_sync_disabled(self, fpga_instance):
         """Test initialize with sync disabled."""
@@ -165,136 +244,152 @@ class TestEigsepFpga:
             mock_sync.assert_called_once()
 
     def test_update_redis(self, fpga_instance):
-        """Test update_redis method."""
-        test_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
+        """update_redis forwards (data, cnt, dtype) to redis.add_corr_data."""
+        # Bytes match what fpga.read_data(unpack=False) actually returns
+        # in production — the prior list-of-int fixture diverged from
+        # the producer contract and only worked because the spy was a
+        # bare Mock that never ran the real xadd path.
+        test_data = {"00": b"\x00\x01\x02\x03", "11": b"\x04\x05\x06\x07"}
         test_cnt = 42
-
-        fpga_instance.update_redis(test_data, test_cnt)
-
-        # Use the actual dtype from config instead of hardcoding
         expected_dtype = fpga_instance.cfg["dtype"]
-        fpga_instance.redis.add_corr_data.assert_called_once_with(
-            test_data, test_cnt, dtype=expected_dtype
-        )
+
+        with patch.object(
+            fpga_instance.redis,
+            "add_corr_data",
+            wraps=fpga_instance.redis.add_corr_data,
+        ) as spy:
+            fpga_instance.update_redis(test_data, test_cnt)
+
+        spy.assert_called_once_with(test_data, test_cnt, dtype=expected_dtype)
 
     def test_read_integrations_no_new_data(self, fpga_instance):
-        """Test _read_integrations when no new data is available."""
-        from queue import Queue
-        from threading import Event
-
+        """No new cnt → loop exits via pre-set event, queue stays empty."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        fpga_instance.fpga.read_int.return_value = (
-            5  # Always return same count
-        )
-
-        # Set event to stop the loop
+        # Pre-set so the loop's while-condition fails after the first
+        # read_int, before it has a chance to enter the iteration body.
         fpga_instance.event.set()
 
-        # Run _read_integrations, won't put to queue since no new data
-        fpga_instance._read_integrations(["00", "11"], timeout=0.1)
+        with patch.object(
+            fpga_instance.fpga, "read_int", return_value=5
+        ) as mock_read_int:
+            fpga_instance._read_integrations(["00", "11"], timeout=0.1)
 
         assert fpga_instance.queue.empty()
-        fpga_instance.fpga.read_int.assert_called_with("corr_acc_cnt")
+        mock_read_int.assert_called_with("corr_acc_cnt")
 
-    def test_read_integrations_new_data(self, fpga_instance):
-        """Test _read_integrations with new data available."""
-        from queue import Queue
-        from threading import Event
-
+    def test_read_integrations_new_data(self, fpga_instance, caplog):
+        """New cnt → data read, queued, and logged."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        fpga_instance.fpga.read_int.side_effect = [
-            5,  # Initial count
-            6,  # New count (triggers read)
-            6,  # Validation read after data read
-        ]
         expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
-        fpga_instance.read_data.return_value = expected_data
 
-        # Set event after first iteration
-        def stop_after_one(msg):
+        # _read_integrations calls read_int 3 times per successful
+        # iteration: (1) initial cnt before the loop, (2) new-cnt
+        # check inside the loop, (3) validation read after read_data.
+        # We set the event during the validation read so the next
+        # iteration's while-condition fails and the loop exits cleanly.
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5  # initial cnt (before loop)
+            if n == 2:
+                return 6  # new cnt → triggers data read
+            # n == 3: validation read; matches new cnt so no error log
             fpga_instance.event.set()
+            return 6
 
-        fpga_instance.logger.info.side_effect = stop_after_one
+        caplog.set_level(logging.INFO)
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ) as mock_read_data,
+        ):
+            fpga_instance._read_integrations(["00", "11"], timeout=1)
 
-        # Run _read_integrations
-        fpga_instance._read_integrations(["00", "11"], timeout=0.1)
-
-        # Check that data was put in queue
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
         assert queued_item["data"] == expected_data
         assert queued_item["cnt"] == 6
-        fpga_instance.logger.info.assert_called_with("Reading acc_cnt=6")
-        fpga_instance.read_data.assert_called_once_with(
+        assert "Reading acc_cnt=6" in caplog.text
+        mock_read_data.assert_called_once_with(
             pairs=["00", "11"], unpack=False
         )
 
-    def test_read_integrations_missed_integrations(self, fpga_instance):
-        """Test _read_integrations when integrations are missed."""
-        from queue import Queue
-        from threading import Event
-
+    def test_read_integrations_missed_integrations(
+        self, fpga_instance, caplog
+    ):
+        """cnt jumps > 1 → warning log, data still read."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        fpga_instance.fpga.read_int.side_effect = [
-            5,  # Initial count
-            8,  # Jumped from 5 to 8 (missed 2)
-            8,  # Validation read
-        ]
         expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
-        fpga_instance.read_data.return_value = expected_data
 
-        # Set event after warning is logged
-        def stop_after_warning(msg):
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5
+            if n == 2:
+                return 8  # jumped from 5 to 8 (missed 2)
             fpga_instance.event.set()
+            return 8  # validation matches
 
-        fpga_instance.logger.warning.side_effect = stop_after_warning
+        caplog.set_level(logging.WARNING)
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ),
+        ):
+            fpga_instance._read_integrations(["00", "11"], timeout=1)
 
-        # Run _read_integrations
-        fpga_instance._read_integrations(["00", "11"], timeout=0.1)
-
-        # Check that data was put in queue
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
         assert queued_item["data"] == expected_data
         assert queued_item["cnt"] == 8
-        fpga_instance.logger.warning.assert_called_with(
-            "Missed 2 integration(s)."
-        )
+        assert "Missed 2 integration(s)." in caplog.text
 
-    def test_read_integrations_read_failure(self, fpga_instance):
-        """Test _read_integrations when read fails to complete in time."""
-        from queue import Queue
-        from threading import Event
-
+    def test_read_integrations_read_failure(self, fpga_instance, caplog):
+        """Validation read returns different cnt → error log, data still queued."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        fpga_instance.fpga.read_int.side_effect = [
-            5,  # Initial count
-            6,  # New count (triggers read)
-            7,  # Count changed during read - indicates failure
-        ]
         expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
-        fpga_instance.read_data.return_value = expected_data
 
-        # Set event after error is logged
-        def stop_after_error(msg):
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5
+            if n == 2:
+                return 6
+            # Validation read with a different cnt → error log path
             fpga_instance.event.set()
+            return 7
 
-        fpga_instance.logger.error.side_effect = stop_after_error
+        caplog.set_level(logging.ERROR)
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ),
+        ):
+            fpga_instance._read_integrations(["00", "11"], timeout=1)
 
-        # Run _read_integrations
-        fpga_instance._read_integrations(["00", "11"], timeout=0.1)
-
-        # Check that data was still put in queue (even with error)
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
         assert queued_item["data"] == expected_data
         assert queued_item["cnt"] == 6
-        fpga_instance.logger.error.assert_called_with(
+        assert (
             "Read of acc_cnt=6 FAILED to complete before next integration."
+            in caplog.text
         )
 
     def test_end_observing(self, fpga_instance):
@@ -308,23 +403,16 @@ class TestEigsepFpga:
         fpga_instance.upload_config = Mock()
         fpga_instance.update_redis = Mock()
 
-        # Set up proper numeric values for hardware reads
-        fpga_instance.fpga.read_uint.return_value = 1024  # acc_len
-
-        # Mock the thread behavior
-        def mock_thread_run(target, args, kwargs):
-            # Put some data in the queue
-            fpga_instance.queue.put({"data": {"00": [1, 2, 3]}, "cnt": 1})
-            fpga_instance.queue.put({"data": {"00": [4, 5, 6]}, "cnt": 2})
-            # Signal thread is done
-            fpga_instance.event.set()
-            return Mock(spec=Thread)
-
-        with patch("eigsep_observing.fpga.Thread") as mock_thread_class:
-            mock_thread = Mock()
-            mock_thread_class.return_value = mock_thread
-            mock_thread.start = lambda: mock_thread_run(None, None, None)
-
+        # Trailing None mirrors the production producer: real
+        # _read_integrations always pushes a sentinel at end-of-stream,
+        # and the consumer's documented exit path is the sentinel-break
+        # (with its "End of queue" log line), not the while-condition.
+        items = [
+            {"data": {"00": [1, 2, 3]}, "cnt": 1},
+            {"data": {"00": [4, 5, 6]}, "cnt": 2},
+            None,
+        ]
+        with _patch_observe_thread(fpga_instance, items):
             fpga_instance.observe(pairs=["00"], timeout=10)
 
         fpga_instance.upload_config.assert_called_once_with(validate=True)
@@ -332,52 +420,86 @@ class TestEigsepFpga:
         fpga_instance.update_redis.assert_any_call({"00": [1, 2, 3]}, 1)
         fpga_instance.update_redis.assert_any_call({"00": [4, 5, 6]}, 2)
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    def test_observe_default_pairs(self, fpga_instance):
-        """Test observe with default pairs (None)."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+    def test_observe_default_pairs(self, fpga_instance, caplog):
+        """observe() with no pairs arg defaults to self.pairs."""
+        fpga_instance.update_redis = Mock()
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    def test_observe_timeout_immediate(self, fpga_instance):
-        """Test observe timeout behavior."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        # Trailing None mirrors the production producer (see
+        # test_observe_basic_functionality for the rationale).
+        items = [{"data": {"00": [1, 2, 3]}, "cnt": 1}, None]
+        caplog.set_level(logging.INFO)
+        with _patch_observe_thread(fpga_instance, items) as mock_thread_cls:
+            fpga_instance.observe()  # no pairs arg → defaults to self.pairs
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    def test_observe_continuous_no_data(self, fpga_instance):
-        """Test observe when continuously getting no data until timeout."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        # Producer thread was constructed with self.pairs
+        call_kwargs = mock_thread_cls.call_args.kwargs
+        assert call_kwargs["args"] == (fpga_instance.pairs,)
+        assert call_kwargs["kwargs"] == {"timeout": 10}
+        assert call_kwargs["target"] == fpga_instance._read_integrations
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    def test_observe_logging(self, fpga_instance):
-        """Test observe logging behavior."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        # And the log line names self.pairs, not the literal "None"
+        assert (
+            f"Starting observation for pairs: {fpga_instance.pairs}."
+            in caplog.text
+        )
+        # Data still drained normally
+        fpga_instance.update_redis.assert_called_once_with(
+            {"00": [1, 2, 3]}, 1
+        )
 
-    @pytest.mark.skip(reason="Test needs rewrite - prev_cnt no longer used")
-    def test_observe_prev_cnt_update(self, fpga_instance):
-        """Test that observe updates prev_cnt correctly."""
-        # TODO: Remove or rewrite this test - prev_cnt is no longer used
-        pass
+    def test_observe_timeout_immediate(self, fpga_instance, caplog):
+        """
+        observe() exits cleanly when the producer ends without ever
+        pushing data (only the None sentinel arrives).
 
-    @pytest.mark.skip(
-        reason="Test needs rewrite for new thread-based implementation"
-    )
-    @patch("time.time")
-    @patch("time.sleep")
-    def test_observe_integration_loop(
-        self, mock_sleep, mock_time, fpga_instance
-    ):
-        """Test observe integration loop with multiple data reads."""
-        # TODO: Rewrite this test to work with new thread/queue implementation
-        pass
+        This subsumes the old test_observe_continuous_no_data — the
+        consumer can't tell whether the producer never had data or
+        timed out without it; both surface as "sentinel only". The
+        producer-side no-data path is covered separately by
+        test_read_integrations_no_new_data.
+        """
+        fpga_instance.update_redis = Mock()
+
+        caplog.set_level(logging.INFO)
+        with _patch_observe_thread(fpga_instance, [None]):
+            fpga_instance.observe(pairs=["00"], timeout=1)
+
+        fpga_instance.update_redis.assert_not_called()
+        assert "End of queue, processing finished." in caplog.text
+
+    def test_observe_logging(self, fpga_instance, caplog):
+        """observe() emits the expected info log lines."""
+        # The dummy provides real registers now, so header computes
+        # integration_time without any helper-side setup.
+        expected_t_int = fpga_instance.header["integration_time"]
+
+        # Bytes match what fpga.read_data(unpack=False) returns in
+        # production — the consumer path runs the real add_corr_data
+        # against fakeredis, which rejects non-bytes/str/int/float
+        # field values.
+        items = [{"data": {"00": b"\x00\x01\x02\x03"}, "cnt": 1}, None]
+        caplog.set_level(logging.INFO)
+        with _patch_observe_thread(fpga_instance, items):
+            fpga_instance.observe(pairs=["00"], timeout=10)
+
+        assert f"Integration time is {expected_t_int} seconds." in caplog.text
+        assert "Starting observation for pairs: ['00']." in caplog.text
+        assert "End of queue, processing finished." in caplog.text
+
+    def test_observe_integration_loop(self, fpga_instance):
+        """
+        Consumer drains every queued integration, in order, before
+        exiting on the sentinel.
+        """
+        fpga_instance.update_redis = Mock()
+
+        items = [{"data": {"00": [i]}, "cnt": 10 + i} for i in range(5)] + [
+            None
+        ]
+        with _patch_observe_thread(fpga_instance, items):
+            fpga_instance.observe(pairs=["00", "11"], timeout=10)
+
+        assert fpga_instance.update_redis.call_count == 5
+        # Order matters — assert via call_args_list, not assert_any_call.
+        for i, call in enumerate(fpga_instance.update_redis.call_args_list):
+            assert call.args == ({"00": [i]}, 10 + i)
