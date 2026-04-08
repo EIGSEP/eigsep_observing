@@ -106,12 +106,20 @@ def test_metadata_has_expected_fields(client, redis):
     assert "sw_state" in rfswitch
 
     # Check potmon (post-_pot_redis_handler shape: voltages always
-    # present, cal/angle fields are None for an uncalibrated stream)
+    # present as floats; cal/angle fields are None for an
+    # uncalibrated stream — and the dummy potmon used by the
+    # DummyPandaClient is uncalibrated, so this test pins the
+    # uncalibrated-stream contract on the snapshot path. Real-hardware
+    # calibrated streams would publish floats here instead.
     potmon = metadata.get("potmon", {})
-    assert "pot_el_voltage" in potmon
-    assert "pot_az_voltage" in potmon
-    assert "pot_el_cal_slope" in potmon
-    assert "pot_el_angle" in potmon
+    assert isinstance(potmon["pot_el_voltage"], float)
+    assert isinstance(potmon["pot_az_voltage"], float)
+    assert potmon["pot_el_cal_slope"] is None
+    assert potmon["pot_el_cal_intercept"] is None
+    assert potmon["pot_el_angle"] is None
+    assert potmon["pot_az_cal_slope"] is None
+    assert potmon["pot_az_cal_intercept"] is None
+    assert potmon["pot_az_angle"] is None
 
 
 def test_get_live_metadata_single_key(client, redis):
