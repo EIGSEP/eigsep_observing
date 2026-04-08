@@ -843,11 +843,20 @@ def _avg_rfswitch_metadata(value):
 # ~14k events/hour for a chronically-broken sensor.
 #
 # Non-invariant fields that legitimately change inside an integration
-# (accel_cal/mag_cal cal levels, watchdog_tripped fault flag, A_enabled
-# / A_active mode flags) are NOT logged — the per-type reduction in
-# _avg_sensor_values already encodes the disagreement in the saved value
-# (min for ints, any for bools, "UNKNOWN" for strings) so downstream can
-# detect the issue from the file alone.
+# (the tempctrl `watchdog_tripped` fault flag, the
+# `LNA_enabled`/`LOAD_enabled`/`LNA_active`/`LOAD_active` mode flags,
+# the `LNA_status`/`LOAD_status` strings) are NOT logged — the per-type
+# reduction in _avg_sensor_values already encodes the disagreement in
+# the saved value (`any` for bools, `"UNKNOWN"` for strings) so
+# downstream can detect the issue from the file alone. Note that
+# post-picohost-1.0.0, every `int` field in SENSOR_SCHEMAS reaching
+# _avg_sensor_values is in _INVARIANT_FIELDS — the only non-invariant
+# int is rfswitch's `sw_state`, which is handled by
+# _avg_rfswitch_metadata, not _avg_sensor_values. The int `min`
+# reduction is therefore a no-op-on-agreement safety net behind the
+# invariant ERROR log path; if a future schema adds a legitimately
+# varying int, the disagreement is silently captured by `min` rather
+# than logged.
 # ----------------------------------------------------------------------
 _INVARIANT_FIELDS = frozenset({"sensor_name", "app_id", "watchdog_timeout_ms"})
 _INVARIANT_LOG_THROTTLE_S = 60.0

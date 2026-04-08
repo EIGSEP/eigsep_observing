@@ -8,7 +8,7 @@ while True:
     try:
         # m = r.get_live_metadata()
         m = r.get_live_metadata(keys=["lidar", "lidar_ts"])
-        # m = r.get_live_metadata(keys=["imu_panda", "imu_antenna", "lidar"])
+        # m = r.get_live_metadata(keys=["imu_el", "imu_az", "lidar"])
         print(json.dumps(m, indent=2, sort_keys=False))
         time.sleep(1.0)
     except KeyboardInterrupt:
