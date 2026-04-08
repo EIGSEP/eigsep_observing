@@ -178,6 +178,46 @@ two by bypassing `PicoPotentiometer.__init__` and calling
 scalar, including the cal slope/intercept which were flattened from the
 old `[m, b]` list shape.
 
+## Testing philosophy: dummies over mocks
+
+When testing classes that interact with hardware, Redis, or other
+external systems, prefer the project's `Dummy*` classes over
+replacing attributes with `Mock()`. The dummies are not stubs — they
+are working in-process implementations. `DummyEigsepFpga`, for
+example, exposes a real `DummyFpga` (in `eigsep_corr.testing`) with
+realistic register defaults and a wallclock-driven `corr_acc_cnt`
+counter; replacing `fpga.fpga` with `Mock()` clobbers all of that and
+forces every test that touches the fixture to manually re-supply
+values that were already there.
+
+**Rule of thumb**: if you're about to write `fixture_obj.attr = Mock()`,
+check whether the dummy already provides a working `attr`. If it does,
+scope a per-test `patch.object(fixture_obj, "attr", ...)` to the
+*specific* method or value the test needs to control, instead of a
+fixture-wide Mock that hides what's available.
+
+**When the dummy doesn't do what you need**: first try to set the
+attribute directly (e.g. `fpga.pfb.fft_shift = fpga.cfg["fft_shift"]`)
+or call the dummy's own setter. If that's not enough, extending the
+dummy class itself is preferable to fixture-level Mocking — the
+extension benefits every other test, where a fixture Mock only
+papers over the gap locally.
+
+**Loggers**: prefer pytest's `caplog` fixture over replacing
+`obj.logger = Mock()`. The dummies use real Python loggers and
+`caplog` captures records natively. If a test needs to interrupt a
+loop after a specific log message, drive the loop's actual control
+variable (e.g. set the event in a counting closure on the patched
+read method) — the logger is not a control plane.
+
+**Bad**: `fpga.fpga = Mock()` — replaces the whole DummyFpga, breaks
+the realistic counter, register defaults, and downstream tests.
+**Good**: `with patch.object(fpga.fpga, "read_int", side_effect=[5, 6, 6]):`
+— scopes the patch to the one method the test needs to control.
+
+`tests/test_fpga.py` follows this pattern; refer to it for the
+canonical shape of producer-side and consumer-side observe() tests.
+
 ## Testing philosophy: fixtures must match production data
 
 Test fixtures should mirror the **shape, types, and cardinality** of real

@@ -1,60 +1,59 @@
 import logging
 import time
+from collections import defaultdict
 from math import floor
 
 from ..fpga import EigsepFpga, default_config
 from .eig_redis import DummyEigsepRedis
+from .utils import generate_data  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
 
 
-class DummyBlock:
-    def __init__(self, fpga, *args, **kwargs):
-        self.fpga = fpga
+class DummyFpga:
+    """
+    In-memory stand-in for ``casperfpga.CasperFpga``.
 
-    def init(self, *args, **kwargs):
-        pass
+    Implements the register-level interface that ``blocks.Block`` and
+    its subclasses rely on (``read_int``/``read_uint``/``write_int``/
+    ``read``/``write``/``blindwrite``/``listdev``), backed by a plain
+    dict. Unknown registers default to 0 so real blocks can read
+    power-on state without ``KeyError``. ``corr_acc_cnt`` is a free-
+    running wallclock-driven counter (advances at ``cnt_period``
+    seconds per tick from instance construction), matching the
+    behavior of a correlator that's been synced.
 
-    def initialize(self, *args, **kwargs):
-        pass
+    The constructor accepts the production calling convention
+    (``CasperFpga(snap_ip, transport=...)``) so it can slot into
+    ``EigsepFpga._make_fpga`` overrides without signature juggling.
+    """
 
-    def __call__(self, *args, **kwargs):
-        return None
-
-
-class DummyFpga(DummyBlock):
-    def __init__(self, **kwargs):
-        self.sync_time = None
+    def __init__(self, snap_ip=None, transport=None, **kwargs):
+        self.snap_ip = snap_ip
+        self.transport = transport
+        self.sync_time = time.time()
         self.cnt_period = kwargs.pop("cnt_period", 2**28 / (500 * 1e6))
-        self.regs = {}
+        self.regs = defaultdict(int)
         self.regs["version_version"] = 0x20003
         self.regs["corr_acc_len"] = kwargs.get("corr_acc_len", 67108864)
         self.regs["corr_scalar"] = kwargs.get("corr_scalar", 512)
-        self.regs["fft_shift"] = kwargs.get("fft_shift", 0x0FF)
-        self.regs["pfb_pol01_delay"] = 0
-        self.regs["pfb_pol23_delay"] = 0
-        self.regs["pfb_pol45_delay"] = 0
 
     def upload_to_ram_and_program(self, fpg_file, force=False):
         pass
 
-    def write_int(self, reg, val):
+    def write_int(self, reg, val, word_offset=0, **kwargs):
         logger.debug(f"Writing {val} to {reg}")
         self.regs[reg] = val
 
-    def read_int(self, reg):
+    def read_int(self, reg, word_offset=0, **kwargs):
         if reg == "corr_acc_cnt":
-            if self.sync_time is None:
-                return 0
             acc_cnt = (time.time() - self.sync_time) / self.cnt_period
-            acc_cnt = int(floor(acc_cnt))
-            return acc_cnt
-        else:
-            return self.regs[reg]
+            return int(floor(acc_cnt))
+        return self.regs[reg]
 
     read_uint = read_int
 
-    def read(self, reg, nbytes):
+    def read(self, reg, nbytes, **kwargs):
         return b"\x12" * nbytes
 
     def write(self, reg, val, offset=0, **kwargs):
@@ -63,15 +62,26 @@ class DummyFpga(DummyBlock):
     def blindwrite(self, reg, val, **kwargs):
         pass
 
+    def listdev(self):
+        return list(self.regs.keys())
+
 
 class DummyAdcAdc:
     def selectInput(self, inp):
         pass
 
 
-class DummyAdc(DummyBlock):
+class DummyAdc:
+    """
+    Stand-in for ``casperfpga.snapadc.SnapAdc``. Matches the subset of
+    the SnapAdc interface that ``EigsepFpga.initialize_adc`` exercises.
+    """
+
     def __init__(self, fpga, num_chans=2, resolution=8, ref=None):
-        super().__init__(fpga)
+        self.fpga = fpga
+        self.num_chans = num_chans
+        self.resolution = resolution
+        self.ref = ref
 
     def init(self, sample_rate=500):
         self.adc = DummyAdcAdc()
@@ -92,20 +102,21 @@ class DummyAdc(DummyBlock):
         pass
 
 
-class DummyPfb(DummyBlock):
-    def set_fft_shift(self, fft_shift):
-        self.fpga.write_int("fft_shift", fft_shift)
+class DummyPam:
+    """
+    Stand-in for ``blocks.Pam``. The real Pam talks to an I2C bus via
+    ``casperfpga.i2c``, which cannot run against ``DummyFpga`` — hence
+    the substitute. Keeps the same call surface ``EigsepFpga``
+    exercises in ``initialize_pams`` / ``get_pam_atten`` /
+    ``set_pam_atten``.
+    """
 
-    def get_fft_shift(self):
-        return self.fpga.read_int("fft_shift")
-
-
-class DummyPam(DummyBlock):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, host, name=None, logger=None):
+        self.host = host
+        self.name = name
         self.attenuation = (0, 0)
 
-    def initialize(self):
+    def initialize(self, verify=False):
         pass
 
     def set_attenuation(self, att_e, att_n, verify=True):
@@ -117,95 +128,52 @@ class DummyPam(DummyBlock):
         return self.attenuation
 
 
-class DummySync(DummyBlock):
-    def set_delay(self, delay):
-        pass
-
-    def arm_sync(self):
-        pass
-
-    def arm_noise(self):
-        pass
-
-    def sw_sync(self):
-        self.fpga.sync_time = time.time()
-
-
-class DummyNoise(DummyBlock):
-    def set_seed(self, stream=None, seed=0):
-        pass
-
-
-class DummyInput(DummyBlock):
-    def use_noise(self, stream=None):
-        pass
-
-    def use_adc(self, stream=None):
-        pass
-
-
 class DummyEigsepFpga(EigsepFpga):
     """
-    Hardware-free EigsepFpga for testing.
+    Hardware-free ``EigsepFpga`` for testing.
 
-    Replaces the casperfpga-backed FPGA object and register blocks with
-    in-memory Dummy* implementations, and uses DummyEigsepRedis (backed
-    by fakeredis) instead of a real Redis server.
+    Inherits the production ``__init__`` verbatim — the only
+    substitutions happen at the factory-method boundary:
+
+    - ``_make_fpga`` → ``DummyFpga`` (in-memory register backend)
+    - ``_make_adc``  → ``DummyAdc``  (SnapAdc substitute)
+    - ``_make_pam``  → ``DummyPam``  (I2C-free PAM substitute)
+    - ``_create_redis`` → ``DummyEigsepRedis`` (fakeredis backend)
+
+    The real ``Sync`` / ``NoiseGen`` / ``Input`` / ``Pfb`` blocks run
+    unchanged against ``DummyFpga``, so production register-write
+    sequences are actually exercised by tests.
+
+    After ``super().__init__()`` the dummy primes a few registers to
+    reflect a freshly-configured FPGA (pfb_ctrl bits that match
+    ``cfg["fft_shift"]``). Without this, ``validate_config`` would
+    fail on any test that calls it, because power-on defaults are
+    zero and real ``Pfb.get_fft_shift`` reads the actual bits.
     """
 
     def __init__(self, cfg=default_config, program=False):
-        self.logger = logger
-        self.cfg = cfg
-        self.pairs = cfg["pairs"]
+        super().__init__(cfg=cfg, program=program)
+        # Seed pfb_ctrl with cfg fft_shift bits via the real Pfb so
+        # header/validate_config report the expected value.
+        self.pfb.set_fft_shift(self.cfg["fft_shift"])
 
-        self.fpg_file = self.cfg["fpg_file"]
+    @staticmethod
+    def _create_redis(host, port):
+        return DummyEigsepRedis(host=host, port=port)
+
+    def _make_fpga(self):
         corr_acc_len = self.cfg["corr_acc_len"]
         sample_rate = self.cfg["sample_rate"]
         cnt_period = corr_acc_len / (sample_rate * 1e6)
-        self.fpga = DummyFpga(
+        return DummyFpga(
             snap_ip=self.cfg["snap_ip"],
-            transport=None,
             cnt_period=cnt_period,
             corr_acc_len=corr_acc_len,
             corr_scalar=self.cfg["corr_scalar"],
-            fft_shift=self.cfg["fft_shift"],
         )
-        if program:
-            force = program == "force"
-            self.fpga.upload_to_ram_and_program(self.fpg_file, force=force)
 
-        if cfg["use_ref"]:
-            ref = 10
-        else:
-            ref = None
+    def _make_adc(self, ref):
+        return DummyAdc(self.fpga, ref=ref)
 
-        self.logger.debug("Adding dummy blocks to FPGA")
-        self.adc = DummyAdc(self.fpga, ref=ref)
-        self.sync = DummySync(self.fpga)
-        self.noise = DummyNoise(self.fpga)
-        self.inp = DummyInput(self.fpga)
-        self.pfb = DummyPfb(self.fpga)
-        self.blocks = [self.sync, self.noise, self.inp, self.pfb]
-
-        self.autos = [p for p in self.pairs if len(p) == 1]
-        self.crosses = [p for p in self.pairs if len(p) == 2]
-        self.pams = []
-
-        self.logger.debug("Initializing dummy Redis")
-        redis_cfg = self.cfg.get("redis", {})
-        host = redis_cfg.get("host", "localhost")
-        port = redis_cfg.get("port", 6379)
-        self.redis = DummyEigsepRedis(host=host, port=port)
-
-        self.adc_initialized = False
-        self.pams_initialized = False
-        self.is_synchronized = False
-
-    def initialize_pams(self):
-        """Initialize dummy PAMs using DummyPam objects."""
-        self.pams = [DummyPam(self.fpga) for _ in range(3)]
-        self.blocks.extend(self.pams)
-        self.pams_initialized = True
-        for ant in self.cfg["rf_chain"]["ants"]:
-            atten = self.cfg["rf_chain"]["ants"][ant]["pam"]["atten"]
-            self.set_pam_atten(ant, atten)
+    def _make_pam(self, num):
+        return DummyPam(self.fpga, f"i2c_ant{num}")
