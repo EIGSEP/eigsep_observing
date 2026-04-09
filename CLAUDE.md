@@ -26,7 +26,7 @@ ruff format --check .             # Check formatting (line length 79)
 - **EigsepRedis** (`eig_redis.py`) - Redis message bus wrapping `redis.Redis`. Manages streams: `stream:ctrl` (commands), `stream:status` (status updates), `stream:data:{sensor}` (sensor data). Large file (~1000 lines).
 - **EigObserver** (`observer.py`) - Main orchestrator on the ground computer. Takes two Redis connections (`redis_snap` for SNAP correlator, `redis_panda` for LattePanda). Manages observation schedules, data collection, and file writing.
 - **PandaClient** (`client.py`) - Runs on the suspended LattePanda. Pulls sensor data, pushes to Redis, listens for control commands. Manages Pico devices (IMU, thermometers, peltier, lidar, RF switch) via `picohost` library.
-- **EigsepFpga** (`fpga.py`) - Extends `eigsep_corr.fpga.EigsepFpga` for SNAP FPGA/correlator interface.
+- **EigsepFpga** (`fpga.py`) - SNAP FPGA/correlator driver. Owns the register blocks (`blocks.py`), the `.fpg` bitstream (`data/`), and the `EigsepRedis`-backed metadata publication path. Was historically a subclass of `eigsep_corr.fpga.EigsepFpga`; the two were merged in-tree when `eigsep_corr` was archived.
 
 ### Testing architecture (`testing/` subpackage):
 
@@ -34,7 +34,7 @@ Each core class has a `Dummy*` counterpart (`DummyEigsepRedis`, `DummyPandaClien
 
 ### Key dependencies:
 
-- `eigsep_corr` - SNAP correlator library (config loading via `eigsep_corr.config.load_config()`)
+- `casperfpga` - SNAP board driver (lazy optional import; only required on the ground computer that actually talks to the FPGA)
 - `cmt_vna` - VNA control library
 - `picohost` - Pico microcontroller communication
 - `fakeredis` - In-memory Redis for testing

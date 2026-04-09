@@ -4,10 +4,11 @@ import logging
 import threading
 import yaml
 
-from eigsep_corr.config import load_config
 import numpy as np
 import redis
 import redis.exceptions
+
+from .utils import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -323,7 +324,7 @@ class EigsepRedis:
         data : dict
             Dictionary holding correlation data. Keys are correlation
             pairs and values are bytes. See the `read_data` method of
-            EigsepFpga in eigsep_corr.fpga for the expected format.
+            EigsepFpga in eigsep_observing.fpga for the expected format.
         cnt : int
             Accumulation count, read from SNAP.
         dtype : str

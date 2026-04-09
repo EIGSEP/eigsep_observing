@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from eigsep_corr.utils import calc_times, calc_freqs_dfreq
+from .utils import calc_times, calc_freqs_dfreq
 
 logger = logging.getLogger(__name__)
 

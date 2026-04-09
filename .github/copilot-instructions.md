@@ -47,7 +47,7 @@ flake8                        # Lint code
 - `config/obs_config.yaml` - Observation parameters (switch schedules, VNA settings)
 - `config/dummy_config.yaml` - Test configuration for hardware-free development
 
-Load configurations using `eigsep_corr.config.load_config()`.
+Load configurations using `eigsep_observing.utils.load_config()`.
 
 ## Coding Guidelines
 

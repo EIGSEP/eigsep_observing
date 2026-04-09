@@ -23,7 +23,6 @@ dependencies = [
   "flask",
   "picohost==1.0.0",
   "eigsep-vna==0.0.2",
-  "eigsep_corr==2.0.0",
   "fakeredis",
 ]
 
@@ -49,7 +48,7 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-"eigsep_observing" = ["config/*.yaml"]
+"eigsep_observing" = ["config/*.yaml", "data/*.fpg"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
