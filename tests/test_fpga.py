@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing import EigsepFpga
-from eigsep_observing.testing import DummyEigsepFpga
+from eigsep_observing.testing import DummyEigsepFpga, utils
 
 
 @contextmanager
@@ -249,7 +249,7 @@ class TestEigsepFpga:
         # in production — the prior list-of-int fixture diverged from
         # the producer contract and only worked because the spy was a
         # bare Mock that never ran the real xadd path.
-        test_data = {"00": b"\x00\x01\x02\x03", "11": b"\x04\x05\x06\x07"}
+        test_data = {"0": b"\x00\x01\x02\x03", "1": b"\x04\x05\x06\x07"}
         test_cnt = 42
         expected_dtype = fpga_instance.cfg["dtype"]
 
@@ -273,7 +273,7 @@ class TestEigsepFpga:
         with patch.object(
             fpga_instance.fpga, "read_int", return_value=5
         ) as mock_read_int:
-            fpga_instance._read_integrations(["00", "11"], timeout=0.1)
+            fpga_instance._read_integrations(["0", "1"], timeout=0.1)
 
         assert fpga_instance.queue.empty()
         mock_read_int.assert_called_with("corr_acc_cnt")
@@ -282,7 +282,11 @@ class TestEigsepFpga:
         """New cnt → data read, queued, and logged."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        expected_data = {p: fake_data[p] for p in pairs}
 
         # _read_integrations calls read_int 3 times per successful
         # iteration: (1) initial cnt before the loop, (2) new-cnt
@@ -309,16 +313,14 @@ class TestEigsepFpga:
                 fpga_instance, "read_data", return_value=expected_data
             ) as mock_read_data,
         ):
-            fpga_instance._read_integrations(["00", "11"], timeout=1)
+            fpga_instance._read_integrations(pairs, timeout=1)
 
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
         assert queued_item["data"] == expected_data
         assert queued_item["cnt"] == 6
         assert "Reading acc_cnt=6" in caplog.text
-        mock_read_data.assert_called_once_with(
-            pairs=["00", "11"], unpack=False
-        )
+        mock_read_data.assert_called_once_with(pairs=pairs, unpack=False)
 
     def test_read_integrations_missed_integrations(
         self, fpga_instance, caplog
@@ -326,7 +328,11 @@ class TestEigsepFpga:
         """cnt jumps > 1 → warning log, data still read."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        expected_data = {p: fake_data[p] for p in pairs}
 
         calls = []
 
@@ -347,7 +353,7 @@ class TestEigsepFpga:
                 fpga_instance, "read_data", return_value=expected_data
             ),
         ):
-            fpga_instance._read_integrations(["00", "11"], timeout=1)
+            fpga_instance._read_integrations(pairs, timeout=1)
 
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
@@ -359,7 +365,11 @@ class TestEigsepFpga:
         """Validation read returns different cnt → error log, data still queued."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
-        expected_data = {"00": [1, 2, 3], "11": [4, 5, 6]}
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        expected_data = {p: fake_data[p] for p in pairs}
 
         calls = []
 
@@ -381,7 +391,7 @@ class TestEigsepFpga:
                 fpga_instance, "read_data", return_value=expected_data
             ),
         ):
-            fpga_instance._read_integrations(["00", "11"], timeout=1)
+            fpga_instance._read_integrations(pairs, timeout=1)
 
         assert not fpga_instance.queue.empty()
         queued_item = fpga_instance.queue.get()
@@ -403,30 +413,38 @@ class TestEigsepFpga:
         fpga_instance.upload_config = Mock()
         fpga_instance.update_redis = Mock()
 
-        # Trailing None mirrors the production producer: real
-        # _read_integrations always pushes a sentinel at end-of-stream,
-        # and the consumer's documented exit path is the sentinel-break
-        # (with its "End of queue" log line), not the while-condition.
+        pairs = ["0"]
+
+        # Two normal items followed by a None sentinel to end the loop
+        d1 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        d1 = {p: d1[p] for p in pairs}  # filter to the observed pair(s)
+        d2 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        d2 = {p: d2[p] for p in pairs}
         items = [
-            {"data": {"00": [1, 2, 3]}, "cnt": 1},
-            {"data": {"00": [4, 5, 6]}, "cnt": 2},
+            {"data": d1, "cnt": 1},
+            {"data": d2, "cnt": 2},
             None,
         ]
         with _patch_observe_thread(fpga_instance, items):
-            fpga_instance.observe(pairs=["00"], timeout=10)
+            fpga_instance.observe(pairs=pairs, timeout=10)
 
         fpga_instance.upload_config.assert_called_once_with(validate=True)
         assert fpga_instance.update_redis.call_count == 2
-        fpga_instance.update_redis.assert_any_call({"00": [1, 2, 3]}, 1)
-        fpga_instance.update_redis.assert_any_call({"00": [4, 5, 6]}, 2)
+        fpga_instance.update_redis.assert_any_call(d1, 1)
+        fpga_instance.update_redis.assert_any_call(d2, 2)
 
     def test_observe_default_pairs(self, fpga_instance, caplog):
         """observe() with no pairs arg defaults to self.pairs."""
         fpga_instance.update_redis = Mock()
 
-        # Trailing None mirrors the production producer (see
-        # test_observe_basic_functionality for the rationale).
-        items = [{"data": {"00": [1, 2, 3]}, "cnt": 1}, None]
+        d1 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        items = [{"data": d1, "cnt": 1}, None]
         caplog.set_level(logging.INFO)
         with _patch_observe_thread(fpga_instance, items) as mock_thread_cls:
             fpga_instance.observe()  # no pairs arg → defaults to self.pairs
@@ -443,9 +461,7 @@ class TestEigsepFpga:
             in caplog.text
         )
         # Data still drained normally
-        fpga_instance.update_redis.assert_called_once_with(
-            {"00": [1, 2, 3]}, 1
-        )
+        fpga_instance.update_redis.assert_called_once_with(d1, 1)
 
     def test_observe_timeout_immediate(self, fpga_instance, caplog):
         """
@@ -462,7 +478,7 @@ class TestEigsepFpga:
 
         caplog.set_level(logging.INFO)
         with _patch_observe_thread(fpga_instance, [None]):
-            fpga_instance.observe(pairs=["00"], timeout=1)
+            fpga_instance.observe(pairs=["0"], timeout=1)
 
         fpga_instance.update_redis.assert_not_called()
         assert "End of queue, processing finished." in caplog.text
@@ -473,17 +489,16 @@ class TestEigsepFpga:
         # integration_time without any helper-side setup.
         expected_t_int = fpga_instance.header["integration_time"]
 
-        # Bytes match what fpga.read_data(unpack=False) returns in
-        # production — the consumer path runs the real add_corr_data
-        # against fakeredis, which rejects non-bytes/str/int/float
-        # field values.
-        items = [{"data": {"00": b"\x00\x01\x02\x03"}, "cnt": 1}, None]
+        d1 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        items = [{"data": d1, "cnt": 1}, None]
         caplog.set_level(logging.INFO)
         with _patch_observe_thread(fpga_instance, items):
-            fpga_instance.observe(pairs=["00"], timeout=10)
+            fpga_instance.observe(pairs=["0"], timeout=10)
 
         assert f"Integration time is {expected_t_int} seconds." in caplog.text
-        assert "Starting observation for pairs: ['00']." in caplog.text
+        assert "Starting observation for pairs: ['0']." in caplog.text
         assert "End of queue, processing finished." in caplog.text
 
     def test_observe_integration_loop(self, fpga_instance):
@@ -493,13 +508,12 @@ class TestEigsepFpga:
         """
         fpga_instance.update_redis = Mock()
 
-        items = [{"data": {"00": [i]}, "cnt": 10 + i} for i in range(5)] + [
-            None
-        ]
+        items = [{"data": {"0": [i]}, "cnt": 10 + i} for i in range(5)]
+        items.append(None)
         with _patch_observe_thread(fpga_instance, items):
-            fpga_instance.observe(pairs=["00", "11"], timeout=10)
+            fpga_instance.observe(pairs=["0", "1"], timeout=10)
 
         assert fpga_instance.update_redis.call_count == 5
         # Order matters — assert via call_args_list, not assert_any_call.
         for i, call in enumerate(fpga_instance.update_redis.call_args_list):
-            assert call.args == ({"00": [i]}, 10 + i)
+            assert call.args == ({"0": [i]}, 10 + i)
