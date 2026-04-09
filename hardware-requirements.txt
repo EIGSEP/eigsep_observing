@@ -1,0 +1,1 @@
+casperfpga @ git+https://github.com/EIGSEP/casperfpga.git@v0.6.0
