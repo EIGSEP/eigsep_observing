@@ -18,12 +18,6 @@ class DummyBlock:
     def initialize(self, *args, **kwargs):
         pass
 
-    def __getattribute__(self, attr):
-        try:
-            return object.__getattribute__(self, attr)
-        except AttributeError:
-            return self
-
     def __call__(self, *args, **kwargs):
         return None
 
