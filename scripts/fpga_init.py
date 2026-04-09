@@ -8,20 +8,60 @@ from threading import Thread  # noqa: E402
 
 import IPython  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
-from eigsep_observing.fpga import add_args  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
-from eigsep_observing.utils import load_config  # noqa: E402
+from eigsep_observing.utils import get_config_path, load_config  # noqa: E402
 
 parser = argparse.ArgumentParser(
     description="Snap observing with Eigsep FPGA",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-add_args(
-    parser,
-    default_config_file=(
-        "/home/eigsep/eigsep/eigsep_observing/src/eigsep_observing/"
-        "config/corr_config.yaml"
-    ),
+parser.add_argument(
+    "-p",
+    dest="program",
+    action="store_true",
+    default=False,
+    help="Program Eigsep correlator.",
+)
+parser.add_argument(
+    "-P",
+    dest="force_program",
+    action="store_true",
+    default=False,
+    help="Force program Eigsep correlator.",
+)
+parser.add_argument(
+    "-a",
+    dest="initialize_adc",
+    action="store_true",
+    default=False,
+    help="Initialize ADCs.",
+)
+parser.add_argument(
+    "-f",
+    dest="initialize_fpga",
+    action="store_true",
+    default=False,
+    help="Initialize Eigsep correlator.",
+)
+parser.add_argument(
+    "-s",
+    dest="sync",
+    action="store_true",
+    default=False,
+    help="Sync Eigsep correlator.",
+)
+parser.add_argument(
+    "--config_file",
+    dest="config_file",
+    default=str(get_config_path("corr_config.yaml")),
+    help="Configuration file for Eigsep Fpga.",
+)
+parser.add_argument(
+    "--dummy",
+    dest="dummy_mode",
+    action="store_true",
+    default=False,
+    help="Run with a dummy SNAP interface",
 )
 parser.add_argument(
     "-i",
