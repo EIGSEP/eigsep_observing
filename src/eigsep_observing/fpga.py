@@ -160,8 +160,8 @@ class EigsepFpga:
             for ant in rf_chain["ants"]:
                 try:
                     atten = self.get_pam_atten(ant)
-                except Exception as e:
-                    self.logger.warning(
+                except OSError as e:
+                    self.logger.error(
                         f"Error getting PAM attenuation for {ant}: {e}"
                     )
                     self.pams_initialized = False
@@ -401,7 +401,7 @@ class EigsepFpga:
         try:
             self.initialize_pams()
         except OSError:
-            self.logger.warning("Couldn't initialize PAMs.")
+            self.logger.error("Couldn't initialize PAMs.")
             pass
         self.logger.info(f"Setting FFT_SHIFT: {fft_shift}")
         self.pfb.set_fft_shift(fft_shift)
@@ -781,7 +781,7 @@ class EigsepFpga:
             self.event.set()
             self.queue.put(None)  # signals end of observing
         except AttributeError:
-            pass
+            self.logger.error("Observation not started or already ended.")
 
     def update_redis(self, data, cnt):
         """
