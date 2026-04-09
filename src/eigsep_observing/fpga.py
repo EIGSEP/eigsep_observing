@@ -46,66 +46,6 @@ default_config_file = get_config_path("corr_config.yaml")
 default_config = load_config(default_config_file)
 
 
-def add_args(parser, default_config_file=default_config_file):
-    """
-    Add command-line arguments for EigsepFpga.
-
-    Parameters
-    ----------
-    parser : argparse.ArgumentParser
-        The argument parser to add arguments to.
-
-    """
-    parser.add_argument(
-        "-p",
-        dest="program",
-        action="store_true",
-        default=False,
-        help="Program Eigsep correlator.",
-    )
-    parser.add_argument(
-        "-P",
-        dest="force_program",
-        action="store_true",
-        default=False,
-        help="Force program Eigsep correlator.",
-    )
-    parser.add_argument(
-        "-a",
-        dest="initialize_adc",
-        action="store_true",
-        default=False,
-        help="Initialize ADCs.",
-    )
-    parser.add_argument(
-        "-f",
-        dest="initialize_fpga",
-        action="store_true",
-        default=False,
-        help="Initialize Eigsep correlator.",
-    )
-    parser.add_argument(
-        "-s",
-        dest="sync",
-        action="store_true",
-        default=False,
-        help="Sync Eigsep correlator.",
-    )
-    parser.add_argument(
-        "--config_file",
-        dest="config_file",
-        default=default_config_file,
-        help="Configuration file for Eigsep Fpga.",
-    )
-    parser.add_argument(
-        "--dummy",
-        dest="dummy_mode",
-        action="store_true",
-        default=False,
-        help="Run with a dummy SNAP interface",
-    )
-
-
 class EigsepFpga:
     def __init__(self, cfg=default_config, program=False):
         """
