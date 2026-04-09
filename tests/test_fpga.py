@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 from eigsep_observing import EigsepFpga
 from eigsep_observing.testing import DummyEigsepFpga
 from eigsep_observing.testing import DummyEigsepRedis
-from eigsep_corr.testing import DummyPam
+from eigsep_observing.testing.fpga import DummyPam
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def fpga_instance(mock_redis):
     return fpga
 
 
-@patch("eigsep_corr.fpga.Pam", DummyPam)
+@patch("eigsep_observing.fpga.Pam", DummyPam)
 class TestEigsepFpga:
     """Test cases for EigsepFpga class."""
 
@@ -94,23 +94,28 @@ class TestEigsepFpga:
 
     def test_synchronize(self, fpga_instance):
         """Test synchronize method."""
-        # Mock the corr dummy synchronize method (second base class)
-        with patch.object(
-            fpga_instance.__class__.__bases__[1], "synchronize"
-        ) as mock_super_sync:
+        # Stub the sync block so we don't exercise the low-level
+        # set_delay / arm_sync / sw_sync sequence; just verify that the
+        # high-level behavior (sync block calls + metadata publication)
+        # happens with the expected structure and timestamp.
+        fpga_instance.sync = Mock()
+        with patch(
+            "eigsep_observing.fpga.time.time", return_value=1234567890.0
+        ):
             fpga_instance.synchronize(delay=5)
 
-            # Check that the parent method was called
-            mock_super_sync.assert_called_once()
-            fpga_instance.redis.add_metadata.assert_called_once()
+        fpga_instance.sync.set_delay.assert_called_once_with(5)
+        fpga_instance.sync.arm_sync.assert_called_once()
+        assert fpga_instance.sync.sw_sync.call_count == 3
+        fpga_instance.redis.add_metadata.assert_called_once()
 
-            # Check metadata structure
-            call_args = fpga_instance.redis.add_metadata.call_args
-            assert call_args[0][0] == "corr_sync_time"
-            metadata = call_args[0][1]
-            assert "sync_time_unix" in metadata
-            assert "sync_date" in metadata
-            assert metadata["sync_time_unix"] == 1234567890.0
+        # Check metadata structure
+        call_args = fpga_instance.redis.add_metadata.call_args
+        assert call_args[0][0] == "corr_sync_time"
+        metadata = call_args[0][1]
+        assert "sync_time_unix" in metadata
+        assert "sync_date" in metadata
+        assert metadata["sync_time_unix"] == 1234567890.0
 
     def test_synchronize_default_delay(self, fpga_instance):
         """Test synchronize with default delay."""

@@ -1,9 +1,9 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from eigsep_corr.utils import calc_freqs_dfreq
 
 from .io import reshape_data
+from .utils import calc_freqs_dfreq
 
 
 def pairs_to_labels(pairs, corr_cfg):
