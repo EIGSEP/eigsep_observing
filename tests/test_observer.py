@@ -186,35 +186,33 @@ def test_record_corr_data_no_snap():
 
 
 def test_status_logger(observer_panda_only, redis_panda, caplog):
-    """Test status_logger method."""
+    """Test status_logger method.
+
+    The observer's status_logger thread is already running (started in
+    __init__). Feed it messages via the mock, then signal the stop event
+    once all messages are consumed and join the thread.
+    """
     caplog.set_level(logging.INFO)
 
-    # Set up mock to return messages then None
-    redis_panda.read_status.side_effect = [
+    messages = [
         (logging.INFO, "Test status 1"),
         (logging.WARNING, "Test status 2"),
-        (None, None),
-        (None, None),  # Continue returning None
     ]
+    call_count = [0]
 
-    # Run status logger briefly
-    observer = observer_panda_only
+    def read_status_effect(timeout=0):
+        idx = call_count[0]
+        call_count[0] += 1
+        if idx < len(messages):
+            return messages[idx]
+        observer_panda_only.stop_event.set()
+        return (None, None)
 
-    def run_logger():
-        # Run for a short time then stop
-        count = 0
-        while count < 3:  # Limit iterations
-            level, status = observer.redis_panda.read_status()
-            if status is None:
-                break
-            observer.logger.log(level, status)
-            count += 1
+    redis_panda.read_status.side_effect = read_status_effect
 
-    logger_thread = threading.Thread(target=run_logger)
-    logger_thread.start()
-    logger_thread.join(timeout=1)
+    # Wait for the status_logger thread to finish processing
+    observer_panda_only.status_thread.join(timeout=2)
 
-    # Verify status messages were logged
     assert "Test status 1" in caplog.text
     assert "Test status 2" in caplog.text
 
