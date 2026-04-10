@@ -221,6 +221,9 @@ class LivePlotter:
             if len(p) == 1:  # Auto-correlation
                 self.lines["mag"][p].set_ydata(d)
             else:  # Cross-correlation
+                # reshape_data returns (nchan, 2) int32; reconstruct
+                # complex for magnitude/phase extraction.
+                d = d[..., 0] + 1j * d[..., 1]
                 mag = np.abs(d)
                 phase = np.angle(d)
                 self.lines["mag"][p].set_ydata(mag)

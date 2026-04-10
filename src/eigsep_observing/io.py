@@ -390,7 +390,16 @@ def read_hdf5(fname):
 
     """
     with h5py.File(fname, "r") as f:
-        data = {k: np.array(v) for k, v in f["data"].items()}
+        data = {}
+        for k, v in f["data"].items():
+            arr = np.array(v)
+            # Reconstruct complex from int32 (re, im) storage.
+            # Old files store crosses as complex128 (returned as-is).
+            if arr.ndim >= 2 and arr.shape[-1] == 2 and arr.dtype.kind == "i":
+                arr = arr[..., 0].astype(np.float64) + 1j * arr[..., 1].astype(
+                    np.float64
+                )
+            data[k] = arr
         # header
         header_grp = f["header"]
         header = {k: v for k, v in header_grp.attrs.items()}

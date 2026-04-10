@@ -261,20 +261,37 @@ def _test_write_header_item():
                 io._write_header_item(grp, "invalid", lambda x: x + 1)
 
 
+def _as_read_back(data):
+    """Convert reshape_data output to the format read_hdf5 returns.
+
+    read_hdf5 reconstructs complex from int32 (re, im) cross datasets,
+    so the round-trip comparison needs the written data in the same form.
+    """
+    out = {}
+    for k, arr in data.items():
+        if arr.ndim >= 2 and arr.shape[-1] == 2 and arr.dtype.kind == "i":
+            arr = arr[..., 0].astype(np.float64) + 1j * arr[..., 1].astype(
+                np.float64
+            )
+        out[k] = arr
+    return out
+
+
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
+    expected = _as_read_back(data)
     with tempfile.TemporaryDirectory() as tmpdir:
         filename = Path(tmpdir) / "test.h5"
         io.write_hdf5(filename, data, HEADER)
         assert filename.exists()
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        compare_dicts(data, read_data)
+        compare_dicts(expected, read_data)
         compare_dicts(HEADER, read_header)
         assert read_meta == {}
 
         io.write_hdf5(filename, data, HEADER, metadata=CORR_METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        compare_dicts(data, read_data)
+        compare_dicts(expected, read_data)
         compare_dicts(HEADER, read_header)
         compare_dicts(CORR_METADATA, read_meta)
 
@@ -285,29 +302,36 @@ def test_write_read_hdf5():
         assert bad_filename.exists()
         bad_read_data, bad_read_header, _ = io.read_hdf5(bad_filename)
         # corr data still present
-        compare_dicts(data, bad_read_data)
+        compare_dicts(expected, bad_read_data)
         # bad field skipped, other fields present
         assert "bad" not in bad_read_header
         assert "nchan" in bad_read_header
 
 
 def test_int32_hdf5_round_trip_dtypes():
-    """Int32 data survives write_hdf5 → read_hdf5 with correct dtypes."""
+    """Int32 corr data round-trips through write_hdf5 → read_hdf5.
+
+    read_hdf5 reconstructs complex from int32 cross datasets, so:
+    - Autos: read back as int32
+    - Crosses: read back as complex128 (reconstructed from int32)
+    """
     data = generate_data(reshape=True)
+    expected = _as_read_back(data)
     with tempfile.TemporaryDirectory() as tmpdir:
         fname = Path(tmpdir) / "test_int32.h5"
         io.write_hdf5(fname, data, HEADER)
         read_data, _, _ = io.read_hdf5(fname)
         for key in data:
-            written = data[key]
             read_back = read_data[key]
-            assert read_back.dtype == np.int32, (
-                f"key '{key}': expected int32, got {read_back.dtype}"
-            )
-            assert read_back.shape == written.shape, (
-                f"key '{key}': shape {read_back.shape} != {written.shape}"
-            )
-            np.testing.assert_array_equal(read_back, written)
+            if len(key) == 1:  # auto
+                assert read_back.dtype == np.int32, (
+                    f"key '{key}': expected int32, got {read_back.dtype}"
+                )
+            else:  # cross — reconstructed to complex
+                assert read_back.dtype == np.complex128, (
+                    f"key '{key}': expected complex128, got {read_back.dtype}"
+                )
+            np.testing.assert_array_equal(read_back, expected[key])
 
 
 def test_write_read_s11_file():
@@ -414,7 +438,8 @@ def test_file():
     fname = files[0]
     # check that the data is written correctly
     read_data, read_header, read_meta = io.read_hdf5(fname)
-    compare_dicts(io.reshape_data(data, avg_even_odd=True), read_data)
+    expected = _as_read_back(io.reshape_data(data, avg_even_odd=True))
+    compare_dicts(expected, read_data)
     # can't compare header with read_header since extra keys are added
     for key in HEADER:
         assert key in read_header
