@@ -1962,6 +1962,7 @@ def test_validate_corr_header():
     """Schema validation returns descriptive violations, no exceptions."""
     valid = {
         "acc_bins": 2,
+        "avg_even_odd": True,
         "nchan": 1024,
         "dtype": ">i4",
         "integration_time": 0.1,

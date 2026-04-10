@@ -35,6 +35,7 @@ FILE_TIME = NTIMES * INTEGRATION_TIME  # seconds
 HEADER = {
     "dtype": ">i4",
     "acc_bins": 2,
+    "avg_even_odd": True,
     "nchan": 1024,
     "fgp_file": "fpg_files/eigsep_fengine.fpg",
     "fpg_version": [0, 0],

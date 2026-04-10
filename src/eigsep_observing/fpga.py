@@ -216,6 +216,7 @@ class EigsepFpga:
             "corr_scalar": self.fpga.read_uint("corr_scalar"),
             "corr_word": self.cfg["corr_word"],
             "acc_bins": acc_bins,
+            "avg_even_odd": self.cfg["avg_even_odd"],
             "dtype": self.cfg["dtype"],
             "pol_delay": {
                 "01": self.fpga.read_uint("pfb_pol01_delay"),
