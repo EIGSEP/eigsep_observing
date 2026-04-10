@@ -57,8 +57,24 @@ def reshape_data(data, avg_even_odd=True):
     """
     Reshape data to the form (ntimes, nchan). From the SNAP, the
     even and odd spectra follow each other, here we split them
-    and optionally average them. Moreover, cross-correlation data
-    is explictly converted to complex numbers.
+    and optionally average them.
+
+    When ``avg_even_odd=True`` (the production/file-write path),
+    the even/odd average uses banker's rounding
+    (``np.rint``, round-half-to-even) and returns **int32** arrays:
+
+    - Auto-correlations: ``(ntimes, nchan)`` int32.
+    - Cross-correlations: ``(ntimes, nchan, 2)`` int32, where
+      ``[..., 0]`` is real and ``[..., 1]`` is imaginary.
+
+    The float64 intermediate in ``mean()`` is exact for int32
+    inputs (sum of two int32 values ≤ 2^32, within float64's
+    2^53 exact-integer range). The ±0.5 LSB rounding error is
+    ~5 orders of magnitude below the radiometric noise floor
+    for typical EIGSEP integration depths.
+
+    When ``avg_even_odd=False``, the even/odd axis is preserved
+    and cross-correlations are returned as complex128.
 
     Parameters
     ----------
@@ -81,11 +97,18 @@ def reshape_data(data, avg_even_odd=True):
         ntimes = arr.shape[0]
         arr = arr.reshape(ntimes, -1, 2, order="F")
         if avg_even_odd:
-            arr = arr.mean(axis=2)
+            # Unbiased integer average via banker's rounding.
+            # mean(axis=2) goes through float64, which is exact for
+            # int32 inputs (sum ≤ 2^32 < 2^53). rint uses
+            # round-half-to-even (no systematic bias on crosses).
+            arr = np.rint(arr.mean(axis=2)).astype(np.int32)
         if len(p) > 1:  # cross-correlation
             real = arr[:, ::2]
             imag = arr[:, 1::2]
-            arr = real + 1j * imag
+            if avg_even_odd:
+                arr = np.stack([real, imag], axis=-1)
+            else:
+                arr = real + 1j * imag
         reshaped[p] = arr
     return reshaped
 
