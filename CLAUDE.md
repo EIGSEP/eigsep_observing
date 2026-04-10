@@ -178,6 +178,29 @@ two by bypassing `PicoPotentiometer.__init__` and calling
 scalar, including the cal slope/intercept which were flattened from the
 old `[m, b]` list shape.
 
+## File I/O: write/read symmetry
+
+`write_hdf5` and `read_hdf5` are a matched pair. Any transformation
+applied when writing must be inverted when reading so that the consumer
+API is stable regardless of the on-disk representation. Concretely:
+
+- **Corr data is stored as int32.** `reshape_data(avg_even_odd=True)`
+  averages even/odd spectra via banker's rounding (`np.rint`) and
+  returns int32 arrays. Auto-correlations are `(ntimes, nchan)` int32.
+  Cross-correlations are `(ntimes, nchan, 2)` int32, where `[..., 0]`
+  is real and `[..., 1]` is imaginary.
+- **`read_hdf5` reconstructs complex crosses.** On read, 3-D integer
+  datasets whose last axis is 2 are converted back to complex128 via
+  `arr[..., 0] + 1j * arr[..., 1]`. Old files that already store
+  complex128 are returned as-is. This keeps the consumer-facing API
+  (complex arrays for crosses) unchanged.
+- **VNA / S11 data is unaffected.** It is natively complex128 from the
+  VNA and is stored and read as complex128.
+
+If you change the on-disk format in the future, update `read_hdf5` to
+invert the transformation so that callers never need to know about the
+storage representation.
+
 ## Testing philosophy: dummies over mocks
 
 When testing classes that interact with hardware, Redis, or other
