@@ -527,6 +527,7 @@ def read_s11_file(fname):
 #   - sync_time (when present) is a Unix timestamp in seconds
 CORR_HEADER_SCHEMA = {
     "acc_bins": int,
+    "avg_even_odd": bool,
     "nchan": int,
     "dtype": str,  # must also be parseable by np.dtype
     "integration_time": float,
@@ -555,7 +556,11 @@ def _validate_corr_header(header):
             violations.append(f"missing key '{key}'")
             continue
         val = header[key]
-        if expected is float:
+        if expected is bool:
+            # np.bool_ from h5py round-trip is not a subclass of
+            # Python bool in all numpy versions.
+            ok = isinstance(val, (bool, np.bool_))
+        elif expected is float:
             ok = isinstance(
                 val, (int, float, np.integer, np.floating)
             ) and not isinstance(val, bool)
@@ -1468,7 +1473,9 @@ class File:
         sync_times = sync_times[:counter]
         metadata = {k: v[:counter] for k, v in metadata.items()}
 
-        reshaped = reshape_data(data, avg_even_odd=True)
+        reshaped = reshape_data(
+            data, avg_even_odd=header.get("avg_even_odd", True)
+        )
         full_header = append_corr_header(header, acc_cnts, sync_times)
 
         fd, tmp_path = tempfile.mkstemp(dir=self.save_dir, suffix=".h5.tmp")
