@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import numpy as np
 import pytest
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +77,45 @@ def test_raw(server):
         server.add_raw(f"data:{p}", d)
         data_back[p] = server.get_raw(f"data:{p}")
     compare_dicts(data, data_back)
+
+
+def test_int32_redis_round_trip(server, client):
+    """Int32 data survives add_corr_data → read_corr_data bit-for-bit.
+
+    Mirrors the production pattern: consumer (server) blocks on
+    read_corr_data *before* the producer (client) writes, matching
+    the EigObserver ↔ EigsepFpga interaction.
+    """
+    data = generate_data(ntimes=1, reshape=False)
+    # Convert one time-step to bytes (the wire format)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    dtype = ">i4"
+    pairs = list(data.keys())
+    # Seed corr_sync_time so read_corr_data can retrieve it.
+    # Must be a dict with "sync_time_unix" — matches fpga.py's format.
+    client.add_metadata("corr_sync_time", {"sync_time_unix": 1748732903.42})
+    # In production, the FPGA is already running when the observer
+    # starts reading — stream:corr exists and has at least one entry.
+    # Seed the stream so read_corr_data doesn't bail on the
+    # "no stream" guard, mirroring the production startup order.
+    client.add_corr_data(raw, cnt=0, dtype=dtype)
+    # Consumer blocks first (like EigObserver), producer writes after
+    # (like EigsepFpga) — same pattern as test_status.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        read_future = executor.submit(
+            server.read_corr_data, pairs=pairs, unpack=True
+        )
+        time.sleep(0.1)  # let consumer block
+        client.add_corr_data(raw, cnt=42, dtype=dtype)
+        acc_cnt, _, read_data = read_future.result(timeout=5.0)
+    assert acc_cnt == 42
+    for p in pairs:
+        original = np.frombuffer(raw[p], dtype=dtype)
+        read_back = read_data[p]
+        assert read_back.dtype == np.dtype(dtype), (
+            f"pair '{p}': expected {dtype}, got {read_back.dtype}"
+        )
+        np.testing.assert_array_equal(read_back, original)
 
 
 def test_is_alive(server, client):

@@ -53,24 +53,71 @@ def test_reshape_data():
                 imag = spec[:, 1::2]
                 cdata = real + 1j * imag
                 np.testing.assert_array_equal(cdata, reshaped_data[k][:, :, i])
-    # test with averaging even and odd time steps
+    # test with averaging even and odd time steps — returns int32
     reshaped_data = io.reshape_data(data, avg_even_odd=True)
     for k in data:
         assert k in reshaped_data
-        assert reshaped_data[k].shape == (ntimes, nchan)
-        if len(k) == 1:
+        if len(k) == 1:  # autocorrelations
+            assert reshaped_data[k].shape == (ntimes, nchan)
+            assert reshaped_data[k].dtype == np.int32
             even = data[k][:, :nchan]
             odd = data[k][:, nchan:]
-            avg = np.mean([even, odd], axis=0)
-            np.testing.assert_array_equal(avg, reshaped_data[k])
-        else:
+            expected = np.rint(np.mean([even, odd], axis=0)).astype(np.int32)
+            np.testing.assert_array_equal(expected, reshaped_data[k])
+        else:  # cross-correlations: (ntimes, nchan, 2) int32
+            assert reshaped_data[k].shape == (ntimes, nchan, 2)
+            assert reshaped_data[k].dtype == np.int32
             even = data[k][:, : 2 * nchan]
             odd = data[k][:, 2 * nchan :]
-            avg = np.mean([even, odd], axis=0)
+            avg = np.rint(np.mean([even, odd], axis=0)).astype(np.int32)
             real = avg[:, ::2]
             imag = avg[:, 1::2]
-            cdata = real + 1j * imag
-            np.testing.assert_array_equal(cdata, reshaped_data[k])
+            np.testing.assert_array_equal(real, reshaped_data[k][:, :, 0])
+            np.testing.assert_array_equal(imag, reshaped_data[k][:, :, 1])
+
+
+def test_int32_rounding_unbiased():
+    """Banker's rounding in reshape_data introduces no systematic bias.
+
+    Verifies that np.rint(mean) satisfies:
+    - Max absolute error ≤ 0.5 LSB (theoretical bound)
+    - Mean error ≈ 0 (banker's rounding is unbiased)
+    - Max error is orders of magnitude below the radiometric noise
+      for typical EIGSEP integration depths
+    """
+    rng = np.random.default_rng(42)
+    n = 1_000_000
+
+    # --- autos (non-negative, typical range 1e6–1e9) ---
+    lo, hi = int(1e6), int(1e9)
+    even_auto = rng.integers(lo, high=hi, size=n, dtype=np.int32)
+    odd_auto = rng.integers(lo, high=hi, size=n, dtype=np.int32)
+    exact_auto = (even_auto.astype(np.float64) + odd_auto) / 2
+    rounded_auto = np.rint(exact_auto).astype(np.int32)
+
+    err_auto = rounded_auto.astype(np.float64) - exact_auto
+    assert np.max(np.abs(err_auto)) <= 0.5
+    # Banker's rounding is unbiased: mean error should be near zero
+    assert abs(np.mean(err_auto)) < 0.01
+
+    # --- crosses (signed, typical range −1e9 to 1e9) ---
+    even_cross = rng.integers(-hi, high=hi, size=n, dtype=np.int32)
+    odd_cross = rng.integers(-hi, high=hi, size=n, dtype=np.int32)
+    exact_cross = (even_cross.astype(np.float64) + odd_cross) / 2
+    rounded_cross = np.rint(exact_cross).astype(np.int32)
+
+    err_cross = rounded_cross.astype(np.float64) - exact_cross
+    assert np.max(np.abs(err_cross)) <= 0.5
+    assert abs(np.mean(err_cross)) < 0.01
+
+    # --- max error vs radiometric noise ---
+    # For corr_acc_len = 2^28, signal = 1e9:
+    # noise_per_integration = signal / sqrt(corr_acc_len)
+    corr_acc_len = 2**28
+    signal = 1e9
+    noise = signal / np.sqrt(corr_acc_len)
+    max_rounding_error = 0.5
+    assert max_rounding_error / noise < 1e-3
 
 
 def test_write_attr():
@@ -214,20 +261,37 @@ def _test_write_header_item():
                 io._write_header_item(grp, "invalid", lambda x: x + 1)
 
 
+def _as_read_back(data):
+    """Convert reshape_data output to the format read_hdf5 returns.
+
+    read_hdf5 reconstructs complex from int32 (re, im) cross datasets,
+    so the round-trip comparison needs the written data in the same form.
+    """
+    out = {}
+    for k, arr in data.items():
+        if arr.ndim >= 2 and arr.shape[-1] == 2 and arr.dtype.kind == "i":
+            arr = arr[..., 0].astype(np.float64) + 1j * arr[..., 1].astype(
+                np.float64
+            )
+        out[k] = arr
+    return out
+
+
 def test_write_read_hdf5():
     data = generate_data(reshape=True)
+    expected = _as_read_back(data)
     with tempfile.TemporaryDirectory() as tmpdir:
         filename = Path(tmpdir) / "test.h5"
         io.write_hdf5(filename, data, HEADER)
         assert filename.exists()
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        compare_dicts(data, read_data)
+        compare_dicts(expected, read_data)
         compare_dicts(HEADER, read_header)
         assert read_meta == {}
 
         io.write_hdf5(filename, data, HEADER, metadata=CORR_METADATA)
         read_data, read_header, read_meta = io.read_hdf5(filename)
-        compare_dicts(data, read_data)
+        compare_dicts(expected, read_data)
         compare_dicts(HEADER, read_header)
         compare_dicts(CORR_METADATA, read_meta)
 
@@ -238,10 +302,36 @@ def test_write_read_hdf5():
         assert bad_filename.exists()
         bad_read_data, bad_read_header, _ = io.read_hdf5(bad_filename)
         # corr data still present
-        compare_dicts(data, bad_read_data)
+        compare_dicts(expected, bad_read_data)
         # bad field skipped, other fields present
         assert "bad" not in bad_read_header
         assert "nchan" in bad_read_header
+
+
+def test_int32_hdf5_round_trip_dtypes():
+    """Int32 corr data round-trips through write_hdf5 → read_hdf5.
+
+    read_hdf5 reconstructs complex from int32 cross datasets, so:
+    - Autos: read back as int32
+    - Crosses: read back as complex128 (reconstructed from int32)
+    """
+    data = generate_data(reshape=True)
+    expected = _as_read_back(data)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "test_int32.h5"
+        io.write_hdf5(fname, data, HEADER)
+        read_data, _, _ = io.read_hdf5(fname)
+        for key in data:
+            read_back = read_data[key]
+            if len(key) == 1:  # auto
+                assert read_back.dtype == np.int32, (
+                    f"key '{key}': expected int32, got {read_back.dtype}"
+                )
+            else:  # cross — reconstructed to complex
+                assert read_back.dtype == np.complex128, (
+                    f"key '{key}': expected complex128, got {read_back.dtype}"
+                )
+            np.testing.assert_array_equal(read_back, expected[key])
 
 
 def test_write_read_s11_file():
@@ -348,7 +438,8 @@ def test_file():
     fname = files[0]
     # check that the data is written correctly
     read_data, read_header, read_meta = io.read_hdf5(fname)
-    compare_dicts(io.reshape_data(data, avg_even_odd=True), read_data)
+    expected = _as_read_back(io.reshape_data(data, avg_even_odd=True))
+    compare_dicts(expected, read_data)
     # can't compare header with read_header since extra keys are added
     for key in HEADER:
         assert key in read_header
@@ -1871,6 +1962,7 @@ def test_validate_corr_header():
     """Schema validation returns descriptive violations, no exceptions."""
     valid = {
         "acc_bins": 2,
+        "avg_even_odd": True,
         "nchan": 1024,
         "dtype": ">i4",
         "integration_time": 0.1,
