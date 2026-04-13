@@ -5,7 +5,8 @@ import time
 import yaml
 
 from cmt_vna import VNA
-import picohost
+from picohost.base import PicoRFSwitch
+from picohost.proxy import PicoProxy
 
 from .utils import get_config_path
 
@@ -14,64 +15,47 @@ default_cfg_file = get_config_path("obs_config.yaml")
 with open(default_cfg_file, "r") as f:
     default_cfg = yaml.safe_load(f)
 
+# Valid RF switch state names, sourced from the firmware-side class so
+# that a pico firmware change flows through automatically.
+VALID_SWITCH_STATES = set(PicoRFSwitch.path_str)
+
 
 class PandaClient:
-    PICO_CLASSES = {
-        "imu_el": picohost.PicoIMU,
-        "imu_az": picohost.PicoIMU,
-        "potmon": picohost.PicoPotentiometer,
-        "tempctrl": picohost.PicoPeltier,
-        "lidar": picohost.PicoDevice,
-        "rfswitch": picohost.PicoRFSwitch,
-    }
+    """
+    Client class that runs on the computer in the suspended box.
+
+    Reads sensor data published to Redis by PicoManager and sends
+    control commands (e.g. RF switching) via PicoManager's Redis
+    command stream. Does **not** hold serial connections — all pico
+    communication is mediated by the PicoManager service.
+
+    Parameters
+    ----------
+    redis : EigsepRedis
+        The Redis server object to push data to and read commands
+        from.
+    default_cfg : dict
+        Default configuration to use if no config is found in Redis.
+    """
 
     def __init__(self, redis, default_cfg=default_cfg):
-        """
-        Client class that runs on the computer in the suspended box.
-        This pulls data from connected sensors and pushes it to the
-        Redis server. Moreover, it listens to control commands from the
-        main computer on the ground, executes them, and reports the
-        results back to the Redis.
-
-        Parameters
-        ----------
-        redis : EigsepRedis
-            The Redis server object to push data to and read commands
-            from.
-
-        """
         self.logger = logger
         self.redis = redis
-        self.serial_timeout = 5  # serial port timeout in seconds
-        self.stop_client = threading.Event()  # flag to stop the client
-        cfg = self._get_cfg()  # get the current config from Redis
+        self.stop_client = threading.Event()
+        cfg = self._get_cfg()
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
             )
-            cfg = default_cfg.copy()
-        # add pico info
-        try:
-            fname = cfg["pico_config_file"]
-            apps = cfg["pico_app_mapping"]
-            pico_cfg = self.get_pico_config(fname, app_mapping=apps)
-        except Exception as e:
-            self.logger.warning(
-                f"Failed to read pico config file: {e}. Running without picos."
-            )
-            pico_cfg = {}
-        # add pico config to the cfg
-        cfg["picos"] = pico_cfg
-        self.logger.info(f"pico config: {pico_cfg}")
-        # upload config to Redis
-        self.redis.upload_config(cfg, from_file=False)
+            self.redis.upload_config(default_cfg, from_file=False)
+            cfg = self._get_cfg()
         self.cfg = json.loads(json.dumps(cfg))
 
-        # initialize the picos and VNA
+        # initialize proxies and VNA
         self.peltier = None
-        self._switch_nw = None
+        self._sw_proxy = None
         self.switch_lock = None
-        self._initialize()  # initialize the client
+        self._initialize()
 
     def _get_cfg(self):
         """
@@ -93,65 +77,34 @@ class PandaClient:
         return cfg
 
     @property
-    def switch_nw(self):
-        return self._switch_nw
+    def sw_proxy(self):
+        return self._sw_proxy
 
-    @switch_nw.setter
-    def switch_nw(self, value):
-        self._switch_nw = value
+    @sw_proxy.setter
+    def sw_proxy(self, value):
+        self._sw_proxy = value
         self.switch_lock = threading.Lock()
         self.current_switch_state = None
 
-    def get_pico_config(self, fname, app_mapping):
+    def _switch_to(self, state):
+        """Route an RF switch command through PicoManager.
+
+        Returns the manager's response dict on success, or ``None`` if
+        PicoManager has not registered the rfswitch device (no-op). The
+        caller treats falsy as "switch failed".
         """
-        Read pico configuration from the config file. This is used to
-        update `cfg` and the configuration in Redis.
-
-        Parameters
-        ----------
-        fname : str or Path
-            The name of the pico configuration file to read from.
-        app_mapping : dict
-            Mapping of Pico app_id to name.
-
-        Returns
-        -------
-        pico_cfg : dict
-            The pico configuration dictionary read from the file. Keys
-            are pico names, values are serial ports.
-
-        """
-        with open(fname, "r") as f:
-            cfg = json.load(f)  # list of dicts
-        pico_cfg = {}
-        for dev in cfg:
-            try:
-                app_id = str(dev["app_id"])
-                name = app_mapping[app_id]
-            except KeyError:
-                self.logger.warning(
-                    f"Skipping pico with unknown or missing app_id, {dev}"
-                )
-                continue  # skip unknown app_ids
-            pico_cfg[name] = dev["port"]
-        return pico_cfg
+        return self._sw_proxy.send_command("switch", state=state)
 
     def _initialize(self):
-        self.stop_client.clear()  # reset the stop flag
-        self.init_picos()  # initialize picos
+        self.stop_client.clear()
+        self.init_picos()
         if self.cfg.get("use_vna", False):
-            if self.switch_nw is None:
-                self.logger.error(
-                    "Switch network not initialized, cannot initialize VNA."
-                )
-                self.vna = None
-            else:
-                self.init_VNA()
+            self.init_VNA()
         else:
             self.vna = None
             self.logger.info("VNA not initialized")
 
-        # start heartbeat thread, telling others that we are alive
+        # start heartbeat thread
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
             kwargs={"ex": 60},
@@ -172,8 +125,7 @@ class PandaClient:
         """
         while not self.stop_client.is_set():
             self.redis.client_heartbeat_set(ex=ex, alive=True)
-            self.stop_client.wait(1.0)  # update faster than expiration
-        # if we reach here, the client should stop running
+            self.stop_client.wait(1.0)
         self.redis.client_heartbeat_set(alive=False)
 
     def init_VNA(self):
@@ -192,7 +144,7 @@ class PandaClient:
             port=self.cfg["vna_port"],
             timeout=self.cfg["vna_timeout"],
             save_dir=self.cfg["vna_save_dir"],
-            switch_network=self.switch_nw,
+            switch_fn=self._switch_to,
         )
         kwargs = self.cfg["vna_settings"].copy()
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
@@ -202,60 +154,32 @@ class PandaClient:
 
     def init_picos(self):
         """
-        Initialize pico readings based on the configuration in Redis.
+        Create Redis-backed proxies for pico devices.
+
+        Sensor-only devices (IMU, potmon, lidar, tempctrl) need no
+        proxy — their data flows to Redis via PicoManager
+        automatically. Only devices that require active commands
+        (e.g. the RF switch) get a proxy.
 
         Notes
         -----
-        Called by the constructor of the client. This method can be
-        called again to reinitialize the picos if the configuration
-        changes.
+        PicoManager must be running as a separate service for commands
+        to be routed. If it hasn't started yet, the proxies still
+        construct successfully and will no-op until PicoManager
+        registers the devices.
 
         """
-        self.picos = {}  # pico name : pico instance
-        try:
-            pico_cfg = self.cfg["picos"].copy()  # name: serial port mapping
-        except KeyError:
-            self.logger.warning(
-                "No sensor config provided, no sensors will be initialized."
+        r = self.redis.r
+        self.sw_proxy = PicoProxy("rfswitch", r, source="panda_client")
+        # Log what PicoManager has registered
+        available = r.smembers("picos")
+        if available:
+            names = sorted(
+                n.decode() if isinstance(n, bytes) else n for n in available
             )
-            return
-
-        for name, port in pico_cfg.items():
-            if name == "motor":
-                self.logger.warning("Skipping motor init in client")
-                continue
-            self.logger.info(f"Adding sensor {name}.")
-            # instantiate the pico class
-            try:
-                cls = self.PICO_CLASSES[name]
-            except KeyError:
-                self.logger.warning(
-                    f"Unknown pico class {name}. "
-                    f"Must be in {self.PICO_CLASSES}."
-                )
-                continue
-
-            try:
-                p = cls(
-                    port,
-                    timeout=self.serial_timeout,
-                    name=name,
-                    eig_redis=self.redis,
-                )
-                if p.is_connected:
-                    self.picos[name] = p
-                    self.redis.r.sadd("picos", name)
-            except Exception as e:
-                self.logger.warning(f"Failed to initialize pico {name}: {e}")
-                continue  # Skip picos that fail to initialize
-
-        if not self.picos:
-            self.logger.warning("Running without pico threads.")
-            return
-
-        # create reference to switch_nw, motor, peltier if they exist
-        self.switch_nw = self.picos.get("rfswitch", None)
-        self.peltier = self.picos.get("tempctrl", None)
+            self.logger.info(f"PicoManager devices: {names}")
+        else:
+            self.logger.warning("No pico devices registered by PicoManager.")
 
     def switch_loop(self):
         """
@@ -271,12 +195,6 @@ class PandaClient:
         lock immediately after switching to sky.
 
         """
-        if self.switch_nw is None:
-            self.logger.warning(
-                "Switch network not initialized. Cannot execute "
-                "switching commands."
-            )
-            return
         schedule = self.cfg.get("switch_schedule", None)
         if schedule is None:
             self.logger.warning(
@@ -290,11 +208,11 @@ class PandaClient:
                 "switching commands."
             )
             return
-        elif any(k not in self.switch_nw.path_str for k in schedule):
+        elif any(k not in VALID_SWITCH_STATES for k in schedule):
             self.logger.warning(
                 "Invalid switch keys found in schedule. Cannot execute "
                 "switching commands. Schedule keys must be in: "
-                f"{list(self.switch_nw.path_str.keys())}."
+                f"{sorted(VALID_SWITCH_STATES)}."
             )
             return
         # Validate that all wait_time values are positive numbers
@@ -318,8 +236,13 @@ class PandaClient:
                 if mode == "RFANT":
                     with self.switch_lock:
                         self.logger.info(f"Switching to {mode} measurements")
-                        self.switch_nw.switch(mode)
-                        self.current_switch_state = mode
+                        if self._switch_to(mode):
+                            self.current_switch_state = mode
+                        else:
+                            self.logger.warning(
+                                f"Failed to switch to {mode}; keeping "
+                                f"current_switch_state={self.current_switch_state}"
+                            )
                     # release the lock during sky wait time
                     if self.stop_client.wait(wait_time):
                         self.logger.info("Switching stopped by event")
@@ -327,8 +250,13 @@ class PandaClient:
                 else:
                     with self.switch_lock:
                         self.logger.info(f"Switching to {mode} measurements")
-                        self.switch_nw.switch(mode)
-                        self.current_switch_state = mode
+                        if self._switch_to(mode):
+                            self.current_switch_state = mode
+                        else:
+                            self.logger.warning(
+                                f"Failed to switch to {mode}; keeping "
+                                f"current_switch_state={self.current_switch_state}"
+                            )
                         if self.stop_client.wait(wait_time):  # wait with stop
                             self.logger.info("Switching stopped by event")
                             return
@@ -348,23 +276,19 @@ class PandaClient:
         ValueError
             If the mode is not 'ant' or 'rec'.
         RuntimeError
-            If the switch network is not initialized or the VNA is not
-            initialized.
+            If the VNA is not initialized.
 
         Notes
         -----
         This function does all the switching needed for the VNA
-        measurement, including to OSL calibrators. There's no option to
-        skip the calibration.
+        measurement, including to OSL calibrators. The VNA internally
+        invokes the ``switch_fn`` callable wired in ``init_VNA``, which
+        routes through PicoManager.
 
         """
         if mode not in ["ant", "rec"]:
             raise ValueError(
                 f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'."
-            )
-        if self.switch_nw is None:
-            raise RuntimeError(
-                "Switch network not initialized. Cannot execute VNA commands."
             )
         if self.vna is None:
             raise RuntimeError(
@@ -385,12 +309,6 @@ class PandaClient:
 
         header = self.vna.header
         header["mode"] = mode
-        # Stamp the snapshot time so downstream can sanity-check that
-        # the metadata is contemporaneous with the VNA measurement.
-        # get_live_metadata() reads the latest hash values, which can
-        # be arbitrarily stale if a sensor stopped updating; this
-        # timestamp lets a researcher detect that case at file
-        # inspection time without needing the original Redis state.
         header["metadata_snapshot_unix"] = time.time()
         metadata = self.redis.get_live_metadata()
         self.redis.add_vna_data(s11, header=header, metadata=metadata)
@@ -404,20 +322,17 @@ class PandaClient:
             self.logger.warning(
                 "VNA not initialized. Cannot execute VNA commands."
             )
-            threading.Event().wait(5)  # wait for VNA to be initialized
+            threading.Event().wait(5)
         while not self.stop_client.is_set():
             with self.switch_lock:
-                # default to RFANT if not found
                 prev_mode = self.current_switch_state
                 if prev_mode is None:
                     prev_mode = "RFANT"
                 for mode in ["ant", "rec"]:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")
                     self.measure_s11(mode)
-                # restore previous mode
                 self.logger.info(
                     f"Switching back to previous mode: {prev_mode}"
                 )
-                self.switch_nw.switch(prev_mode)
-            # wait for the next iteration
+                self._switch_to(prev_mode)
             self.stop_client.wait(self.cfg["vna_interval"])

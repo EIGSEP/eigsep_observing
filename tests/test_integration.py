@@ -1,8 +1,9 @@
 """
 Integration tests for the emulator-backed pico pipeline.
 
-Tests that sensor data flows from pico emulators through picohost reader
-threads into FakeRedis, and is retrievable via get_live_metadata().
+Tests that sensor data flows from pico emulators (running inside an
+in-process PicoManager) through picohost reader threads into
+FakeRedis, and is retrievable via get_live_metadata().
 """
 
 import time
@@ -31,18 +32,13 @@ def redis():
 def client(redis, dummy_cfg):
     c = DummyPandaClient(redis, default_cfg=dummy_cfg)
     yield c
-    # disconnect all picos to stop emulator/reader threads
-    for pico in c.picos.values():
-        try:
-            pico.disconnect()
-        except Exception:
-            pass
+    c.stop()
 
 
-def test_picos_initialized(client):
-    """DummyPandaClient should initialize picos from the dummy config."""
-    # motor is skipped in init_picos; the dummy config has six picos
-    # left after that (tempctrl, potmon, imu_el, imu_az, lidar, rfswitch).
+def test_picos_registered(client):
+    """PicoManager should register all dummy devices in Redis."""
+    available = client.redis.r.smembers("picos")
+    names = {n.decode() if isinstance(n, bytes) else n for n in available}
     expected = {
         "tempctrl",
         "potmon",
@@ -50,27 +46,24 @@ def test_picos_initialized(client):
         "imu_az",
         "lidar",
         "rfswitch",
+        "motor",
     }
-    assert set(client.picos.keys()) == expected
+    assert names == expected
 
 
 def test_sensor_metadata_in_redis(client, redis):
     """Emulators generate status that flows through redis_handler to Redis."""
-    # Wait for at least one status cadence (50ms) + reader thread processing
     time.sleep(0.5)
 
     metadata = redis.get_live_metadata()
 
-    # Each emulator writes its sensor_name as the Redis metadata key. The
-    # two IMU picos use distinct app_id-based names (imu_el / imu_az) per
-    # picohost 1.0.0.
     expected_sensors = {
-        "tempctrl",  # from tempctrl pico (PicoPeltier class)
-        "potmon",  # from potmon pico
-        "imu_el",  # from imu_el pico (app_id=3)
-        "imu_az",  # from imu_az pico (app_id=6)
-        "lidar",  # from lidar pico
-        "rfswitch",  # from rfswitch pico
+        "tempctrl",
+        "potmon",
+        "imu_el",
+        "imu_az",
+        "lidar",
+        "rfswitch",
     }
     for sensor in expected_sensors:
         assert sensor in metadata, (
@@ -91,7 +84,7 @@ def test_metadata_has_expected_fields(client, redis):
     assert "LOAD_T_now" in tempctrl
     assert tempctrl.get("sensor_name") == "tempctrl"
 
-    # Check IMU (BNO085 RVC mode in picohost 1.0.0)
+    # Check IMU (BNO085 RVC mode)
     imu = metadata.get("imu_el", {})
     assert "yaw" in imu
     assert "accel_x" in imu
@@ -105,12 +98,7 @@ def test_metadata_has_expected_fields(client, redis):
     rfswitch = metadata.get("rfswitch", {})
     assert "sw_state" in rfswitch
 
-    # Check potmon (post-_pot_redis_handler shape: voltages always
-    # present as floats; cal/angle fields are None for an
-    # uncalibrated stream — and the dummy potmon used by the
-    # DummyPandaClient is uncalibrated, so this test pins the
-    # uncalibrated-stream contract on the snapshot path. Real-hardware
-    # calibrated streams would publish floats here instead.
+    # Check potmon (uncalibrated — cal/angle fields are None)
     potmon = metadata.get("potmon", {})
     assert isinstance(potmon["pot_el_voltage"], float)
     assert isinstance(potmon["pot_az_voltage"], float)

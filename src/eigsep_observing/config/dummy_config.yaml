@@ -3,16 +3,6 @@
 # IP addresses
 rpi_ip: "localhost"
 panda_ip: "localhost"
-# picos
-pico_config_file: "/home/christian/Documents/research/eigsep/pico-firmware/pico_config.json"
-pico_app_mapping:  # app number to device mapping
-  0: "motor"
-  1: "tempctrl"
-  2: "potmon"
-  3: "imu_el"
-  4: "lidar"
-  5: "rfswitch"
-  6: "imu_az"
 # corr filewriter
 corr_save_dir: "/home/christian/Documents/research/eigsep/eigsep_observing/test_data"
 corr_ntimes: 240

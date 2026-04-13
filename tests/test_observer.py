@@ -232,7 +232,7 @@ def test_logger_attribute(observer_both):
 def dummy_vna():
     """DummyVNA instance for generating realistic VNA test data."""
     switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
-    vna = DummyVNA(switch_network=switch)
+    vna = DummyVNA(switch_fn=switch.switch)
     vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
     return vna
 

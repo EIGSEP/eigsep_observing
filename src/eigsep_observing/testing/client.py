@@ -2,7 +2,8 @@ from functools import partial
 
 import yaml
 from cmt_vna.testing import DummyVNA
-import picohost
+import picohost.testing
+from picohost.manager import PicoManager
 
 from .. import PandaClient
 
@@ -34,49 +35,49 @@ class _DummyPicoImuAz(picohost.testing.DummyPicoIMU):
     EMULATOR_CLASS = partial(picohost.testing.ImuEmulator, app_id=6)
 
 
+# Map device names to dummy picohost classes for the embedded manager.
+DUMMY_PICO_CLASSES = {
+    "imu_el": _DummyPicoImuEl,
+    "imu_az": _DummyPicoImuAz,
+    "potmon": picohost.testing.DummyPicoPotentiometer,
+    "tempctrl": picohost.testing.DummyPicoPeltier,
+    "lidar": picohost.testing.DummyPicoLidar,
+    "rfswitch": picohost.testing.DummyPicoRFSwitch,
+    "motor": picohost.testing.DummyPicoMotor,
+}
+
+
 class DummyPandaClient(PandaClient):
     """
-    Mock up of PandaClient for testing purposes, that uses dummy
-    implementations of the VNA and PicoHost.
+    Test PandaClient backed by an in-process PicoManager.
+
+    Starts a PicoManager with emulator-backed DummyPico* devices on
+    the same (fake)redis instance before ``super().__init__`` runs, so
+    that the proxy objects created by ``init_picos`` find their devices
+    already registered.
     """
 
-    # override pico classes with emulator-backed dummies
-    PICO_CLASSES = {
-        "imu_el": _DummyPicoImuEl,
-        "imu_az": _DummyPicoImuAz,
-        "potmon": picohost.testing.DummyPicoPotentiometer,
-        "tempctrl": picohost.testing.DummyPicoPeltier,
-        "lidar": picohost.testing.DummyPicoLidar,
-        "rfswitch": picohost.testing.DummyPicoRFSwitch,
-        "motor": picohost.testing.DummyPicoMotor,
-    }
-
     def __init__(self, redis, default_cfg=None):
-        """
-        Override the default config.
-        """
         if default_cfg is None:
             try:
                 with open(default_cfg_file, "r") as f:
                     default_cfg = yaml.safe_load(f)
             except FileNotFoundError:
                 default_cfg = {}
+        # Start the embedded manager BEFORE super().__init__ so that
+        # PicoProxy.is_available is True when init_picos runs.
+        self._manager = self._start_dummy_manager(redis)
         super().__init__(redis, default_cfg=default_cfg)
 
-    def get_pico_config(self, fname, app_mapping):
-        """
-        Override the pico config loading to use the default dummy config.
-        """
-        pico_cfg = {
-            "motor": "dummy",
-            "tempctrl": "dummy",
-            "potmon": "dummy",
-            "imu_el": "dummy",
-            "imu_az": "dummy",
-            "lidar": "dummy",
-            "rfswitch": "dummy",
-        }
-        return pico_cfg
+    def _start_dummy_manager(self, redis):
+        """Create and start a PicoManager with dummy devices."""
+        mgr = PicoManager(redis)
+        for name, cls in DUMMY_PICO_CLASSES.items():
+            pico = cls("/dev/dummy", eig_redis=redis, name=name)
+            mgr.picos[name] = pico
+            redis.r.sadd("picos", name)
+        mgr.start()
+        return mgr
 
     def init_VNA(self):
         """
@@ -87,8 +88,14 @@ class DummyPandaClient(PandaClient):
             port=self.cfg["vna_port"],
             timeout=self.cfg["vna_timeout"],
             save_dir=self.cfg["vna_save_dir"],
-            switch_network=self.switch_nw,
+            switch_fn=self._switch_to,
         )
         kwargs = self.cfg["vna_settings"].copy()
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
         self.vna.setup(**kwargs)
+
+    def stop(self):
+        """Stop the embedded PicoManager and all dummy devices."""
+        if hasattr(self, "_manager") and self._manager:
+            self._manager.stop()
+            self._manager = None
