@@ -87,13 +87,20 @@ def test_int32_rounding_unbiased():
     """
     rng = np.random.default_rng(42)
     n = 1_000_000
+    # Match production dtype (big-endian int32 from the SNAP)
+    dtype = np.dtype(">i4")
+    native_dtype = np.dtype("=i4")
 
     # --- autos (non-negative, typical range 1e6–1e9) ---
     lo, hi = int(1e6), int(1e9)
-    even_auto = rng.integers(lo, high=hi, size=n, dtype=np.int32)
-    odd_auto = rng.integers(lo, high=hi, size=n, dtype=np.int32)
+    even_auto = rng.integers(lo, high=hi, size=n, dtype=native_dtype).astype(
+        dtype
+    )
+    odd_auto = rng.integers(lo, high=hi, size=n, dtype=native_dtype).astype(
+        dtype
+    )
     exact_auto = (even_auto.astype(np.float64) + odd_auto) / 2
-    rounded_auto = np.rint(exact_auto).astype(np.int32)
+    rounded_auto = np.rint(exact_auto).astype(dtype)
 
     err_auto = rounded_auto.astype(np.float64) - exact_auto
     assert np.max(np.abs(err_auto)) <= 0.5
@@ -101,10 +108,14 @@ def test_int32_rounding_unbiased():
     assert abs(np.mean(err_auto)) < 0.01
 
     # --- crosses (signed, typical range −1e9 to 1e9) ---
-    even_cross = rng.integers(-hi, high=hi, size=n, dtype=np.int32)
-    odd_cross = rng.integers(-hi, high=hi, size=n, dtype=np.int32)
+    even_cross = rng.integers(-hi, high=hi, size=n, dtype=native_dtype).astype(
+        dtype
+    )
+    odd_cross = rng.integers(-hi, high=hi, size=n, dtype=native_dtype).astype(
+        dtype
+    )
     exact_cross = (even_cross.astype(np.float64) + odd_cross) / 2
-    rounded_cross = np.rint(exact_cross).astype(np.int32)
+    rounded_cross = np.rint(exact_cross).astype(dtype)
 
     err_cross = rounded_cross.astype(np.float64) - exact_cross
     assert np.max(np.abs(err_cross)) <= 0.5
