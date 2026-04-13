@@ -3,6 +3,7 @@ import pytest
 import yaml
 
 from cmt_vna.testing import DummyVNA
+from picohost.proxy import PicoProxy
 
 from eigsep_observing.testing import DummyEigsepRedis
 
@@ -36,19 +37,19 @@ def redis():
 
 @pytest.fixture
 def client(redis, dummy_cfg):
-    return DummyPandaClient(redis, default_cfg=dummy_cfg)
+    c = DummyPandaClient(redis, default_cfg=dummy_cfg)
+    yield c
+    c.stop()
 
 
 def test_client(client):
     # client is initialized with redis commands
     assert client.redis.client_heartbeat_check()  # check heartbeat
-    if hasattr(client, "picos") and client.picos:
-        if "rfswitch" in client.picos:
-            assert client.switch_nw is not None
-            # Since picohost is mocked, we just check it exists
-            assert client.switch_nw is client.picos["rfswitch"]
-    # vna should be initialized if switch exists and use_vna is true
-    if client.switch_nw is not None and client.cfg.get("use_vna", False):
+    # sw_proxy is always created as a generic PicoProxy
+    assert client.sw_proxy is not None
+    assert isinstance(client.sw_proxy, PicoProxy)
+    # vna should be initialized if use_vna is true in config
+    if client.cfg.get("use_vna", False):
         assert isinstance(client.vna, DummyVNA)
     else:
         assert client.vna is None
@@ -62,58 +63,59 @@ def test_get_cfg(caplog, dummy_cfg):
     with pytest.raises(ValueError):
         r.get_config()
     client2 = DummyPandaClient(r, default_cfg={})
-    # should have created a logger warning about missing config
-    for record in caplog.records:
-        if "No configuration found in Redis" in record.getMessage():
-            assert record.levelname == "WARNING"
-    # after init of client2, the cfg should be in redis
-    # it is appended with a timestamp and empty pico config
-    cfg_in_redis = client2._get_cfg()
-    assert len(cfg_in_redis) == 2  # timestamp and picos
-    assert "upload_time" in cfg_in_redis
-    assert "picos" in cfg_in_redis
-    assert cfg_in_redis["picos"] == {}
-
-    # upload the dummy config to client2's redis
-    client2.redis.upload_config(dummy_cfg, from_file=False)
-
-    # check that they're the same
-    retrieved_cfg = client2._get_cfg()
-    retrieved_cfg_copy = retrieved_cfg.copy()
-    del retrieved_cfg_copy["upload_time"]
-    dummy_cfg_serialized = json.loads(json.dumps(dummy_cfg))
-    compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
-
-    # if reinit client2, it should get the config from redis
-    client3 = DummyPandaClient(r, default_cfg={})
-    retrieved_cfg2 = client3._get_cfg()
-    compare_dicts(client3.cfg, retrieved_cfg2)
-    # retrieved_cfg was directly uploaded so didn't have picos
-    del retrieved_cfg2["picos"]
-    compare_dicts(retrieved_cfg, retrieved_cfg2)
-
-    # check logging
-    for record in caplog.records:
-        if "Using config from Redis" in record.getMessage():
-            assert record.levelname == "INFO"
-
-
-def test_add_pico(caplog, monkeypatch, client):
-    caplog.set_level("DEBUG")
-    # Test that client initializes picos based on config
-    # The client should have initialized picos from the dummy config
-    # Check that picos were initialized (if any in config)
-    if hasattr(client, "picos") and client.picos:
-        # With mocked picohost, we just verify picos were created
-        assert len(client.picos) > 0
-
-        # Check that switch_nw was set if switch pico exists
-        if "rfswitch" in client.picos:
-            assert client.switch_nw is not None
-            assert client.switch_nw is client.picos["rfswitch"]
-
-        # Check logging
+    client3 = None
+    try:
+        # should have created a logger warning about missing config
         for record in caplog.records:
-            if "Adding sensor" in record.getMessage():
-                # Verify picos were attempted to be added
+            if "No configuration found in Redis" in record.getMessage():
+                assert record.levelname == "WARNING"
+        # after init of client2, the cfg should be in redis
+        cfg_in_redis = client2._get_cfg()
+        assert "upload_time" in cfg_in_redis
+
+        # upload the dummy config to client2's redis
+        client2.redis.upload_config(dummy_cfg, from_file=False)
+
+        # check that they're the same
+        retrieved_cfg = client2._get_cfg()
+        retrieved_cfg_copy = retrieved_cfg.copy()
+        del retrieved_cfg_copy["upload_time"]
+        dummy_cfg_serialized = json.loads(json.dumps(dummy_cfg))
+        compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
+
+        # if reinit client2, it should get the config from redis
+        client3 = DummyPandaClient(r, default_cfg={})
+        retrieved_cfg2 = client3._get_cfg()
+        compare_dicts(client3.cfg, retrieved_cfg2)
+
+        # check logging
+        for record in caplog.records:
+            if "Using config from Redis" in record.getMessage():
                 assert record.levelname == "INFO"
+    finally:
+        client2.stop()
+        if client3 is not None:
+            client3.stop()
+
+
+def test_switch_proxy_created(client):
+    """sw_proxy is a PicoProxy that can see PicoManager's rfswitch."""
+    assert isinstance(client.sw_proxy, PicoProxy)
+    assert client.sw_proxy.is_available
+    assert client.sw_proxy.name == "rfswitch"
+
+
+def test_pico_manager_devices_visible(client):
+    """PicoManager's registered devices are visible in Redis."""
+    available = client.redis.r.smembers("picos")
+    names = {n.decode() if isinstance(n, bytes) else n for n in available}
+    expected = {
+        "tempctrl",
+        "potmon",
+        "imu_el",
+        "imu_az",
+        "lidar",
+        "rfswitch",
+        "motor",
+    }
+    assert names == expected

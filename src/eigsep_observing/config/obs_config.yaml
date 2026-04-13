@@ -4,16 +4,6 @@
 # IP addresses
 rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.11"
-# picos
-pico_config_file: "/home/eigsep/eigsep/pico-firmware/pico_config.json"
-pico_app_mapping:  # app number to device mapping
-  0: "motor"
-  1: "tempctrl"
-  2: "potmon"
-  3: "imu_el"
-  4: "lidar"
-  5: "rfswitch"
-  6: "imu_az"
 # corr filewriter
 corr_save_dir: "/media/eigsep/T7/data"
 corr_ntimes: 240
