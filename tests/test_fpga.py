@@ -59,7 +59,7 @@ def fpga_instance():
     """
     DummyEigsepFpga instance for FPGA tests.
 
-    Uses the real DummyEigsepRedis (fakeredis-backed) the dummy
+    Uses the real DummyEigsepObsRedis (fakeredis-backed) the dummy
     constructs in __init__. We do *not* mock fpga.fpga, fpga.logger,
     fpga.read_data, fpga.validate_config, or fpga.redis — the dummy
     provides working implementations of all of those, and clobbering
@@ -78,7 +78,7 @@ def fpga_instance():
 class TestEigsepFpga:
     """Test cases for EigsepFpga class."""
 
-    @patch("eigsep_observing.fpga.EigsepRedis")
+    @patch("eigsep_observing.fpga.EigsepObsRedis")
     def test_create_redis(self, mock_redis_class):
         """Test _create_redis static method."""
         mock_redis_instance = Mock()

@@ -21,10 +21,10 @@ class EigObserver:
 
         Parameters
         ----------
-        redis_snap : EigsepRedis
+        redis_snap : EigsepObsRedis
             The Redis connection to the Rasperry Pi controlling the
             SNAP correlator.
-        redis_panda : EigsepRedis
+        redis_panda : EigsepObsRedis
             The Redis connection to the LattePanda server.
 
         Notes

@@ -31,7 +31,7 @@ class PandaClient:
 
     Parameters
     ----------
-    redis : EigsepRedis
+    redis : EigsepObsRedis
         The Redis server object to push data to and read commands
         from.
     default_cfg : dict

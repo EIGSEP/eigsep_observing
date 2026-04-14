@@ -5,7 +5,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-from eigsep_observing import EigsepRedis
+from eigsep_observing import EigsepObsRedis
 from eigsep_observing.io import reshape_data
 
 parser = ArgumentParser(
@@ -45,7 +45,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-redis = EigsepRedis(host=args.redis_host, port=args.redis_port)
+redis = EigsepObsRedis(host=args.redis_host, port=args.redis_port)
 logger.info(
     f"Connected to Redis server at {args.redis_host}:{args.redis_port}"
 )

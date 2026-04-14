@@ -4,7 +4,7 @@ from collections import defaultdict
 from math import floor
 
 from ..fpga import EigsepFpga, default_config
-from .eig_redis import DummyEigsepRedis
+from .eig_redis import DummyEigsepObsRedis
 from .utils import generate_data  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
@@ -138,7 +138,7 @@ class DummyEigsepFpga(EigsepFpga):
     - ``_make_fpga`` → ``DummyFpga`` (in-memory register backend)
     - ``_make_adc``  → ``DummyAdc``  (SnapAdc substitute)
     - ``_make_pam``  → ``DummyPam``  (I2C-free PAM substitute)
-    - ``_create_redis`` → ``DummyEigsepRedis`` (fakeredis backend)
+    - ``_create_redis`` → ``DummyEigsepObsRedis`` (fakeredis backend)
 
     The real ``Sync`` / ``NoiseGen`` / ``Input`` / ``Pfb`` blocks run
     unchanged against ``DummyFpga``, so production register-write
@@ -159,7 +159,7 @@ class DummyEigsepFpga(EigsepFpga):
 
     @staticmethod
     def _create_redis(host, port):
-        return DummyEigsepRedis(host=host, port=port)
+        return DummyEigsepObsRedis(host=host, port=port)
 
     def _make_fpga(self):
         corr_acc_len = self.cfg["corr_acc_len"]

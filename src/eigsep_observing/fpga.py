@@ -22,7 +22,7 @@ from threading import Event, Thread
 import numpy as np
 
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
-from .eig_redis import EigsepRedis
+from .eig_redis import EigsepObsRedis
 from .utils import (
     calc_inttime,
     get_config_path,
@@ -104,9 +104,9 @@ class EigsepFpga:
         self.is_synchronized = False
 
     @staticmethod
-    def _create_redis(host: str, port: int) -> EigsepRedis:
+    def _create_redis(host: str, port: int) -> EigsepObsRedis:
         """
-        Create an EigsepRedis instance.
+        Create an EigsepObsRedis instance.
 
         Parameters
         ----------
@@ -117,12 +117,12 @@ class EigsepFpga:
 
         Returns
         -------
-        EigsepRedis
-            An instance of EigsepRedis connected to the specified Redis
-            server.
+        EigsepObsRedis
+            An instance of EigsepObsRedis connected to the specified
+            Redis server.
 
         """
-        return EigsepRedis(host=host, port=port)
+        return EigsepObsRedis(host=host, port=port)
 
     def _make_fpga(self):
         """

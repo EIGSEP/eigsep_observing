@@ -55,6 +55,7 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
   "--cov=eigsep_observing",
+  "--cov=eigsep_redis",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--junitxml=junit.xml",

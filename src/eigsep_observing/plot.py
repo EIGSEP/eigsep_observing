@@ -54,7 +54,7 @@ class LivePlotter:
 
         Parameters
         ----------
-        redis_client : EigsepRedis
+        redis_client : EigsepObsRedis
             Redis client instance
         pairs : list of str
             Correlation pairs to plot (e.g., ['0', '1', '02', '13'])
