@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "eigsep_observing"
-version = "0.0.1"
+version = "1.0.0"
 description = "Control code for EIGSEP observing."
 readme = "README.md"
 license = {text = "MIT"}
