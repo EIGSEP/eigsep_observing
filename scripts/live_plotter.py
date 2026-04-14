@@ -1,7 +1,7 @@
 import argparse
 import logging
 
-from eigsep_observing import EigsepRedis
+from eigsep_observing import EigsepObsRedis
 from eigsep_observing.plot import LivePlotter
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ def main():
     args = parser.parse_args()
 
     # Connect to Redis
-    redis_client = EigsepRedis(host=args.redis_host, port=args.redis_port)
+    redis_client = EigsepObsRedis(host=args.redis_host, port=args.redis_port)
     print(f"Connected to Redis at {args.redis_host}:{args.redis_port}")
 
     # Create and start plotter

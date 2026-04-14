@@ -1,9 +1,9 @@
 import fakeredis
 
-from ..eig_redis import EigsepObsRedis
+from ..eig_redis import EigsepRedis
 
 
-class DummyEigsepObsRedis(EigsepObsRedis):
+class DummyEigsepRedis(EigsepRedis):
     def _make_redis(self, *args, **kwargs):
         """
         Create a fake Redis instance for testing purposes. Overrides

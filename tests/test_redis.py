@@ -5,7 +5,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from eigsep_observing.testing.utils import compare_dicts, generate_data
-from eigsep_observing.testing import DummyEigsepRedis
+from eigsep_observing.testing import DummyEigsepObsRedis
+from eigsep_redis.testing import DummyEigsepRedis
 
 
 @pytest.fixture
@@ -17,6 +18,18 @@ def server():
 def client(server):
     c = DummyEigsepRedis()
     c.r = server.r
+    return c
+
+
+@pytest.fixture
+def obs_server():
+    return DummyEigsepObsRedis()
+
+
+@pytest.fixture
+def obs_client(obs_server):
+    c = DummyEigsepObsRedis()
+    c.r = obs_server.r
     return c
 
 
@@ -79,7 +92,7 @@ def test_raw(server):
     compare_dicts(data, data_back)
 
 
-def test_int32_redis_round_trip(server, client):
+def test_int32_redis_round_trip(obs_server, obs_client):
     """Int32 data survives add_corr_data → read_corr_data bit-for-bit.
 
     Mirrors the production pattern: consumer (server) blocks on
@@ -93,20 +106,22 @@ def test_int32_redis_round_trip(server, client):
     pairs = list(data.keys())
     # Seed corr_sync_time so read_corr_data can retrieve it.
     # Must be a dict with "sync_time_unix" — matches fpga.py's format.
-    client.add_metadata("corr_sync_time", {"sync_time_unix": 1748732903.42})
+    obs_client.add_metadata(
+        "corr_sync_time", {"sync_time_unix": 1748732903.42}
+    )
     # In production, the FPGA is already running when the observer
     # starts reading — stream:corr exists and has at least one entry.
     # Seed the stream so read_corr_data doesn't bail on the
     # "no stream" guard, mirroring the production startup order.
-    client.add_corr_data(raw, cnt=0, dtype=dtype)
+    obs_client.add_corr_data(raw, cnt=0, dtype=dtype)
     # Consumer blocks first (like EigObserver), producer writes after
     # (like EigsepFpga) — same pattern as test_status.
     with ThreadPoolExecutor(max_workers=1) as executor:
         read_future = executor.submit(
-            server.read_corr_data, pairs=pairs, unpack=True
+            obs_server.read_corr_data, pairs=pairs, unpack=True
         )
         time.sleep(0.1)  # let consumer block
-        client.add_corr_data(raw, cnt=42, dtype=dtype)
+        obs_client.add_corr_data(raw, cnt=42, dtype=dtype)
         acc_cnt, _, read_data = read_future.result(timeout=5.0)
     assert acc_cnt == 42
     for p in pairs:

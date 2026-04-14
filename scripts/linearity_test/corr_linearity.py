@@ -7,7 +7,7 @@ Usage:
 
 import argparse
 import numpy as np
-from eigsep_observing import EigsepRedis
+from eigsep_observing import EigsepObsRedis
 from eigsep_observing.io import reshape_data
 
 parser = argparse.ArgumentParser(
@@ -30,7 +30,7 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-redis = EigsepRedis(host=args.redis_host, port=args.redis_port)
+redis = EigsepObsRedis(host=args.redis_host, port=args.redis_port)
 print(f"Connected to Redis at {args.redis_host}:{args.redis_port}")
 
 pairs = ["0", "1"]

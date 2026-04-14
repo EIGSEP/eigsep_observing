@@ -11,7 +11,7 @@ import threading
 import time
 import yaml
 
-from eigsep_observing import EigObserver, EigsepRedis
+from eigsep_observing import EigObserver, EigsepObsRedis
 from eigsep_observing.testing import DummyEigObserver
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
@@ -75,13 +75,13 @@ panda_ip = cfg["panda_ip"]
 # initialize the Redis instances
 if args.use_snap:
     logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
-    redis_snap = EigsepRedis(host=rpi_ip, port=redis_port)
+    redis_snap = EigsepObsRedis(host=rpi_ip, port=redis_port)
 else:
     logger.warning("Not connecting to RPi Redis instance.")
     redis_snap = None
 if args.use_panda:
     logger.info(f"Connecting to LattePanda at {panda_ip}.")
-    redis_panda = EigsepRedis(host=panda_ip, port=redis_port)
+    redis_panda = EigsepObsRedis(host=panda_ip, port=redis_port)
 else:
     logger.warning("Not connecting to LattePanda")
     redis_panda = None

@@ -5,7 +5,7 @@ import yaml
 from cmt_vna.testing import DummyVNA
 from picohost.proxy import PicoProxy
 
-from eigsep_observing.testing import DummyEigsepRedis
+from eigsep_observing.testing import DummyEigsepObsRedis
 
 import eigsep_observing
 from eigsep_observing.testing import DummyPandaClient
@@ -32,7 +32,7 @@ def dummy_cfg(module_tmpdir):
 
 @pytest.fixture
 def redis():
-    return DummyEigsepRedis()
+    return DummyEigsepObsRedis()
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def test_get_cfg(caplog, dummy_cfg):
     caplog.set_level("INFO")
 
     # should be no config in redis at start
-    r = DummyEigsepRedis(port=6380)  # different port to avoid conflicts
+    r = DummyEigsepObsRedis(port=6380)  # different port to avoid conflicts
     with pytest.raises(ValueError):
         r.get_config()
     client2 = DummyPandaClient(r, default_cfg={})

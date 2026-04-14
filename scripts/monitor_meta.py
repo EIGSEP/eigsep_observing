@@ -1,8 +1,8 @@
 import json
 import time
-from eigsep_observing import EigsepRedis
+from eigsep_observing import EigsepObsRedis
 
-r = EigsepRedis("10.10.10.11")
+r = EigsepObsRedis("10.10.10.11")
 
 while True:
     try:

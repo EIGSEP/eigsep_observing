@@ -8,14 +8,14 @@ from cmt_vna.testing import DummyVNA
 from picohost.testing import DummyPicoRFSwitch
 
 from eigsep_observing import EigObserver
-from eigsep_observing.testing import DummyEigsepRedis
+from eigsep_observing.testing import DummyEigsepObsRedis
 from eigsep_observing.testing.utils import generate_data
 
 
 @pytest.fixture
 def redis_snap():
     """Mock Redis connection for SNAP correlator."""
-    redis = DummyEigsepRedis()
+    redis = DummyEigsepObsRedis()
     # Mock correlator config
     redis.get_corr_config = Mock(
         return_value={
@@ -29,7 +29,7 @@ def redis_snap():
 @pytest.fixture
 def redis_panda():
     """Mock Redis connection for LattePanda."""
-    redis = DummyEigsepRedis()
+    redis = DummyEigsepObsRedis()
 
     # Mock config
     redis.get_config = Mock(

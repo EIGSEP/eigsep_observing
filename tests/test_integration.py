@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 import eigsep_observing
-from eigsep_observing.testing import DummyEigsepRedis, DummyPandaClient
+from eigsep_observing.testing import DummyEigsepObsRedis, DummyPandaClient
 
 
 @pytest.fixture()
@@ -25,7 +25,7 @@ def dummy_cfg(tmp_path):
 
 @pytest.fixture
 def redis():
-    return DummyEigsepRedis()
+    return DummyEigsepObsRedis()
 
 
 @pytest.fixture
