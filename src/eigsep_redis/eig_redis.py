@@ -274,7 +274,7 @@ class EigsepRedis:
         ----------
         key : str
             Metadata key.
-        value : bytes or JSON serializable object
+        value : JSON serializable object
             Metadata value.
 
         Raises
@@ -295,10 +295,7 @@ class EigsepRedis:
             )
 
         try:
-            if isinstance(value, (bytes, bytearray)):
-                payload = value
-            else:
-                payload = json.dumps(value).encode("utf-8")
+            payload = json.dumps(value).encode("utf-8")
         except (TypeError, ValueError) as e:
             raise ValueError(f"value is not JSON serializable: {e}")
 
