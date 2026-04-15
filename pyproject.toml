@@ -22,7 +22,7 @@ dependencies = [
   "pyyaml",
   "flask",
   "picohost>=2.2.0",
-  "eigsep-vna==1.0.0",
+  "eigsep-vna==1.1.1",
   "fakeredis",
 ]
 
