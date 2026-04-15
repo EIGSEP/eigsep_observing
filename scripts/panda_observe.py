@@ -43,8 +43,7 @@ if client.cfg["use_vna"]:
     vna_thd.start()
 
 try:
-    for t in thds.values():
-        t.join()
+    client.stop_client.wait()  # wait until stop signal is set
 except KeyboardInterrupt:
     logger.info("Keyboard interrupt received, stopping threads")
 finally:

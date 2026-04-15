@@ -127,8 +127,7 @@ if args.use_panda and observer.cfg.get("use_vna", False):
 
 
 try:
-    for name, t in thds.items():
-        t.join()  # blocks forever until the thread is done
+    observer.stop_event.wait()  # wait until stop event
 except KeyboardInterrupt:
     logger.info("Keyboard interrupt received, stopping observer.")
 finally:
@@ -136,6 +135,7 @@ finally:
     for name in thds:
         logger.info(f"Stopping thread: {name}")
         thds[name].join()
+        logger.info(f"Thread {name} stopped.")
     logger.info("All threads stopped. Exiting observer.")
 
 if args.dummy:
