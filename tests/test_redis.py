@@ -4,6 +4,9 @@ import pytest
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from cmt_vna.testing import DummyVNA
+from picohost.testing import DummyPicoRFSwitch
+
 from eigsep_observing.testing.utils import compare_dicts, generate_data
 from eigsep_observing.testing import DummyEigsepObsRedis
 from eigsep_redis.testing import DummyEigsepRedis
@@ -90,6 +93,53 @@ def test_raw(server):
         server.add_raw(f"data:{p}", d)
         data_back[p] = server.get_raw(f"data:{p}")
     compare_dicts(data, data_back)
+
+
+def test_get_metadata_ignores_vna_stream(obs_server, obs_client):
+    """get_metadata() with no args must skip stream:vna even when it's
+    present on the same Redis.
+
+    Regression guard: historically ``get_metadata()`` defaulted to the
+    full ``data_streams`` set, which includes ``stream:vna`` /
+    ``stream:corr``. Those carry raw numpy payloads, not JSON, so the
+    default path would raise on ``json.loads``. Metadata is now tracked
+    in a separate ``metadata_streams`` set and the default path only
+    touches those. This test mirrors the redis_panda scenario where
+    both kinds of producers share one Redis instance.
+    """
+    # Producer-side: push sensor metadata and a VNA measurement to the
+    # same Redis that the consumer will query.
+    obs_client.add_metadata("acc_cnt", 7)
+    obs_client.add_metadata("temp", 25.5)
+
+    switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
+    vna = DummyVNA(switch_fn=switch.switch)
+    vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
+    s11 = vna.measure_ant(measure_noise=True, measure_load=True)
+    header = dict(vna.header)
+    header["freqs"] = header["freqs"].tolist()
+    header["mode"] = "ant"
+    obs_client.add_vna_data(s11, header=header, metadata={"temp": 25.5})
+
+    # Both stream families are registered in data_streams...
+    assert b"stream:vna" in obs_server.r.smembers("data_streams")
+    assert b"stream:acc_cnt" in obs_server.r.smembers("data_streams")
+    # ...but only metadata streams are in metadata_streams.
+    metadata_members = obs_server.r.smembers("metadata_streams")
+    assert b"stream:vna" not in metadata_members
+    assert b"stream:acc_cnt" in metadata_members
+    assert b"stream:temp" in metadata_members
+
+    # Reset read positions so the streaming drain picks up seeded entries.
+    obs_server._set_last_read_id("stream:acc_cnt", "0-0")
+    obs_server._set_last_read_id("stream:temp", "0-0")
+
+    # Default get_metadata() must not touch stream:vna (would raise on
+    # json.loads of the numpy payload) and must return the metadata.
+    out = obs_server.get_metadata()
+    assert set(out.keys()) == {"stream:acc_cnt", "stream:temp"}
+    assert out["stream:acc_cnt"] == [7]
+    assert out["stream:temp"] == [25.5]
 
 
 def test_int32_redis_round_trip(obs_server, obs_client):
