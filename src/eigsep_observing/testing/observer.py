@@ -15,8 +15,8 @@ class DummyEigObserver(EigObserver):
         """
         # upload corr config to redis, parent class will read it
         if redis_snap is not None:
-            redis_snap.upload_corr_config(CORR_CFG_PATH, from_file=True)
+            redis_snap.corr_config.upload_config(CORR_CFG_PATH, from_file=True)
         if redis_panda is not None:
-            redis_panda.upload_config(CFG_PATH, from_file=True)
+            redis_panda.config.upload(CFG_PATH, from_file=True)
         # call parent constructor
         super().__init__(redis_snap=redis_snap, redis_panda=redis_panda)

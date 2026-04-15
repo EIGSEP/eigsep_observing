@@ -96,9 +96,9 @@ class TestEigsepFpga:
         caplog.set_level(logging.DEBUG)
 
         with patch.object(
-            fpga_instance.redis,
-            "upload_corr_config",
-            wraps=fpga_instance.redis.upload_corr_config,
+            fpga_instance.redis.corr_config,
+            "upload_config",
+            wraps=fpga_instance.redis.corr_config.upload_config,
         ) as spy:
             fpga_instance.upload_config(validate=True)
 
@@ -116,9 +116,9 @@ class TestEigsepFpga:
                 wraps=fpga_instance.validate_config,
             ) as validate_spy,
             patch.object(
-                fpga_instance.redis,
-                "upload_corr_config",
-                wraps=fpga_instance.redis.upload_corr_config,
+                fpga_instance.redis.corr_config,
+                "upload_config",
+                wraps=fpga_instance.redis.corr_config.upload_config,
             ) as upload_spy,
         ):
             fpga_instance.upload_config(validate=False)
@@ -137,9 +137,9 @@ class TestEigsepFpga:
                 side_effect=RuntimeError("Config invalid"),
             ),
             patch.object(
-                fpga_instance.redis,
-                "upload_corr_config",
-                wraps=fpga_instance.redis.upload_corr_config,
+                fpga_instance.redis.corr_config,
+                "upload_config",
+                wraps=fpga_instance.redis.corr_config.upload_config,
             ) as upload_spy,
         ):
             with pytest.raises(
@@ -151,15 +151,15 @@ class TestEigsepFpga:
         upload_spy.assert_not_called()
 
     def test_synchronize(self, fpga_instance):
-        """synchronize writes corr_sync_time and it round-trips through redis."""
+        """synchronize sets sync_time on the corr header and uploads it."""
         # Spy on the real Sync block so we observe the high-level
         # sequence (set_delay / arm_sync / sw_sync) without stubbing
         # out the register writes — the wraps= keeps DummyFpga state
-        # in sync with what real hardware would see. add_metadata is
-        # also wraps=, so the value actually lands in fakeredis and we
-        # can read it back via the production get_live_metadata path —
-        # this is the writer↔reader contract guard for the metadata
-        # serialization round-trip.
+        # in sync with what real hardware would see. upload_corr_header
+        # is wraps=, so the value actually lands in fakeredis and we
+        # can read it back via the production get_corr_header path —
+        # this is the writer↔reader contract guard for the corr header
+        # round-trip (sync_time lives on the header, not metadata).
         sync = fpga_instance.sync
         with (
             patch.object(
@@ -174,44 +174,37 @@ class TestEigsepFpga:
                 return_value=1234567890.0,
             ),
             patch.object(
-                fpga_instance.redis,
-                "add_metadata",
-                wraps=fpga_instance.redis.add_metadata,
-            ) as spy_add_metadata,
+                fpga_instance.redis.corr_config,
+                "upload_header",
+                wraps=fpga_instance.redis.corr_config.upload_header,
+            ) as spy_upload_header,
         ):
             fpga_instance.synchronize(delay=5)
 
         spy_set_delay.assert_called_once_with(5)
         spy_arm_sync.assert_called_once()
         assert spy_sw_sync.call_count == 3
-        spy_add_metadata.assert_called_once()
-        assert spy_add_metadata.call_args[0][0] == "corr_sync_time"
+        # synchronize() pushes the header once so consumers see fresh
+        # sync_time without waiting for the observe loop's periodic
+        # upload.
+        spy_upload_header.assert_called_once()
 
-        # Round-trip: read corr_sync_time back through the production
-        # get_live_metadata path and confirm the value survived the
-        # hset/json-encode → hgetall/json-decode pipeline intact.
-        metadata = fpga_instance.redis.get_live_metadata("corr_sync_time")
-        assert metadata["sync_time_unix"] == 1234567890.0
-        assert "sync_date" in metadata
+        # Round-trip: read corr_header back through the production
+        # get_corr_header path and confirm sync_time survived the
+        # json-encode → json-decode pipeline intact.
+        header = fpga_instance.redis.corr_config.get_header()
+        assert header["sync_time"] == 1234567890.0
 
     def test_synchronize_default_delay(self, fpga_instance):
-        """Test synchronize with default delay."""
-        with patch.object(
-            fpga_instance.redis,
-            "add_metadata",
-            wraps=fpga_instance.redis.add_metadata,
-        ) as spy_add_metadata:
+        """synchronize() with default delay still publishes sync_time on the header."""
+        with patch(
+            "eigsep_observing.fpga.time.time",
+            return_value=1111111111.0,
+        ):
             fpga_instance.synchronize()
 
-        # Verify that redis.add_metadata was called
-        spy_add_metadata.assert_called_once()
-
-        # Verify metadata structure
-        call_args = spy_add_metadata.call_args
-        assert call_args[0][0] == "corr_sync_time"
-        metadata = call_args[0][1]
-        assert "sync_time_unix" in metadata
-        assert "sync_date" in metadata
+        header = fpga_instance.redis.corr_config.get_header()
+        assert header["sync_time"] == 1111111111.0
 
     def test_initialize_all_enabled(self, fpga_instance, caplog):
         """initialize() with sync=True calls synchronize and logs."""
@@ -242,25 +235,6 @@ class TestEigsepFpga:
 
             # Verify that synchronize was called even with initialize_adc=False
             mock_sync.assert_called_once()
-
-    def test_update_redis(self, fpga_instance):
-        """update_redis forwards (data, cnt, dtype) to redis.add_corr_data."""
-        # Bytes match what fpga.read_data(unpack=False) actually returns
-        # in production — the prior list-of-int fixture diverged from
-        # the producer contract and only worked because the spy was a
-        # bare Mock that never ran the real xadd path.
-        test_data = {"0": b"\x00\x01\x02\x03", "1": b"\x04\x05\x06\x07"}
-        test_cnt = 42
-        expected_dtype = fpga_instance.cfg["dtype"]
-
-        with patch.object(
-            fpga_instance.redis,
-            "add_corr_data",
-            wraps=fpga_instance.redis.add_corr_data,
-        ) as spy:
-            fpga_instance.update_redis(test_data, test_cnt)
-
-        spy.assert_called_once_with(test_data, test_cnt, dtype=expected_dtype)
 
     def test_read_integrations_no_new_data(self, fpga_instance):
         """No new cnt → loop exits via pre-set event, queue stays empty."""
@@ -411,7 +385,7 @@ class TestEigsepFpga:
     def test_observe_basic_functionality(self, fpga_instance):
         """Test basic observe functionality."""
         fpga_instance.upload_config = Mock()
-        fpga_instance.update_redis = Mock()
+        expected_dtype = fpga_instance.cfg["dtype"]
 
         pairs = ["0"]
 
@@ -429,24 +403,30 @@ class TestEigsepFpga:
             {"data": d2, "cnt": 2},
             None,
         ]
-        with _patch_observe_thread(fpga_instance, items):
+        with (
+            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, items),
+        ):
             fpga_instance.observe(pairs=pairs, timeout=10)
 
         fpga_instance.upload_config.assert_called_once_with(validate=True)
-        assert fpga_instance.update_redis.call_count == 2
-        fpga_instance.update_redis.assert_any_call(d1, 1)
-        fpga_instance.update_redis.assert_any_call(d2, 2)
+        assert mock_add.call_count == 2
+        mock_add.assert_any_call(d1, 1, dtype=expected_dtype)
+        mock_add.assert_any_call(d2, 2, dtype=expected_dtype)
 
     def test_observe_default_pairs(self, fpga_instance, caplog):
         """observe() with no pairs arg defaults to self.pairs."""
-        fpga_instance.update_redis = Mock()
+        expected_dtype = fpga_instance.cfg["dtype"]
 
         d1 = utils.generate_data(
             ntimes=1, raw=True, reshape=False, return_time_freq=False
         )
         items = [{"data": d1, "cnt": 1}, None]
         caplog.set_level(logging.INFO)
-        with _patch_observe_thread(fpga_instance, items) as mock_thread_cls:
+        with (
+            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, items) as mock_thread_cls,
+        ):
             fpga_instance.observe()  # no pairs arg → defaults to self.pairs
 
         # Producer thread was constructed with self.pairs
@@ -461,7 +441,7 @@ class TestEigsepFpga:
             in caplog.text
         )
         # Data still drained normally
-        fpga_instance.update_redis.assert_called_once_with(d1, 1)
+        mock_add.assert_called_once_with(d1, 1, dtype=expected_dtype)
 
     def test_observe_timeout_immediate(self, fpga_instance, caplog):
         """
@@ -474,13 +454,14 @@ class TestEigsepFpga:
         producer-side no-data path is covered separately by
         test_read_integrations_no_new_data.
         """
-        fpga_instance.update_redis = Mock()
-
         caplog.set_level(logging.INFO)
-        with _patch_observe_thread(fpga_instance, [None]):
+        with (
+            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, [None]),
+        ):
             fpga_instance.observe(pairs=["0"], timeout=1)
 
-        fpga_instance.update_redis.assert_not_called()
+        mock_add.assert_not_called()
         assert "End of queue, processing finished." in caplog.text
 
     def test_observe_logging(self, fpga_instance, caplog):
@@ -506,14 +487,18 @@ class TestEigsepFpga:
         Consumer drains every queued integration, in order, before
         exiting on the sentinel.
         """
-        fpga_instance.update_redis = Mock()
+        expected_dtype = fpga_instance.cfg["dtype"]
 
         items = [{"data": {"0": [i]}, "cnt": 10 + i} for i in range(5)]
         items.append(None)
-        with _patch_observe_thread(fpga_instance, items):
+        with (
+            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, items),
+        ):
             fpga_instance.observe(pairs=["0", "1"], timeout=10)
 
-        assert fpga_instance.update_redis.call_count == 5
+        assert mock_add.call_count == 5
         # Order matters — assert via call_args_list, not assert_any_call.
-        for i, call in enumerate(fpga_instance.update_redis.call_args_list):
+        for i, call in enumerate(mock_add.call_args_list):
             assert call.args == ({"0": [i]}, 10 + i)
+            assert call.kwargs == {"dtype": expected_dtype}

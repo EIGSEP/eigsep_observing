@@ -3,7 +3,7 @@ Integration tests for the emulator-backed pico pipeline.
 
 Tests that sensor data flows from pico emulators (running inside an
 in-process PicoManager) through picohost reader threads into
-FakeRedis, and is retrievable via get_live_metadata().
+FakeRedis, and is retrievable via ``MetadataSnapshotReader.get``.
 """
 
 import time
@@ -55,7 +55,7 @@ def test_sensor_metadata_in_redis(client, redis):
     """Emulators generate status that flows through redis_handler to Redis."""
     time.sleep(0.5)
 
-    metadata = redis.get_live_metadata()
+    metadata = redis.metadata_snapshot.get()
 
     expected_sensors = {
         "tempctrl",
@@ -76,7 +76,7 @@ def test_metadata_has_expected_fields(client, redis):
     """Verify that metadata values contain the expected sensor fields."""
     time.sleep(0.5)
 
-    metadata = redis.get_live_metadata()
+    metadata = redis.metadata_snapshot.get()
 
     # Check tempctrl LNA/LOAD channels
     tempctrl = metadata.get("tempctrl", {})
@@ -110,9 +110,9 @@ def test_metadata_has_expected_fields(client, redis):
     assert potmon["pot_az_angle"] is None
 
 
-def test_get_live_metadata_single_key(client, redis):
-    """get_live_metadata with a single key returns just that sensor's data."""
+def test_metadata_snapshot_single_key(client, redis):
+    """metadata_snapshot.get(key) returns just that sensor's data."""
     time.sleep(0.5)
-    lidar = redis.get_live_metadata("lidar")
+    lidar = redis.metadata_snapshot.get("lidar")
     assert isinstance(lidar, dict)
     assert "distance_m" in lidar

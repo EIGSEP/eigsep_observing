@@ -12,7 +12,6 @@ CORR_SCALAR (18_8).
 """
 
 from copy import deepcopy
-import datetime
 import logging
 import time
 from pathlib import Path
@@ -301,7 +300,7 @@ class EigsepFpga:
                 self.logger.error(f"Configuration validation failed: {e}")
                 raise RuntimeError("Configuration validation failed") from e
         self.logger.debug("Uploading configuration to Redis.")
-        self.redis.upload_corr_config(self.cfg, from_file=False)
+        self.redis.corr_config.upload_config(self.cfg, from_file=False)
 
     def initialize(
         self,
@@ -601,13 +600,8 @@ class EigsepFpga:
             self.logger.info(f"Synchronized at {sync_time}.")
         self.sync_time = sync_time
         self.is_synchronized = True
-        sync_meta = {
-            "sync_time_unix": self.sync_time,
-            "sync_date": datetime.datetime.fromtimestamp(
-                self.sync_time
-            ).isoformat(),
-        }
-        self.redis.add_metadata("corr_sync_time", sync_meta)
+        # update header in redis with fresh sync time
+        self.redis.corr_config.upload_header(self.header)
 
     def unpack_data(self, data):
         """
@@ -807,23 +801,6 @@ class EigsepFpga:
         except AttributeError:
             self.logger.error("Observation not started or already ended.")
 
-    def update_redis(self, data, cnt):
-        """
-        Stream data and metadata to Redis.
-
-        Parameters
-        ----------
-        data : dict
-            A dictionary of raw data from the correlator.
-        cnt : int
-            Accumulation count from the correlator.
-
-        """
-        self.redis.add_corr_data(data, cnt, dtype=self.cfg["dtype"])
-        # hack to upload header regularly
-        if cnt % 100 == 0:
-            self.redis.upload_corr_header(self.header)
-
     def observe(self, pairs=None, timeout=10):
         """
         Read correlator data and stream it to Redis.
@@ -868,4 +845,4 @@ class EigsepFpga:
                     continue
             data = d["data"]
             cnt = d["cnt"]
-            self.update_redis(data, cnt)
+            self.redis.corr.add(data, cnt, dtype=self.cfg["dtype"])
