@@ -120,20 +120,13 @@ class EigsepRedis:
             self._last_read_ids.clear()
             self._last_read_ids["stream:status"] = "$"
 
-    @property
-    def data_streams(self):
+    def _streams_from_set(self, set_name):
         """
-        Dictionary of data streams. The keys are the stream names and
-        the values are the last entry id read from the stream. If no
-        entry has been read, the value is '$', indicating that the read
-        start from newest message delivered by the stream.
-
-        Returns
-        -------
-        d : dict
-
+        Build a ``{stream_name: last_read_id}`` dict from a Redis set of
+        stream names. If no entry has been read, the value is '$',
+        indicating the read should start from the newest message.
         """
-        members = self.r.smembers("data_streams")
+        members = self.r.smembers(set_name)
         with self._stream_lock:
             d = {}
             for s in members:
@@ -149,6 +142,36 @@ class EigsepRedis:
                         last = "$"
                 d[s.decode()] = last
             return d
+
+    @property
+    def data_streams(self):
+        """
+        Dictionary of all data streams (metadata, corr, vna, ...). The
+        keys are the stream names and the values are the last entry id
+        read from the stream. If no entry has been read, the value is
+        '$', indicating that the read starts from the newest message
+        delivered by the stream.
+
+        Returns
+        -------
+        d : dict
+
+        """
+        return self._streams_from_set("data_streams")
+
+    @property
+    def metadata_streams(self):
+        """
+        Dictionary of metadata streams only (i.e. streams registered by
+        ``add_metadata``, excluding corr/vna raw-data streams). Same
+        shape as ``data_streams``.
+
+        Returns
+        -------
+        d : dict
+
+        """
+        return self._streams_from_set("metadata_streams")
 
     @property
     def status_stream(self):
@@ -290,8 +313,12 @@ class EigsepRedis:
             maxlen=self.maxlen["data"],
             approximate=True,
         )
-        # add the stream to the data streams if not already present
+        # add the stream to both the general data streams set and the
+        # metadata-only set (the latter is what get_metadata() defaults
+        # to, so raw-data streams like stream:corr / stream:vna never
+        # end up there)
         self.r.sadd("data_streams", f"stream:{key}")
+        self.r.sadd("metadata_streams", f"stream:{key}")
 
     def get_live_metadata(self, keys=None):
         """
@@ -378,7 +405,7 @@ class EigsepRedis:
         ----------
         stream_keys : str or list of str
             Redis stream key. If a list, return the requested streams.
-            If None, return all streams.
+            If None, return all registered metadata streams.
 
         Returns
         -------
@@ -391,17 +418,14 @@ class EigsepRedis:
         This grabs updated metadata from the Redis streams. If a stream
         has not been updated, it will not be included in the output.
 
-        Callers should pass ``stream_keys`` explicitly — with
-        ``stream_keys=None`` this reads every entry in the Redis
-        ``data_streams`` set, which includes non-metadata streams
-        like ``stream:corr`` and ``stream:vna`` whose payloads are
-        not JSON (they carry raw numpy bytes). Those will fail at
-        ``json.loads`` below. The base class has no way to
-        distinguish metadata streams from data streams today.
+        With ``stream_keys=None`` this reads only streams registered
+        via ``add_metadata`` (tracked in the Redis ``metadata_streams``
+        set), so raw-data streams like ``stream:corr`` / ``stream:vna``
+        — whose payloads are not JSON — are excluded by construction.
 
         """
         if stream_keys is None:
-            streams = self.data_streams
+            streams = self.metadata_streams
         else:
             if isinstance(stream_keys, str):
                 stream_keys = [stream_keys]
