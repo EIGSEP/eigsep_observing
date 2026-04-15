@@ -42,9 +42,9 @@ class EigObserver:
         self.redis_panda = redis_panda
 
         if self.redis_snap is not None:
-            self.corr_cfg = self.redis_snap.get_corr_config()
+            self.corr_cfg = self.redis_snap.corr_config.get_config()
         if self.redis_panda is not None:
-            self.cfg = self.redis_panda.get_config()
+            self.cfg = self.redis_panda.config.get()
 
         self.stop_event = threading.Event()  # main stop event
 
@@ -69,7 +69,7 @@ class EigObserver:
         """
         if self.redis_panda is None:
             return False
-        return self.redis_panda.client_heartbeat_check()
+        return self.redis_panda.heartbeat_reader.check()
 
     def status_logger(self):
         """
@@ -91,7 +91,7 @@ class EigObserver:
                 if self.stop_event.wait(1):  # wait 1s before checking again
                     return
             self.logger.debug("Panda connected.")
-            level, status = self.redis_panda.read_status(timeout=0.1)
+            level, status = self.redis_panda.status_reader.read(timeout=0.1)
             if status is not None:
                 self.logger.log(level, status)
 
@@ -132,27 +132,37 @@ class EigObserver:
             if self.stop_event.wait(1):
                 return
 
+        sync_time = None
         while not self.stop_event.is_set():
             if file.counter == 0:  # look up header in Redis once per file
                 try:
-                    header = self.redis_snap.get_corr_header()
+                    header = self.redis_snap.corr_config.get_header()
                 except ValueError as e:
                     self.logger.error(f"Error reading header from SNAP: {e}")
                     header = None
+                if header is not None:
+                    sync_time = header.get("sync_time")
+                if sync_time is None or sync_time == 0:
+                    self.logger.error(
+                        "No sync_time in corr header. Cannot "
+                        "derive accurate timestamps. Waiting "
+                        "for SNAP to synchronize."
+                    )
+                    if self.stop_event.wait(1):
+                        return
+                    continue
                 file.set_header(header=header)
             # blocking read from Redis
-            acc_cnt, sync_time, data = self.redis_snap.read_corr_data(
+            acc_cnt, data = self.redis_snap.corr_reader.read(
                 pairs=pairs, timeout=timeout, unpack=True
             )
             self.logger.info(f"{acc_cnt=}")
             if self.panda_connected:
-                metadata = self.redis_panda.get_metadata()
+                metadata = self.redis_panda.metadata_stream.drain()
             else:
                 metadata = None
             file.add_data(acc_cnt, sync_time, data, metadata=metadata)
 
-        # close() flushes any pending buffer to disk before shutting
-        # down the writer thread, so no manual flush is needed.
         file.close()
 
     def record_vna_data(self, save_dir, timeout=60):
@@ -186,7 +196,7 @@ class EigObserver:
                     return
                 continue
             try:
-                data, header, metadata = self.redis_panda.read_vna_data(
+                data, header, metadata = self.redis_panda.vna_reader.read(
                     timeout=timeout
                 )
             except TimeoutError:

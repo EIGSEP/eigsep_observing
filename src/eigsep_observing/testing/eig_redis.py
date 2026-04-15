@@ -1,12 +1,7 @@
-import fakeredis
+from eigsep_redis.testing import DummyTransport
 
 from ..eig_redis import EigsepObsRedis
 
 
 class DummyEigsepObsRedis(EigsepObsRedis):
-    def _make_redis(self, *args, **kwargs):
-        """
-        Create a fake Redis instance for testing purposes. Overrides
-        the parent class method.
-        """
-        return fakeredis.FakeRedis(decode_responses=False)
+    transport_cls = DummyTransport

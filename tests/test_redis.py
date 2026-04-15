@@ -7,8 +7,20 @@ from concurrent.futures import ThreadPoolExecutor
 from cmt_vna.testing import DummyVNA
 from picohost.testing import DummyPicoRFSwitch
 
+from eigsep_observing.corr import CorrConfigStore, CorrReader, CorrWriter
 from eigsep_observing.testing.utils import compare_dicts, generate_data
 from eigsep_observing.testing import DummyEigsepObsRedis
+from eigsep_observing.vna import VnaReader, VnaWriter
+from eigsep_redis import (
+    ConfigStore,
+    HeartbeatReader,
+    HeartbeatWriter,
+    MetadataSnapshotReader,
+    MetadataStreamReader,
+    MetadataWriter,
+    StatusReader,
+    StatusWriter,
+)
 from eigsep_redis.testing import DummyEigsepRedis
 
 
@@ -20,7 +32,9 @@ def server():
 @pytest.fixture
 def client(server):
     c = DummyEigsepRedis()
-    c.r = server.r
+    # share the underlying fakeredis so both clients talk to the
+    # same in-memory DB but keep independent last-read-id state
+    c.transport.r = server.transport.r
     return c
 
 
@@ -32,7 +46,7 @@ def obs_server():
 @pytest.fixture
 def obs_client(obs_server):
     c = DummyEigsepObsRedis()
-    c.r = obs_server.r
+    c.transport.r = obs_server.transport.r
     return c
 
 
@@ -42,17 +56,17 @@ def test_metadata(server, client):
 
     # Test live metadata functionality - this is the primary use case
     for acc_cnt in range(10):
-        client.add_metadata("acc_cnt", acc_cnt)
+        client.metadata.add("acc_cnt", acc_cnt)
         assert client.r.smembers("data_streams") == {b"stream:acc_cnt"}
         assert server.r.smembers("data_streams") == {b"stream:acc_cnt"}
         if acc_cnt == 0:  # data stream should be created on first call
             assert "stream:acc_cnt" in server.data_streams
         # live metadata should be updated
-        assert server.get_live_metadata(keys="acc_cnt") == acc_cnt
-        assert server.get_live_metadata(keys=["acc_cnt"]) == {
+        assert server.metadata_snapshot.get(keys="acc_cnt") == acc_cnt
+        assert server.metadata_snapshot.get(keys=["acc_cnt"]) == {
             "acc_cnt": acc_cnt
         }
-        live = server.get_live_metadata()
+        live = server.metadata_snapshot.get()
         # can't expect the exact timestamp - live metadata uses string keys
         assert "acc_cnt_ts" in live
         ts = live.pop("acc_cnt_ts")
@@ -61,13 +75,13 @@ def test_metadata(server, client):
 
     # Test stream reading behavior - with current API, reads start from $
     # which means only new messages after stream is established
-    metadata = server.get_metadata(stream_keys="acc_cnt")
+    metadata = server.metadata_stream.drain(stream_keys="acc_cnt")
     assert metadata == {}  # No new messages since stream starts at $
 
     # Test multiple streams
     test_date = "2025-06-02T16:25:15.089640"
-    client.add_metadata("update_date", test_date)
-    live = server.get_live_metadata()
+    client.metadata.add("update_date", test_date)
+    live = server.metadata_snapshot.get()
     assert "acc_cnt_ts" in live
     assert "update_date_ts" in live
     assert "update_date" in live
@@ -76,9 +90,9 @@ def test_metadata(server, client):
         "stream:update_date",
     }
 
-    # test typeerror in live_metadata
+    # test typeerror on malformed keys
     with pytest.raises(TypeError):
-        server.get_live_metadata(keys=[1])  # keys must be str or list of str
+        server.metadata_snapshot.get(keys=[1])
 
     # test reset
     server.reset()
@@ -95,11 +109,11 @@ def test_raw(server):
     compare_dicts(data, data_back)
 
 
-def test_get_metadata_ignores_vna_stream(obs_server, obs_client):
-    """get_metadata() with no args must skip stream:vna even when it's
+def test_metadata_stream_drain_ignores_vna_stream(obs_server, obs_client):
+    """MetadataStreamReader.drain() must skip stream:vna even when it's
     present on the same Redis.
 
-    Regression guard: historically ``get_metadata()`` defaulted to the
+    Regression guard: historically the streaming read defaulted to the
     full ``data_streams`` set, which includes ``stream:vna`` /
     ``stream:corr``. Those carry raw numpy payloads, not JSON, so the
     default path would raise on ``json.loads``. Metadata is now tracked
@@ -109,8 +123,8 @@ def test_get_metadata_ignores_vna_stream(obs_server, obs_client):
     """
     # Producer-side: push sensor metadata and a VNA measurement to the
     # same Redis that the consumer will query.
-    obs_client.add_metadata("acc_cnt", 7)
-    obs_client.add_metadata("temp", 25.5)
+    obs_client.metadata.add("acc_cnt", 7)
+    obs_client.metadata.add("temp", 25.5)
 
     switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
     vna = DummyVNA(switch_fn=switch.switch)
@@ -119,7 +133,7 @@ def test_get_metadata_ignores_vna_stream(obs_server, obs_client):
     header = dict(vna.header)
     header["freqs"] = header["freqs"].tolist()
     header["mode"] = "ant"
-    obs_client.add_vna_data(s11, header=header, metadata={"temp": 25.5})
+    obs_client.vna.add(s11, header=header, metadata={"temp": 25.5})
 
     # Both stream families are registered in data_streams...
     assert b"stream:vna" in obs_server.r.smembers("data_streams")
@@ -134,12 +148,165 @@ def test_get_metadata_ignores_vna_stream(obs_server, obs_client):
     obs_server._set_last_read_id("stream:acc_cnt", "0-0")
     obs_server._set_last_read_id("stream:temp", "0-0")
 
-    # Default get_metadata() must not touch stream:vna (would raise on
+    # Default drain() must not touch stream:vna (would raise on
     # json.loads of the numpy payload) and must return the metadata.
-    out = obs_server.get_metadata()
+    out = obs_server.metadata_stream.drain()
     assert set(out.keys()) == {"stream:acc_cnt", "stream:temp"}
     assert out["stream:acc_cnt"] == [7]
     assert out["stream:temp"] == [25.5]
+
+    # Explicit-keys path must also refuse non-metadata streams. If
+    # the explicit path resolved against ``data_streams`` it would
+    # find ``stream:vna`` and try to ``json.loads`` the numpy payload.
+    out_explicit = obs_server.metadata_stream.drain(["stream:vna"])
+    assert out_explicit == {}
+
+
+def test_metadata_writer_has_no_cross_bus_methods():
+    """Structural guard: the metadata writer surface must not expose any
+    method or attribute that could be used to write a corr or VNA payload.
+
+    This is the whole point of the writer/reader split — wrong-stream
+    writes should be unrepresentable at the type level, not runtime-
+    checked. If someone adds a method here in the future, this test
+    fails and forces the split to be revisited.
+    """
+    # The only public writer method is add().
+    public = {
+        name for name in vars(MetadataWriter) if not name.startswith("_")
+    }
+    assert public == {"add", "maxlen"}, (
+        f"MetadataWriter surface has grown: {public}"
+    )
+    # Negative guards — the old god-class methods must not reappear.
+    for forbidden in (
+        "add_corr_data",
+        "add_vna_data",
+        "send_status",
+        "upload_config",
+        "upload_corr_config",
+        "upload_corr_header",
+    ):
+        assert not hasattr(MetadataWriter, forbidden), (
+            f"MetadataWriter should not expose {forbidden!r}"
+        )
+
+
+def test_metadata_readers_have_no_cross_bus_methods():
+    """Structural guard: metadata readers only read metadata, nothing else."""
+    for cls, expected in (
+        (MetadataSnapshotReader, {"get"}),
+        (MetadataStreamReader, {"drain", "streams"}),
+    ):
+        public = {name for name in vars(cls) if not name.startswith("_")}
+        assert public == expected, (
+            f"{cls.__name__} surface has grown: {public}"
+        )
+        for forbidden in (
+            "read_corr_data",
+            "read_vna_data",
+            "read_status",
+            "get_corr_config",
+            "get_corr_header",
+        ):
+            assert not hasattr(cls, forbidden), (
+                f"{cls.__name__} should not expose {forbidden!r}"
+            )
+
+
+def test_metadata_writer_rejects_non_json_payload(server):
+    """Contract: the writer is the JSON-serialization boundary.
+
+    A payload that can't be JSON-encoded is a producer bug; the writer
+    must surface it as ValueError rather than silently write a broken
+    stream entry.
+    """
+
+    class Unserializable:
+        pass
+
+    with pytest.raises(ValueError):
+        server.metadata.add("broken", Unserializable())
+
+
+def test_metadata_writer_rejects_bad_keys(server):
+    """Contract: keys are strings, non-empty, no ':' (Redis separator)."""
+    with pytest.raises(TypeError):
+        server.metadata.add(123, "value")
+    with pytest.raises(ValueError):
+        server.metadata.add("", "value")
+    with pytest.raises(ValueError):
+        server.metadata.add("   ", "value")
+    with pytest.raises(ValueError):
+        server.metadata.add("a:b", "value")
+
+
+def test_bus_classes_have_no_cross_bus_methods():
+    """Structural guard for every writer/reader class across all buses.
+
+    Each class should expose only the surface for its own bus. The
+    forbidden list is deliberately broad — it catches the original
+    god-class methods (add_metadata, add_corr_data, read_corr_data,
+    …) reappearing on any of these smaller classes.
+    """
+    cross_bus_methods = (
+        "add_metadata",
+        "get_live_metadata",
+        "get_metadata",
+        "add_corr_data",
+        "read_corr_data",
+        "add_vna_data",
+        "read_vna_data",
+        "upload_corr_config",
+        "get_corr_config",
+        "upload_corr_header",
+        "get_corr_header",
+        "send_status",
+        "read_status",
+        "upload_config",
+        "get_config",
+        "client_heartbeat_set",
+        "client_heartbeat_check",
+    )
+    surfaces = {
+        StatusWriter: {"send", "maxlen"},
+        StatusReader: {"read", "stream"},
+        HeartbeatWriter: {"set"},
+        HeartbeatReader: {"check"},
+        ConfigStore: {"upload", "get"},
+        CorrWriter: {"add", "maxlen"},
+        CorrReader: {"read", "seek"},
+        CorrConfigStore: {
+            "upload_config",
+            "get_config",
+            "upload_header",
+            "get_header",
+        },
+        VnaWriter: {"add", "maxlen"},
+        VnaReader: {"read"},
+    }
+    # CorrConfigStore legitimately owns upload_config/get_config/
+    # upload_header/get_header — those are its surface, not cross-bus.
+    # Scope the forbidden check to each class's non-own methods.
+    for cls, expected in surfaces.items():
+        public = {name for name in vars(cls) if not name.startswith("_")}
+        assert public == expected, (
+            f"{cls.__name__} surface has grown: {public}"
+        )
+        for forbidden in cross_bus_methods:
+            if forbidden in expected:
+                continue  # the class legitimately owns this name
+            assert not hasattr(cls, forbidden), (
+                f"{cls.__name__} should not expose {forbidden!r}"
+            )
+
+
+def test_add_metadata_shim_emits_deprecation_warning(server):
+    """The picohost shim must be loud — it should disappear at the monorepo cutover."""
+    with pytest.warns(DeprecationWarning, match="redis.metadata.add"):
+        server.add_metadata("via_shim", 42)
+    # The shim still writes correctly in the meantime.
+    assert server.metadata_snapshot.get("via_shim") == 42
 
 
 def test_int32_redis_round_trip(obs_server, obs_client):
@@ -154,25 +321,23 @@ def test_int32_redis_round_trip(obs_server, obs_client):
     raw = {p: d[0].tobytes() for p, d in data.items()}
     dtype = ">i4"
     pairs = list(data.keys())
-    # Seed corr_sync_time so read_corr_data can retrieve it.
-    # Must be a dict with "sync_time_unix" — matches fpga.py's format.
-    obs_client.add_metadata(
-        "corr_sync_time", {"sync_time_unix": 1748732903.42}
-    )
     # In production, the FPGA is already running when the observer
     # starts reading — stream:corr exists and has at least one entry.
     # Seed the stream so read_corr_data doesn't bail on the
     # "no stream" guard, mirroring the production startup order.
-    obs_client.add_corr_data(raw, cnt=0, dtype=dtype)
+    # sync_time now rides on corr_header (tested separately in
+    # test_fpga.py:test_synchronize) — this test only exercises the
+    # raw corr payload round-trip.
+    obs_client.corr.add(raw, cnt=0, dtype=dtype)
     # Consumer blocks first (like EigObserver), producer writes after
     # (like EigsepFpga) — same pattern as test_status.
     with ThreadPoolExecutor(max_workers=1) as executor:
         read_future = executor.submit(
-            obs_server.read_corr_data, pairs=pairs, unpack=True
+            obs_server.corr_reader.read, pairs=pairs, unpack=True
         )
         time.sleep(0.1)  # let consumer block
-        obs_client.add_corr_data(raw, cnt=42, dtype=dtype)
-        acc_cnt, _, read_data = read_future.result(timeout=5.0)
+        obs_client.corr.add(raw, cnt=42, dtype=dtype)
+        acc_cnt, read_data = read_future.result(timeout=5.0)
     assert acc_cnt == 42
     for p in pairs:
         original = np.frombuffer(raw[p], dtype=dtype)
@@ -183,42 +348,97 @@ def test_int32_redis_round_trip(obs_server, obs_client):
         np.testing.assert_array_equal(read_back, original)
 
 
+def test_corr_reader_skips_producer_backlog(obs_server, obs_client):
+    """Tier-2 guard: when the producer has pushed to stream:corr before
+    the consumer ever reads, the consumer must skip that backlog. The
+    blocking read returns the *next* entry pushed, not the oldest
+    backlog entry.
+
+    Pins the "only pull data after observer is on" guarantee implemented
+    by ``Transport._streams_from_set`` falling back to
+    ``XINFO last-generated-id`` on cache miss.
+    """
+    data = generate_data(ntimes=1, reshape=False)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    pairs = list(data.keys())
+    # Seed a backlog; cnt=1 would be returned first if tier 2 regressed.
+    obs_client.corr.add(raw, cnt=1, dtype=">i4")
+    obs_client.corr.add(raw, cnt=2, dtype=">i4")
+    # Start the reader blocking first, then push. If tier 2 works the
+    # read blocks past the backlog and returns the post-start entry.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        fut = executor.submit(obs_server.corr_reader.read, pairs=pairs)
+        time.sleep(0.1)  # let reader block
+        obs_client.corr.add(raw, cnt=99, dtype=">i4")
+        acc_cnt, _ = fut.result(timeout=5.0)
+    assert acc_cnt == 99
+
+
+def test_vna_reader_skips_producer_backlog(obs_server, obs_client):
+    """Tier-2 guard for stream:vna — same rationale as the corr test."""
+    old = {"ant": np.array([1 + 2j], dtype=np.complex128)}
+    new = {"ant": np.array([9 + 9j], dtype=np.complex128)}
+    obs_client.vna.add(old, metadata={"marker": "old-1"})
+    obs_client.vna.add(old, metadata={"marker": "old-2"})
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        fut = executor.submit(obs_server.vna_reader.read)
+        time.sleep(0.1)  # let reader block
+        obs_client.vna.add(new, metadata={"marker": "new"})
+        _, _, metadata = fut.result(timeout=5.0)
+    assert metadata["marker"] == "new"
+
+
+def test_metadata_drain_skips_producer_backlog(server, client):
+    """Tier-2 guard for metadata streams: a consumer whose cache is
+    empty must see a producer-first backlog as "past" and return an
+    empty drain, not replay the backlog.
+
+    Narrower than the corr/vna tests because ``drain()`` is
+    non-blocking — it returns immediately rather than waiting for the
+    next entry. The guarantee under test is just "backlog skipped."
+    """
+    for i in range(5):
+        client.metadata.add("acc_cnt", i)
+    # Fresh reader (empty cache) must not drain the backlog.
+    assert server.metadata_stream.drain() == {}
+
+
 def test_is_alive(server, client):
     # Test heartbeat functionality with current API
     # initially, both should be empty
-    assert server.client_heartbeat_check() is False
+    assert server.heartbeat_reader.check() is False
     # set client alive (server checks client heartbeat)
-    client.client_heartbeat_set(ex=1, alive=True)
-    assert server.client_heartbeat_check() is True
+    client.heartbeat.set(ex=1, alive=True)
+    assert server.heartbeat_reader.check() is True
     time.sleep(1.1)  # wait for expiration
-    assert server.client_heartbeat_check() is False
+    assert server.heartbeat_reader.check() is False
     # turn on/off
-    client.client_heartbeat_set(ex=100, alive=True)
-    assert server.client_heartbeat_check() is True
-    client.client_heartbeat_set(ex=100, alive=False)  # turn off
-    assert server.client_heartbeat_check() is False
+    client.heartbeat.set(ex=100, alive=True)
+    assert server.heartbeat_reader.check() is True
+    client.heartbeat.set(ex=100, alive=False)  # turn off
+    assert server.heartbeat_reader.check() is False
     # test reset
-    client.client_heartbeat_set(ex=100, alive=True)
-    assert server.client_heartbeat_check() is True
+    client.heartbeat.set(ex=100, alive=True)
+    assert server.heartbeat_reader.check() is True
     server.reset()
-    assert server.client_heartbeat_check() is False
+    assert server.heartbeat_reader.check() is False
 
 
 def test_status(server, client):
     # initial state
-    assert client.status_stream == {"stream:status": "$"}
+    assert client.status_reader.stream == {"stream:status": "$"}
 
     # Test blocking reads using ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as executor:
         # Start reading in background thread (will block until message arrives)
-        read_future = executor.submit(server.read_status)
+        read_future = executor.submit(server.status_reader.read)
 
         # Give the read thread a moment to start
         time.sleep(0.1)
 
         # Send status message
         msg = "test"
-        client.send_status(status=msg)
+        client.status.send(msg)
 
         # Get the result from the read
         level, status = read_future.result(timeout=2.0)
@@ -228,23 +448,23 @@ def test_status(server, client):
     # Send many statuses and read them
     messages = [f"status {i}" for i in range(5)]
     for msg in messages:
-        client.send_status(status=msg)
+        client.status.send(msg)
 
     # Read all statuses
     for expected_msg in messages:
-        level, status = server.read_status()
+        level, status = server.status_reader.read()
         assert status == expected_msg
         assert level == 20
 
     # test specific statuses
-    client.send_status(status="VNA_COMPLETE")
-    level, status = server.read_status()
+    client.status.send("VNA_COMPLETE")
+    level, status = server.status_reader.read()
     assert status == "VNA_COMPLETE"
 
-    client.send_status(status="VNA_ERROR")
-    level, status = server.read_status()
+    client.status.send("VNA_ERROR")
+    level, status = server.status_reader.read()
     assert status == "VNA_ERROR"
 
-    client.send_status(status="VNA_TIMEOUT")
-    level, status = server.read_status()
+    client.status.send("VNA_TIMEOUT")
+    level, status = server.status_reader.read()
     assert status == "VNA_TIMEOUT"

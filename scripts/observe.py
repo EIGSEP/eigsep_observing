@@ -90,7 +90,7 @@ if args.use_panda:
     logger.info("Waiting for Panda config in Redis.")
     while True:
         try:
-            redis_panda.get_config()
+            redis_panda.config.get()
             break
         except ValueError:
             logger.info("Panda config not yet available, retrying...")

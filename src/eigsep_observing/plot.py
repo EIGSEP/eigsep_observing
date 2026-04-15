@@ -89,7 +89,7 @@ class LivePlotter:
         self.poll_interval = poll_interval
 
         # Get configuration from Redis
-        self.corr_cfg = self.redis.get_corr_config()
+        self.corr_cfg = self.redis.corr_config.get_config()
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
@@ -213,7 +213,7 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        data = self.redis.read_corr_data(pairs=self.pairs, timeout=0)[-1]
+        data = self.redis.corr_reader.read(pairs=self.pairs, timeout=0)[-1]
         data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot

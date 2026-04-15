@@ -23,10 +23,17 @@ ruff format --check .             # Check formatting (line length 79)
 
 ### Core classes (all use Redis for communication):
 
-- **EigsepRedis** (`eig_redis.py`) - Redis message bus wrapping `redis.Redis`. Manages streams: `stream:ctrl` (commands), `stream:status` (status updates), `stream:data:{sensor}` (sensor data). Large file (~1000 lines).
+- **EigsepRedis** (`eigsep_redis/eig_redis.py`) - Thin composition object over a shared `Transport`. Exposes per-bus writer/reader attributes, not a god-class of methods. Surfaces: `metadata` (writer), `metadata_snapshot` / `metadata_stream` (readers), `status` (writer), `status_reader`, `heartbeat` (writer), `heartbeat_reader`, `config` (store). Picohost and other external producers consume this; it lives in the shared `eigsep_redis` package so everyone sees the same wire format.
+- **EigsepObsRedis** (`eigsep_observing/eig_redis.py`) - Observer-side subclass. Adds `corr_config` (store — config + header), `corr` (writer), `corr_reader`, `vna` (writer), `vna_reader`. The observer-specific classes live in `corr.py` and `vna.py`.
 - **EigObserver** (`observer.py`) - Main orchestrator on the ground computer. Takes two Redis connections (`redis_snap` for SNAP correlator, `redis_panda` for LattePanda). Manages observation schedules, data collection, and file writing.
 - **PandaClient** (`client.py`) - Runs on the suspended LattePanda. Pulls sensor data, pushes to Redis, listens for control commands. Manages Pico devices (IMU, thermometers, peltier, lidar, RF switch) via `picohost` library.
-- **EigsepFpga** (`fpga.py`) - SNAP FPGA/correlator driver. Owns the register blocks (`blocks.py`), the `.fpg` bitstream (`data/`), and the `EigsepRedis`-backed metadata publication path. Was historically a subclass of `eigsep_corr.fpga.EigsepFpga`; the two were merged in-tree when `eigsep_corr` was archived.
+- **EigsepFpga** (`fpga.py`) - SNAP FPGA/correlator driver. Owns the register blocks (`blocks.py`), the `.fpg` bitstream (`data/`), and the corr-bus publication path (`redis.corr.add`, `redis.corr_config.upload_header`). Was historically a subclass of `eigsep_corr.fpga.EigsepFpga`; the two were merged in-tree when `eigsep_corr` was archived.
+
+### Per-bus class split (why `EigsepRedis` is not a god-class)
+
+Writer and reader classes are separated per bus so that **wrong-stream writes are structurally impossible**, not runtime-checked. `MetadataWriter` has no method that accepts a VNA payload; `CorrWriter` has no method that accepts a metadata payload; etc. Structural-impossibility guards in `tests/test_redis.py` enforce this at test time. Motivated by a real VNA→metadata leak bug caught in PR review (fixed in `b8cc1ed` / `ba42f1f`, then made structural in this refactor).
+
+`EigsepRedis.add_metadata` remains as a one-line shim with `DeprecationWarning`, narrowly for picohost (`pico-firmware/picohost/src/picohost/base.py:65` until the monorepo merge). In-tree code must use `redis.metadata.add(...)` directly.
 
 ### Testing architecture (`testing/` subpackage):
 
@@ -70,42 +77,57 @@ Two principles, in priority order:
 
 ## Metadata flow: streaming for corr, snapshot for VNA
 
-`EigsepRedis` exposes two metadata-fetching mechanisms with deliberately different
-semantics. They look inconsistent, but the inconsistency is intentional and not
-something to "fix" by unifying them.
+Two reader classes expose metadata with deliberately different semantics. They
+look inconsistent, but the inconsistency is intentional and not something to
+"fix" by unifying them.
 
-- **`get_metadata()` — streaming, used by corr.** Drains all sensor readings since
-  the last call from per-stream Redis streams (advances a position pointer). Used by
-  `EigObserver.record_corr_data` per integration. Each integration is a sub-second
-  window, and the corr loop averages all sensor readings within that window down to
-  one entry per spectrum (via `io.avg_metadata`). The streaming path matches the corr
-  cadence and gives cadence-correct averages. Because it advances a position pointer,
-  only one consumer per `EigsepRedis` instance can call it per stream.
+- **`MetadataStreamReader.drain()` — streaming, used by corr.** Drains all
+  sensor readings since the last call from per-stream Redis streams (advances a
+  position pointer). Used by `EigObserver.record_corr_data` per integration.
+  Each integration is a sub-second window, and the corr loop averages all sensor
+  readings within that window down to one entry per spectrum (via
+  `io.avg_metadata`). The streaming path matches the corr cadence and gives
+  cadence-correct averages. Because it advances a position pointer, only one
+  consumer per `Transport` can call it per stream.
 
-- **`get_live_metadata()` — snapshot, used by VNA.** Reads the latest values from
-  the Redis metadata hash (no position pointer, no draining). Used by
-  `PandaClient.execute_vna` when packaging a VNA measurement. A VNA reading is
-  point-in-time, taken at ~1/hour cadence; the right semantic is "what was the
-  latest sensor reading at the moment the VNA was triggered," not "average everything
-  since the last VNA an hour ago." The VNA file header includes
-  `metadata_snapshot_unix` so downstream can sanity-check the snapshot's recency.
+- **`MetadataSnapshotReader.get()` — snapshot, used by VNA.** Reads the latest
+  values from the Redis metadata hash (no position pointer, no draining). Used
+  by `PandaClient.execute_vna` when packaging a VNA measurement. A VNA reading
+  is point-in-time, taken at ~1/hour cadence; the right semantic is "what was
+  the latest sensor reading at the moment the VNA was triggered," not "average
+  everything since the last VNA an hour ago." The VNA file header includes
+  `metadata_snapshot_unix` so downstream can sanity-check the snapshot's
+  recency.
 
-**Do not unify these.** Using `get_metadata` for VNA would compete with the corr
-loop for stream position (consumer race) and would average over an irrelevantly long
-window. Using `get_live_metadata` for corr would lose the cadence-matched averaging
-and would mix in stale readings. The two paths reflect different physical semantics
-(integration window vs point-in-time) and run in different processes
-(`EigObserver` on the ground PC vs `PandaClient` on the panda).
+**Do not unify these.** Using the stream reader for VNA would compete with the
+corr loop for stream position (consumer race) and would average over an
+irrelevantly long window. Using the snapshot reader for corr would lose the
+cadence-matched averaging and would mix in stale readings. The two paths
+reflect different physical semantics (integration window vs point-in-time) and
+run in different processes (`EigObserver` on the ground PC vs `PandaClient` on
+the panda).
 
-**Known weakness:** `get_live_metadata` has no freshness check. A dead sensor
-silently returns its last reading. The `metadata_snapshot_unix` header field lets
-downstream detect this at file inspection time, but a runtime warning would require
-panda-side timestamping in `add_metadata` (no firmware change needed). Tracked
-informally; not yet implemented.
+**Known weakness:** the snapshot reader has no freshness check. A dead sensor
+silently returns its last reading. The `metadata_snapshot_unix` header field
+lets downstream detect this at file inspection time, but a runtime warning
+would require panda-side timestamping in `MetadataWriter.add` (no firmware
+change needed). Tracked informally; not yet implemented.
+
+## corr `sync_time` lives on the corr header, not metadata
+
+`sync_time` is a per-sync invariant (set once when the SNAP is synchronized),
+not a per-integration sensor reading. It rides on the corr header
+(`redis.corr_config.get_header()["sync_time"]`), published by
+`EigsepFpga.synchronize` and re-uploaded every ~100 integrations inside the
+observe loop. `EigObserver.record_corr_data` caches it from the header at
+file-start; a mid-file re-sync is an edge case that warrants a new file
+anyway. Historically `sync_time` was pushed through `add_metadata` and fetched
+inline by `read_corr_data` — that was the last cross-bus read inside a reader,
+removed in this refactor.
 
 ## Metadata averaging: per-type reduction policy
 
-When `EigObserver.record_corr_data` calls `get_metadata` it gets a list of raw
+When `EigObserver.record_corr_data` calls `redis.metadata_stream.drain` it gets a list of raw
 sensor dicts since the last call (one entry per producer push, ~5 per integration
 at typical pico cadence). Those get reduced to one entry per integration via
 `io.avg_metadata` → `_avg_sensor_values`. The reduction is **per-type**, derived

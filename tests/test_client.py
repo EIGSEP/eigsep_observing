@@ -44,7 +44,7 @@ def client(redis, dummy_cfg):
 
 def test_client(client):
     # client is initialized with redis commands
-    assert client.redis.client_heartbeat_check()  # check heartbeat
+    assert client.redis.heartbeat_reader.check()  # check heartbeat
     # sw_proxy is always created as a generic PicoProxy
     assert client.sw_proxy is not None
     assert isinstance(client.sw_proxy, PicoProxy)
@@ -61,7 +61,7 @@ def test_get_cfg(caplog, dummy_cfg):
     # should be no config in redis at start
     r = DummyEigsepObsRedis(port=6380)  # different port to avoid conflicts
     with pytest.raises(ValueError):
-        r.get_config()
+        r.config.get()
     client2 = DummyPandaClient(r, default_cfg={})
     client3 = None
     try:
@@ -74,7 +74,7 @@ def test_get_cfg(caplog, dummy_cfg):
         assert "upload_time" in cfg_in_redis
 
         # upload the dummy config to client2's redis
-        client2.redis.upload_config(dummy_cfg, from_file=False)
+        client2.redis.config.upload(dummy_cfg, from_file=False)
 
         # check that they're the same
         retrieved_cfg = client2._get_cfg()

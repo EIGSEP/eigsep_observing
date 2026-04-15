@@ -53,14 +53,14 @@ while True:
     # Skip to latest entry in the stream
     last_id = redis.r.xrevrange("stream:corr", count=1)
     if last_id:
-        redis._set_last_read_id("stream:corr", last_id[0][0])
+        redis.corr_reader.seek(last_id[0][0])
 
     print(f"  Capturing {args.nsamples} integrations...")
     pwr = {p: [] for p in pairs}
     last_cnt = None
     collected = 0
     while collected < args.nsamples:
-        acc_cnt, _, data = redis.read_corr_data(pairs=pairs, timeout=10)
+        acc_cnt, data = redis.corr_reader.read(pairs=pairs, timeout=10)
         if acc_cnt == last_cnt:
             continue
         last_cnt = acc_cnt

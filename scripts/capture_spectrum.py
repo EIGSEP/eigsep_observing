@@ -56,7 +56,7 @@ pairs = args.pairs or all_autos + all_cross
 all_data = {}
 logger.info(f"Capturing {args.num_spec} spectra for pairs: {pairs}")
 for i in range(args.num_spec):
-    data = redis.read_corr_data(pairs=pairs, timeout=10)[-1]
+    data = redis.corr_reader.read(pairs=pairs, timeout=10)[-1]
     data = reshape_data(data, avg_even_odd=True)
     for k, v in data.items():
         if k not in all_data:

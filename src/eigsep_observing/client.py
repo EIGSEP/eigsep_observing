@@ -47,7 +47,7 @@ class PandaClient:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
             )
-            self.redis.upload_config(default_cfg, from_file=False)
+            self.redis.config.upload(default_cfg, from_file=False)
             cfg = self._get_cfg()
         self.cfg = json.loads(json.dumps(cfg))
 
@@ -69,7 +69,7 @@ class PandaClient:
 
         """
         try:
-            cfg = self.redis.get_config()
+            cfg = self.redis.config.get()
         except ValueError:
             return None  # no config in Redis
         upload_time = cfg["upload_time"]
@@ -124,9 +124,9 @@ class PandaClient:
 
         """
         while not self.stop_client.is_set():
-            self.redis.client_heartbeat_set(ex=ex, alive=True)
+            self.redis.heartbeat.set(ex=ex, alive=True)
             self.stop_client.wait(1.0)
-        self.redis.client_heartbeat_set(alive=False)
+        self.redis.heartbeat.set(alive=False)
 
     def init_VNA(self):
         """
@@ -310,8 +310,8 @@ class PandaClient:
         header = self.vna.header
         header["mode"] = mode
         header["metadata_snapshot_unix"] = time.time()
-        metadata = self.redis.get_live_metadata()
-        self.redis.add_vna_data(s11, header=header, metadata=metadata)
+        metadata = self.redis.metadata_snapshot.get()
+        self.redis.vna.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
 
     def vna_loop(self):

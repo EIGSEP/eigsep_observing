@@ -14,26 +14,29 @@ from eigsep_observing.testing.utils import generate_data
 
 @pytest.fixture
 def redis_snap():
-    """Mock Redis connection for SNAP correlator."""
+    """DummyEigsepObsRedis seeded with a correlator config."""
     redis = DummyEigsepObsRedis()
-    # Mock correlator config
-    redis.get_corr_config = Mock(
-        return_value={
+    redis.corr_config.upload_config(
+        {
             "integration_time": 1.0,
             "pairs": ["0", "1", "2", "3", "02", "13"],
-        }
+        },
+        from_file=False,
     )
     return redis
 
 
 @pytest.fixture
 def redis_panda():
-    """Mock Redis connection for LattePanda."""
-    redis = DummyEigsepObsRedis()
+    """DummyEigsepObsRedis seeded with a panda config and a live heartbeat.
 
-    # Mock config
-    redis.get_config = Mock(
-        return_value={
+    The real ``ConfigStore`` / ``HeartbeatReader`` / ``StatusReader``
+    run against fakeredis via ``DummyTransport``; per-test behavior is
+    applied with ``patch.object`` in the tests that need it.
+    """
+    redis = DummyEigsepObsRedis()
+    redis.config.upload(
+        {
             "switch_schedule": {"sky": 0.05, "load": 0.02, "noise": 0.02},
             "vna_settings": {
                 "ip": "127.0.0.1",
@@ -43,13 +46,10 @@ def redis_panda():
             },
             "vna_save_dir": "/tmp/test_vna",
             "vna_interval": 0.5,
-        }
+        },
+        from_file=False,
     )
-    # Mock client heartbeat check
-    redis.client_heartbeat_check = Mock(return_value=True)
-    redis.read_status = Mock(
-        return_value=(None, None)
-    )  # Default return to avoid thread warnings
+    redis.heartbeat.set(alive=True)
     return redis
 
 
@@ -129,7 +129,7 @@ def test_panda_connected_property(
     assert observer_none.panda_connected is False
 
     # Test when heartbeat check fails
-    redis_panda.client_heartbeat_check.return_value = False
+    redis_panda.heartbeat.set(alive=False)
     assert observer_panda_only.panda_connected is False
 
     # clean up
@@ -142,15 +142,19 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     """Test record_corr_data method."""
     observer = observer_snap_only
 
+    # Upload a header with sync_time so record_corr_data can proceed
+    sync_time = 1713200000.0
+    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+
     # Mock file instance
     mock_file = Mock()
+    mock_file.counter = 0
     mock_file.__len__ = Mock(return_value=0)
     mock_file.add_data = Mock(return_value=None)  # No file written yet
     mock_file_class.return_value = mock_file
 
     # Mock correlator data
     mock_data = generate_data(ntimes=1)
-    redis_snap.read_corr_data = Mock(return_value=(123, 0, mock_data))
 
     # Start recording in a thread and stop it quickly
     stop_event = observer.stop_event
@@ -162,7 +166,10 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     stop_thread = threading.Thread(target=stop_after_delay)
     stop_thread.start()
 
-    observer.record_corr_data("/tmp/test", timeout=5)
+    with patch.object(
+        redis_snap.corr_reader, "read", return_value=(123, mock_data)
+    ) as mock_read:
+        observer.record_corr_data("/tmp/test", timeout=5)
     stop_thread.join()
 
     # Verify File was created with correct parameters
@@ -174,8 +181,10 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     )
 
     # Verify data was read and added
-    redis_snap.read_corr_data.assert_called()
-    mock_file.add_data.assert_called_with(123, 0, mock_data, metadata=None)
+    mock_read.assert_called()
+    mock_file.add_data.assert_called_with(
+        123, sync_time, mock_data, metadata=None
+    )
 
 
 def test_record_corr_data_no_snap():
@@ -189,8 +198,10 @@ def test_status_logger(observer_panda_only, redis_panda, caplog):
     """Test status_logger method.
 
     The observer's status_logger thread is already running (started in
-    __init__). Feed it messages via the mock, then signal the stop event
-    once all messages are consumed and join the thread.
+    __init__) and calling the real ``StatusReader.read`` against an
+    empty fakeredis stream. Scope a ``patch.object`` to this test to
+    feed it a sequence of messages, then signal the stop event once
+    all messages are consumed and join the thread.
     """
     caplog.set_level(logging.INFO)
 
@@ -208,10 +219,10 @@ def test_status_logger(observer_panda_only, redis_panda, caplog):
         observer_panda_only.stop_event.set()
         return (None, None)
 
-    redis_panda.read_status.side_effect = read_status_effect
-
-    # Wait for the status_logger thread to finish processing
-    observer_panda_only.status_thread.join(timeout=2)
+    with patch.object(
+        redis_panda.status_reader, "read", side_effect=read_status_effect
+    ):
+        observer_panda_only.status_thread.join(timeout=2)
 
     assert "Test status 1" in caplog.text
     assert "Test status 2" in caplog.text
@@ -256,8 +267,8 @@ def test_record_vna_data(
     s11, header, metadata = _make_vna_payload(dummy_vna)
 
     # Push data into the Redis stream and reset read position so
-    # read_vna_data picks it up on the first call.
-    redis_panda.add_vna_data(s11, header=header, metadata=metadata)
+    # the VNA reader picks it up on the first call.
+    redis_panda.vna.add(s11, header=header, metadata=metadata)
     redis_panda._set_last_read_id("stream:vna", "0-0")
 
     def stop_after_read():
@@ -283,10 +294,10 @@ def test_record_vna_data_timeout(observer_panda_only, redis_panda):
     """Test record_vna_data retries on timeout (no data in stream)."""
     observer = observer_panda_only
 
-    # No data pushed — read_vna_data returns (None, None, None) because
+    # No data pushed — vna_reader.read returns (None, None, None) because
     # the stream doesn't exist yet. After two None responses, stop.
     call_count = [0]
-    real_read = redis_panda.read_vna_data
+    real_read = redis_panda.vna_reader.read
 
     def counting_read(timeout=0):
         call_count[0] += 1
@@ -294,9 +305,10 @@ def test_record_vna_data_timeout(observer_panda_only, redis_panda):
             observer.stop_event.set()
         return real_read(timeout=timeout)
 
-    redis_panda.read_vna_data = counting_read
-
-    observer.record_vna_data("/tmp/test_vna", timeout=1)
+    with patch.object(
+        redis_panda.vna_reader, "read", side_effect=counting_read
+    ):
+        observer.record_vna_data("/tmp/test_vna", timeout=1)
 
     assert call_count[0] >= 2
 
@@ -313,10 +325,6 @@ def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
             return False  # disconnected
         return True  # reconnected
 
-    redis_panda.client_heartbeat_check = Mock(
-        side_effect=heartbeat_side_effect
-    )
-
     def stop_after_delay():
         time.sleep(0.3)
         observer.stop_event.set()
@@ -324,11 +332,16 @@ def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
     stop_thread = threading.Thread(target=stop_after_delay)
     stop_thread.start()
 
-    observer.record_vna_data("/tmp/test_vna", timeout=1)
+    with patch.object(
+        redis_panda.heartbeat_reader,
+        "check",
+        side_effect=heartbeat_side_effect,
+    ) as mock_check:
+        observer.record_vna_data("/tmp/test_vna", timeout=1)
     stop_thread.join()
 
     # Verify heartbeat was checked multiple times
-    assert redis_panda.client_heartbeat_check.call_count >= 2
+    assert mock_check.call_count >= 2
 
 
 def test_record_vna_data_stop_event(observer_panda_only, redis_panda):
@@ -336,7 +349,7 @@ def test_record_vna_data_stop_event(observer_panda_only, redis_panda):
     observer = observer_panda_only
 
     # Panda not connected — will enter the initial wait loop
-    redis_panda.client_heartbeat_check = Mock(return_value=False)
+    redis_panda.heartbeat.set(alive=False)
 
     def stop_after_delay():
         time.sleep(0.1)
