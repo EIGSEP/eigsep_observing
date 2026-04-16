@@ -347,24 +347,25 @@ class TestEigsepFpga:
         assert payload == {"sync_time": 42, "nchan": 1024}
 
     def test_initialize_publishes_header_at_boundary(self, fpga_instance):
-        """initialize() itself publishes once at the end, independent of
-        whichever sub-mutator (synchronize / set_pam_atten / ...) also
-        publishes. Stubbing every sub-mutator isolates this guarantee."""
-        with (
-            patch.object(fpga_instance, "initialize_adc"),
-            patch.object(fpga_instance, "initialize_fpga"),
-            patch.object(fpga_instance, "set_input"),
-            patch.object(fpga_instance, "synchronize"),
-            patch.object(
-                fpga_instance.redis.corr_config,
-                "upload_header",
-                wraps=fpga_instance.redis.corr_config.upload_header,
-            ) as spy,
-        ):
+        """initialize()'s trailing line publishes the header after all
+        sub-mutators have run, independently of which of them also
+        published. Called with initialize_adc=False / initialize_fpga=
+        False / sync=True the only other publish is synchronize(), so
+        the boundary publish is observable as the second of exactly two
+        calls (redundant but harmless, freshest-wins). A fuller
+        initialize() call additionally goes through set_pam_atten (once
+        per configured antenna) and set_pol_delay, each of which also
+        publishes — that shape is covered by the dedicated sub-mutator
+        tests below, not this one."""
+        with patch.object(
+            fpga_instance.redis.corr_config,
+            "upload_header",
+            wraps=fpga_instance.redis.corr_config.upload_header,
+        ) as spy:
             fpga_instance.initialize(
-                initialize_adc=True, initialize_fpga=True, sync=True
+                initialize_adc=False, initialize_fpga=False, sync=True
             )
-        spy.assert_called_once()
+        assert spy.call_count == 2
 
     def test_set_pam_atten_publishes_header(self, fpga_instance):
         """set_pam_atten mutates header-relevant state (rf_chain atten),
