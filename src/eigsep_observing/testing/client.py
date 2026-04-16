@@ -94,8 +94,9 @@ class DummyPandaClient(PandaClient):
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
         self.vna.setup(**kwargs)
 
-    def stop(self):
-        """Stop the embedded PicoManager and all dummy devices."""
+    def stop(self, timeout=5.0):
+        """Stop client loops, then the embedded PicoManager."""
+        super().stop(timeout=timeout)
         if hasattr(self, "_manager") and self._manager:
             self._manager.stop()
             self._manager = None
