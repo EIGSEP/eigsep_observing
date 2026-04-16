@@ -91,6 +91,8 @@ else:
 if args.reinit:
     # Fresh observing block: full init + sync.
     fpga.initialize(initialize_adc=True, initialize_fpga=True, sync=True)
+    # Validate cfg against freshly-initialized hardware and publish.
+    fpga.upload_config(validate=True)
 else:
     # Attach path: SNAP is already running; recover sync_time from the
     # header so CorrWriter.add doesn't drop every integration.
@@ -100,9 +102,15 @@ else:
             "No valid sync_time on corr header; refusing to attach. "
             "Run with --reinit to start a fresh observing block."
         )
-
-# validate config and upload to redis
-fpga.upload_config(validate=True)
+    # validate_config against hardware is vacuous on attach (the
+    # header echoes cfg for blocks this process didn't initialize).
+    # Use Redis as source of truth: a cfg diff means the yaml was
+    # edited without a matching reinit — refuse rather than silently
+    # push the edited cfg to Redis.
+    try:
+        fpga.assert_config_matches_redis()
+    except RuntimeError as e:
+        parser.error(str(e))
 
 # start observing
 logger.info("Starting observation.")
