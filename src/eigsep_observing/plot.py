@@ -89,7 +89,7 @@ class LivePlotter:
         self.poll_interval = poll_interval
 
         # Get configuration from Redis
-        self.corr_cfg = self.redis.corr_config.get_config()
+        self.corr_cfg = self.redis.corr_config.get()
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 

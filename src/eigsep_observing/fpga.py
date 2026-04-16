@@ -373,7 +373,7 @@ class EigsepFpga:
                 self.logger.error(f"Configuration validation failed: {e}")
                 raise RuntimeError("Configuration validation failed") from e
         self.logger.debug("Uploading configuration to Redis.")
-        self.redis.corr_config.upload_config(self.cfg, from_file=False)
+        self.redis.corr_config.upload(self.cfg, from_file=False)
 
     def initialize(
         self,

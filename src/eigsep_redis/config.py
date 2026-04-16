@@ -18,7 +18,7 @@ class ConfigStore:
     def __init__(self, transport):
         self.transport = transport
 
-    def upload(self, config, from_file=True):
+    def upload(self, config, from_file=False):
         """
         Upload the panda configuration to Redis.
 

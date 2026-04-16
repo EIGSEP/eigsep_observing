@@ -280,8 +280,8 @@ def test_bus_classes_have_no_cross_bus_methods():
         CorrWriter: {"add", "maxlen"},
         CorrReader: {"read", "seek"},
         CorrConfigStore: {
-            "upload_config",
-            "get_config",
+            "upload",
+            "get",
             "upload_header",
             "get_header",
         },

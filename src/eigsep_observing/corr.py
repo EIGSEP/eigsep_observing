@@ -54,7 +54,7 @@ class CorrConfigStore:
     def __init__(self, transport):
         self.transport = transport
 
-    def upload_config(self, config, from_file=False):
+    def upload(self, config, from_file=False):
         """
         Upload the SNAP configuration.
 
@@ -62,13 +62,17 @@ class CorrConfigStore:
         ----------
         config : str or dict
             Path to a YAML file if ``from_file`` is True, else a dict.
+            When loading from a file, ``integration_time`` is computed
+            and injected via :func:`utils.load_config` — the corr
+            config contract requires it, which is why this path differs
+            from :class:`ConfigStore.upload`.
         from_file : bool
         """
         if from_file:
             config = load_config(config)
         self.transport._upload_dict(config, CORR_CONFIG_KEY)
 
-    def get_config(self):
+    def get(self):
         """
         Return the SNAP configuration.
 

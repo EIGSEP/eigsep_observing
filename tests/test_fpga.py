@@ -99,8 +99,8 @@ class TestEigsepFpga:
 
         with patch.object(
             fpga_instance.redis.corr_config,
-            "upload_config",
-            wraps=fpga_instance.redis.corr_config.upload_config,
+            "upload",
+            wraps=fpga_instance.redis.corr_config.upload,
         ) as spy:
             fpga_instance.upload_config(validate=True)
 
@@ -119,8 +119,8 @@ class TestEigsepFpga:
             ) as validate_spy,
             patch.object(
                 fpga_instance.redis.corr_config,
-                "upload_config",
-                wraps=fpga_instance.redis.corr_config.upload_config,
+                "upload",
+                wraps=fpga_instance.redis.corr_config.upload,
             ) as upload_spy,
         ):
             fpga_instance.upload_config(validate=False)
@@ -140,8 +140,8 @@ class TestEigsepFpga:
             ),
             patch.object(
                 fpga_instance.redis.corr_config,
-                "upload_config",
-                wraps=fpga_instance.redis.corr_config.upload_config,
+                "upload",
+                wraps=fpga_instance.redis.corr_config.upload,
             ) as upload_spy,
         ):
             with pytest.raises(
