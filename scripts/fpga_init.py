@@ -12,7 +12,13 @@ from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 from eigsep_observing.utils import get_config_path, load_config  # noqa: E402
 
 parser = argparse.ArgumentParser(
-    description="Snap observing with Eigsep FPGA",
+    description=(
+        "SNAP observing with Eigsep FPGA. "
+        "With no flags, attach to a SNAP that is already running and "
+        "synced (sync_time is rehydrated from the corr header). "
+        "Use --reinit for a fresh observing block (ADC + FPGA regs + "
+        "sync); add -p/-P to also (re)program the bitstream."
+    ),
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument(
@@ -20,35 +26,24 @@ parser.add_argument(
     dest="program",
     action="store_true",
     default=False,
-    help="Program Eigsep correlator.",
+    help="Program Eigsep correlator (requires --reinit).",
 )
 parser.add_argument(
     "-P",
     dest="force_program",
     action="store_true",
     default=False,
-    help="Force program Eigsep correlator.",
+    help="Force program Eigsep correlator (requires --reinit).",
 )
 parser.add_argument(
-    "-a",
-    dest="initialize_adc",
+    "--reinit",
+    dest="reinit",
     action="store_true",
     default=False,
-    help="Initialize ADCs.",
-)
-parser.add_argument(
-    "-f",
-    dest="initialize_fpga",
-    action="store_true",
-    default=False,
-    help="Initialize Eigsep correlator.",
-)
-parser.add_argument(
-    "-s",
-    dest="sync",
-    action="store_true",
-    default=False,
-    help="Sync Eigsep correlator.",
+    help=(
+        "Full re-init: ADC + FPGA registers + sync. Starts a fresh "
+        "observing block and invalidates any prior sync_time."
+    ),
 )
 parser.add_argument(
     "--config_file",
@@ -71,6 +66,13 @@ parser.add_argument(
     help="Drop into an IPython shell with live access to the fpga object.",
 )
 args = parser.parse_args()
+
+if (args.program or args.force_program) and not args.reinit:
+    parser.error(
+        "-p/-P requires --reinit: a fresh bitstream leaves all FPGA "
+        "registers at zero and needs a full init + sync."
+    )
+
 cfg = load_config(args.config_file)
 
 if args.force_program:
@@ -86,12 +88,18 @@ else:
     logger.info(f"Connecting to Eigsep correlator at {snap_ip}.")
     fpga = EigsepFpga(cfg=cfg, program=program)
 
-# initialize SNAP
-fpga.initialize(
-    initialize_adc=args.initialize_adc,
-    initialize_fpga=args.initialize_fpga,
-    sync=args.sync,
-)
+if args.reinit:
+    # Fresh observing block: full init + sync.
+    fpga.initialize(initialize_adc=True, initialize_fpga=True, sync=True)
+else:
+    # Attach path: SNAP is already running; recover sync_time from the
+    # header so CorrWriter.add doesn't drop every integration.
+    logger.info("Attaching to running SNAP (no --reinit).")
+    if not fpga.rehydrate_sync_from_header():
+        parser.error(
+            "No valid sync_time on corr header; refusing to attach. "
+            "Run with --reinit to start a fresh observing block."
+        )
 
 # validate config and upload to redis
 fpga.upload_config(validate=True)
