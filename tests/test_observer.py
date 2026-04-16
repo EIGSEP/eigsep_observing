@@ -464,6 +464,50 @@ def test_record_corr_data_read_timeout_then_success_resets_deadline(
     assert mock_file.add_data.call_count >= 1
 
 
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_panda_connected_drains_metadata(
+    mock_file_class, observer_both, redis_snap, redis_panda
+):
+    """When the panda is connected, the metadata stream is drained and
+    forwarded to ``file.add_data``; when not, ``metadata=None`` is passed
+    (covered by ``test_record_corr_data``). This exercises the only
+    success-path branch that touches cross-class logic.
+    """
+    observer = observer_both
+    sync_time = 1713200000.0
+    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    # Push one sensor reading onto the panda metadata stream via the
+    # real MetadataWriter (runs against fakeredis in DummyEigsepObsRedis).
+    sample = {"temp_c": 23.5, "status": "update"}
+    redis_panda.metadata.add("sensor_a", sample)
+    # Rewind last-read-id so drain() picks up the entry we just pushed
+    # (xread skips entries at/before the last-generated-id by default).
+    redis_panda._set_last_read_id("stream:sensor_a", "0-0")
+
+    def read_side_effect(*a, **kw):
+        observer.stop_event.set()
+        return (123, mock_data)
+
+    with patch.object(
+        redis_snap.corr_reader, "read", side_effect=read_side_effect
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    # add_data received the drained metadata, keyed by the stream name
+    # MetadataWriter.add uses (``stream:<key>``).
+    mock_file.add_data.assert_called_once()
+    call_kwargs = mock_file.add_data.call_args.kwargs
+    assert call_kwargs["metadata"] == {"stream:sensor_a": [sample]}
+
+
 def test_record_corr_data_no_snap():
     """Test record_corr_data without snap connection raises AttributeError."""
     observer = EigObserver()
