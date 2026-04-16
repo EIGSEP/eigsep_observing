@@ -104,15 +104,8 @@ else:
 
 thds = {}
 thds["status"] = observer.status_thread
-# Corr data is sacred — every other data product (VNA, switch
-# schedule, sensors) is supporting context for the corr stream. If
-# the corr thread dies for any reason (bounded-wait watchdog raising
-# RuntimeError, TimeoutError from CorrReader.read after SNAP dies
-# mid-run, any unanticipated failure), the rest of the system should
-# stop too: collecting hours of VNA files with no corr data to pair
-# them against is worse than exiting loudly. threading.Thread swallows
-# target exceptions by default, so wrap the target to convert any
-# Exception into stop_event + non-zero exit.
+
+# crash observing if the corr thread dies for any reason
 corr_crashed = [False]
 
 
