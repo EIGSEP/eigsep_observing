@@ -7,6 +7,8 @@ import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing import EigsepFpga
+from eigsep_observing import corr as corr_mod
+from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing import DummyEigsepFpga, utils
 
 
@@ -411,8 +413,11 @@ class TestEigsepFpga:
 
         fpga_instance.upload_config.assert_called_once_with(validate=True)
         assert mock_add.call_count == 2
-        mock_add.assert_any_call(d1, 1, dtype=expected_dtype)
-        mock_add.assert_any_call(d2, 2, dtype=expected_dtype)
+        # Not synchronized in this test → sync_time=0; the gate only
+        # fires inside the real CorrWriter.add (which is mocked out
+        # here), so the call is still made with sync_time=0.
+        mock_add.assert_any_call(d1, 1, 0, dtype=expected_dtype)
+        mock_add.assert_any_call(d2, 2, 0, dtype=expected_dtype)
 
     def test_observe_default_pairs(self, fpga_instance, caplog):
         """observe() with no pairs arg defaults to self.pairs."""
@@ -441,7 +446,7 @@ class TestEigsepFpga:
             in caplog.text
         )
         # Data still drained normally
-        mock_add.assert_called_once_with(d1, 1, dtype=expected_dtype)
+        mock_add.assert_called_once_with(d1, 1, 0, dtype=expected_dtype)
 
     def test_observe_timeout_immediate(self, fpga_instance, caplog):
         """
@@ -500,5 +505,50 @@ class TestEigsepFpga:
         assert mock_add.call_count == 5
         # Order matters — assert via call_args_list, not assert_any_call.
         for i, call in enumerate(mock_add.call_args_list):
-            assert call.args == ({"0": [i]}, 10 + i)
+            assert call.args == ({"0": [i]}, 10 + i, 0)
             assert call.kwargs == {"dtype": expected_dtype}
+
+    def test_observe_passes_sync_time_when_synced(self, fpga_instance):
+        """After synchronize(), observe() passes the real sync_time to
+        the writer so downstream can derive valid timestamps.
+        """
+        expected_dtype = fpga_instance.cfg["dtype"]
+
+        with patch(
+            "eigsep_observing.fpga.time.time", return_value=1713200000.0
+        ):
+            fpga_instance.synchronize(delay=5)
+
+        d1 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        items = [{"data": d1, "cnt": 1}, None]
+        with (
+            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, items),
+        ):
+            fpga_instance.observe(pairs=["0"], timeout=10)
+
+        mock_add.assert_called_once_with(
+            d1, 1, 1713200000.0, dtype=expected_dtype
+        )
+
+    def test_observe_skips_corr_stream_when_unsynced(self, fpga_instance):
+        """End-to-end with the real CorrWriter: unsynced SNAP → stream
+        stays empty. Structural guarantee that pre-sync integrations
+        cannot be consumed downstream.
+        """
+        corr_mod._last_unsynced_log[0] = 0.0
+        assert fpga_instance.is_synchronized is False
+
+        d1 = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        items = [{"data": d1, "cnt": 1}, {"data": d1, "cnt": 2}, None]
+        with _patch_observe_thread(fpga_instance, items):
+            fpga_instance.observe(pairs=["0"], timeout=10)
+
+        # Real CorrWriter.add with sync_time=0 → dropped; nothing on
+        # the stream.
+        r = fpga_instance.redis.transport.r
+        assert r.xlen(CORR_STREAM) == 0

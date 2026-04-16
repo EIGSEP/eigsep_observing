@@ -845,4 +845,5 @@ class EigsepFpga:
                     continue
             data = d["data"]
             cnt = d["cnt"]
-            self.redis.corr.add(data, cnt, dtype=self.cfg["dtype"])
+            sync_time = self.sync_time if self.is_synchronized else 0
+            self.redis.corr.add(data, cnt, sync_time, dtype=self.cfg["dtype"])

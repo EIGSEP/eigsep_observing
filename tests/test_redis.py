@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import logging
 import numpy as np
 import pytest
 import time
@@ -7,7 +8,9 @@ from concurrent.futures import ThreadPoolExecutor
 from cmt_vna.testing import DummyVNA
 from picohost.testing import DummyPicoRFSwitch
 
+from eigsep_observing import corr as corr_mod
 from eigsep_observing.corr import CorrConfigStore, CorrReader, CorrWriter
+from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing.utils import compare_dicts, generate_data
 from eigsep_observing.testing import DummyEigsepObsRedis
 from eigsep_observing.vna import VnaReader, VnaWriter
@@ -328,7 +331,7 @@ def test_int32_redis_round_trip(obs_server, obs_client):
     # sync_time now rides on corr_header (tested separately in
     # test_fpga.py:test_synchronize) — this test only exercises the
     # raw corr payload round-trip.
-    obs_client.corr.add(raw, cnt=0, dtype=dtype)
+    obs_client.corr.add(raw, cnt=0, sync_time=1713200000.0, dtype=dtype)
     # Consumer blocks first (like EigObserver), producer writes after
     # (like EigsepFpga) — same pattern as test_status.
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -336,7 +339,7 @@ def test_int32_redis_round_trip(obs_server, obs_client):
             obs_server.corr_reader.read, pairs=pairs, unpack=True
         )
         time.sleep(0.1)  # let consumer block
-        obs_client.corr.add(raw, cnt=42, dtype=dtype)
+        obs_client.corr.add(raw, cnt=42, sync_time=1713200000.0, dtype=dtype)
         acc_cnt, read_data = read_future.result(timeout=5.0)
     assert acc_cnt == 42
     for p in pairs:
@@ -362,16 +365,58 @@ def test_corr_reader_skips_producer_backlog(obs_server, obs_client):
     raw = {p: d[0].tobytes() for p, d in data.items()}
     pairs = list(data.keys())
     # Seed a backlog; cnt=1 would be returned first if tier 2 regressed.
-    obs_client.corr.add(raw, cnt=1, dtype=">i4")
-    obs_client.corr.add(raw, cnt=2, dtype=">i4")
+    obs_client.corr.add(raw, cnt=1, sync_time=1713200000.0, dtype=">i4")
+    obs_client.corr.add(raw, cnt=2, sync_time=1713200000.0, dtype=">i4")
     # Start the reader blocking first, then push. If tier 2 works the
     # read blocks past the backlog and returns the post-start entry.
     with ThreadPoolExecutor(max_workers=1) as executor:
         fut = executor.submit(obs_server.corr_reader.read, pairs=pairs)
         time.sleep(0.1)  # let reader block
-        obs_client.corr.add(raw, cnt=99, dtype=">i4")
+        obs_client.corr.add(raw, cnt=99, sync_time=1713200000.0, dtype=">i4")
         acc_cnt, _ = fut.result(timeout=5.0)
     assert acc_cnt == 99
+
+
+def test_corr_writer_drops_unsynced_zero(obs_client, caplog):
+    """sync_time=0 means SNAP not synced; the integration must be
+    dropped at the writer so downstream never sees untimestamped data.
+    """
+    corr_mod._last_unsynced_log[0] = 0.0  # reset throttle
+    data = generate_data(ntimes=1, reshape=False)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.corr"):
+        obs_client.corr.add(raw, cnt=5, sync_time=0, dtype=">i4")
+    assert obs_client.transport.r.xlen(CORR_STREAM) == 0
+    assert any("SNAP not synchronized" in r.message for r in caplog.records)
+
+
+def test_corr_writer_drops_unsynced_none(obs_client, caplog):
+    """sync_time=None (missing key on the caller side) is treated the
+    same as 0 — drop the integration."""
+    corr_mod._last_unsynced_log[0] = 0.0
+    data = generate_data(ntimes=1, reshape=False)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.corr"):
+        obs_client.corr.add(raw, cnt=5, sync_time=None, dtype=">i4")
+    assert obs_client.transport.r.xlen(CORR_STREAM) == 0
+    assert any("SNAP not synchronized" in r.message for r in caplog.records)
+
+
+def test_corr_writer_unsynced_log_throttled(obs_client, caplog):
+    """At ~4Hz corr cadence, a persistent pre-sync state must not
+    drown the log file — the throttle collapses to one ERROR per
+    window.
+    """
+    corr_mod._last_unsynced_log[0] = 0.0
+    data = generate_data(ntimes=1, reshape=False)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.corr"):
+        for _ in range(10):
+            obs_client.corr.add(raw, cnt=5, sync_time=0, dtype=">i4")
+    records = [
+        r for r in caplog.records if "SNAP not synchronized" in r.message
+    ]
+    assert len(records) == 1
 
 
 def test_vna_reader_skips_producer_backlog(obs_server, obs_client):
