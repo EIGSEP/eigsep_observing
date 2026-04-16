@@ -611,8 +611,10 @@ def test_record_vna_data(
     assert call_args[1]["save_dir"] == "/tmp/test_vna"
 
 
-def test_record_vna_data_timeout(observer_panda_only, redis_panda):
-    """Test record_vna_data retries on timeout (no data in stream)."""
+def test_record_vna_data_stream_absent(observer_panda_only, redis_panda):
+    """When no VNA data has ever been published, ``vna_reader.read``
+    returns ``(None, None, None)`` and the loop retries after a wait.
+    """
     observer = observer_panda_only
 
     # No data pushed — vna_reader.read returns (None, None, None) because
@@ -628,6 +630,29 @@ def test_record_vna_data_timeout(observer_panda_only, redis_panda):
 
     with patch.object(
         redis_panda.vna_reader, "read", side_effect=counting_read
+    ):
+        observer.record_vna_data("/tmp/test_vna", timeout=1)
+
+    assert call_count[0] >= 2
+
+
+def test_record_vna_data_timeout(observer_panda_only, redis_panda):
+    """``TimeoutError`` from ``vna_reader.read`` is expected during idle
+    windows between hourly VNA triggers — bare ``continue``, no log, no
+    watchdog. The loop simply retries.
+    """
+    observer = observer_panda_only
+
+    call_count = [0]
+
+    def timeout_read(timeout=0):
+        call_count[0] += 1
+        if call_count[0] >= 2:
+            observer.stop_event.set()
+        raise TimeoutError("no VNA entry")
+
+    with patch.object(
+        redis_panda.vna_reader, "read", side_effect=timeout_read
     ):
         observer.record_vna_data("/tmp/test_vna", timeout=1)
 
