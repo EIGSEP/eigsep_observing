@@ -128,6 +128,23 @@ class PandaClient:
             self.stop_client.wait(1.0)
         self.redis.heartbeat.set(alive=False)
 
+    def stop(self, timeout=5.0):
+        """
+        Signal all client loops to stop and wait for the heartbeat
+        thread to emit its ``alive=False`` farewell.
+
+        Idempotent — safe to call more than once. Caller-managed
+        threads (``switch_loop``, ``vna_loop``) observe ``stop_client``
+        and must be joined separately.
+        """
+        self.stop_client.set()
+        if self.heartbeat_thd.is_alive():
+            self.heartbeat_thd.join(timeout=timeout)
+            if self.heartbeat_thd.is_alive():
+                self.logger.warning(
+                    f"Heartbeat thread did not exit within {timeout}s."
+                )
+
     def init_VNA(self):
         """
         Initialize the VNA instance using the configuration from Redis.
@@ -215,8 +232,9 @@ class PandaClient:
                 f"{sorted(VALID_SWITCH_STATES)}."
             )
             return
-        # Validate that all wait_time values are positive numbers
-        remove_modes = []
+        # Validate wait_time values and drop zero-wait modes into a
+        # local schedule — do not mutate self.cfg["switch_schedule"].
+        active_schedule = {}
         for mode, wait_time in schedule.items():
             if not isinstance(wait_time, (int, float)) or wait_time < 0:
                 self.logger.warning(
@@ -228,11 +246,10 @@ class PandaClient:
                 self.logger.info(
                     f"Zero wait_time for mode {mode}: skipping this mode."
                 )
-                remove_modes.append(mode)
-        for mode in remove_modes:
-            del schedule[mode]
+                continue
+            active_schedule[mode] = wait_time
         while not self.stop_client.is_set():
-            for mode, wait_time in schedule.items():
+            for mode, wait_time in active_schedule.items():
                 if mode == "RFANT":
                     with self.switch_lock:
                         self.logger.info(f"Switching to {mode} measurements")
@@ -318,11 +335,11 @@ class PandaClient:
         """
         Observe with VNA and write data to files.
         """
-        while self.vna is None:
+        if self.vna is None:
             self.logger.warning(
                 "VNA not initialized. Cannot execute VNA commands."
             )
-            threading.Event().wait(5)
+            return
         while not self.stop_client.is_set():
             with self.switch_lock:
                 prev_mode = self.current_switch_state

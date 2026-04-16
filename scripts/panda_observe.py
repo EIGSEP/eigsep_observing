@@ -47,7 +47,7 @@ try:
 except KeyboardInterrupt:
     logger.info("Keyboard interrupt received, stopping threads")
 finally:
-    client.stop_client.set()
+    client.stop()
     for name, t in thds.items():
         logger.info(f"Joining thread {name}")
         t.join()

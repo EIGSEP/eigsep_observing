@@ -1,4 +1,7 @@
+import copy
 import json
+import time
+
 import pytest
 import yaml
 
@@ -119,3 +122,40 @@ def test_pico_manager_devices_visible(client):
         "motor",
     }
     assert names == expected
+
+
+def test_vna_loop_returns_when_vna_is_none(caplog, client):
+    """vna_loop must return promptly when self.vna is None — no
+    polling. Regression for a bare `threading.Event().wait(5)` that
+    ignored stop_client."""
+    caplog.set_level("WARNING")
+    assert client.vna is None  # dummy_config has use_vna: false
+    t0 = time.monotonic()
+    client.vna_loop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
+    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+
+
+def test_switch_loop_does_not_mutate_cfg_schedule(client):
+    """switch_loop must not mutate self.cfg['switch_schedule'] when
+    filtering out zero-wait modes. Regression for `del schedule[mode]`
+    on the live cfg reference."""
+    original = copy.deepcopy(client.cfg["switch_schedule"])
+    assert any(v == 0 for v in original.values()), (
+        "test needs a zero-wait mode in dummy_config to exercise the filter"
+    )
+    client.stop_client.set()  # bypass the main while loop after validation
+    client.switch_loop()
+    assert client.cfg["switch_schedule"] == original
+
+
+def test_stop_joins_heartbeat_and_emits_goodbye(client):
+    """stop() sets stop_client, joins the heartbeat thread, and the
+    thread's final alive=False is visible to readers. Idempotent."""
+    assert client.heartbeat_thd.is_alive()
+    assert client.redis.heartbeat_reader.check() is True
+    client.stop()
+    assert not client.heartbeat_thd.is_alive()
+    assert client.redis.heartbeat_reader.check() is False
+    client.stop()  # idempotent — must not raise
