@@ -6,6 +6,7 @@ disk. The Panda runs autonomously — start it before running this script.
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 import threading
 import time
@@ -103,13 +104,32 @@ else:
 
 thds = {}
 thds["status"] = observer.status_thread
+# A RuntimeError out of record_corr_data is the "SNAP never synced /
+# no header ever available" crash path. threading.Thread swallows
+# exceptions by default, so wrap the target: surface the crash at
+# CRITICAL, signal stop_event so the VNA thread exits cleanly, and
+# record the failure so the main process exits non-zero after join.
+corr_crashed = [False]
+
+
+def _corr_target():
+    try:
+        observer.record_corr_data(
+            cfg["corr_save_dir"],
+            ntimes=cfg["corr_ntimes"],
+            timeout=10,
+        )
+    except RuntimeError as e:
+        logger.critical(
+            f"Correlator recording crashed: {e}. Stopping observer."
+        )
+        corr_crashed[0] = True
+        observer.stop_event.set()
+
+
 # set up file writing: corr_thd for correlation data, panda_thd for s11
 if args.use_snap:
-    corr_thd = threading.Thread(
-        target=observer.record_corr_data,
-        args=(cfg["corr_save_dir"],),
-        kwargs={"ntimes": cfg["corr_ntimes"], "timeout": 10},
-    )
+    corr_thd = threading.Thread(target=_corr_target)
     thds["corr"] = corr_thd
     logger.info("Starting correlation file writing thread.")
     corr_thd.start()
@@ -144,3 +164,6 @@ if args.dummy:
         redis_snap.reset()
     if args.use_panda:
         redis_panda.reset()
+
+if corr_crashed[0]:
+    sys.exit(1)

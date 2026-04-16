@@ -95,7 +95,9 @@ class EigObserver:
             if status is not None:
                 self.logger.log(level, status)
 
-    def record_corr_data(self, save_dir, ntimes=240, timeout=20):
+    def record_corr_data(
+        self, save_dir, ntimes=240, timeout=20, header_wait_timeout=300
+    ):
         """
         Read data from the SNAP correlator via Redis and write it to
         file.
@@ -108,7 +110,37 @@ class EigObserver:
             Number of spectra per file.
         timeout : int
             The time in seconds to wait for data from the correlator.
+        header_wait_timeout : float
+            Bounded wait, in seconds, when we cannot obtain a valid
+            corr header with a non-zero ``sync_time`` — either because
+            the fetch is failing with ``ValueError`` and we have no
+            cached header, or because the fetch succeeds but reports
+            ``sync_time=0`` (SNAP never synchronized). Exceeding this
+            deadline raises ``RuntimeError`` so the process crashes
+            visibly rather than silently accumulating days of
+            untimestamped data.
 
+        Notes
+        -----
+        Two failure modes are handled separately:
+
+        1. **Transient header-fetch failure** (``ValueError`` from
+           ``get_header``) when we have a cached header from a prior
+           successful fetch: fall back to the cache, log at WARNING,
+           and save the incoming corr data. Data on the stream has
+           valid timestamps; the metadata-path blip must not block
+           corr writes ("corr data is sacred").
+        2. **No sync anchor** (``sync_time=0`` from a successful
+           fetch, or ``ValueError`` with no cache): start a bounded
+           wait and crash via ``RuntimeError`` once
+           ``header_wait_timeout`` elapses. The writer-side gate in
+           ``CorrWriter.add`` keeps the stream empty in this state,
+           so the watchdog is the structural guard that prevents
+           silent long-term unusable data.
+
+        A valid ``sync_time`` that differs from the cached one is
+        treated as a mid-run SNAP re-sync: the current file is closed
+        and a new one is opened with the new anchor.
         """
         pairs = self.corr_cfg["pairs"]
         t_int = self.corr_cfg["integration_time"]
@@ -118,12 +150,6 @@ class EigObserver:
             f"Integration time: {t_int} s, "
             f"File time: {file_time} s"
         )
-        file = io.File(
-            save_dir,
-            pairs,
-            ntimes,
-            self.corr_cfg,
-        )
 
         while not self.snap_connected:
             self.logger.warning(
@@ -132,38 +158,90 @@ class EigObserver:
             if self.stop_event.wait(1):
                 return
 
-        sync_time = None
-        while not self.stop_event.is_set():
-            if file.counter == 0:  # look up header in Redis once per file
-                try:
-                    header = self.redis_snap.corr_config.get_header()
-                except ValueError as e:
-                    self.logger.error(f"Error reading header from SNAP: {e}")
-                    header = None
-                if header is not None:
-                    sync_time = header.get("sync_time")
-                if sync_time is None or sync_time == 0:
-                    self.logger.error(
-                        "No sync_time in corr header. Cannot "
-                        "derive accurate timestamps. Waiting "
-                        "for SNAP to synchronize."
-                    )
-                    if self.stop_event.wait(1):
-                        return
-                    continue
-                file.set_header(header=header)
-            # blocking read from Redis
-            acc_cnt, data = self.redis_snap.corr_reader.read(
-                pairs=pairs, timeout=timeout, unpack=True
-            )
-            self.logger.info(f"{acc_cnt=}")
-            if self.panda_connected:
-                metadata = self.redis_panda.metadata_stream.drain()
-            else:
-                metadata = None
-            file.add_data(acc_cnt, sync_time, data, metadata=metadata)
-
-        file.close()
+        file = io.File(save_dir, pairs, ntimes, self.corr_cfg)
+        cached_header = None
+        cached_sync_time = None
+        no_header_deadline = None
+        try:
+            while not self.stop_event.is_set():
+                if file.counter == 0:
+                    try:
+                        header = self.redis_snap.corr_config.get_header()
+                    except ValueError as e:
+                        if cached_header is not None:
+                            self.logger.warning(
+                                f"Error reading header from SNAP: {e}. "
+                                "Using cached corr header."
+                            )
+                            file.set_header(header=cached_header)
+                            no_header_deadline = None
+                        else:
+                            if no_header_deadline is None:
+                                no_header_deadline = (
+                                    time.monotonic() + header_wait_timeout
+                                )
+                            if time.monotonic() > no_header_deadline:
+                                raise RuntimeError(
+                                    f"No corr header available after "
+                                    f"{header_wait_timeout}s: {e}"
+                                )
+                            self.logger.error(
+                                f"Error reading header from SNAP: {e}. "
+                                "Waiting for a valid header."
+                            )
+                            if self.stop_event.wait(1):
+                                return
+                            continue
+                    else:
+                        new_sync_time = header.get("sync_time")
+                        if not new_sync_time:
+                            if no_header_deadline is None:
+                                no_header_deadline = (
+                                    time.monotonic() + header_wait_timeout
+                                )
+                            if time.monotonic() > no_header_deadline:
+                                raise RuntimeError(
+                                    f"SNAP never synchronized within "
+                                    f"{header_wait_timeout}s (sync_time=0)."
+                                )
+                            self.logger.error(
+                                "No sync_time in corr header. Cannot "
+                                "derive accurate timestamps. Waiting "
+                                "for SNAP to synchronize."
+                            )
+                            if self.stop_event.wait(1):
+                                return
+                            continue
+                        if (
+                            cached_sync_time is not None
+                            and new_sync_time != cached_sync_time
+                        ):
+                            self.logger.warning(
+                                f"SNAP re-synchronized from "
+                                f"{cached_sync_time} to {new_sync_time}; "
+                                "rolling to new file."
+                            )
+                            file.close()
+                            file = io.File(
+                                save_dir, pairs, ntimes, self.corr_cfg
+                            )
+                        cached_header = header
+                        cached_sync_time = new_sync_time
+                        no_header_deadline = None
+                        file.set_header(header=header)
+                acc_cnt, data = self.redis_snap.corr_reader.read(
+                    pairs=pairs, timeout=timeout, unpack=True
+                )
+                self.logger.info(f"{acc_cnt=}")
+                if self.panda_connected:
+                    metadata = self.redis_panda.metadata_stream.drain()
+                else:
+                    metadata = None
+                file.add_data(
+                    acc_cnt, cached_sync_time, data, metadata=metadata
+                )
+        finally:
+            file.close()
 
     def record_vna_data(self, save_dir, timeout=60):
         """

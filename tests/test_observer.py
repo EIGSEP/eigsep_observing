@@ -187,6 +187,172 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     )
 
 
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_transient_header_blip_uses_cache(
+    mock_file_class, observer_snap_only, redis_snap, caplog
+):
+    """Transient header-fetch ValueError with a valid cache → fall
+    back to the cache and save the corr data. Non-corr failures must
+    not block corr writes.
+    """
+    observer = observer_snap_only
+    sync_time = 1713200000.0
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    # First header fetch succeeds; second raises ValueError (blip).
+    # After that, stop the loop.
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 2:
+            observer.stop_event.set()
+        return (100 + read_count[0], mock_data)
+
+    good_header = {"sync_time": sync_time}
+    header_calls = [good_header, ValueError("Redis blip")]
+
+    def header_side_effect():
+        val = header_calls.pop(0)
+        if isinstance(val, Exception):
+            raise val
+        return val
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            redis_snap.corr_config,
+            "get_header",
+            side_effect=header_side_effect,
+        ),
+        patch.object(
+            redis_snap.corr_reader, "read", side_effect=read_side_effect
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    # set_header called twice: once with fetched, once with cached.
+    assert mock_file.set_header.call_count == 2
+    mock_file.set_header.assert_any_call(header=good_header)
+    # add_data called on both iterations — corr data is sacred, the
+    # blip must not have blocked writes.
+    assert mock_file.add_data.call_count >= 2
+    assert "Using cached corr header" in caplog.text
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_unsynced_watchdog_crashes(
+    mock_file_class, observer_snap_only, redis_snap
+):
+    """sync_time=0 persistently → bounded wait → RuntimeError."""
+    observer = observer_snap_only
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    redis_snap.corr_config.upload_header({"sync_time": 0})
+
+    with pytest.raises(RuntimeError, match="SNAP never synchronized"):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=5, header_wait_timeout=0.2
+        )
+
+    # No data should have been read or written — no sync anchor.
+    mock_file.add_data.assert_not_called()
+    # Partial-buffer flush still runs (try/finally).
+    mock_file.close.assert_called()
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_no_header_ever_crashes(
+    mock_file_class, observer_snap_only, redis_snap
+):
+    """get_header always raises, no cache → bounded wait → RuntimeError."""
+    observer = observer_snap_only
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    with (
+        patch.object(
+            redis_snap.corr_config,
+            "get_header",
+            side_effect=ValueError("no header"),
+        ),
+        pytest.raises(RuntimeError, match="No corr header"),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=5, header_wait_timeout=0.2
+        )
+
+    mock_file.add_data.assert_not_called()
+    mock_file.close.assert_called()
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_resync_rolls_file(
+    mock_file_class, observer_snap_only, redis_snap, caplog
+):
+    """A successful header fetch with a *different* non-zero sync_time
+    than the cached one → close current file, open new one, continue.
+    """
+    observer = observer_snap_only
+
+    # Each File() call returns a fresh mock so we can count
+    # constructions.
+    file_mocks = [Mock(), Mock(), Mock()]
+    for fm in file_mocks:
+        fm.counter = 0
+        fm.__len__ = Mock(return_value=0)
+    mock_file_class.side_effect = file_mocks
+
+    mock_data = generate_data(ntimes=1)
+
+    t1 = 1713200000.0
+    t2 = 1713300000.0
+    header_values = [{"sync_time": t1}, {"sync_time": t2}]
+
+    def header_side_effect():
+        return header_values.pop(0)
+
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 2:
+            observer.stop_event.set()
+        return (read_count[0], mock_data)
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            redis_snap.corr_config,
+            "get_header",
+            side_effect=header_side_effect,
+        ),
+        patch.object(
+            redis_snap.corr_reader, "read", side_effect=read_side_effect
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    # Constructed File twice: initial, plus one roll after re-sync.
+    # (Final try/finally close happens on the second one.)
+    assert mock_file_class.call_count == 2
+    file_mocks[0].close.assert_called()
+    assert "SNAP re-synchronized" in caplog.text
+
+
 def test_record_corr_data_no_snap():
     """Test record_corr_data without snap connection raises AttributeError."""
     observer = EigObserver()
