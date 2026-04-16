@@ -208,6 +208,38 @@ class TestEigsepFpga:
         header = fpga_instance.redis.corr_config.get_header()
         assert header["sync_time"] == 1111111111.0
 
+    def test_synchronize_noise_mode(self, fpga_instance):
+        """In noise mode, synchronize() arms the noise generator (not
+        the external sync path) and skips set_delay — but still records
+        sync_time and uploads the header so CorrWriter.add un-gates."""
+        fpga_instance.cfg["use_noise"] = True
+        sync = fpga_instance.sync
+        with (
+            patch.object(
+                sync, "set_delay", wraps=sync.set_delay
+            ) as spy_set_delay,
+            patch.object(
+                sync, "arm_sync", wraps=sync.arm_sync
+            ) as spy_arm_sync,
+            patch.object(
+                sync, "arm_noise", wraps=sync.arm_noise
+            ) as spy_arm_noise,
+            patch.object(sync, "sw_sync", wraps=sync.sw_sync) as spy_sw_sync,
+            patch(
+                "eigsep_observing.fpga.time.time",
+                return_value=2222222222.0,
+            ),
+        ):
+            fpga_instance.synchronize(delay=5)
+
+        spy_arm_noise.assert_called_once()
+        spy_arm_sync.assert_not_called()
+        spy_set_delay.assert_not_called()
+        assert spy_sw_sync.call_count == 3
+        assert fpga_instance.is_synchronized is True
+        header = fpga_instance.redis.corr_config.get_header()
+        assert header["sync_time"] == 2222222222.0
+
     def test_initialize_all_enabled(self, fpga_instance, caplog):
         """initialize() with sync=True calls synchronize and logs."""
         caplog.set_level(logging.DEBUG)
