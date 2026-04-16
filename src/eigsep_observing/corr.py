@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 import numpy as np
 
@@ -14,6 +15,30 @@ from .keys import (
 from .utils import load_config
 
 logger = logging.getLogger(__name__)
+
+_UNSYNCED_LOG_THROTTLE_S = 60.0
+_last_unsynced_log = [0.0]
+
+
+def _log_unsynced_drop(cnt):
+    """Throttled ERROR log for a pre-sync corr integration drop.
+
+    Logs at most once per ``_UNSYNCED_LOG_THROTTLE_S`` seconds. The
+    throttle state is module-level so it survives across calls; tests
+    that need to exercise the throttle can reset
+    ``_last_unsynced_log[0]``. This message intentionally avoids
+    hard-coding a specific ``sync_time`` value because callers may drop
+    integrations for any falsy or missing ``sync_time``.
+    """
+    now = time.time()
+    if now - _last_unsynced_log[0] < _UNSYNCED_LOG_THROTTLE_S:
+        return
+    _last_unsynced_log[0] = now
+    logger.error(
+        f"SNAP not synchronized (sync_time is falsy or missing); "
+        f"dropping corr integration cnt={cnt}. Data without a sync "
+        f"anchor has no valid timestamps."
+    )
 
 
 class CorrConfigStore:
@@ -90,7 +115,7 @@ class CorrWriter:
     def __init__(self, transport):
         self.transport = transport
 
-    def add(self, data, cnt, dtype=">i4"):
+    def add(self, data, cnt, sync_time, dtype=">i4"):
         """
         Publish one integration.
 
@@ -100,9 +125,21 @@ class CorrWriter:
             Keys are correlation pair names, values are raw bytes.
         cnt : int
             Accumulation count from SNAP.
+        sync_time : float or int
+            Unix wallclock of SNAP synchronization. ``0`` (or any
+            falsy value) means the SNAP is not synchronized yet and
+            the integration is dropped, because without a sync anchor
+            downstream cannot compute valid timestamps from
+            ``acc_cnt``. Pre-sync drops are logged at ERROR
+            (throttled) — dropped data would be unusable, and it's
+            better to fail loud on a real sync problem than to let
+            days of untimestamped integrations accumulate.
         dtype : str
             NumPy dtype string for unpacking downstream.
         """
+        if not sync_time:
+            _log_unsynced_drop(cnt)
+            return
         redis_data = {p.encode("utf-8"): d for p, d in data.items()}
         r = self.transport.r
         r.sadd(CORR_PAIRS_SET, *redis_data.keys())
