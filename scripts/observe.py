@@ -6,6 +6,7 @@ disk. The Panda runs autonomously — start it before running this script.
 
 import argparse
 import logging
+import sys
 from pathlib import Path
 import threading
 import time
@@ -103,13 +104,34 @@ else:
 
 thds = {}
 thds["status"] = observer.status_thread
+# Corr data is sacred — every other data product (VNA, switch
+# schedule, sensors) is supporting context for the corr stream. If
+# the corr thread dies for any reason (bounded-wait watchdog raising
+# RuntimeError, TimeoutError from CorrReader.read after SNAP dies
+# mid-run, any unanticipated failure), the rest of the system should
+# stop too: collecting hours of VNA files with no corr data to pair
+# them against is worse than exiting loudly. threading.Thread swallows
+# target exceptions by default, so wrap the target to convert any
+# Exception into stop_event + non-zero exit.
+corr_crashed = [False]
+
+
+def _corr_target():
+    try:
+        observer.record_corr_data(
+            cfg["corr_save_dir"],
+            ntimes=cfg["corr_ntimes"],
+            timeout=10,
+        )
+    except Exception:
+        logger.exception("Correlator recording crashed. Stopping observer.")
+        corr_crashed[0] = True
+        observer.stop_event.set()
+
+
 # set up file writing: corr_thd for correlation data, panda_thd for s11
 if args.use_snap:
-    corr_thd = threading.Thread(
-        target=observer.record_corr_data,
-        args=(cfg["corr_save_dir"],),
-        kwargs={"ntimes": cfg["corr_ntimes"], "timeout": 10},
-    )
+    corr_thd = threading.Thread(target=_corr_target)
     thds["corr"] = corr_thd
     logger.info("Starting correlation file writing thread.")
     corr_thd.start()
@@ -144,3 +166,6 @@ if args.dummy:
         redis_snap.reset()
     if args.use_panda:
         redis_panda.reset()
+
+if corr_crashed[0]:
+    sys.exit(1)
