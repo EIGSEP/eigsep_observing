@@ -495,22 +495,25 @@ class EigsepFpga:
 
     def set_input(self):
         """
-        Set the input to either noise or ADC based on the configuration.
-        This method is called after initializing the ADC and FPGA.
+        Point the input mux at noise or ADC based on ``cfg["use_noise"]``.
+
+        This only configures the mux and the noise seed; it does not arm
+        the sync / noise generator or issue any ``sw_sync`` pulses. The
+        arming happens in :meth:`synchronize`, which branches on the
+        same config flag so that noise mode arms the noise generator and
+        ADC mode arms the external sync path.
 
         Notes
         -----
-        This is called by `initialize`. Can be called separately
-        to change the input after initialization.
+        Called by :meth:`initialize`. Switching inputs post-init changes
+        the data product (digital noise vs sky) and should be done by
+        re-running ``initialize`` with the updated config, not by
+        calling this directly.
         """
         self.noise.set_seed(stream=None, seed=0)
         if self.cfg["use_noise"]:
             self.logger.warning("Switching to noise input.")
             self.inp.use_noise(stream=None)
-            self.sync.arm_noise()
-            for i in range(3):
-                self.sync.sw_sync()
-            self.logger.info("Synchronized noise")
         else:
             self.logger.info("Switching to ADC input.")
             self.inp.use_adc(stream=None)
@@ -641,19 +644,29 @@ class EigsepFpga:
         """
         Synchronize the correlator clock and publish sync time to Redis.
 
+        Branches on ``cfg["use_noise"]``: noise mode arms the noise
+        generator; ADC mode arms the external sync path after setting
+        the pulse-to-trigger delay. Both paths then issue three
+        ``sw_sync`` pulses, record ``sync_time``, and upload the fresh
+        header so ``CorrWriter.add`` stops gating.
+
         Parameters
         ----------
         delay : int
             Delay in FPGA clock ticks between arrival of an external
-            sync pulse and the issuing of an internal trigger.
+            sync pulse and the issuing of an internal trigger. Only
+            used in ADC mode.
 
         """
-        self.sync.set_delay(delay)
-        self.sync.arm_sync()
-        for i in range(3):
+        if self.cfg["use_noise"]:
+            self.sync.arm_noise()
+        else:
+            self.sync.set_delay(delay)
+            self.sync.arm_sync()
+        for _ in range(3):
             self.sync.sw_sync()
-            sync_time = time.time()  # not an int unless 1PPS is provided
-            self.logger.info(f"Synchronized at {sync_time}.")
+        sync_time = time.time()  # not an int unless 1PPS is provided
+        self.logger.info(f"Synchronized at {sync_time}.")
         self.sync_time = sync_time
         self.is_synchronized = True
         # update header in redis with fresh sync time
