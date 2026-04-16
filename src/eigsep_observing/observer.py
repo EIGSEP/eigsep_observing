@@ -77,7 +77,7 @@ class EigObserver:
         self.redis_panda = redis_panda
 
         if self.redis_snap is not None:
-            self.corr_cfg = self.redis_snap.corr_config.get_config()
+            self.corr_cfg = self.redis_snap.corr_config.get()
         if self.redis_panda is not None:
             self.cfg = self.redis_panda.config.get()
 

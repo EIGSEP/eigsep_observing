@@ -16,12 +16,11 @@ from eigsep_observing.testing.utils import generate_data
 def redis_snap():
     """DummyEigsepObsRedis seeded with a correlator config."""
     redis = DummyEigsepObsRedis()
-    redis.corr_config.upload_config(
+    redis.corr_config.upload(
         {
             "integration_time": 1.0,
             "pairs": ["0", "1", "2", "3", "02", "13"],
-        },
-        from_file=False,
+        }
     )
     return redis
 
@@ -46,8 +45,7 @@ def redis_panda():
             },
             "vna_save_dir": "/tmp/test_vna",
             "vna_interval": 0.5,
-        },
-        from_file=False,
+        }
     )
     redis.heartbeat.set(alive=True)
     return redis

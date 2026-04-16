@@ -280,17 +280,17 @@ def test_bus_classes_have_no_cross_bus_methods():
         CorrWriter: {"add", "maxlen"},
         CorrReader: {"read", "seek"},
         CorrConfigStore: {
-            "upload_config",
-            "get_config",
+            "upload",
+            "get",
             "upload_header",
             "get_header",
         },
         VnaWriter: {"add", "maxlen"},
         VnaReader: {"read"},
     }
-    # CorrConfigStore legitimately owns upload_config/get_config/
-    # upload_header/get_header — those are its surface, not cross-bus.
-    # Scope the forbidden check to each class's non-own methods.
+    # CorrConfigStore legitimately owns upload/get/upload_header/
+    # get_header — those are its surface, not cross-bus. Scope the
+    # forbidden check to each class's non-own methods.
     for cls, expected in surfaces.items():
         public = {name for name in vars(cls) if not name.startswith("_")}
         assert public == expected, (

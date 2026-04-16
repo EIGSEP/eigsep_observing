@@ -99,14 +99,14 @@ class TestEigsepFpga:
 
         with patch.object(
             fpga_instance.redis.corr_config,
-            "upload_config",
-            wraps=fpga_instance.redis.corr_config.upload_config,
+            "upload",
+            wraps=fpga_instance.redis.corr_config.upload,
         ) as spy:
             fpga_instance.upload_config(validate=True)
 
         # Implicit success: if validate_config had raised, the upload
         # below would never have happened.
-        spy.assert_called_once_with(fpga_instance.cfg, from_file=False)
+        spy.assert_called_once_with(fpga_instance.cfg)
         assert "Uploading configuration to Redis." in caplog.text
 
     def test_upload_config_without_validation(self, fpga_instance):
@@ -119,14 +119,14 @@ class TestEigsepFpga:
             ) as validate_spy,
             patch.object(
                 fpga_instance.redis.corr_config,
-                "upload_config",
-                wraps=fpga_instance.redis.corr_config.upload_config,
+                "upload",
+                wraps=fpga_instance.redis.corr_config.upload,
             ) as upload_spy,
         ):
             fpga_instance.upload_config(validate=False)
 
         validate_spy.assert_not_called()
-        upload_spy.assert_called_once_with(fpga_instance.cfg, from_file=False)
+        upload_spy.assert_called_once_with(fpga_instance.cfg)
 
     def test_upload_config_validation_failure(self, fpga_instance, caplog):
         """upload_config raises and logs when validate_config fails."""
@@ -140,8 +140,8 @@ class TestEigsepFpga:
             ),
             patch.object(
                 fpga_instance.redis.corr_config,
-                "upload_config",
-                wraps=fpga_instance.redis.corr_config.upload_config,
+                "upload",
+                wraps=fpga_instance.redis.corr_config.upload,
             ) as upload_spy,
         ):
             with pytest.raises(
@@ -154,9 +154,7 @@ class TestEigsepFpga:
 
     def test_assert_config_matches_redis_match(self, fpga_instance):
         """assert_config_matches_redis is a no-op when cfg matches Redis."""
-        fpga_instance.redis.corr_config.upload_config(
-            fpga_instance.cfg, from_file=False
-        )
+        fpga_instance.redis.corr_config.upload(fpga_instance.cfg)
         fpga_instance.assert_config_matches_redis()
 
     def test_assert_config_matches_redis_missing(self, fpga_instance):
@@ -170,9 +168,7 @@ class TestEigsepFpga:
         real-world failure: user edited the yaml and attached without
         --reinit.
         """
-        fpga_instance.redis.corr_config.upload_config(
-            fpga_instance.cfg, from_file=False
-        )
+        fpga_instance.redis.corr_config.upload(fpga_instance.cfg)
         # Perturb a scalar and a nested field to exercise the recursive
         # diff summary.
         fpga_instance.cfg["sample_rate"] = fpga_instance.cfg["sample_rate"] / 2

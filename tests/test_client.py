@@ -74,7 +74,7 @@ def test_get_cfg(caplog, dummy_cfg):
         assert "upload_time" in cfg_in_redis
 
         # upload the dummy config to client2's redis
-        client2.redis.config.upload(dummy_cfg, from_file=False)
+        client2.redis.config.upload(dummy_cfg)
 
         # check that they're the same
         retrieved_cfg = client2._get_cfg()

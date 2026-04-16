@@ -47,7 +47,7 @@ class PandaClient:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
             )
-            self.redis.config.upload(default_cfg, from_file=False)
+            self.redis.config.upload(default_cfg)
             cfg = self._get_cfg()
         self.cfg = json.loads(json.dumps(cfg))
 
