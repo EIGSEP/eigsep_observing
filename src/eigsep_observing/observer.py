@@ -193,13 +193,6 @@ class EigObserver:
             f"File time: {file_time} s"
         )
 
-        while not self.snap_connected:
-            self.logger.warning(
-                "Waiting for SNAP Redis connection to be established."
-            )
-            if self.stop_event.wait(1):
-                return
-
         file = io.File(save_dir, pairs, ntimes, self.corr_cfg)
         cached_header = None
         cached_sync_time = None
