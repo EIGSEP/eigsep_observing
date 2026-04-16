@@ -45,6 +45,35 @@ default_config_file = get_config_path("corr_config.yaml")
 default_config = load_config(default_config_file)
 
 
+def _cfg_diff_summary(disk_cfg, redis_cfg):
+    """
+    Produce a human-readable summary of differences between two
+    configuration dicts. Used by ``assert_config_matches_redis`` to
+    make "re-run with --reinit" errors debuggable.
+
+    Recurses into nested dicts and reports dotted paths; non-dict
+    leaves are compared with ``!=``.
+    """
+    lines = []
+
+    def _walk(a, b, path):
+        for key in sorted(set(a) | set(b)):
+            sub = f"{path}.{key}" if path else key
+            if key not in a:
+                lines.append(f"  {sub}: <missing on disk> vs {b[key]!r}")
+            elif key not in b:
+                lines.append(f"  {sub}: {a[key]!r} vs <missing in Redis>")
+            elif isinstance(a[key], dict) and isinstance(b[key], dict):
+                _walk(a[key], b[key], sub)
+            elif a[key] != b[key]:
+                lines.append(
+                    f"  {sub}: {a[key]!r} (disk) vs {b[key]!r} (Redis)"
+                )
+
+    _walk(disk_cfg, redis_cfg, "")
+    return "\n".join(lines) if lines else "  <identical>"
+
+
 class EigsepFpga:
     def __init__(self, cfg=default_config, program=False):
         """
@@ -274,6 +303,50 @@ class EigsepFpga:
             raise RuntimeError(
                 "Configuration does not match hardware setup: "
                 + ", ".join(fails)
+            )
+
+    def assert_config_matches_redis(self) -> None:
+        """
+        Attach-path assertion: ``self.cfg`` must match the config
+        already in Redis.
+
+        The attach path (``fpga_init.py`` without ``--reinit``) does
+        not re-initialize the hardware, so ``validate_config`` — which
+        compares ``self.cfg`` against ``self.header`` — is vacuous for
+        fields that the header echoes from ``self.cfg`` when a block's
+        ``_initialized`` flag is False (ADC ``sample_rate`` /
+        ``adc_gain``, PAM ``atten``). On attach, the cfg already in
+        Redis is the authoritative record of the running hardware's
+        intended configuration (written by the prior reinit run), so
+        the safe check is "the cfg I'm about to attach with matches
+        the cfg already in Redis."
+
+        Raises
+        ------
+        RuntimeError
+            If there is no config in Redis (cold boot — caller should
+            run with ``--reinit``), or if ``self.cfg`` differs from
+            the Redis-resident cfg (yaml was edited without a matching
+            reinit; either revert the yaml or re-run with ``--reinit``
+            to apply).
+        """
+        try:
+            redis_cfg = self.redis.corr_config.get_config()
+        except ValueError:
+            raise RuntimeError(
+                "No corr config in Redis; cannot attach. "
+                "Run with --reinit to initialize from this config."
+            )
+        # Transport injects ``upload_time`` on every publish; it's not
+        # part of the config contract and always differs.
+        redis_cfg.pop("upload_time", None)
+        if self.cfg != redis_cfg:
+            diff = _cfg_diff_summary(self.cfg, redis_cfg)
+            raise RuntimeError(
+                "Config on disk differs from Redis-resident config:\n"
+                f"{diff}\n"
+                "Re-run with --reinit to apply the new config, or "
+                "revert the yaml to match the running hardware."
             )
 
     def upload_config(self, validate: bool = True) -> None:

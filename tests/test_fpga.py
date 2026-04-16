@@ -152,6 +152,41 @@ class TestEigsepFpga:
         assert "Configuration validation failed: Config invalid" in caplog.text
         upload_spy.assert_not_called()
 
+    def test_assert_config_matches_redis_match(self, fpga_instance):
+        """assert_config_matches_redis is a no-op when cfg matches Redis."""
+        fpga_instance.redis.corr_config.upload_config(
+            fpga_instance.cfg, from_file=False
+        )
+        fpga_instance.assert_config_matches_redis()
+
+    def test_assert_config_matches_redis_missing(self, fpga_instance):
+        """Cold boot (no cfg in Redis) → caller must run with --reinit."""
+        with pytest.raises(RuntimeError, match="No corr config in Redis"):
+            fpga_instance.assert_config_matches_redis()
+
+    def test_assert_config_matches_redis_mismatch(self, fpga_instance):
+        """
+        cfg differs from Redis → refuse with a diff. Simulates the
+        real-world failure: user edited the yaml and attached without
+        --reinit.
+        """
+        fpga_instance.redis.corr_config.upload_config(
+            fpga_instance.cfg, from_file=False
+        )
+        # Perturb a scalar and a nested field to exercise the recursive
+        # diff summary.
+        fpga_instance.cfg["sample_rate"] = fpga_instance.cfg["sample_rate"] / 2
+        first_ant = next(iter(fpga_instance.cfg["rf_chain"]["ants"]))
+        fpga_instance.cfg["rf_chain"]["ants"][first_ant]["pam"]["atten"] += 1
+
+        with pytest.raises(RuntimeError) as exc:
+            fpga_instance.assert_config_matches_redis()
+
+        msg = str(exc.value)
+        assert "sample_rate" in msg
+        assert f"rf_chain.ants.{first_ant}.pam.atten" in msg
+        assert "--reinit" in msg
+
     def test_synchronize(self, fpga_instance):
         """synchronize sets sync_time on the corr header and uploads it."""
         # Spy on the real Sync block so we observe the high-level
