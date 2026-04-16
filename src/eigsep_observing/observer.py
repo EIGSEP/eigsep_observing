@@ -7,6 +7,41 @@ from . import io
 logger = logging.getLogger(__name__)
 
 
+def _tick_liveness_deadline(deadline, liveness_timeout, reason):
+    """Advance the SNAP-liveness deadline; raise if expired.
+
+    Parameters
+    ----------
+    deadline : float or None
+        Current deadline (``time.monotonic()`` seconds), or ``None``
+        if no failure has been seen since the last successful write.
+    liveness_timeout : float
+        Tolerated duration without a complete corr row, in seconds.
+    reason : str
+        What triggered this tick; surfaced in the ``RuntimeError``.
+
+    Returns
+    -------
+    float
+        Updated deadline. Set to ``monotonic() + liveness_timeout`` on
+        the first failure since the last clear; unchanged thereafter.
+
+    Raises
+    ------
+    RuntimeError
+        If ``deadline`` is in the past.
+    """
+    now = time.monotonic()
+    if deadline is None:
+        return now + liveness_timeout
+    if now > deadline:
+        raise RuntimeError(
+            f"SNAP has not produced a complete corr row for "
+            f"{liveness_timeout}s: {reason}"
+        )
+    return deadline
+
+
 class EigObserver:
     def __init__(self, redis_snap=None, redis_panda=None):
         """
@@ -96,7 +131,7 @@ class EigObserver:
                 self.logger.log(level, status)
 
     def record_corr_data(
-        self, save_dir, ntimes=240, timeout=20, header_wait_timeout=300
+        self, save_dir, ntimes=240, timeout=20, liveness_timeout=300
     ):
         """
         Read data from the SNAP correlator via Redis and write it to
@@ -110,37 +145,44 @@ class EigObserver:
             Number of spectra per file.
         timeout : int
             The time in seconds to wait for data from the correlator.
-        header_wait_timeout : float
-            Bounded wait, in seconds, when we cannot obtain a valid
-            corr header with a non-zero ``sync_time`` — either because
-            the fetch is failing with ``ValueError`` and we have no
-            cached header, or because the fetch succeeds but reports
-            ``sync_time=0`` (SNAP never synchronized). Exceeding this
-            deadline raises ``RuntimeError`` so the process crashes
-            visibly rather than silently accumulating days of
-            untimestamped data.
+        liveness_timeout : float
+            Bounded wait, in seconds, for the SNAP to produce a
+            complete corr row (valid header with non-zero
+            ``sync_time`` *and* an entry on the corr stream).
+            Exceeding this deadline raises ``RuntimeError`` so the
+            process crashes visibly rather than silently accumulating
+            unusable data.
 
         Notes
         -----
-        Two failure modes are handled separately:
+        Every failure mode that means "SNAP is not producing a
+        complete corr row right now" shares a single watchdog:
 
-        1. **Transient header-fetch failure** (``ValueError`` from
-           ``get_header``) when we have a cached header from a prior
-           successful fetch: fall back to the cache, log at WARNING,
-           and save the incoming corr data. Data on the stream has
-           valid timestamps; the metadata-path blip must not block
-           corr writes ("corr data is sacred").
-        2. **No sync anchor** (``sync_time=0`` from a successful
-           fetch, or ``ValueError`` with no cache): start a bounded
-           wait and crash via ``RuntimeError`` once
-           ``header_wait_timeout`` elapses. The writer-side gate in
-           ``CorrWriter.add`` keeps the stream empty in this state,
-           so the watchdog is the structural guard that prevents
-           silent long-term unusable data.
+        - ``ValueError`` from ``get_header`` with no cached header
+        - ``sync_time == 0`` on a fetched header
+        - ``TimeoutError`` from ``corr_reader.read``
+        - ``(None, {})`` from ``corr_reader.read`` (stream absent)
+
+        The deadline starts on the first such failure and is cleared
+        when ``file.add_data`` completes. Crossing it raises
+        ``RuntimeError``. The consumer only cares *whether* a row
+        arrived, not *why* it did not — duck-typing on "did I get a
+        complete row?" is more trustworthy than classifying header vs.
+        stream failures, because ``get_header`` reads a persistent
+        Redis hash and a stale header can survive a dead SNAP.
+
+        A ``ValueError`` from ``get_header`` *with* a cached header
+        is treated as a transient metadata-path blip: the cached
+        header is used, the loop proceeds to read/write the next row,
+        and the deadline is cleared on the next successful write.
+        Corr data on the stream has valid timestamps; the blip must
+        not block corr writes ("corr data is sacred").
 
         A valid ``sync_time`` that differs from the cached one is
         treated as a mid-run SNAP re-sync: the current file is closed
-        and a new one is opened with the new anchor.
+        and a new one is opened with the new anchor. This is a
+        legitimate state change, not a failure, so the deadline is
+        untouched.
         """
         pairs = self.corr_cfg["pairs"]
         t_int = self.corr_cfg["integration_time"]
@@ -161,7 +203,7 @@ class EigObserver:
         file = io.File(save_dir, pairs, ntimes, self.corr_cfg)
         cached_header = None
         cached_sync_time = None
-        no_header_deadline = None
+        last_write_deadline = None
         try:
             while not self.stop_event.is_set():
                 if file.counter == 0:
@@ -174,17 +216,12 @@ class EigObserver:
                                 "Using cached corr header."
                             )
                             file.set_header(header=cached_header)
-                            no_header_deadline = None
                         else:
-                            if no_header_deadline is None:
-                                no_header_deadline = (
-                                    time.monotonic() + header_wait_timeout
-                                )
-                            if time.monotonic() > no_header_deadline:
-                                raise RuntimeError(
-                                    f"No corr header available after "
-                                    f"{header_wait_timeout}s: {e}"
-                                )
+                            last_write_deadline = _tick_liveness_deadline(
+                                last_write_deadline,
+                                liveness_timeout,
+                                f"header fetch failed: {e}",
+                            )
                             self.logger.error(
                                 f"Error reading header from SNAP: {e}. "
                                 "Waiting for a valid header."
@@ -195,15 +232,11 @@ class EigObserver:
                     else:
                         new_sync_time = header.get("sync_time")
                         if not new_sync_time:
-                            if no_header_deadline is None:
-                                no_header_deadline = (
-                                    time.monotonic() + header_wait_timeout
-                                )
-                            if time.monotonic() > no_header_deadline:
-                                raise RuntimeError(
-                                    f"SNAP never synchronized within "
-                                    f"{header_wait_timeout}s (sync_time=0)."
-                                )
+                            last_write_deadline = _tick_liveness_deadline(
+                                last_write_deadline,
+                                liveness_timeout,
+                                "sync_time=0 (SNAP not synchronized)",
+                            )
                             self.logger.error(
                                 "No sync_time in corr header. Cannot "
                                 "derive accurate timestamps. Waiting "
@@ -227,11 +260,31 @@ class EigObserver:
                             )
                         cached_header = header
                         cached_sync_time = new_sync_time
-                        no_header_deadline = None
                         file.set_header(header=header)
-                acc_cnt, data = self.redis_snap.corr_reader.read(
-                    pairs=pairs, timeout=timeout, unpack=True
-                )
+                try:
+                    acc_cnt, data = self.redis_snap.corr_reader.read(
+                        pairs=pairs, timeout=timeout, unpack=True
+                    )
+                except TimeoutError:
+                    last_write_deadline = _tick_liveness_deadline(
+                        last_write_deadline,
+                        liveness_timeout,
+                        f"no corr entry within {timeout}s",
+                    )
+                    self.logger.error(
+                        f"No correlation data received within {timeout}s. "
+                        "Waiting for SNAP to produce data."
+                    )
+                    continue
+                if acc_cnt is None:
+                    last_write_deadline = _tick_liveness_deadline(
+                        last_write_deadline,
+                        liveness_timeout,
+                        "corr stream does not exist yet",
+                    )
+                    if self.stop_event.wait(1):
+                        return
+                    continue
                 self.logger.info(f"{acc_cnt=}")
                 if self.panda_connected:
                     metadata = self.redis_panda.metadata_stream.drain()
@@ -240,6 +293,7 @@ class EigObserver:
                 file.add_data(
                     acc_cnt, cached_sync_time, data, metadata=metadata
                 )
+                last_write_deadline = None
         finally:
             file.close()
 

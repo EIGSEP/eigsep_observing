@@ -260,9 +260,11 @@ def test_record_corr_data_unsynced_watchdog_crashes(
 
     redis_snap.corr_config.upload_header({"sync_time": 0})
 
-    with pytest.raises(RuntimeError, match="SNAP never synchronized"):
+    with pytest.raises(
+        RuntimeError, match="SNAP has not produced a complete corr row"
+    ):
         observer.record_corr_data(
-            "/tmp/test", ntimes=1, timeout=5, header_wait_timeout=0.2
+            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
         )
 
     # No data should have been read or written — no sync anchor.
@@ -289,10 +291,12 @@ def test_record_corr_data_no_header_ever_crashes(
             "get_header",
             side_effect=ValueError("no header"),
         ),
-        pytest.raises(RuntimeError, match="No corr header"),
+        pytest.raises(
+            RuntimeError, match="SNAP has not produced a complete corr row"
+        ),
     ):
         observer.record_corr_data(
-            "/tmp/test", ntimes=1, timeout=5, header_wait_timeout=0.2
+            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
         )
 
     mock_file.add_data.assert_not_called()
@@ -351,6 +355,113 @@ def test_record_corr_data_resync_rolls_file(
     assert mock_file_class.call_count == 2
     file_mocks[0].close.assert_called()
     assert "SNAP re-synchronized" in caplog.text
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_read_timeout_watchdog_crashes(
+    mock_file_class, observer_snap_only, redis_snap
+):
+    """Persistent ``TimeoutError`` from ``corr_reader.read`` → bounded
+    wait → ``RuntimeError``. Unified with the header-side watchdog:
+    the consumer only cares whether complete rows arrive.
+    """
+    observer = observer_snap_only
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    redis_snap.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    with (
+        patch.object(
+            redis_snap.corr_reader,
+            "read",
+            side_effect=TimeoutError("no data"),
+        ),
+        pytest.raises(
+            RuntimeError, match="SNAP has not produced a complete corr row"
+        ),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.2
+        )
+
+    mock_file.add_data.assert_not_called()
+    mock_file.close.assert_called()
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_read_stream_absent_watchdog_crashes(
+    mock_file_class, observer_snap_only, redis_snap
+):
+    """Persistent ``(None, {})`` from ``corr_reader.read`` (stream not
+    created yet) → bounded wait → ``RuntimeError``.
+    """
+    observer = observer_snap_only
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    redis_snap.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    with (
+        patch.object(redis_snap.corr_reader, "read", return_value=(None, {})),
+        pytest.raises(
+            RuntimeError, match="SNAP has not produced a complete corr row"
+        ),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
+        )
+
+    mock_file.add_data.assert_not_called()
+    mock_file.close.assert_called()
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_read_timeout_then_success_resets_deadline(
+    mock_file_class, observer_snap_only, redis_snap
+):
+    """A single read timeout followed by a successful read must not
+    crash. ``file.add_data`` clears ``last_write_deadline`` so the
+    next failure starts a fresh watchdog instead of inheriting the
+    prior one.
+    """
+    observer = observer_snap_only
+    sync_time = 1713200000.0
+    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    calls = [0]
+
+    def read_side_effect(*a, **kw):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise TimeoutError("transient")
+        if calls[0] >= 3:
+            observer.stop_event.set()
+        return (100 + calls[0], mock_data)
+
+    with patch.object(
+        redis_snap.corr_reader, "read", side_effect=read_side_effect
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.05
+        )
+
+    # At least one successful write happened; the first-call timeout
+    # did not crash the loop because the follow-up write cleared it.
+    assert mock_file.add_data.call_count >= 1
 
 
 def test_record_corr_data_no_snap():
