@@ -320,6 +320,15 @@ class EigsepFpga:
         sync : bool
             Synchronize the correlator clock.
 
+        Raises
+        ------
+        ValueError
+            If ``initialize_fpga=True`` and ``sync=False``. Rewriting
+            the correlator registers (``corr_acc_len``, etc.) restarts
+            the accumulation counter, so any previously-published
+            ``sync_time`` is stale — the hardware must be re-synced or
+            ``acc_cnt`` cannot be converted to a valid wallclock.
+
         Notes
         -----
         This is a convenience method that calls the methods
@@ -330,6 +339,12 @@ class EigsepFpga:
         in the specified order with their default parameters.
 
         """
+        if initialize_fpga and not sync:
+            raise ValueError(
+                "initialize_fpga=True requires sync=True: re-initializing "
+                "the FPGA registers resets acc_cnt and invalidates the "
+                "previous sync_time."
+            )
         if initialize_adc:
             self.logger.debug("Initializing ADCs.")
             self.initialize_adc()
@@ -340,6 +355,47 @@ class EigsepFpga:
         if sync:
             self.logger.debug("Synchronizing correlator clock.")
             self.synchronize()
+
+    def rehydrate_sync_from_header(self):
+        """
+        Restore ``sync_time`` / ``is_synchronized`` from the corr header.
+
+        Intended for the attach path — reconnecting to a SNAP that is
+        already running and synced from a previous process. Without
+        this, ``self.sync_time=0`` on startup and ``CorrWriter.add``
+        would drop every integration until the next ``synchronize()``
+        call (see :mod:`eigsep_observing.corr`). The header is the
+        authoritative persisted record of the last sync; it's
+        re-uploaded by the observe loop roughly every ~100 integrations
+        so it should always be present while the SNAP is producing
+        data.
+
+        Returns
+        -------
+        bool
+            ``True`` if a valid ``sync_time`` was found on the header
+            and restored. ``False`` if the header is missing or
+            ``sync_time`` is falsy (cold boot — the caller should
+            synchronize explicitly).
+        """
+        try:
+            header = self.redis.corr_config.get_header()
+        except ValueError:
+            self.logger.warning(
+                "No corr header in Redis; cannot rehydrate sync_time. "
+                "This is expected on a cold boot — run with --reinit."
+            )
+            return False
+        sync_time = header.get("sync_time", 0)
+        if not sync_time:
+            self.logger.warning(
+                "Corr header present but sync_time=0; not rehydrating."
+            )
+            return False
+        self.sync_time = sync_time
+        self.is_synchronized = True
+        self.logger.info(f"Rehydrated sync_time={sync_time} from corr header.")
+        return True
 
     def _run_adc_test(self, test, n_tries):
         """

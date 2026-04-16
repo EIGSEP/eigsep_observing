@@ -220,14 +220,23 @@ class TestEigsepFpga:
 
         assert "Synchronizing correlator clock." in caplog.text
 
-    def test_initialize_sync_disabled(self, fpga_instance):
-        """Test initialize with sync disabled."""
-        # Track calls to synchronize method
+    def test_initialize_sync_disabled_attach_path(self, fpga_instance):
+        """initialize(initialize_fpga=False, sync=False) is the attach
+        path: set_input runs but synchronize does not."""
         with patch.object(fpga_instance, "synchronize") as mock_sync:
-            fpga_instance.initialize(sync=False)
-
-            # Verify that synchronize was NOT called when sync=False
+            fpga_instance.initialize(
+                initialize_adc=False, initialize_fpga=False, sync=False
+            )
             mock_sync.assert_not_called()
+
+    def test_initialize_fpga_without_sync_raises(self, fpga_instance):
+        """Re-initializing FPGA registers invalidates the prior
+        sync_time, so initialize_fpga=True with sync=False must raise
+        rather than silently leave a stale sync anchor."""
+        with pytest.raises(ValueError, match="requires sync=True"):
+            fpga_instance.initialize(
+                initialize_adc=False, initialize_fpga=True, sync=False
+            )
 
     def test_initialize_adc_disabled(self, fpga_instance):
         """Test initialize with ADC initialization disabled."""
@@ -237,6 +246,53 @@ class TestEigsepFpga:
 
             # Verify that synchronize was called even with initialize_adc=False
             mock_sync.assert_called_once()
+
+    def test_rehydrate_sync_from_header_restores_state(
+        self, fpga_instance, caplog
+    ):
+        """A header with a non-zero sync_time rehydrates
+        self.sync_time / self.is_synchronized without hitting the
+        hardware sync path."""
+        caplog.set_level(logging.INFO)
+        with patch(
+            "eigsep_observing.fpga.time.time",
+            return_value=2222222222.0,
+        ):
+            fpga_instance.synchronize()
+        # Fresh instance semantics: reset the in-process state so we
+        # prove the rehydrate path does the work.
+        fpga_instance.sync_time = 0
+        fpga_instance.is_synchronized = False
+
+        assert fpga_instance.rehydrate_sync_from_header() is True
+        assert fpga_instance.sync_time == 2222222222.0
+        assert fpga_instance.is_synchronized is True
+        assert "Rehydrated sync_time" in caplog.text
+
+    def test_rehydrate_sync_from_header_no_header(self, fpga_instance, caplog):
+        """Cold-boot case: no header in Redis → returns False, warns,
+        and leaves state untouched."""
+        caplog.set_level(logging.WARNING)
+        fpga_instance.sync_time = 0
+        fpga_instance.is_synchronized = False
+
+        assert fpga_instance.rehydrate_sync_from_header() is False
+        assert fpga_instance.sync_time == 0
+        assert fpga_instance.is_synchronized is False
+        assert "cold boot" in caplog.text
+
+    def test_rehydrate_sync_from_header_zero_sync_time(
+        self, fpga_instance, caplog
+    ):
+        """Header present but sync_time=0 → refuse to rehydrate."""
+        caplog.set_level(logging.WARNING)
+        fpga_instance.redis.corr_config.upload_header({"sync_time": 0})
+        fpga_instance.sync_time = 0
+        fpga_instance.is_synchronized = False
+
+        assert fpga_instance.rehydrate_sync_from_header() is False
+        assert fpga_instance.is_synchronized is False
+        assert "sync_time=0" in caplog.text
 
     def test_read_integrations_no_new_data(self, fpga_instance):
         """No new cnt → loop exits via pre-set event, queue stays empty."""
