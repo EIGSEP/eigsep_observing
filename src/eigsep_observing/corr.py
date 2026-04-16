@@ -12,7 +12,6 @@ from .keys import (
     CORR_PAIRS_SET,
     CORR_STREAM,
 )
-from .utils import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -54,22 +53,20 @@ class CorrConfigStore:
     def __init__(self, transport):
         self.transport = transport
 
-    def upload(self, config, from_file=False):
+    def upload(self, config):
         """
         Upload the SNAP configuration.
 
+        YAML file loading is the caller's responsibility — the corr
+        contract requires ``integration_time`` to be injected
+        (``utils.load_config`` does this), and keeping that step at
+        the entry point avoids coupling this store to the observing
+        utils.
+
         Parameters
         ----------
-        config : str or dict
-            Path to a YAML file if ``from_file`` is True, else a dict.
-            When loading from a file, ``integration_time`` is computed
-            and injected via :func:`utils.load_config` — the corr
-            config contract requires it, which is why this path differs
-            from :class:`ConfigStore.upload`.
-        from_file : bool
+        config : dict
         """
-        if from_file:
-            config = load_config(config)
         self.transport._upload_dict(config, CORR_CONFIG_KEY)
 
     def get(self):

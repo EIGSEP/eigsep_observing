@@ -331,7 +331,7 @@ class EigsepFpga:
             to apply).
         """
         try:
-            redis_cfg = self.redis.corr_config.get_config()
+            redis_cfg = self.redis.corr_config.get()
         except ValueError:
             raise RuntimeError(
                 "No corr config in Redis; cannot attach. "
@@ -373,7 +373,7 @@ class EigsepFpga:
                 self.logger.error(f"Configuration validation failed: {e}")
                 raise RuntimeError("Configuration validation failed") from e
         self.logger.debug("Uploading configuration to Redis.")
-        self.redis.corr_config.upload(self.cfg, from_file=False)
+        self.redis.corr_config.upload(self.cfg)
 
     def initialize(
         self,
