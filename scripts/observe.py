@@ -104,11 +104,15 @@ else:
 
 thds = {}
 thds["status"] = observer.status_thread
-# A RuntimeError out of record_corr_data is the "SNAP never synced /
-# no header ever available" crash path. threading.Thread swallows
-# exceptions by default, so wrap the target: surface the crash at
-# CRITICAL, signal stop_event so the VNA thread exits cleanly, and
-# record the failure so the main process exits non-zero after join.
+# Corr data is sacred — every other data product (VNA, switch
+# schedule, sensors) is supporting context for the corr stream. If
+# the corr thread dies for any reason (bounded-wait watchdog raising
+# RuntimeError, TimeoutError from CorrReader.read after SNAP dies
+# mid-run, any unanticipated failure), the rest of the system should
+# stop too: collecting hours of VNA files with no corr data to pair
+# them against is worse than exiting loudly. threading.Thread swallows
+# target exceptions by default, so wrap the target to convert any
+# Exception into stop_event + non-zero exit.
 corr_crashed = [False]
 
 
@@ -119,10 +123,8 @@ def _corr_target():
             ntimes=cfg["corr_ntimes"],
             timeout=10,
         )
-    except RuntimeError as e:
-        logger.critical(
-            f"Correlator recording crashed: {e}. Stopping observer."
-        )
+    except Exception:
+        logger.exception("Correlator recording crashed. Stopping observer.")
         corr_crashed[0] = True
         observer.stop_event.set()
 
