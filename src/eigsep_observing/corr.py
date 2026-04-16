@@ -26,15 +26,18 @@ def _log_unsynced_drop(cnt):
     Logs at most once per ``_UNSYNCED_LOG_THROTTLE_S`` seconds. The
     throttle state is module-level so it survives across calls; tests
     that need to exercise the throttle can reset
-    ``_last_unsynced_log[0]``.
+    ``_last_unsynced_log[0]``. This message intentionally avoids
+    hard-coding a specific ``sync_time`` value because callers may drop
+    integrations for any falsy or missing ``sync_time``.
     """
     now = time.time()
     if now - _last_unsynced_log[0] < _UNSYNCED_LOG_THROTTLE_S:
         return
     _last_unsynced_log[0] = now
     logger.error(
-        f"SNAP not synchronized (sync_time=0); dropping corr integration "
-        f"cnt={cnt}. Data without a sync anchor has no valid timestamps."
+        f"SNAP not synchronized (sync_time is falsy or missing); "
+        f"dropping corr integration cnt={cnt}. Data without a sync "
+        f"anchor has no valid timestamps."
     )
 
 
