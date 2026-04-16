@@ -187,8 +187,8 @@ class TestEigsepFpga:
         spy_arm_sync.assert_called_once()
         assert spy_sw_sync.call_count == 3
         # synchronize() pushes the header once so consumers see fresh
-        # sync_time without waiting for the observe loop's periodic
-        # upload.
+        # sync_time. The observe loop does not re-upload — header
+        # publication is state-change driven.
         spy_upload_header.assert_called_once()
 
         # Round-trip: read corr_header back through the production
@@ -325,6 +325,81 @@ class TestEigsepFpga:
         assert fpga_instance.rehydrate_sync_from_header() is False
         assert fpga_instance.is_synchronized is False
         assert "sync_time=0" in caplog.text
+
+    def test_upload_header_stamps_header_upload_unix(self, fpga_instance):
+        """Every CorrConfigStore.upload_header stamps the wallclock of
+        publication under 'header_upload_unix'. Consumers (file headers)
+        read this alongside sync_time to detect post-sync mutations
+        that weren't re-published."""
+        with patch("eigsep_observing.corr.time.time", return_value=1234.0):
+            fpga_instance.redis.corr_config.upload_header({"sync_time": 42})
+
+        header = fpga_instance.redis.corr_config.get_header()
+        assert header["sync_time"] == 42
+        assert header["header_upload_unix"] == 1234.0
+
+    def test_upload_header_does_not_mutate_caller_dict(self, fpga_instance):
+        """Stamping is done on a copy so the caller's dict (typically
+        EigsepFpga.header, a fresh dict per property access, but still)
+        is not surprised with extra keys."""
+        payload = {"sync_time": 42, "nchan": 1024}
+        fpga_instance.redis.corr_config.upload_header(payload)
+        assert payload == {"sync_time": 42, "nchan": 1024}
+
+    def test_initialize_publishes_header_at_boundary(self, fpga_instance):
+        """initialize() itself publishes once at the end, independent of
+        whichever sub-mutator (synchronize / set_pam_atten / ...) also
+        publishes. Stubbing every sub-mutator isolates this guarantee."""
+        with (
+            patch.object(fpga_instance, "initialize_adc"),
+            patch.object(fpga_instance, "initialize_fpga"),
+            patch.object(fpga_instance, "set_input"),
+            patch.object(fpga_instance, "synchronize"),
+            patch.object(
+                fpga_instance.redis.corr_config,
+                "upload_header",
+                wraps=fpga_instance.redis.corr_config.upload_header,
+            ) as spy,
+        ):
+            fpga_instance.initialize(
+                initialize_adc=True, initialize_fpga=True, sync=True
+            )
+        spy.assert_called_once()
+
+    def test_set_pam_atten_publishes_header(self, fpga_instance):
+        """set_pam_atten mutates header-relevant state (rf_chain atten),
+        so it must re-publish."""
+        fpga_instance.initialize_pams()
+        ant = next(iter(fpga_instance.cfg["rf_chain"]["ants"]))
+        with patch.object(
+            fpga_instance.redis.corr_config,
+            "upload_header",
+            wraps=fpga_instance.redis.corr_config.upload_header,
+        ) as spy:
+            fpga_instance.set_pam_atten(ant, 4)
+        spy.assert_called_once()
+
+    def test_set_pam_atten_all_publishes_header(self, fpga_instance):
+        """set_pam_atten_all mutates all PAMs at once; same contract."""
+        fpga_instance.initialize_pams()
+        with patch.object(
+            fpga_instance.redis.corr_config,
+            "upload_header",
+            wraps=fpga_instance.redis.corr_config.upload_header,
+        ) as spy:
+            fpga_instance.set_pam_atten_all(6)
+        spy.assert_called_once()
+
+    def test_set_pol_delay_publishes_header(self, fpga_instance):
+        """set_pol_delay mutates pol_delay (a top-level header field)
+        so it must re-publish."""
+        with patch.object(
+            fpga_instance.redis.corr_config,
+            "upload_header",
+            wraps=fpga_instance.redis.corr_config.upload_header,
+        ) as spy:
+            fpga_instance.set_pol_delay({"01": 3, "23": 0, "45": 0})
+        spy.assert_called_once()
 
     def test_read_integrations_no_new_data(self, fpga_instance):
         """No new cnt → loop exits via pre-set event, queue stays empty."""

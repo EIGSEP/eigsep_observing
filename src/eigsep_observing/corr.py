@@ -83,8 +83,17 @@ class CorrConfigStore:
         return json.loads(raw)
 
     def upload_header(self, header):
-        """Upload the correlator header (from ``EigsepFpga.header``)."""
-        self.transport._upload_dict(header, CORR_HEADER_KEY)
+        """Upload the correlator header (from ``EigsepFpga.header``).
+
+        Stamps ``header_upload_unix`` at publication time so downstream
+        (file headers, offline inspection) can see when the producer
+        last re-published. A stale timestamp relative to ``sync_time``
+        means state on the SNAP changed without the producer
+        re-publishing — a contract violation worth investigating, not a
+        runtime failure.
+        """
+        stamped = {**header, "header_upload_unix": time.time()}
+        self.transport._upload_dict(stamped, CORR_HEADER_KEY)
 
     def get_header(self):
         """

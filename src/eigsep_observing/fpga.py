@@ -355,6 +355,12 @@ class EigsepFpga:
         if sync:
             self.logger.debug("Synchronizing correlator clock.")
             self.synchronize()
+        # Explicit re-publish: initialize() is the outer state-change
+        # boundary. synchronize() also publishes, so on sync=True this
+        # is a redundant (but harmless, freshest-wins) upload; on
+        # sync=False / ADC-only paths this is the only publish that
+        # reflects the freshly-initialized state.
+        self.redis.corr_config.upload_header(self.header)
 
     def rehydrate_sync_from_header(self):
         """
@@ -365,10 +371,11 @@ class EigsepFpga:
         this, ``self.sync_time=0`` on startup and ``CorrWriter.add``
         would drop every integration until the next ``synchronize()``
         call (see :mod:`eigsep_observing.corr`). The header is the
-        authoritative persisted record of the last sync; it's
-        re-uploaded by the observe loop roughly every ~100 integrations
-        so it should always be present while the SNAP is producing
-        data.
+        authoritative persisted record of the last sync: it's
+        published on every state-changing call (``initialize``,
+        ``synchronize``, ``set_pam_atten*``, ``set_pol_delay``) and
+        persists in Redis until overwritten, so it should be present
+        whenever a SNAP has been initialized and synced.
 
         Returns
         -------
@@ -541,6 +548,7 @@ class EigsepFpga:
             self.fpga.write_int(f"pfb_pol{key}_delay", dly)
             if verify:
                 assert self.fpga.read_uint(f"pfb_pol{key}_delay") == dly
+        self.redis.corr_config.upload_header(self.header)
 
     def initialize_pams(self):
         """
@@ -595,6 +603,7 @@ class EigsepFpga:
         update_pol = self.cfg["rf_chain"]["ants"][ant]["pam"]["pol"]
         atten[update_pol] = attenuation
         pam.set_attenuation(atten["E"], atten["N"], verify=True)
+        self.redis.corr_config.upload_header(self.header)
 
     def get_pam_atten(self, ant):
         """
@@ -639,6 +648,7 @@ class EigsepFpga:
             raise RuntimeError("PAMs not initialized.")
         for pam in self.pams:
             pam.set_attenuation(attenuation, attenuation, verify=True)
+        self.redis.corr_config.upload_header(self.header)
 
     def synchronize(self, delay=0):
         """

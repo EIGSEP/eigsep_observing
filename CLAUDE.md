@@ -117,13 +117,19 @@ change needed). Tracked informally; not yet implemented.
 
 `sync_time` is a per-sync invariant (set once when the SNAP is synchronized),
 not a per-integration sensor reading. It rides on the corr header
-(`redis.corr_config.get_header()["sync_time"]`), published by
-`EigsepFpga.synchronize` and re-uploaded every ~100 integrations inside the
-observe loop. `EigObserver.record_corr_data` caches it from the header at
-file-start; a mid-file re-sync is an edge case that warrants a new file
-anyway. Historically `sync_time` was pushed through `add_metadata` and fetched
-inline by `read_corr_data` — that was the last cross-bus read inside a reader,
-removed in this refactor.
+(`redis.corr_config.get_header()["sync_time"]`), published on every
+state-changing call in `EigsepFpga` — `initialize`, `synchronize`,
+`set_pam_atten` / `set_pam_atten_all`, `set_pol_delay`. There is no periodic
+heartbeat re-upload; the header persists in Redis until overwritten by the
+next state change. Every `CorrConfigStore.upload_header` call also stamps a
+`header_upload_unix` field so file headers record when the producer last
+re-published — offline you can check consistency between `sync_time` and
+`header_upload_unix` to detect a SNAP that was reconfigured without
+re-publishing. `EigObserver.record_corr_data` caches `sync_time` from the
+header at file-start; a mid-file re-sync is an edge case that warrants a
+new file anyway. Historically `sync_time` was pushed through `add_metadata`
+and fetched inline by `read_corr_data` — that was the last cross-bus read
+inside a reader, removed in this refactor.
 
 ## Metadata averaging: per-type reduction policy
 
