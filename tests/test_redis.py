@@ -1,4 +1,3 @@
-from datetime import datetime, timedelta, timezone
 import json
 import logging
 import numpy as np
@@ -57,11 +56,12 @@ def obs_client(obs_server):
 
 def test_metadata(server, client):
     assert server.data_streams == {}  # initially empty
-    today = datetime.now(timezone.utc).isoformat().split("T")[0]
 
     # Test live metadata functionality - this is the primary use case
     for acc_cnt in range(10):
+        before = time.time()
         client.metadata.add("acc_cnt", acc_cnt)
+        after = time.time()
         assert client.r.smembers("data_streams") == {b"stream:acc_cnt"}
         assert server.r.smembers("data_streams") == {b"stream:acc_cnt"}
         if acc_cnt == 0:  # data stream should be created on first call
@@ -72,10 +72,12 @@ def test_metadata(server, client):
             "acc_cnt": acc_cnt
         }
         live = server.metadata_snapshot.get()
-        # can't expect the exact timestamp - live metadata uses string keys
+        # _ts is Unix seconds (float); can't pin the exact value but it
+        # must fall in the [before, after] window we just measured.
         assert "acc_cnt_ts" in live
         ts = live.pop("acc_cnt_ts")
-        assert ts.startswith(today)
+        assert isinstance(ts, float)
+        assert before <= ts <= after
         compare_dicts(live, {"acc_cnt": acc_cnt})
 
     # Test stream reading behavior - with current API, reads start from $
@@ -106,14 +108,14 @@ def test_metadata(server, client):
 
 def _backdate_ts(server, key, seconds_ago):
     """Rewrite METADATA_HASH's ``{key}_ts`` to simulate sensor
-    silence. Paired with MetadataWriter.add, which stamps current
-    UTC isoformat; this replaces it with a past value so the
-    snapshot reader's freshness check fires deterministically."""
-    past = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    silence. Paired with MetadataWriter.add, which stamps the current
+    Unix time; this replaces it with a past value so the freshness
+    check fires deterministically."""
+    past = time.time() - seconds_ago
     server.r.hset(
         METADATA_HASH,
         f"{key}_ts",
-        json.dumps(past.isoformat()).encode("utf-8"),
+        json.dumps(past).encode("utf-8"),
     )
 
 
@@ -165,7 +167,11 @@ def test_metadata_snapshot_malformed_ts_silent(server, client, caplog):
     the fromisoformat ValueError branch is unreachable via the writer.
     Overwrite _ts directly via hset to simulate a non-compliant
     producer or manual redis intervention — the only way to exercise
-    this boundary condition."""
+    this boundary condition.
+
+    Non-numeric ``_ts`` (e.g. a leftover ISO string from a
+    pre-Unix-time writer) is treated as freshness-unknown — skipped,
+    not warned."""
     client.metadata.add("acc_cnt", 1)
     server.r.hset(
         METADATA_HASH,

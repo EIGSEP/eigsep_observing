@@ -1,7 +1,7 @@
-from datetime import datetime, timezone
 import json
 import logging
 import threading
+import time
 
 import redis
 import redis.exceptions
@@ -99,9 +99,7 @@ class Transport:
     def _upload_dict(self, d, key):
         """Serialize ``d`` as JSON (with ``upload_time`` injected) under ``key``."""
         d = d.copy()
-        d["upload_time"] = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
+        d["upload_time"] = time.time()
         self.add_raw(key, json.dumps(d).encode("utf-8"))
 
     def is_connected(self):
