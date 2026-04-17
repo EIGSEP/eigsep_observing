@@ -230,25 +230,24 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
         switch_calls = []
         original_switch_to = client._switch_to
 
+        # Stop after the post-VNA switch-back. The VNA's internal
+        # switch_fn only touches VNA* modes (VNAANT, VNARF, ...);
+        # RFNOFF is uniquely vna_loop's switch-back target. Setting
+        # stop_client here (instead of patching stop_client.wait)
+        # avoids racing the heartbeat thread, which shares the same
+        # Event and would otherwise see the patched wait().
         def recording_switch_to(state):
             switch_calls.append(state)
-            return original_switch_to(state)
-
-        # Stop after one iteration — vna_loop's outer wait will exit.
-        def stop_after_first_iteration(*args, **kwargs):
-            client.stop_client.set()
-            return True
+            result = original_switch_to(state)
+            if state == "RFNOFF":
+                client.stop_client.set()
+            return result
 
         with patch.object(
             client, "_switch_to", side_effect=recording_switch_to
         ):
-            with patch.object(
-                client.stop_client,
-                "wait",
-                side_effect=stop_after_first_iteration,
-            ):
-                caplog.set_level("INFO")
-                client.vna_loop()
+            caplog.set_level("INFO")
+            client.vna_loop()
 
         # The last _switch_to call from vna_loop itself is the
         # switch-back; intermediate calls come from VNA OSL/ant/rec.
@@ -281,13 +280,15 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
         switch_calls = []
         original_switch_to = client._switch_to
 
+        # See sibling test: RFANT is the fallback switch-back target and
+        # isn't hit by the VNA's internal VNA*-mode switching, so it's
+        # safe to key the stop on it without racing the heartbeat.
         def recording_switch_to(state):
             switch_calls.append(state)
-            return original_switch_to(state)
-
-        def stop_after_first_iteration(*args, **kwargs):
-            client.stop_client.set()
-            return True
+            result = original_switch_to(state)
+            if state == "RFANT":
+                client.stop_client.set()
+            return result
 
         with patch.object(
             client, "_read_switch_mode_from_redis", return_value=None
@@ -295,13 +296,8 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
             with patch.object(
                 client, "_switch_to", side_effect=recording_switch_to
             ):
-                with patch.object(
-                    client.stop_client,
-                    "wait",
-                    side_effect=stop_after_first_iteration,
-                ):
-                    caplog.set_level("WARNING")
-                    client.vna_loop()
+                caplog.set_level("WARNING")
+                client.vna_loop()
 
         assert switch_calls[-1] == "RFANT"
         assert any(
