@@ -12,10 +12,12 @@ class StatusWriter:
     Producers call ``send(level, status)`` to emit a human-readable
     status line tagged with a Python logging level. The stream is
     bounded via ``maxlen`` so a dead consumer can't grow it without
-    limit.
+    limit. The bound is sized to survive a brief ground-reader
+    outage without dropping diverse event types — the durable record
+    of every event remains the panda's rotating log file.
     """
 
-    maxlen = 5
+    maxlen = 100
 
     def __init__(self, transport):
         self.transport = transport
