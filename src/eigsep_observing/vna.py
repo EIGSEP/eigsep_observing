@@ -18,9 +18,15 @@ class VnaWriter:
     (dtype/shape/order), and optional JSON-encoded ``header`` and
     ``metadata`` blobs. Numpy arrays inside ``header`` / ``metadata``
     are flattened to lists before encoding.
+
+    ``maxlen`` is a dead-reader failsafe: each ``measure_s11`` call
+    produces one bundled entry (ant+noise+load+OSL or rec+OSL), and
+    the ground reader drains it synchronously. 200 covers ~100 full
+    ant+rec sweeps of headroom even during VNA-only campaigns —
+    well beyond any realistic ground-reader outage window.
     """
 
-    maxlen = 1000
+    maxlen = 200
 
     def __init__(self, transport):
         self.transport = transport
