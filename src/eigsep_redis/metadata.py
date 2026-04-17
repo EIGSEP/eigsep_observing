@@ -16,9 +16,16 @@ class MetadataWriter:
     stream in the metadata-only and generic stream-index sets. The two
     destinations back the two readers (snapshot vs streaming) — splitting
     them would let the readers drift out of sync.
+
+    ``maxlen`` is a dead-reader failsafe, not a working buffer:
+    ``MetadataStreamReader.drain`` pulls everything since its last call
+    on every corr integration, so the stream sits near-empty in normal
+    operation. Sized for ~5 min of tolerance at the 5 Hz producer
+    cadence (picohost ``STATUS_CADENCE_MS = 200``) — past that window
+    sensor data is stale and the observation is already compromised.
     """
 
-    maxlen = 5000
+    maxlen = 1500
 
     def __init__(self, transport):
         self.transport = transport

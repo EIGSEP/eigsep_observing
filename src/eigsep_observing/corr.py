@@ -118,9 +118,16 @@ class CorrWriter:
     The wire format matches ``EigsepFpga.read_data``: per-pair bytes
     plus ``acc_cnt`` and ``dtype`` sidecars so the reader can
     ``np.frombuffer`` without a separate type registry.
+
+    ``maxlen`` is a dead-reader failsafe: in normal operation the
+    observer loop reads each integration as it arrives, so the stream
+    sits at depth ~1. Sized for ~10 min of tolerance at the 4 Hz
+    target integration rate (``corr_acc_len = 0x04000000``); at ~144
+    KB/entry for the current 12-pair × 1024-channel layout this caps
+    the worst-case Redis footprint around 360 MB.
     """
 
-    maxlen = 5000
+    maxlen = 2500
 
     def __init__(self, transport):
         self.transport = transport
