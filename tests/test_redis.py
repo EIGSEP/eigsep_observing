@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import json
 import logging
 import numpy as np
 import pytest
@@ -24,6 +25,7 @@ from eigsep_redis import (
     StatusReader,
     StatusWriter,
 )
+from eigsep_redis.keys import METADATA_HASH
 from eigsep_redis.testing import DummyEigsepRedis
 
 
@@ -100,6 +102,98 @@ def test_metadata(server, client):
     # test reset
     server.reset()
     assert server.data_streams == {}
+
+
+def _backdate_ts(server, key, seconds_ago):
+    """Rewrite METADATA_HASH's ``{key}_ts`` to simulate sensor
+    silence. Paired with MetadataWriter.add, which stamps current
+    UTC isoformat; this replaces it with a past value so the
+    snapshot reader's freshness check fires deterministically."""
+    past = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    server.r.hset(
+        METADATA_HASH,
+        f"{key}_ts",
+        json.dumps(past.isoformat()).encode("utf-8"),
+    )
+
+
+def test_metadata_snapshot_fresh_no_warning(server, client, caplog):
+    client.metadata.add("acc_cnt", 1)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        server.metadata_snapshot.get()
+    assert not any("is stale" in r.message for r in caplog.records)
+
+
+def test_metadata_snapshot_stale_warns_but_returns_value(
+    server, client, caplog
+):
+    client.metadata.add("acc_cnt", 7)
+    _backdate_ts(server, "acc_cnt", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        val = server.metadata_snapshot.get("acc_cnt")
+    # value still returned — staleness is informational
+    assert val == 7
+    stale = [r for r in caplog.records if "is stale" in r.message]
+    assert len(stale) == 1
+    assert "acc_cnt" in stale[0].message
+
+
+def test_metadata_snapshot_stale_warns_on_full_get(server, client, caplog):
+    client.metadata.add("acc_cnt", 1)
+    client.metadata.add("temp", 25.5)
+    _backdate_ts(server, "acc_cnt", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        m = server.metadata_snapshot.get()
+    assert m["acc_cnt"] == 1 and m["temp"] == 25.5
+    messages = [r.message for r in caplog.records if "is stale" in r.message]
+    assert any("acc_cnt" in msg for msg in messages)
+    assert not any("temp" in msg for msg in messages)
+
+
+def test_metadata_snapshot_missing_ts_silent(server, caplog):
+    """Pre-timestamp entries (or direct hset bypasses) must not
+    trigger false positives — freshness is simply unknown."""
+    server.r.hset(METADATA_HASH, "legacy", json.dumps(42).encode("utf-8"))
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        val = server.metadata_snapshot.get("legacy")
+    assert val == 42
+    assert not any("is stale" in r.message for r in caplog.records)
+
+
+def test_metadata_snapshot_malformed_ts_silent(server, client, caplog):
+    client.metadata.add("acc_cnt", 1)
+    server.r.hset(
+        METADATA_HASH,
+        "acc_cnt_ts",
+        json.dumps("not-a-timestamp").encode("utf-8"),
+    )
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        server.metadata_snapshot.get()
+    assert not any("is stale" in r.message for r in caplog.records)
+
+
+def test_metadata_snapshot_staleness_can_be_disabled(server, client, caplog):
+    client.metadata.add("acc_cnt", 1)
+    _backdate_ts(server, "acc_cnt", seconds_ago=3600)
+    try:
+        server.metadata_snapshot.max_age_s = float("inf")
+        with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+            server.metadata_snapshot.get()
+    finally:
+        server.metadata_snapshot.max_age_s = MetadataSnapshotReader.max_age_s
+    assert not any("is stale" in r.message for r in caplog.records)
+
+
+def test_metadata_snapshot_staleness_restricted_to_requested_keys(
+    server, client, caplog
+):
+    client.metadata.add("acc_cnt", 1)
+    client.metadata.add("temp", 25.5)
+    _backdate_ts(server, "temp", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        server.metadata_snapshot.get("acc_cnt")
+    # temp is stale but wasn't requested — must stay silent
+    assert not any("is stale" in r.message for r in caplog.records)
 
 
 def test_raw(server):
@@ -198,7 +292,9 @@ def test_metadata_writer_has_no_cross_bus_methods():
 def test_metadata_readers_have_no_cross_bus_methods():
     """Structural guard: metadata readers only read metadata, nothing else."""
     for cls, expected in (
-        (MetadataSnapshotReader, {"get"}),
+        # ``max_age_s`` is a tunable, not a bus method — see
+        # MetadataSnapshotReader docstring.
+        (MetadataSnapshotReader, {"get", "max_age_s"}),
         (MetadataStreamReader, {"drain", "streams"}),
     ):
         public = {name for name in vars(cls) if not name.startswith("_")}
