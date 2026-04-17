@@ -309,6 +309,52 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
         client.stop()
 
 
+def test_vna_loop_warns_on_failed_switch_back(redis, dummy_cfg, caplog):
+    """If the post-VNA ``_switch_to(prev_mode)`` returns falsy, vna_loop
+    logs a WARNING — mirrors switch_loop's "Failed to switch" pattern so
+    a hardware-stuck calibrator is operator-visible instead of silent."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 60  # long: only one iteration before stop
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        assert client._switch_to("RFNOFF")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if client._read_switch_mode_from_redis() == "RFNOFF":
+                break
+            time.sleep(0.05)
+        assert client._read_switch_mode_from_redis() == "RFNOFF"
+
+        original_switch_to = client._switch_to
+
+        # Only fail the switch-back (RFNOFF). The VNA's internal
+        # switch_fn touches VNA* modes and must continue to succeed, or
+        # the test would short-circuit before reaching the tail.
+        def failing_switch_back(state):
+            if state == "RFNOFF":
+                client.stop_client.set()
+                return None
+            return original_switch_to(state)
+
+        with patch.object(
+            client, "_switch_to", side_effect=failing_switch_back
+        ):
+            caplog.set_level("WARNING")
+            client.vna_loop()
+
+        assert any(
+            "Failed to switch back to RFNOFF" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), (
+            "expected 'Failed to switch back to RFNOFF' warning; "
+            f"got records: {[r.getMessage() for r in caplog.records]}"
+        )
+    finally:
+        client.stop()
+
+
 def test_no_current_switch_state_attribute(client):
     """Regression: the panda-side shadow ``current_switch_state`` is
     gone — its replacement is :meth:`_read_switch_mode_from_redis`.
