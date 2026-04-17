@@ -20,10 +20,12 @@ belongs with the rest of the producer-conformance suite.
 
 import glob
 import tempfile
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from picohost import PicoPotentiometer
 from picohost.testing import (
     ImuEmulator,
@@ -34,8 +36,13 @@ from picohost.testing import (
 )
 
 from conftest import HEADER, IMU_READING
+import eigsep_observing
 from eigsep_observing import io
-from eigsep_observing.testing import DummyEigsepFpga
+from eigsep_observing.testing import (
+    DummyEigsepFpga,
+    DummyEigsepObsRedis,
+    DummyPandaClient,
+)
 
 
 def _potmon_post_handler_reading():
@@ -127,6 +134,68 @@ def test_every_schema_has_conforming_emulator(sensor_name):
     reading = SENSOR_EMULATORS[sensor_name]()
     violations = io._validate_metadata(reading, io.SENSOR_SCHEMAS[sensor_name])
     assert violations == [], f"{sensor_name} producer drift: {violations}"
+
+
+@pytest.mark.parametrize("mode", sorted(io.VNA_S11_MODE_DATA_KEYS))
+def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
+    """``PandaClient.measure_s11`` is the producer of the VNA stream.
+    Drive the real method end-to-end through DummyPandaClient +
+    DummyVNA, read the entry back off the stream, and validate the
+    payload against ``VNA_S11_HEADER_SCHEMA`` + the per-mode data
+    contract. This is the canonical guard rail against silent drift in
+    the s11 header-merge shape (``cal:*`` prefix, ``mode``,
+    ``metadata_snapshot_unix``) — a rename on either side fails CI
+    immediately. Parametrizes over ``VNA_S11_MODE_DATA_KEYS`` (not a
+    literal tuple) so adding a mode without a contract test is
+    impossible by construction."""
+    cfg_path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+    with open(cfg_path) as f:
+        cfg = yaml.safe_load(f)
+    cfg["use_vna"] = True
+    cfg["vna_save_dir"] = str(tmp_path)
+    redis = DummyEigsepObsRedis()
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        client.measure_s11(mode)
+        # The reader skips producer-backlog by design (see
+        # test_vna_reader_skips_producer_backlog); rewind to stream
+        # origin so this single-threaded test picks up the entry the
+        # producer just pushed.
+        client.redis._set_last_read_id("stream:vna", "0-0")
+        data, header, metadata = client.redis.vna_reader.read(timeout=1)
+    finally:
+        client.stop()
+
+    data_violations = io._validate_vna_s11_data(data, mode)
+    assert data_violations == [], (
+        f"measure_s11({mode!r}) data drift: {data_violations}"
+    )
+
+    header_violations = io._validate_vna_s11_header(header)
+    assert header_violations == [], (
+        f"measure_s11({mode!r}) header drift: {header_violations}"
+    )
+
+    # The ``mode`` field must round-trip through VnaWriter's JSON
+    # encoding unchanged — the test-vs-producer mode arg is the same
+    # string the consumer reads back.
+    assert header["mode"] == mode
+
+    # ``metadata_snapshot_unix`` must be a plausible wallclock (in
+    # seconds, not ms or ns) recorded at publish time. Guarding the
+    # unit here catches a producer that accidentally switches to
+    # monotonic/ms/ns — which is silently-valid under the float type
+    # check but breaks downstream freshness interpretation.
+    now = time.time()
+    assert abs(header["metadata_snapshot_unix"] - now) < 60.0, (
+        f"metadata_snapshot_unix {header['metadata_snapshot_unix']!r} is "
+        f"not a recent Unix timestamp (now={now})"
+    )
+
+    # Metadata snapshot was captured (rfswitch publishes on startup via
+    # DummyPicoRFSwitch). Ensures ``measure_s11`` routes the snapshot
+    # reader through to the VNA stream as opposed to dropping it.
+    assert isinstance(metadata, dict)
 
 
 def test_dummy_fpga_header_round_trips_through_file():
