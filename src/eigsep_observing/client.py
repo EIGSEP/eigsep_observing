@@ -1,6 +1,8 @@
 import logging
 import threading
 import time
+from contextlib import contextmanager
+
 import yaml
 
 from cmt_vna import VNA
@@ -137,6 +139,64 @@ class PandaClient:
         if sw_state is None:
             return None
         return _SW_INT_TO_MODE.get(sw_state)
+
+    @contextmanager
+    def switch_session(self):
+        """Context manager for interactive / scripted RF switch use.
+
+        Acquires :attr:`switch_lock` (pausing ``switch_loop`` and
+        ``vna_loop`` for the duration of the block), yields a callable
+        ``sw(mode) -> bool`` that routes through :meth:`_switch_to`, and
+        restores the mode that was active on entry when the block
+        exits. Matches the common "switch, measure, switch back" REPL
+        pattern without manual bookkeeping.
+
+        Behavior:
+
+        * The callable warns and returns ``False`` if the underlying
+          switch call fails; returns ``True`` on success.
+        * Auto-restore fires only if ``sw`` was actually called inside
+          the block, so a "just pause the loops" block leaves hardware
+          alone on exit.
+        * If the rfswitch hasn't published any state on entry (the
+          session starts with an unknown mode), restore is skipped
+          with a warning — auto-guessing RFANT would be surprising.
+        * A failed restore logs a warning; the lock is released either
+          way, so a stuck switch doesn't wedge the session.
+
+        Examples
+        --------
+        >>> with panda.switch_session() as sw:
+        ...     sw("RFLOAD")
+        ...     take_measurement()
+        # rfswitch auto-restored to the mode that was active on entry
+        """
+        with self.switch_lock:
+            prev_mode = self._read_switch_mode_from_redis()
+            switched = False
+
+            def sw(mode):
+                nonlocal switched
+                switched = True
+                if not self._switch_to(mode):
+                    self.logger.warning(f"Failed to switch to {mode}")
+                    return False
+                return True
+
+            try:
+                yield sw
+            finally:
+                if switched:
+                    if prev_mode is None:
+                        self.logger.warning(
+                            "switch_session: entry mode unknown "
+                            "(rfswitch had not published); skipping "
+                            "auto-restore."
+                        )
+                    elif not self._switch_to(prev_mode):
+                        self.logger.warning(
+                            f"switch_session: failed to restore to {prev_mode}"
+                        )
 
     def _send_heartbeat(self, ex=60):
         """

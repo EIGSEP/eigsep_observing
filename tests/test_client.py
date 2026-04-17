@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import threading
 import time
 from unittest.mock import patch
 
@@ -353,6 +354,245 @@ def test_vna_loop_warns_on_failed_switch_back(redis, dummy_cfg, caplog):
             "expected 'Failed to switch back to RFNOFF' warning; "
             f"got records: {[r.getMessage() for r in caplog.records]}"
         )
+    finally:
+        client.stop()
+
+
+def _wait_for_published_mode(client, expected, timeout=2.0):
+    """Spin until ``_read_switch_mode_from_redis`` sees ``expected``."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if client._read_switch_mode_from_redis() == expected:
+            return
+        time.sleep(0.05)
+    assert client._read_switch_mode_from_redis() == expected
+
+
+def test_switch_session_auto_restores_on_exit(client, caplog):
+    """Happy path: enter with published mode=RFANT, switch to RFNOFF
+    inside, exit → session auto-restores to RFANT. Matches the REPL
+    "switch, measure, switch back" use case."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    switch_calls = []
+    original_switch_to = client._switch_to
+
+    def recording(state):
+        switch_calls.append(state)
+        return original_switch_to(state)
+
+    caplog.set_level("WARNING")
+    with patch.object(client, "_switch_to", side_effect=recording):
+        with client.switch_session() as sw:
+            assert sw("RFNOFF") is True
+
+    assert switch_calls == ["RFNOFF", "RFANT"], (
+        f"expected RFNOFF then auto-restore to RFANT; got {switch_calls}"
+    )
+    # No warnings expected on the happy path.
+    assert not any(
+        "switch_session" in r.getMessage() for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_switch_session_noop_block_skips_restore(client):
+    """If the caller enters a session but never invokes ``sw``, the
+    context manager must not emit a restore ``_switch_to`` — the user
+    didn't change state, so no bookkeeping is required."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    switch_calls = []
+    original_switch_to = client._switch_to
+
+    def recording(state):
+        switch_calls.append(state)
+        return original_switch_to(state)
+
+    with patch.object(client, "_switch_to", side_effect=recording):
+        with client.switch_session():
+            pass
+
+    assert switch_calls == [], (
+        f"no-op switch_session block must not call _switch_to; "
+        f"got {switch_calls}"
+    )
+
+
+def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
+    """If the rfswitch hasn't published on entry, the session has no
+    mode to restore to. Skip the restore and log a warning — auto-
+    guessing RFANT would be surprising at the REPL."""
+    client.redis.r.hdel("metadata", "rfswitch")
+    assert client._read_switch_mode_from_redis() is None
+
+    switch_calls = []
+    original_switch_to = client._switch_to
+
+    def recording(state):
+        switch_calls.append(state)
+        return original_switch_to(state)
+
+    caplog.set_level("WARNING")
+    with patch.object(client, "_switch_to", side_effect=recording):
+        with client.switch_session() as sw:
+            assert sw("RFNOFF") is True
+
+    assert switch_calls == ["RFNOFF"], (
+        f"unknown-entry-mode session must not restore; got {switch_calls}"
+    )
+    assert any(
+        "entry mode unknown" in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_switch_session_warns_on_failed_restore(client, caplog):
+    """If the auto-restore ``_switch_to`` returns falsy, the session
+    logs a warning but still releases the lock — a stuck switch must
+    not wedge the session."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    original_switch_to = client._switch_to
+
+    # Succeed on RFNOFF (user's own switch) but fail the RFANT restore.
+    def restore_fails(state):
+        if state == "RFANT":
+            return None
+        return original_switch_to(state)
+
+    caplog.set_level("WARNING")
+    with patch.object(client, "_switch_to", side_effect=restore_fails):
+        with client.switch_session() as sw:
+            assert sw("RFNOFF") is True
+
+    assert any(
+        "switch_session: failed to restore to RFANT" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+    # Lock must be released post-exit.
+    assert client.switch_lock.acquire(blocking=False)
+    client.switch_lock.release()
+
+
+def test_switch_session_sw_warns_and_returns_false_on_failure(client, caplog):
+    """The yielded callable warns and returns ``False`` when the
+    underlying switch fails, so interactive users can branch on
+    success without having to plumb ``_switch_to``'s falsy sentinel."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    caplog.set_level("WARNING")
+    with patch.object(client, "_switch_to", return_value=None):
+        with client.switch_session() as sw:
+            assert sw("RFNOFF") is False
+
+    assert any(
+        "Failed to switch to RFNOFF" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_switch_session_restores_even_on_exception(client):
+    """An exception raised inside the ``with`` block must propagate
+    (the caller's measurement failed), but auto-restore and lock
+    release must still happen — that's the whole point of using a
+    context manager for this."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    switch_calls = []
+    original_switch_to = client._switch_to
+
+    def recording(state):
+        switch_calls.append(state)
+        return original_switch_to(state)
+
+    class _Boom(Exception):
+        pass
+
+    with patch.object(client, "_switch_to", side_effect=recording):
+        with pytest.raises(_Boom):
+            with client.switch_session() as sw:
+                sw("RFNOFF")
+                raise _Boom("measurement failed")
+
+    assert switch_calls == ["RFNOFF", "RFANT"], (
+        f"exception inside block must still trigger restore; "
+        f"got {switch_calls}"
+    )
+    assert client.switch_lock.acquire(blocking=False)
+    client.switch_lock.release()
+
+
+def test_switch_session_serializes_with_switch_loop(redis, dummy_cfg):
+    """The session holds ``switch_lock`` for the whole block, so a
+    concurrent ``switch_loop`` thread must block on the lock — its
+    first ``_switch_to`` call fires only *after* the session exits.
+    Distinguishes switch_loop's calls from the session's own by
+    thread identity, since both go through the patched ``_switch_to``.
+    """
+    cfg = dict(dummy_cfg)
+    # Keep the schedule simple and long so switch_loop blocks on the
+    # lock instead of racing through many iterations during the test.
+    cfg["switch_schedule"] = {"RFANT": 60.0}
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        assert client._switch_to("RFANT")
+        _wait_for_published_mode(client, "RFANT")
+
+        main_ident = threading.get_ident()
+        inside_session = threading.Event()
+        loop_got_lock = threading.Event()
+        loop_fired_during_session = threading.Event()
+        original_switch_to = client._switch_to
+
+        # Only calls from the switch_loop thread (not the main-thread
+        # session's own ``sw(...)``) count as "loop got the lock."
+        def observing_switch(state):
+            if threading.get_ident() != main_ident:
+                if inside_session.is_set():
+                    loop_fired_during_session.set()
+                loop_got_lock.set()
+            return original_switch_to(state)
+
+        with patch.object(client, "_switch_to", side_effect=observing_switch):
+            t = threading.Thread(target=client.switch_loop, daemon=True)
+            # Take the session lock *before* starting switch_loop so
+            # switch_loop is guaranteed to block on the first iter.
+            with client.switch_session() as sw:
+                inside_session.set()
+                t.start()
+                # switch_loop should attempt to acquire the lock and
+                # block. A brief grace window gives it time to reach
+                # that block point.
+                time.sleep(0.2)
+                assert not loop_got_lock.is_set(), (
+                    "switch_loop acquired switch_lock while session held it"
+                )
+                sw("RFNOFF")
+                time.sleep(0.1)
+                assert not loop_got_lock.is_set(), (
+                    "switch_loop acquired switch_lock after session's "
+                    "sw() call — lock must still be held"
+                )
+            # Session released the lock → switch_loop should proceed.
+            inside_session.clear()
+            assert loop_got_lock.wait(timeout=2.0), (
+                "switch_loop did not acquire lock within 2s of session exit"
+            )
+            assert not loop_fired_during_session.is_set(), (
+                "switch_loop executed _switch_to while session was still "
+                "inside its block"
+            )
+
+        client.stop_client.set()
+        t.join(timeout=2.0)
+        assert not t.is_alive()
     finally:
         client.stop()
 
