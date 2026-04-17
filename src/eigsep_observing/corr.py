@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 _UNSYNCED_LOG_THROTTLE_S = 60.0
 _last_unsynced_log = [0.0]
 
+_GAP_WARN_THROTTLE_S = 60.0
+
 
 def _log_unsynced_drop(cnt):
     """Throttled ERROR log for a pre-sync corr integration drop.
@@ -179,10 +181,22 @@ class CorrReader:
     other per-sync invariants live on the corr header; callers that
     need them should read the header separately
     (:class:`CorrConfigStore.get_header`).
+
+    Tracks ``acc_cnt`` across consecutive ``read`` calls and emits a
+    throttled WARNING if it jumps by more than one — the only online
+    signal that integrations were lost, whether because the stream was
+    trimmed (reader fell behind ``CorrWriter.maxlen``) or the producer
+    dropped entries. A backwards jump (``acc_cnt`` decreasing) is a
+    SNAP re-sync and silently resets the tracker; the observer already
+    rolls to a new file on ``sync_time`` change. ``seek`` also resets
+    the tracker so offline tools replaying from a prior ID don't
+    trigger false alarms.
     """
 
     def __init__(self, transport):
         self.transport = transport
+        self._prev_acc_cnt = None
+        self._last_gap_warn_monotonic = 0.0
 
     def seek(self, position):
         """
@@ -191,6 +205,7 @@ class CorrReader:
         rather than from '$' / the last read.
         """
         self.transport._set_last_read_id(CORR_STREAM, position)
+        self._prev_acc_cnt = None
 
     def read(self, pairs=None, timeout=10, unpack=True):
         """
@@ -239,6 +254,24 @@ class CorrReader:
         eid, fields = out[0][1][0]
         self.transport._set_last_read_id(CORR_STREAM, eid)
         acc_cnt = int(fields.pop(b"acc_cnt").decode())
+        if self._prev_acc_cnt is not None:
+            gap = acc_cnt - self._prev_acc_cnt
+            if gap > 1:
+                now = time.monotonic()
+                if now - self._last_gap_warn_monotonic >= _GAP_WARN_THROTTLE_S:
+                    self._last_gap_warn_monotonic = now
+                    logger.warning(
+                        "Corr stream gap: acc_cnt jumped %d -> %d "
+                        "(%d missed integrations). Stream was likely "
+                        "trimmed because the reader fell behind "
+                        "maxlen=%d, or the producer dropped "
+                        "integrations.",
+                        self._prev_acc_cnt,
+                        acc_cnt,
+                        gap - 1,
+                        CorrWriter.maxlen,
+                    )
+        self._prev_acc_cnt = acc_cnt
         dtype = fields.pop(b"dtype").decode()
         data = {}
         for k, v in fields.items():
