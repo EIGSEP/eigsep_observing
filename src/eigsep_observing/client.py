@@ -18,9 +18,9 @@ with open(default_cfg_file, "r") as f:
 # that a pico firmware change flows through automatically.
 VALID_SWITCH_STATES = set(PicoRFSwitch.path_str)
 
-# Inverse of PicoRFSwitch.paths: {sw_state_int: mode_name}. Used to map
-# the rfswitch's published `sw_state` back to a mode string when reading
-# the current switch state from PicoManager's Redis snapshot.
+# Inverse of PicoRFSwitch.path_str: {sw_state_int: mode_name}. Used to
+# map the rfswitch's published `sw_state` back to a mode string when
+# reading the current switch state from PicoManager's Redis snapshot.
 _SW_INT_TO_MODE = {
     PicoRFSwitch.rbin(v): k for k, v in PicoRFSwitch.path_str.items()
 }
