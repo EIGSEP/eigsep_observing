@@ -1,7 +1,16 @@
+import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+
 import pytest
 from unittest.mock import Mock, patch
 
-from eigsep_observing.utils import require_panda, require_snap, get_config_path
+from eigsep_observing.utils import (
+    configure_eig_logger,
+    get_config_path,
+    require_panda,
+    require_snap,
+)
 
 
 class TestRequirePandaDecorator:
@@ -338,3 +347,102 @@ class TestUtilsIntegration:
 
             assert config_path == "/path/to/obs_config.yaml"
             mock_files.assert_called_once()
+
+
+class TestConfigureEigLogger:
+    """Test configure_eig_logger.
+
+    pytest's logging plugin attaches a ``LogCaptureHandler`` to the
+    root logger right before each test body, so ``hasHandlers()``
+    always returns ``True`` from inside a test — which would
+    short-circuit ``configure_eig_logger``'s idempotency guard and
+    prevent our handlers from being added. Each test clears
+    ``root.handlers`` inline before calling, and the autouse fixture
+    restores the original handlers on teardown.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _isolate_root_logger(self):
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        try:
+            yield
+        finally:
+            root.handlers.clear()
+            for h in saved_handlers:
+                root.addHandler(h)
+            root.setLevel(saved_level)
+
+    def test_default_log_file_is_absolute_under_home(self, tmp_path):
+        """Default log_file must resolve to ``~/eigsep.log`` (absolute),
+        not the CWD-relative ``eigsep.log``. Regression for the
+        operator who can't find the file because it landed wherever
+        the script was launched from."""
+        logging.getLogger().handlers.clear()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger(console=False)
+        file_handlers = [
+            h
+            for h in logging.getLogger().handlers
+            if isinstance(h, RotatingFileHandler)
+        ]
+        assert len(file_handlers) == 1
+        path = Path(file_handlers[0].baseFilename)
+        assert path.is_absolute()
+        assert path == tmp_path / "eigsep.log"
+
+    def test_console_handler_attached_by_default(self, tmp_path):
+        """Console handler must be attached by default so operators
+        see log lines in the terminal without tailing the file."""
+        logging.getLogger().handlers.clear()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger()
+        handler_types = {type(h) for h in logging.getLogger().handlers}
+        assert RotatingFileHandler in handler_types
+        assert logging.StreamHandler in handler_types
+
+    def test_console_false_omits_stream_handler(self, tmp_path):
+        logging.getLogger().handlers.clear()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger(console=False)
+        handlers = logging.getLogger().handlers
+        assert any(isinstance(h, RotatingFileHandler) for h in handlers)
+        # A bare StreamHandler (not the rotating file handler, which is
+        # also a StreamHandler subclass) must not be attached.
+        assert not any(type(h) is logging.StreamHandler for h in handlers)
+
+    def test_idempotent_no_duplicate_handlers(self, tmp_path):
+        """A second call must not stack handlers — we already guard on
+        ``hasHandlers``, this is the regression test."""
+        logging.getLogger().handlers.clear()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger()
+            configure_eig_logger()
+        handlers = logging.getLogger().handlers
+        assert len(handlers) == 2  # rotating file + stream, no dupes
+
+    def test_explicit_relative_path_resolved_under_home(self, tmp_path):
+        """A caller who passes a relative path still gets an absolute
+        location — a relative path defeats the point of the default."""
+        logging.getLogger().handlers.clear()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger(log_file="custom.log", console=False)
+        file_handlers = [
+            h
+            for h in logging.getLogger().handlers
+            if isinstance(h, RotatingFileHandler)
+        ]
+        assert Path(file_handlers[0].baseFilename) == tmp_path / "custom.log"
+
+    def test_explicit_absolute_path_honored(self, tmp_path):
+        target = tmp_path / "subdir" / "mylog.log"
+        target.parent.mkdir()
+        logging.getLogger().handlers.clear()
+        configure_eig_logger(log_file=target, console=False)
+        file_handlers = [
+            h
+            for h in logging.getLogger().handlers
+            if isinstance(h, RotatingFileHandler)
+        ]
+        assert Path(file_handlers[0].baseFilename) == target

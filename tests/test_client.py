@@ -133,7 +133,8 @@ def test_pico_manager_devices_visible(client):
 def test_vna_loop_returns_when_vna_is_none(caplog, client):
     """vna_loop must return promptly when self.vna is None — no
     polling. Regression for a bare `threading.Event().wait(5)` that
-    ignored stop_client."""
+    ignored stop_client. Also asserts the warning rides both channels
+    (local + status stream) so the ground observer sees the failure."""
     caplog.set_level("WARNING")
     assert client.vna is None  # dummy_config has use_vna: false
     t0 = time.monotonic()
@@ -141,6 +142,11 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
     assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+
+    client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+    level, status = client.redis.status_reader.read(timeout=1)
+    assert level == logging.WARNING
+    assert "VNA not initialized" in status
 
 
 def test_switch_loop_does_not_mutate_cfg_schedule(client):
@@ -308,6 +314,11 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
             and r.levelname == "WARNING"
             for r in caplog.records
         )
+
+        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = client.redis.status_reader.read(timeout=1)
+        assert level == logging.WARNING
+        assert "rfswitch state unavailable in Redis" in status
     finally:
         client.stop()
 
@@ -354,6 +365,44 @@ def test_vna_loop_warns_on_failed_switch_back(redis, dummy_cfg, caplog):
             "expected 'Failed to switch back to RFNOFF' warning; "
             f"got records: {[r.getMessage() for r in caplog.records]}"
         )
+
+        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = client.redis.status_reader.read(timeout=1)
+        assert level == logging.WARNING
+        assert "Failed to switch back to RFNOFF" in status
+    finally:
+        client.stop()
+
+
+def test_switch_loop_warns_on_failed_switch(redis, dummy_cfg, caplog):
+    """A failing ``_switch_to`` inside ``switch_loop`` must warn on both
+    the local logger and the Redis status stream so the ground observer
+    sees a stuck calibrator without SSHing into the panda."""
+    cfg = dict(dummy_cfg)
+    # Give the loop exactly one mode to try; cap wait so the stop event
+    # breaks us out after the first iteration.
+    cfg["switch_schedule"] = {"RFNOFF": 0.01}
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+
+        def failing_switch(state):
+            client.stop_client.set()
+            return None
+
+        with patch.object(client, "_switch_to", side_effect=failing_switch):
+            caplog.set_level("WARNING")
+            client.switch_loop()
+
+        assert any(
+            "Failed to switch to RFNOFF" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = client.redis.status_reader.read(timeout=1)
+        assert level == logging.WARNING
+        assert "Failed to switch to RFNOFF" in status
     finally:
         client.stop()
 

@@ -137,43 +137,63 @@ def load_config(name, compute_inttime=True):
 
 
 def configure_eig_logger(
-    log_file: str = "eigsep.log",
+    log_file: Optional[Union[str, Path]] = None,
     level: int = logging.INFO,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
+    console: bool = True,
 ) -> logging.Logger:
     """
-    Configure a logger with a rotating file handler.
+    Configure the root logger with a rotating file handler and
+    (optionally) a console handler.
 
     Parameters
     ----------
-    log_file : str
-        The name of the log file.
+    log_file : str or Path, optional
+        Path to the log file. A relative path is resolved against
+        ``~`` so the default location is deterministic regardless of
+        CWD. Defaults to ``~/eigsep.log``.
     level : int
     max_bytes : int
         The maximum size of the log file before rotation.
     backup_count : int
         The number of backup files to keep.
+    console : bool
+        If True (default), also attach a ``StreamHandler`` so log
+        lines appear on the terminal in addition to the rotating
+        file.
 
     Returns
     -------
     logging.Logger
-        Configured logger instance.
+        Configured root logger.
 
     """
+    if log_file is None:
+        log_file = Path.home() / "eigsep.log"
+    else:
+        log_file = Path(log_file).expanduser()
+        if not log_file.is_absolute():
+            log_file = Path.home() / log_file
+
     logger = logging.getLogger()  # get the root logger
     logger.setLevel(level)
     if not logger.hasHandlers():
-        handler = RotatingFileHandler(
-            log_file, maxBytes=max_bytes, backupCount=backup_count
-        )
-        handler.setLevel(level)
         formatter = logging.Formatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
         )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
+        file_handler = RotatingFileHandler(
+            log_file, maxBytes=max_bytes, backupCount=backup_count
+        )
+        file_handler.setLevel(level)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        if console:
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(level)
+            console_handler.setFormatter(formatter)
+            logger.addHandler(console_handler)
     return logger
 
 

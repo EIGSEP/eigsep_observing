@@ -92,6 +92,21 @@ class PandaClient:
         )
         self.heartbeat_thd.start()
 
+    def _warn_with_status(self, msg):
+        """Warn locally and push to the Redis status stream.
+
+        Panda-side ``self.logger`` writes only to a local
+        ``RotatingFileHandler``; the ground observer sees the message
+        only if it's also pushed through ``self.redis.status``, which
+        ``EigObserver.status_logger`` re-emits ground-side. Use this
+        helper for operator-visible events (contract violations,
+        config errors, hardware fault detection) — not for
+        steady-state DEBUG/INFO telemetry, because the status stream
+        is bounded to the last 5 entries.
+        """
+        self.logger.warning(msg)
+        self.redis.status.send(msg, level=logging.WARNING)
+
     def _get_cfg(self):
         """
         Try to get the current configuration from Redis. If it fails,
@@ -320,7 +335,7 @@ class PandaClient:
                 with self.switch_lock:
                     self.logger.info(f"Switching to {mode} measurements")
                     if not self._switch_to(mode):
-                        self.logger.warning(f"Failed to switch to {mode}")
+                        self._warn_with_status(f"Failed to switch to {mode}")
                     if hold_lock_during_wait and self._wait_or_stop(wait_time):
                         return
                 if not hold_lock_during_wait and self._wait_or_stop(wait_time):
@@ -392,22 +407,15 @@ class PandaClient:
         # io.VNA_S11_HEADER_SCHEMA). Loud but non-blocking: never
         # raises, always publishes, so corr/VNA data flow is
         # uninterrupted when the producer disagrees with its own
-        # contract. Emit on two channels because panda-side
-        # ``self.logger.warning`` writes only to the local rotating
-        # file — the operator on the ground sees nothing unless we
-        # also push through the Redis status stream, which
-        # ``EigObserver.status_logger`` re-emits ground-side. See
-        # project_status_stream_log_bridge memory.
+        # contract.
         violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(
             s11, mode
         )
         if violations:
-            msg = (
+            self._warn_with_status(
                 f"VNA S11 producer contract violation (mode={mode!r}): "
                 + "; ".join(violations)
             )
-            self.logger.warning(msg)
-            self.redis.status.send(msg, level=logging.WARNING)
 
         self.redis.vna.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
@@ -417,7 +425,7 @@ class PandaClient:
         Observe with VNA and write data to files.
         """
         if self.vna is None:
-            self.logger.warning(
+            self._warn_with_status(
                 "VNA not initialized. Cannot execute VNA commands."
             )
             return
@@ -425,7 +433,7 @@ class PandaClient:
             with self.switch_lock:
                 prev_mode = self._read_switch_mode_from_redis()
                 if prev_mode is None:
-                    self.logger.warning(
+                    self._warn_with_status(
                         "rfswitch state unavailable in Redis; defaulting "
                         "post-VNA switch-back to RFANT."
                     )
@@ -437,7 +445,7 @@ class PandaClient:
                     f"Switching back to previous mode: {prev_mode}"
                 )
                 if not self._switch_to(prev_mode):
-                    self.logger.warning(
+                    self._warn_with_status(
                         f"Failed to switch back to {prev_mode}"
                     )
             self.stop_client.wait(self.cfg["vna_interval"])
