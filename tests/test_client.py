@@ -580,8 +580,11 @@ def test_switch_session_serializes_with_switch_loop(redis, dummy_cfg):
                     "switch_loop acquired switch_lock after session's "
                     "sw() call — lock must still be held"
                 )
+                # Clear the flag while the lock is still held so any
+                # switch_loop call observed after the session exits
+                # can't be misattributed to the session's interval.
+                inside_session.clear()
             # Session released the lock → switch_loop should proceed.
-            inside_session.clear()
             assert loop_got_lock.wait(timeout=2.0), (
                 "switch_loop did not acquire lock within 2s of session exit"
             )
