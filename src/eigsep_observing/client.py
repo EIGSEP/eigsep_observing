@@ -1,4 +1,3 @@
-import json
 import logging
 import threading
 import time
@@ -18,6 +17,13 @@ with open(default_cfg_file, "r") as f:
 # Valid RF switch state names, sourced from the firmware-side class so
 # that a pico firmware change flows through automatically.
 VALID_SWITCH_STATES = set(PicoRFSwitch.path_str)
+
+# Inverse of PicoRFSwitch.paths: {sw_state_int: mode_name}. Used to map
+# the rfswitch's published `sw_state` back to a mode string when reading
+# the current switch state from PicoManager's Redis snapshot.
+_SW_INT_TO_MODE = {
+    PicoRFSwitch.rbin(v): k for k, v in PicoRFSwitch.path_str.items()
+}
 
 
 class PandaClient:
@@ -49,7 +55,7 @@ class PandaClient:
             )
             self.redis.config.upload(default_cfg)
             cfg = self._get_cfg()
-        self.cfg = json.loads(json.dumps(cfg))
+        self.cfg = cfg
 
         self.peltier = None
 
@@ -61,7 +67,6 @@ class PandaClient:
             "rfswitch", self.redis.r, source="panda_client"
         )
         self.switch_lock = threading.Lock()
-        self.current_switch_state = None
         available = self.redis.r.smembers("picos")
         if available:
             names = sorted(
@@ -111,6 +116,26 @@ class PandaClient:
         caller treats falsy as "switch failed".
         """
         return self.sw_proxy.send_command("switch", state=state)
+
+    def _read_switch_mode_from_redis(self):
+        """Return the RF switch mode string PicoManager last published.
+
+        Reads ``sw_state`` from the rfswitch metadata snapshot and maps
+        it back to a mode name via :data:`_SW_INT_TO_MODE`. Returns
+        ``None`` if the rfswitch hasn't published yet or the published
+        ``sw_state`` doesn't match a known mode — the caller decides
+        the fallback. PicoManager's published state is the single
+        source of truth; the panda holds no shadow that could drift
+        across a restart on either side.
+        """
+        try:
+            snap = self.redis.metadata_snapshot.get("rfswitch")
+        except KeyError:
+            return None
+        sw_state = snap.get("sw_state")
+        if sw_state is None:
+            return None
+        return _SW_INT_TO_MODE.get(sw_state)
 
     def _send_heartbeat(self, ex=60):
         """
@@ -227,13 +252,8 @@ class PandaClient:
                 hold_lock_during_wait = mode != "RFANT"
                 with self.switch_lock:
                     self.logger.info(f"Switching to {mode} measurements")
-                    if self._switch_to(mode):
-                        self.current_switch_state = mode
-                    else:
-                        self.logger.warning(
-                            f"Failed to switch to {mode}; keeping "
-                            f"current_switch_state={self.current_switch_state}"
-                        )
+                    if not self._switch_to(mode):
+                        self.logger.warning(f"Failed to switch to {mode}")
                     if hold_lock_during_wait and self._wait_or_stop(wait_time):
                         return
                 if not hold_lock_during_wait and self._wait_or_stop(wait_time):
@@ -314,8 +334,12 @@ class PandaClient:
             return
         while not self.stop_client.is_set():
             with self.switch_lock:
-                prev_mode = self.current_switch_state
+                prev_mode = self._read_switch_mode_from_redis()
                 if prev_mode is None:
+                    self.logger.warning(
+                        "rfswitch state unavailable in Redis; defaulting "
+                        "post-VNA switch-back to RFANT."
+                    )
                     prev_mode = "RFANT"
                 for mode in ["ant", "rec"]:
                     self.logger.info(f"Measuring S11 of {mode} with VNA")

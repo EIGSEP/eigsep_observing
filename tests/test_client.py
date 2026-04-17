@@ -1,16 +1,19 @@
 import copy
 import json
 import time
+from unittest.mock import patch
 
 import pytest
 import yaml
 
 from cmt_vna.testing import DummyVNA
+from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from eigsep_observing.testing import DummyEigsepObsRedis
 
 import eigsep_observing
+from eigsep_observing.client import _SW_INT_TO_MODE
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -148,6 +151,173 @@ def test_switch_loop_does_not_mutate_cfg_schedule(client):
     client.stop_client.set()  # bypass the main while loop after validation
     client.switch_loop()
     assert client.cfg["switch_schedule"] == original
+
+
+def test_cfg_is_get_cfg_result_without_extra_roundtrip(client):
+    """``self.cfg`` must equal what ``_get_cfg`` returns. The previous
+    ``json.loads(json.dumps(cfg))`` step was dead code — ``config.get``
+    already returns a JSON-normalized dict (via ``json.loads`` on the
+    serialized payload) — and would silently re-introduce drift if
+    re-added on top of a different storage path."""
+    assert client.cfg == client._get_cfg()
+
+
+def test_sw_int_to_mode_inverts_pico_path_str():
+    """The module-level inverse map must round-trip every PicoRFSwitch
+    path string so a firmware change to ``path_str`` is caught at
+    import-time mismatch rather than silently dropping a mode."""
+    assert set(_SW_INT_TO_MODE.values()) == set(PicoRFSwitch.path_str)
+    for mode, bits in PicoRFSwitch.path_str.items():
+        assert _SW_INT_TO_MODE[PicoRFSwitch.rbin(bits)] == mode
+
+
+def test_read_switch_mode_from_redis_returns_published_mode(client):
+    """The helper maps the rfswitch's last-published ``sw_state`` int
+    back to a mode string. This is the reconcile path that replaces the
+    panda-side shadow ``current_switch_state`` — the published state is
+    the single source of truth across PandaClient/PicoManager restarts.
+    """
+    # Drive the rfswitch to a non-default mode and wait for the firmware
+    # status publish to land in Redis.
+    assert client._switch_to("RFNON")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if client._read_switch_mode_from_redis() == "RFNON":
+            break
+        time.sleep(0.05)
+    assert client._read_switch_mode_from_redis() == "RFNON"
+
+
+def test_read_switch_mode_from_redis_no_rfswitch_data(client):
+    """Returns ``None`` if the rfswitch hasn't published yet — caller
+    decides the fallback (``vna_loop`` falls back to RFANT with a
+    warning)."""
+    # Wipe the rfswitch entry from the metadata snapshot.
+    client.redis.r.hdel("metadata", "rfswitch")
+    assert client._read_switch_mode_from_redis() is None
+
+
+def test_read_switch_mode_from_redis_unmapped_sw_state(client):
+    """Returns ``None`` if the published ``sw_state`` doesn't map to a
+    known mode — guards against firmware drift."""
+    bogus = json.dumps({"sensor_name": "rfswitch", "sw_state": 99999}).encode()
+    client.redis.r.hset("metadata", "rfswitch", bogus)
+    assert client._read_switch_mode_from_redis() is None
+
+
+def test_vna_loop_uses_redis_published_mode_for_switch_back(
+    redis, dummy_cfg, caplog
+):
+    """vna_loop reads ``prev_mode`` from Redis (PicoManager truth), not
+    from a panda-side shadow. After a PandaClient restart that finds
+    the rfswitch already in RFNOFF, the post-VNA switch-back must
+    target RFNOFF — not the previously-shadowed RFANT default."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 60  # long: only one iteration before stop
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        # Pre-seed the rfswitch in Redis to simulate a state PicoManager
+        # set before this PandaClient process started.
+        assert client._switch_to("RFNOFF")
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if client._read_switch_mode_from_redis() == "RFNOFF":
+                break
+            time.sleep(0.05)
+        assert client._read_switch_mode_from_redis() == "RFNOFF"
+
+        switch_calls = []
+        original_switch_to = client._switch_to
+
+        def recording_switch_to(state):
+            switch_calls.append(state)
+            return original_switch_to(state)
+
+        # Stop after one iteration — vna_loop's outer wait will exit.
+        def stop_after_first_iteration(*args, **kwargs):
+            client.stop_client.set()
+            return True
+
+        with patch.object(
+            client, "_switch_to", side_effect=recording_switch_to
+        ):
+            with patch.object(
+                client.stop_client,
+                "wait",
+                side_effect=stop_after_first_iteration,
+            ):
+                caplog.set_level("INFO")
+                client.vna_loop()
+
+        # The last _switch_to call from vna_loop itself is the
+        # switch-back; intermediate calls come from VNA OSL/ant/rec.
+        assert switch_calls, "vna_loop made no switch calls"
+        assert switch_calls[-1] == "RFNOFF", (
+            f"expected switch-back to RFNOFF (Redis truth), got "
+            f"{switch_calls[-1]!r}; full sequence: {switch_calls}"
+        )
+        assert any(
+            "previous mode: RFNOFF" in r.getMessage() for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
+    redis, dummy_cfg, caplog
+):
+    """If the rfswitch hasn't published, vna_loop logs a WARNING and
+    falls back to RFANT — making the contract violation visible
+    instead of silently switching to the wrong place."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 60
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        # Wipe the rfswitch entry so the helper returns None.
+        client.redis.r.hdel("metadata", "rfswitch")
+
+        switch_calls = []
+        original_switch_to = client._switch_to
+
+        def recording_switch_to(state):
+            switch_calls.append(state)
+            return original_switch_to(state)
+
+        def stop_after_first_iteration(*args, **kwargs):
+            client.stop_client.set()
+            return True
+
+        with patch.object(
+            client, "_read_switch_mode_from_redis", return_value=None
+        ):
+            with patch.object(
+                client, "_switch_to", side_effect=recording_switch_to
+            ):
+                with patch.object(
+                    client.stop_client,
+                    "wait",
+                    side_effect=stop_after_first_iteration,
+                ):
+                    caplog.set_level("WARNING")
+                    client.vna_loop()
+
+        assert switch_calls[-1] == "RFANT"
+        assert any(
+            "rfswitch state unavailable in Redis" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_no_current_switch_state_attribute(client):
+    """Regression: the panda-side shadow ``current_switch_state`` is
+    gone — its replacement is :meth:`_read_switch_mode_from_redis`.
+    A new attribute creeping back in would re-introduce the drift."""
+    assert not hasattr(client, "current_switch_state")
 
 
 def test_stop_joins_heartbeat_and_emits_goodbye(client):
