@@ -53,8 +53,6 @@ class PandaClient:
 
         # initialize proxies and VNA
         self.peltier = None
-        self._sw_proxy = None
-        self.switch_lock = None
         self._initialize()
 
     def _get_cfg(self):
@@ -76,16 +74,6 @@ class PandaClient:
         self.logger.info(f"Using config from Redis, updated at {upload_time}.")
         return cfg
 
-    @property
-    def sw_proxy(self):
-        return self._sw_proxy
-
-    @sw_proxy.setter
-    def sw_proxy(self, value):
-        self._sw_proxy = value
-        self.switch_lock = threading.Lock()
-        self.current_switch_state = None
-
     def _switch_to(self, state):
         """Route an RF switch command through PicoManager.
 
@@ -93,7 +81,7 @@ class PandaClient:
         PicoManager has not registered the rfswitch device (no-op). The
         caller treats falsy as "switch failed".
         """
-        return self._sw_proxy.send_command("switch", state=state)
+        return self.sw_proxy.send_command("switch", state=state)
 
     def _initialize(self):
         self.stop_client.clear()
@@ -188,6 +176,8 @@ class PandaClient:
         """
         r = self.redis.r
         self.sw_proxy = PicoProxy("rfswitch", r, source="panda_client")
+        self.switch_lock = threading.Lock()
+        self.current_switch_state = None
         # Log what PicoManager has registered
         available = r.smembers("picos")
         if available:
@@ -250,33 +240,34 @@ class PandaClient:
             active_schedule[mode] = wait_time
         while not self.stop_client.is_set():
             for mode, wait_time in active_schedule.items():
-                if mode == "RFANT":
-                    with self.switch_lock:
-                        self.logger.info(f"Switching to {mode} measurements")
-                        if self._switch_to(mode):
-                            self.current_switch_state = mode
-                        else:
-                            self.logger.warning(
-                                f"Failed to switch to {mode}; keeping "
-                                f"current_switch_state={self.current_switch_state}"
-                            )
-                    # release the lock during sky wait time
-                    if self.stop_client.wait(wait_time):
-                        self.logger.info("Switching stopped by event")
+                # RFANT (sky) releases the switch lock during the wait
+                # so an S11 measurement can interrupt; other modes
+                # (load, noise) hold the lock for the full wait.
+                hold_lock_during_wait = mode != "RFANT"
+                with self.switch_lock:
+                    self.logger.info(f"Switching to {mode} measurements")
+                    if self._switch_to(mode):
+                        self.current_switch_state = mode
+                    else:
+                        self.logger.warning(
+                            f"Failed to switch to {mode}; keeping "
+                            f"current_switch_state={self.current_switch_state}"
+                        )
+                    if hold_lock_during_wait and self._wait_or_stop(wait_time):
                         return
-                else:
-                    with self.switch_lock:
-                        self.logger.info(f"Switching to {mode} measurements")
-                        if self._switch_to(mode):
-                            self.current_switch_state = mode
-                        else:
-                            self.logger.warning(
-                                f"Failed to switch to {mode}; keeping "
-                                f"current_switch_state={self.current_switch_state}"
-                            )
-                        if self.stop_client.wait(wait_time):  # wait with stop
-                            self.logger.info("Switching stopped by event")
-                            return
+                if not hold_lock_during_wait and self._wait_or_stop(wait_time):
+                    return
+
+    def _wait_or_stop(self, wait_time):
+        """Sleep for ``wait_time`` or until ``stop_client`` fires.
+
+        Returns True if stop was requested (caller should unwind its
+        loop), False otherwise.
+        """
+        if self.stop_client.wait(wait_time):
+            self.logger.info("Switching stopped by event")
+            return True
+        return False
 
     def measure_s11(self, mode):
         """
