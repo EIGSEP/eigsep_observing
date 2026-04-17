@@ -177,10 +177,16 @@ class PandaClient:
 
             def sw(mode):
                 nonlocal switched
-                switched = True
+                if mode not in VALID_SWITCH_STATES:
+                    self.logger.warning(
+                        f"Invalid switch mode {mode}; valid modes are "
+                        f"{VALID_SWITCH_STATES}"
+                    )
+                    return False
                 if not self._switch_to(mode):
                     self.logger.warning(f"Failed to switch to {mode}")
                     return False
+                switched = True
                 return True
 
             try:
