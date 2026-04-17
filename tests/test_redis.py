@@ -201,6 +201,99 @@ def test_metadata_snapshot_staleness_restricted_to_requested_keys(
     assert not any("is stale" in r.message for r in caplog.records)
 
 
+def test_metadata_stream_silent_fresh_no_warning(server, client, caplog):
+    """A stream that returned no entries this drain but whose
+    panda-side ``_ts`` is recent is just slow — no warning."""
+    client.metadata.add("acc_cnt", 1)
+    server.metadata_stream.drain()  # establish position past the seed
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        out = server.metadata_stream.drain()
+    assert out == {}
+    assert not any(
+        "drained empty and is stale" in r.message for r in caplog.records
+    )
+
+
+def test_metadata_stream_silent_stale_warns(server, client, caplog):
+    """A stream that returned no entries this drain AND whose
+    ``_ts`` is older than ``max_age_s`` warns once."""
+    client.metadata.add("acc_cnt", 7)
+    server.metadata_stream.drain()  # advance past the seed
+    _backdate_ts(server, "acc_cnt", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        out = server.metadata_stream.drain()
+    assert out == {}
+    stale = [
+        r for r in caplog.records if "drained empty and is stale" in r.message
+    ]
+    assert len(stale) == 1
+    assert "stream:acc_cnt" in stale[0].message
+
+
+def test_metadata_stream_with_entries_skips_check(server, client, caplog):
+    """A stream that returned entries this drain is fresh by
+    definition; even an old ``_ts`` (impossible in practice — the
+    writer restamps ``_ts`` on every add — but cheap to assert)
+    must not warn."""
+    client.metadata.add("acc_cnt", 1)
+    # Read from the start so the just-added entry is visible to drain
+    # (default position is the last-generated-id, which xread excludes).
+    server._set_last_read_id("stream:acc_cnt", "0-0")
+    # Backdate _after_ the add so the stream entry is visible but
+    # the hash _ts is artificially old.
+    _backdate_ts(server, "acc_cnt", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        out = server.metadata_stream.drain()
+    assert out["stream:acc_cnt"] == [1]
+    assert not any(
+        "drained empty and is stale" in r.message for r in caplog.records
+    )
+
+
+def test_metadata_stream_stale_warning_throttled(server, client, caplog):
+    """At the corr cadence (~4 Hz) a permanently dead sensor would
+    spam the log; the per-stream throttle suppresses repeats inside
+    ``warn_interval_s``."""
+    client.metadata.add("acc_cnt", 1)
+    server.metadata_stream.drain()
+    _backdate_ts(server, "acc_cnt", seconds_ago=120)
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        for _ in range(5):
+            server.metadata_stream.drain()
+    stale = [
+        r for r in caplog.records if "drained empty and is stale" in r.message
+    ]
+    assert len(stale) == 1
+
+
+def test_metadata_stream_stale_missing_ts_silent(server, client, caplog):
+    """Direct ``hset`` bypasses or pre-timestamp entries leave
+    ``_ts`` absent; freshness is unknown, so stay silent."""
+    client.metadata.add("acc_cnt", 1)
+    server.metadata_stream.drain()
+    server.r.hdel(METADATA_HASH, "acc_cnt_ts")
+    with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+        server.metadata_stream.drain()
+    assert not any(
+        "drained empty and is stale" in r.message for r in caplog.records
+    )
+
+
+def test_metadata_stream_stale_can_be_disabled(server, client, caplog):
+    client.metadata.add("acc_cnt", 1)
+    server.metadata_stream.drain()
+    _backdate_ts(server, "acc_cnt", seconds_ago=3600)
+    try:
+        server.metadata_stream.max_age_s = float("inf")
+        with caplog.at_level(logging.WARNING, logger="eigsep_redis.metadata"):
+            server.metadata_stream.drain()
+    finally:
+        server.metadata_stream.max_age_s = MetadataStreamReader.max_age_s
+    assert not any(
+        "drained empty and is stale" in r.message for r in caplog.records
+    )
+
+
 def test_raw(server):
     # one integration from snap
     data = generate_data(ntimes=1, raw=True, reshape=False)
@@ -297,10 +390,13 @@ def test_metadata_writer_has_no_cross_bus_methods():
 def test_metadata_readers_have_no_cross_bus_methods():
     """Structural guard: metadata readers only read metadata, nothing else."""
     for cls, expected in (
-        # ``max_age_s`` is a tunable, not a bus method — see
-        # MetadataSnapshotReader docstring.
+        # ``max_age_s`` / ``warn_interval_s`` are tunables, not bus
+        # methods — see the readers' docstrings.
         (MetadataSnapshotReader, {"get", "max_age_s"}),
-        (MetadataStreamReader, {"drain", "streams"}),
+        (
+            MetadataStreamReader,
+            {"drain", "streams", "max_age_s", "warn_interval_s"},
+        ),
     ):
         public = {name for name in vars(cls) if not name.startswith("_")}
         assert public == expected, (

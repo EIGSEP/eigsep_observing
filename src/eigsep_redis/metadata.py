@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import json
 import logging
+import time
 
 from .keys import DATA_STREAMS_SET, METADATA_HASH, METADATA_STREAMS_SET
 
@@ -194,10 +195,32 @@ class MetadataStreamReader:
     registered in ``metadata_streams``, so raw-data streams like
     ``stream:corr`` / ``stream:vna`` — whose payloads are not JSON —
     are excluded by construction.
+
+    Freshness: an empty drain on a registered stream is the only
+    in-band signal of producer silence (the saved file just shows
+    ``None`` gaps in that sensor's column). After each ``drain``,
+    any stream that returned zero entries has its panda-side
+    ``{key}_ts`` looked up in :data:`METADATA_HASH` and compared
+    against the current time; older than :attr:`max_age_s` logs a
+    ``WARNING`` on ``eigsep_redis.metadata``. Warnings are throttled
+    per-stream by :attr:`warn_interval_s` so a chronically dead
+    sensor doesn't spam at the corr cadence (~4 Hz). A stream that
+    returned entries this drain is fresh by definition and is not
+    checked. Set :attr:`max_age_s` to ``float("inf")`` to disable.
     """
+
+    # Mirrors MetadataSnapshotReader.max_age_s: ~150x the 200 ms
+    # producer cadence, so transient pico blips don't warn but a
+    # truly silent sensor does.
+    max_age_s = 30.0
+    # The corr loop calls drain at ~4 Hz; without throttling, a dead
+    # sensor would emit ~14k warnings/hour. 60 s matches the
+    # invariant-disagreement throttle in io.py.
+    warn_interval_s = 60.0
 
     def __init__(self, transport):
         self.transport = transport
+        self._last_warn_monotonic = {}
 
     @property
     def streams(self):
@@ -248,4 +271,51 @@ class MetadataStreamReader:
                 values.append(json.loads(d[b"value"]))
                 self.transport._set_last_read_id(stream, eid)
             out[stream] = values
+        silent = [s for s in streams if s not in out]
+        if silent:
+            self._warn_if_silent_stale(silent)
         return out
+
+    def _warn_if_silent_stale(self, silent_streams):
+        """For each registered stream that returned no entries this
+        drain, peek at its panda-side ``{key}_ts`` in the snapshot
+        hash and warn if older than :attr:`max_age_s`. Warnings are
+        throttled per-stream by :attr:`warn_interval_s`."""
+        if self.max_age_s == float("inf"):
+            return
+        now_mono = time.monotonic()
+        now_utc = datetime.now(timezone.utc)
+        r = self.transport.r
+        for stream in silent_streams:
+            last = self._last_warn_monotonic.get(stream)
+            if (
+                last is not None
+                and now_mono - last < self.warn_interval_s
+            ):
+                continue
+            # ``stream`` is ``stream:{key}``; the matching hash field
+            # is ``{key}_ts``. Anything that doesn't follow the
+            # writer's naming is treated as "freshness unknown".
+            if ":" not in stream:
+                continue
+            key = stream.split(":", 1)[1]
+            ts_raw = r.hget(METADATA_HASH, f"{key}_ts")
+            if ts_raw is None:
+                continue
+            try:
+                ts_str = json.loads(ts_raw)
+                ts = datetime.fromisoformat(ts_str)
+            except (ValueError, TypeError):
+                continue
+            age = (now_utc - ts).total_seconds()
+            if age > self.max_age_s:
+                logger.warning(
+                    "metadata stream %r drained empty and is stale: "
+                    "last update %.1fs ago (threshold %.1fs). Sensor "
+                    "may have stopped publishing; integration row "
+                    "will have None gaps for this sensor.",
+                    stream,
+                    age,
+                    self.max_age_s,
+                )
+                self._last_warn_monotonic[stream] = now_mono

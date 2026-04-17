@@ -108,17 +108,33 @@ run in different processes (`EigObserver` on the ground PC vs `PandaClient` on
 the panda).
 
 **Runtime freshness check.** `MetadataWriter.add` stamps a panda-side
-`{key}_ts` (UTC isoformat) into the hash on every write, and
-`MetadataSnapshotReader.get` compares each requested key's `_ts` to the
-current time. Any key older than `MetadataSnapshotReader.max_age_s`
-(default 30 s, ~150× the 200 ms producer cadence) emits a `WARNING`
-from `eigsep_redis.metadata`. The stale value is **still returned** —
-callers that want "last known" behavior are unaffected, but a dead
-sensor no longer passes silently. Keys whose `_ts` is missing or
-unparseable are skipped (no warning), so direct `hset` bypasses and
-pre-timestamp entries don't trigger false positives. Set
-`max_age_s = float("inf")` to disable. The `metadata_snapshot_unix`
-header remains the offline detection path.
+`{key}_ts` (UTC isoformat) into the hash on every write. Both readers
+consult it, with shapes that match each reader's semantics:
+
+- **Snapshot reader.** `MetadataSnapshotReader.get` compares each
+  requested key's `_ts` to the current time and emits a `WARNING` from
+  `eigsep_redis.metadata` for any key older than `max_age_s`
+  (default 30 s, ~150× the 200 ms producer cadence). The stale value
+  is **still returned** — callers that want "last known" behavior are
+  unaffected, but a dead sensor no longer passes silently. Keys whose
+  `_ts` is missing or unparseable are skipped (no warning), so direct
+  `hset` bypasses and pre-timestamp entries don't trigger false
+  positives. The `metadata_snapshot_unix` header remains the offline
+  detection path.
+- **Stream reader.** `MetadataStreamReader.drain` has no `_ts` of its
+  own (an empty drain has nothing to timestamp), so after each drain
+  it cross-references the snapshot hash for any registered stream that
+  returned zero entries. If that stream's `_ts` is older than
+  `max_age_s` (also 30 s), the same `WARNING` fires. Streams that
+  returned entries this drain are fresh by definition and skip the
+  check. Because the corr loop drains at ~4 Hz, warnings are
+  throttled per-stream by `warn_interval_s` (default 60 s) so a
+  permanently dead sensor doesn't spam the log; this matches the
+  invariant-disagreement throttle in `io.py`. The streaming path's
+  in-band silence signal — `None` gaps in the integration row — is
+  still the offline detection path.
+
+Both readers' `max_age_s` can be set to `float("inf")` to disable.
 
 ## corr `sync_time` lives on the corr header, not metadata
 
