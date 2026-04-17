@@ -17,8 +17,8 @@ from eigsep_observing.testing import DummyEigObserver
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
-logger = logging.getLogger("__name__")
 configure_eig_logger(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # command line arguments
 parser = argparse.ArgumentParser(

@@ -7,8 +7,8 @@ from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
-logger = logging.getLogger("__name__")
 configure_eig_logger(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 parser = ArgumentParser(description="Panda observing client")
 parser.add_argument(
