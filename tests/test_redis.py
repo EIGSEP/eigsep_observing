@@ -161,6 +161,11 @@ def test_metadata_snapshot_missing_ts_silent(server, caplog):
 
 
 def test_metadata_snapshot_malformed_ts_silent(server, client, caplog):
+    """MetadataWriter.add always writes a valid UTC isoformat _ts, so
+    the fromisoformat ValueError branch is unreachable via the writer.
+    Overwrite _ts directly via hset to simulate a non-compliant
+    producer or manual redis intervention — the only way to exercise
+    this boundary condition."""
     client.metadata.add("acc_cnt", 1)
     server.r.hset(
         METADATA_HASH,
