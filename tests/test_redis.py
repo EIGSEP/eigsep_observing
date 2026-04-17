@@ -419,6 +419,96 @@ def test_corr_writer_unsynced_log_throttled(obs_client, caplog):
     assert len(records) == 1
 
 
+def _seed_corr(obs_client, cnt):
+    """Write one corr entry with the given acc_cnt."""
+    data = generate_data(ntimes=1, reshape=False)
+    raw = {p: d[0].tobytes() for p, d in data.items()}
+    obs_client.corr.add(raw, cnt=cnt, sync_time=1713200000.0, dtype=">i4")
+    return list(data.keys())
+
+
+def test_corr_reader_warns_on_acc_cnt_gap(obs_server, obs_client, caplog):
+    """A jump of >1 in ``acc_cnt`` between reads fires a WARNING so
+    that a silently trimmed / dropped corr integration isn't missed
+    online. Models the ``acc_cnt=1`` → ``acc_cnt=3`` gap the observer
+    would see if one entry were trimmed under reader backpressure.
+    """
+    pairs = _seed_corr(obs_client, cnt=1)
+    _seed_corr(obs_client, cnt=3)
+    obs_server.corr_reader.seek("0-0")
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.corr"):
+        obs_server.corr_reader.read(pairs=pairs)
+        obs_server.corr_reader.read(pairs=pairs)
+    gap_records = [r for r in caplog.records if "Corr stream gap" in r.message]
+    assert len(gap_records) == 1
+    assert "1 -> 3" in gap_records[0].message
+    assert "1 missed" in gap_records[0].message
+
+
+def test_corr_reader_no_warn_on_monotonic(obs_server, obs_client, caplog):
+    """Consecutive ``acc_cnt`` values (1, 2, 3) are the normal case and
+    must not produce any gap warning."""
+    pairs = _seed_corr(obs_client, cnt=1)
+    _seed_corr(obs_client, cnt=2)
+    _seed_corr(obs_client, cnt=3)
+    obs_server.corr_reader.seek("0-0")
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.corr"):
+        for _ in range(3):
+            obs_server.corr_reader.read(pairs=pairs)
+    assert not [r for r in caplog.records if "Corr stream gap" in r.message]
+
+
+def test_corr_reader_resets_on_resync(obs_server, obs_client, caplog):
+    """A SNAP re-sync drives ``acc_cnt`` back to a small value. That
+    backwards jump is a real event (handled at file level by the
+    observer) and must not fire the gap warning. The tracker rebaselines
+    on the post-resync value so a subsequent *forward* gap is still
+    caught.
+    """
+    obs_server.corr_reader._last_gap_warn_monotonic = 0.0
+    pairs = _seed_corr(obs_client, cnt=100)
+    _seed_corr(obs_client, cnt=1)  # resync; acc_cnt resets
+    _seed_corr(obs_client, cnt=3)  # gap from the new baseline
+    obs_server.corr_reader.seek("0-0")
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.corr"):
+        obs_server.corr_reader.read(pairs=pairs)  # 100, baseline
+        obs_server.corr_reader.read(pairs=pairs)  # 1, backwards: silent
+        obs_server.corr_reader.read(pairs=pairs)  # 3, forward gap
+    gap_records = [r for r in caplog.records if "Corr stream gap" in r.message]
+    assert len(gap_records) == 1
+    assert "1 -> 3" in gap_records[0].message
+
+
+def test_corr_reader_seek_resets_gap_tracker(obs_server, obs_client):
+    """``seek`` clears ``_prev_acc_cnt`` so offline replays (e.g. the
+    linearity sweep) don't mistake a rewind for a gap.
+    """
+    pairs = _seed_corr(obs_client, cnt=1)
+    obs_server.corr_reader.seek("0-0")
+    obs_server.corr_reader.read(pairs=pairs)
+    assert obs_server.corr_reader._prev_acc_cnt == 1
+    obs_server.corr_reader.seek("0-0")
+    assert obs_server.corr_reader._prev_acc_cnt is None
+
+
+def test_corr_reader_gap_warn_throttled(obs_server, obs_client, caplog):
+    """Persistent reader backpressure at the 4 Hz corr rate must not
+    drown the log file — the throttle collapses repeated gaps to one
+    WARNING per window.
+    """
+    obs_server.corr_reader._last_gap_warn_monotonic = 0.0
+    pairs = _seed_corr(obs_client, cnt=1)
+    _seed_corr(obs_client, cnt=3)
+    _seed_corr(obs_client, cnt=5)
+    _seed_corr(obs_client, cnt=7)
+    obs_server.corr_reader.seek("0-0")
+    with caplog.at_level(logging.WARNING, logger="eigsep_observing.corr"):
+        for _ in range(4):
+            obs_server.corr_reader.read(pairs=pairs)
+    gap_records = [r for r in caplog.records if "Corr stream gap" in r.message]
+    assert len(gap_records) == 1
+
+
 def test_vna_reader_skips_producer_backlog(obs_server, obs_client):
     """Tier-2 guard for stream:vna — same rationale as the corr test."""
     old = {"ant": np.array([1 + 2j], dtype=np.complex128)}
