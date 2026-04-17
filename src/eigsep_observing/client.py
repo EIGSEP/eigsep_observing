@@ -370,5 +370,8 @@ class PandaClient:
                 self.logger.info(
                     f"Switching back to previous mode: {prev_mode}"
                 )
-                self._switch_to(prev_mode)
+                if not self._switch_to(prev_mode):
+                    self.logger.warning(
+                        f"Failed to switch back to {prev_mode}"
+                    )
             self.stop_client.wait(self.cfg["vna_interval"])
