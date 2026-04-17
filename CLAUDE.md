@@ -107,11 +107,18 @@ reflect different physical semantics (integration window vs point-in-time) and
 run in different processes (`EigObserver` on the ground PC vs `PandaClient` on
 the panda).
 
-**Known weakness:** the snapshot reader has no freshness check. A dead sensor
-silently returns its last reading. The `metadata_snapshot_unix` header field
-lets downstream detect this at file inspection time, but a runtime warning
-would require panda-side timestamping in `MetadataWriter.add` (no firmware
-change needed). Tracked informally; not yet implemented.
+**Runtime freshness check.** `MetadataWriter.add` stamps a panda-side
+`{key}_ts` (UTC isoformat) into the hash on every write, and
+`MetadataSnapshotReader.get` compares each requested key's `_ts` to the
+current time. Any key older than `MetadataSnapshotReader.max_age_s`
+(default 30 s, ~150× the 200 ms producer cadence) emits a `WARNING`
+from `eigsep_redis.metadata`. The stale value is **still returned** —
+callers that want "last known" behavior are unaffected, but a dead
+sensor no longer passes silently. Keys whose `_ts` is missing or
+unparseable are skipped (no warning), so direct `hset` bypasses and
+pre-timestamp entries don't trigger false positives. Set
+`max_age_s = float("inf")` to disable. The `metadata_snapshot_unix`
+header remains the offline detection path.
 
 ## corr `sync_time` lives on the corr header, not metadata
 

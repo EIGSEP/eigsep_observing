@@ -26,6 +26,7 @@ Planned features for the live status app that monitors the system via Redis.
 
 - Flag if any Pico device (IMU, thermometers, lidar) stops reporting
 - Track time since last update per sensor — stale data indicates a disconnect
+- Surface `eigsep_redis.metadata` WARNING logs ("key … is stale") — `MetadataSnapshotReader.get` already compares each key's `{key}_ts` against `max_age_s` (default 30 s) and warns on stale reads; the app should either subscribe to that logger or replicate the `_ts` vs. now check directly against the metadata hash
 
 ## RF Switch State
 

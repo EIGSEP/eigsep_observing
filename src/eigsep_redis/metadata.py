@@ -91,11 +91,21 @@ class MetadataSnapshotReader:
     the current sensor state. **Do not use for the corr loop** — see
     :class:`MetadataStreamReader` for cadence-matched averaging.
 
-    Caveat: no freshness check. If a sensor has stopped updating, a
-    stale value is silently returned. Callers that care should record
-    a snapshot timestamp alongside the read (see PandaClient's
-    ``metadata_snapshot_unix`` header field).
+    Freshness: every :meth:`get` compares each requested key against
+    its panda-side ``{key}_ts`` (written by :class:`MetadataWriter`)
+    and logs ``WARNING`` for any key older than :attr:`max_age_s`.
+    The stale value is still returned — staleness is informational,
+    so consumers that want the "last known" reading are unaffected,
+    but a dead sensor no longer passes silently. Set
+    :attr:`max_age_s` to ``float("inf")`` to disable warnings.
+    Keys whose ``_ts`` is missing or unparseable are skipped (no
+    warning), so pre-timestamp entries don't trigger false positives.
     """
+
+    # Producer cadence is ~200 ms (picohost STATUS_CADENCE_MS = 200),
+    # so 30 s is ~150× the expected interval — transient blips don't
+    # warn, but a truly dead sensor does on the next snapshot read.
+    max_age_s = 30.0
 
     def __init__(self, transport):
         self.transport = transport
@@ -124,11 +134,47 @@ class MetadataSnapshotReader:
             raise TypeError("All keys in the list must be strings.")
         raw = self.transport.r.hgetall(METADATA_HASH)
         m = {k.decode("utf-8"): json.loads(v) for k, v in raw.items()}
+        self._warn_if_stale(m, keys)
         if keys is None:
             return m
         if isinstance(keys, str):
             return m[keys]
         return {k: m[k] for k in keys}
+
+    def _warn_if_stale(self, m, keys):
+        """Log WARNING for any requested data key older than
+        :attr:`max_age_s`. ``_ts`` bookkeeping keys are never checked
+        themselves; a missing or unparseable ``_ts`` is treated as
+        "freshness unknown" and skipped."""
+        if self.max_age_s == float("inf"):
+            return
+        if keys is None:
+            candidate_keys = [k for k in m if not k.endswith("_ts")]
+        elif isinstance(keys, str):
+            candidate_keys = [keys]
+        else:
+            candidate_keys = [k for k in keys if not k.endswith("_ts")]
+        if not candidate_keys:
+            return
+        now = datetime.now(timezone.utc)
+        for key in candidate_keys:
+            ts_str = m.get(f"{key}_ts")
+            if not isinstance(ts_str, str):
+                continue
+            try:
+                ts = datetime.fromisoformat(ts_str)
+            except ValueError:
+                continue
+            age = (now - ts).total_seconds()
+            if age > self.max_age_s:
+                logger.warning(
+                    "metadata snapshot key %r is stale: last update "
+                    "%.1fs ago (threshold %.1fs). Sensor may have "
+                    "stopped publishing; returning cached value.",
+                    key,
+                    age,
+                    self.max_age_s,
+                )
 
 
 class MetadataStreamReader:
