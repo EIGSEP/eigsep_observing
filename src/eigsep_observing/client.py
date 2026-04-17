@@ -7,6 +7,7 @@ from cmt_vna import VNA
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .utils import get_config_path
 
 logger = logging.getLogger(__name__)
@@ -320,6 +321,28 @@ class PandaClient:
         header["mode"] = mode
         header["metadata_snapshot_unix"] = time.time()
         metadata = self.redis.metadata_snapshot.get()
+
+        # Producer self-check against the VNA S11 contract (see
+        # io.VNA_S11_HEADER_SCHEMA). Loud but non-blocking: never
+        # raises, always publishes, so corr/VNA data flow is
+        # uninterrupted when the producer disagrees with its own
+        # contract. Emit on two channels because panda-side
+        # ``self.logger.warning`` writes only to the local rotating
+        # file — the operator on the ground sees nothing unless we
+        # also push through the Redis status stream, which
+        # ``EigObserver.status_logger`` re-emits ground-side. See
+        # project_status_stream_log_bridge memory.
+        violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(
+            s11, mode
+        )
+        if violations:
+            msg = (
+                f"VNA S11 producer contract violation (mode={mode!r}): "
+                + "; ".join(violations)
+            )
+            self.logger.warning(msg)
+            self.redis.status.send(msg, level=logging.WARNING)
+
         self.redis.vna.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
 

@@ -1,5 +1,6 @@
 import copy
 import json
+import logging
 import time
 from unittest.mock import patch
 
@@ -7,6 +8,7 @@ import pytest
 import yaml
 
 from cmt_vna.testing import DummyVNA
+from eigsep_redis.keys import STATUS_STREAM
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
@@ -392,6 +394,74 @@ def test_measure_s11_requires_initialized_vna(client):
     assert client.vna is None
     with pytest.raises(RuntimeError, match="VNA not initialized"):
         client.measure_s11("ant")
+
+
+def test_measure_s11_contract_violation_emits_on_both_channels(
+    redis, dummy_cfg, caplog
+):
+    """A producer-side contract violation in ``measure_s11`` must log
+    loudly locally *and* push a status-stream message so the ground
+    observer sees it without SSHing. Panda-side ``self.logger`` writes
+    only to a local RotatingFileHandler — see
+    project_status_stream_log_bridge memory. Force a real violation by
+    patching the header validator to return a canned list; the check
+    under test is "both channels receive the message," not the
+    validator's own logic (already covered by the producer-contract
+    test)."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        violations = ["missing key 'npoints'", "key 'mode': expected str"]
+        with patch(
+            "eigsep_observing.client._validate_vna_s11_header",
+            return_value=violations,
+        ):
+            caplog.set_level(logging.WARNING, logger="eigsep_observing.client")
+            client.measure_s11("ant")
+
+        # Panda-local log channel.
+        warning_msgs = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "VNA S11 producer contract violation" in r.getMessage()
+        ]
+        assert len(warning_msgs) == 1, caplog.records
+        assert "missing key 'npoints'" in warning_msgs[0]
+        assert "key 'mode': expected str" in warning_msgs[0]
+        assert "mode='ant'" in warning_msgs[0]
+
+        # Ground-visible status stream. Reset position so the single
+        # test process can read the entry the producer just pushed
+        # (same rationale as the vna-reader rewind in the producer
+        # contract test).
+        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = client.redis.status_reader.read(timeout=1)
+        assert level == logging.WARNING
+        assert status == warning_msgs[0]
+    finally:
+        client.stop()
+
+
+def test_measure_s11_clean_payload_does_not_send_status(redis, dummy_cfg):
+    """Complement to the contract-violation test: on the happy path
+    (real DummyVNA output passing the real validators), neither channel
+    should emit a violation — we must not spam the bounded 5-entry
+    status stream during normal operation."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        client.measure_s11("ant")
+        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = client.redis.status_reader.read(timeout=0.2)
+    finally:
+        client.stop()
+    assert (level, status) == (None, None), (
+        f"clean measure_s11 must not emit a status message, got "
+        f"level={level!r} status={status!r}"
+    )
 
 
 def test_measure_s11_uses_mode_specific_power_dbm(redis, dummy_cfg):
