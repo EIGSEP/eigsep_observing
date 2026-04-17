@@ -730,6 +730,168 @@ def _validate_metadata(entry, schema):
     return violations
 
 
+# VNA S11 producer contract. ``PandaClient.measure_s11`` publishes to
+# the VNA stream the VNA's own ``header`` dict (fstart, fstop, npoints,
+# ifbw, power_dBm, freqs) plus two fields added at publish time:
+# ``mode`` (``"ant"`` or ``"rec"``) and ``metadata_snapshot_unix``
+# (Unix seconds, the snapshot-capture wallclock). Downstream tools and
+# file headers rely on this exact shape. ``freqs`` is a numpy array,
+# checked separately from the scalar-typed fields.
+#
+# Unit conventions (NOT enforced by the type-only schema; producer
+# must follow these):
+#   - fstart, fstop in Hz (see cmt_vna.setup default units)
+#   - ifbw in Hz
+#   - power_dBm in dBm
+#   - metadata_snapshot_unix is Unix seconds (time.time() semantics)
+VNA_S11_HEADER_SCHEMA = {
+    "fstart": float,
+    "fstop": float,
+    "npoints": int,
+    "ifbw": float,
+    "power_dBm": float,
+    "mode": str,
+    "metadata_snapshot_unix": float,
+}
+
+# OSL calibration standards measured by ``measure_OSL`` and prefixed
+# with ``"cal:"`` by ``measure_s11`` before publication. The prefix is
+# the disk-format convention also used by ``write_s11_file`` /
+# ``read_s11_file``. Sourced once here so a producer rename shows up as
+# a single-point contract break.
+VNA_S11_CAL_KEYS = frozenset({"cal:VNAO", "cal:VNAS", "cal:VNAL"})
+
+# Per-mode required DUT keys on the VNA payload (in addition to the cal
+# keys above). The ``"ant"`` mode measures antenna, load, and noise;
+# ``"rec"`` measures the receiver. These come from ``VNA.measure_ant`` /
+# ``VNA.measure_rec`` respectively and must not regress without an
+# explicit update here — downstream consumers key on these names.
+VNA_S11_MODE_DATA_KEYS = {
+    "ant": frozenset({"ant", "load", "noise"}),
+    "rec": frozenset({"rec"}),
+}
+
+
+def _validate_vna_s11_header(header):
+    """
+    Validate a VNA S11 header against ``VNA_S11_HEADER_SCHEMA`` plus
+    the ``freqs`` numpy-array field.
+
+    Parameters
+    ----------
+    header : dict
+        Header dict produced by ``PandaClient.measure_s11`` (VNA
+        header plus ``mode`` and ``metadata_snapshot_unix``).
+
+    Returns
+    -------
+    violations : list of str
+        Human-readable contract violations. Empty list means valid.
+    """
+    violations = []
+    for key, expected in VNA_S11_HEADER_SCHEMA.items():
+        if key not in header:
+            violations.append(f"missing key '{key}'")
+            continue
+        val = header[key]
+        if expected is float:
+            ok = isinstance(
+                val, (int, float, np.integer, np.floating)
+            ) and not isinstance(val, bool)
+        elif expected is int:
+            ok = isinstance(val, (int, np.integer)) and not isinstance(
+                val, bool
+            )
+        else:
+            ok = isinstance(val, expected)
+        if not ok:
+            violations.append(
+                f"key '{key}': expected {expected.__name__}, got "
+                f"{type(val).__name__}"
+            )
+    if "mode" in header and header["mode"] not in VNA_S11_MODE_DATA_KEYS:
+        violations.append(
+            f"key 'mode': expected one of "
+            f"{sorted(VNA_S11_MODE_DATA_KEYS)}, got {header['mode']!r}"
+        )
+    if "freqs" not in header:
+        violations.append("missing key 'freqs'")
+    else:
+        freqs = header["freqs"]
+        # Accept ndarray (producer side) or list (post-JSON-roundtrip
+        # through VnaWriter). Either way, ensure it's non-empty and
+        # length-matches npoints when both are present.
+        if isinstance(freqs, np.ndarray):
+            n = freqs.size
+        elif isinstance(freqs, list):
+            n = len(freqs)
+        else:
+            violations.append(
+                f"key 'freqs': expected ndarray or list, got "
+                f"{type(freqs).__name__}"
+            )
+            n = None
+        if n == 0:
+            violations.append("key 'freqs': empty array")
+        npoints = header.get("npoints")
+        if n is not None and isinstance(npoints, int) and n != npoints:
+            violations.append(
+                f"key 'freqs': length {n} does not match npoints {npoints}"
+            )
+    return violations
+
+
+def _validate_vna_s11_data(data, mode):
+    """
+    Validate a VNA S11 data dict against the per-mode contract.
+
+    Parameters
+    ----------
+    data : dict
+        Output of ``PandaClient.measure_s11``: per-DUT complex arrays
+        plus the ``cal:*`` OSL calibration arrays.
+    mode : str
+        ``"ant"`` or ``"rec"``.
+
+    Returns
+    -------
+    violations : list of str
+        Human-readable contract violations. Empty list means valid.
+    """
+    violations = []
+    if mode not in VNA_S11_MODE_DATA_KEYS:
+        violations.append(
+            f"unknown mode {mode!r}; expected one of "
+            f"{sorted(VNA_S11_MODE_DATA_KEYS)}"
+        )
+        return violations
+    expected_dut = VNA_S11_MODE_DATA_KEYS[mode]
+    required = expected_dut | VNA_S11_CAL_KEYS
+    missing = required - set(data)
+    extra = set(data) - required
+    if missing:
+        violations.append(f"missing keys: {sorted(missing)}")
+    if extra:
+        violations.append(f"extra keys: {sorted(extra)}")
+    for key in required & set(data):
+        arr = data[key]
+        if not isinstance(arr, np.ndarray):
+            violations.append(
+                f"key '{key}': expected np.ndarray, got {type(arr).__name__}"
+            )
+            continue
+        if arr.dtype.kind != "c":
+            violations.append(
+                f"key '{key}': expected complex dtype, got {arr.dtype}"
+            )
+        if arr.ndim != 1 or arr.size == 0:
+            violations.append(
+                f"key '{key}': expected non-empty 1-D array, got shape "
+                f"{arr.shape}"
+            )
+    return violations
+
+
 def avg_metadata(value):
     """
     Average metadata readings down to one entry per sample.

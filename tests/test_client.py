@@ -325,3 +325,88 @@ def test_stop_joins_heartbeat_and_emits_goodbye(client):
     assert not client.heartbeat_thd.is_alive()
     assert client.redis.heartbeat_reader.check() is False
     client.stop()  # idempotent — must not raise
+
+
+def test_send_heartbeat_cycles_and_announces_shutdown(redis, dummy_cfg):
+    """_send_heartbeat must tick more than once while running (i.e. it
+    loops, not just publishes once at startup) and must emit its
+    alive=False farewell on shutdown. A one-shot implementation that
+    set alive=True in __init__ and never looped would still pass the
+    sibling ``test_stop_joins_heartbeat_and_emits_goodbye`` (the TTL
+    hasn't expired yet), so we explicitly count ticks here by counting
+    invocations of the writer's ``set`` method over a ~1.2s window."""
+    calls = []
+    client = DummyPandaClient(redis, default_cfg=dummy_cfg)
+    try:
+        original_set = client.redis.heartbeat.set
+
+        def recording_set(*args, **kwargs):
+            calls.append(kwargs)
+            return original_set(*args, **kwargs)
+
+        with patch.object(
+            client.redis.heartbeat, "set", side_effect=recording_set
+        ):
+            # Wait for at least two 1s loop cycles so a non-looping
+            # implementation would record zero ticks during the patch.
+            time.sleep(1.2)
+            alive_ticks = len(calls)
+            client.stop()
+
+        assert alive_ticks >= 1, (
+            f"expected at least one heartbeat tick in the 1.2s window; "
+            f"got {alive_ticks} (calls={calls})"
+        )
+        # stop() drives the loop's final iteration AND the explicit
+        # alive=False farewell; both appear after the wait window.
+        assert any(c.get("alive") is False for c in calls), (
+            f"no alive=False shutdown tick recorded (calls={calls})"
+        )
+        # The alive=True ticks must carry the configured 60s TTL so a
+        # crashed client is distinguishable from a cleanly-stopped one.
+        alive_true_calls = [c for c in calls if c.get("alive", True)]
+        assert alive_true_calls, (
+            f"expected at least one alive=True tick (calls={calls})"
+        )
+        assert all(c.get("ex") == 60 for c in alive_true_calls), (
+            f"alive=True ticks must set ex=60 for watchdog semantics; "
+            f"got {alive_true_calls}"
+        )
+    finally:
+        if client.heartbeat_thd.is_alive():
+            client.stop()
+
+
+def test_measure_s11_rejects_invalid_mode(client):
+    """measure_s11 is restricted to ``ant``/``rec``. An unknown mode is
+    a producer-side bug (wrong caller), not a runtime input; raise
+    before touching the VNA so the failure is loud and local."""
+    with pytest.raises(ValueError, match="Unknown VNA mode"):
+        client.measure_s11("bogus")
+
+
+def test_measure_s11_requires_initialized_vna(client):
+    """measure_s11 must fail loudly when self.vna is None. The dummy
+    config ships with use_vna=False so this is the default client
+    fixture's state — use it as the canary."""
+    assert client.vna is None
+    with pytest.raises(RuntimeError, match="VNA not initialized"):
+        client.measure_s11("ant")
+
+
+def test_measure_s11_uses_mode_specific_power_dbm(redis, dummy_cfg):
+    """The per-mode ``power_dBm`` from ``vna_settings`` must be applied
+    to the VNA before each measurement. Regression guard for a unified
+    or hardcoded power that would silently bias either mode."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(redis, default_cfg=cfg)
+    try:
+        client.measure_s11("rec")
+        expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
+        assert client.vna.power_dBm == expected_rec
+        client.measure_s11("ant")
+        expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
+        assert client.vna.power_dBm == expected_ant
+    finally:
+        client.stop()
