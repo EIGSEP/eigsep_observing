@@ -205,11 +205,11 @@ CORR_METADATA = {
 # code in ``PandaClient.measure_s11``. Values are whatever the producer
 # last pushed via ``add_metadata``:
 #   - picohost pushes the raw sensor dict for each sensor key
-#   - ``add_metadata`` auto-appends a ``{key}_ts`` ISO-8601 string
+#   - ``add_metadata`` auto-appends a ``{key}_ts`` Unix-seconds float
 #   - misc. scalars (e.g. ``corr_sync_time``) go in as floats
 # There is NO averaging on this path; unlike CORR_METADATA, values are
 # scalars or nested dicts, never per-sample lists.
-_SNAPSHOT_TS = "2026-04-07T12:34:56.789012+00:00"
+_SNAPSHOT_TS = 1775997296.789012
 VNA_METADATA = {
     "imu_el": IMU_READING,
     "imu_el_ts": _SNAPSHOT_TS,

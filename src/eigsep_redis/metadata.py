@@ -1,4 +1,3 @@
-from datetime import datetime, timezone
 import json
 import logging
 import time
@@ -65,7 +64,10 @@ class MetadataWriter:
         r = self.transport.r
         # hash (snapshot path)
         r.hset(METADATA_HASH, key, payload)
-        ts = datetime.now(timezone.utc).isoformat()
+        # _ts is Unix seconds (time.time() semantics) so it lines up
+        # with the rest of the codebase (metadata_snapshot_unix,
+        # header_upload_unix, sync_time). Downstream parses to a float.
+        ts = time.time()
         r.hset(METADATA_HASH, f"{key}_ts", json.dumps(ts).encode("utf-8"))
         # stream (drain path for corr-cadence averaging)
         r.xadd(
@@ -157,16 +159,12 @@ class MetadataSnapshotReader:
             candidate_keys = [k for k in keys if not k.endswith("_ts")]
         if not candidate_keys:
             return
-        now = datetime.now(timezone.utc)
+        now = time.time()
         for key in candidate_keys:
-            ts_str = m.get(f"{key}_ts")
-            if not isinstance(ts_str, str):
+            ts = m.get(f"{key}_ts")
+            if not isinstance(ts, (int, float)):
                 continue
-            try:
-                ts = datetime.fromisoformat(ts_str)
-            except ValueError:
-                continue
-            age = (now - ts).total_seconds()
+            age = now - ts
             if age > self.max_age_s:
                 logger.warning(
                     "metadata snapshot key %r is stale: last update "
@@ -284,14 +282,11 @@ class MetadataStreamReader:
         if self.max_age_s == float("inf"):
             return
         now_mono = time.monotonic()
-        now_utc = datetime.now(timezone.utc)
+        now = time.time()
         r = self.transport.r
         for stream in silent_streams:
             last = self._last_warn_monotonic.get(stream)
-            if (
-                last is not None
-                and now_mono - last < self.warn_interval_s
-            ):
+            if last is not None and now_mono - last < self.warn_interval_s:
                 continue
             # ``stream`` is ``stream:{key}``; the matching hash field
             # is ``{key}_ts``. Anything that doesn't follow the
@@ -303,11 +298,12 @@ class MetadataStreamReader:
             if ts_raw is None:
                 continue
             try:
-                ts_str = json.loads(ts_raw)
-                ts = datetime.fromisoformat(ts_str)
+                ts = json.loads(ts_raw)
             except (ValueError, TypeError):
                 continue
-            age = (now_utc - ts).total_seconds()
+            if not isinstance(ts, (int, float)):
+                continue
+            age = now - ts
             if age > self.max_age_s:
                 logger.warning(
                     "metadata stream %r drained empty and is stale: "

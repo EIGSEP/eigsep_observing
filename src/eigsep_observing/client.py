@@ -123,7 +123,12 @@ class PandaClient:
         except ValueError:
             return None  # no config in Redis
         upload_time = cfg["upload_time"]
-        self.logger.info(f"Using config from Redis, updated at {upload_time}.")
+        # upload_time is Unix seconds (Transport._upload_dict); render
+        # for the operator log without changing the on-the-wire format.
+        upload_str = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(upload_time)
+        )
+        self.logger.info(f"Using config from Redis, updated at {upload_str}.")
         return cfg
 
     def _switch_to(self, state):
