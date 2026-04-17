@@ -51,9 +51,38 @@ class PandaClient:
             cfg = self._get_cfg()
         self.cfg = json.loads(json.dumps(cfg))
 
-        # initialize proxies and VNA
         self.peltier = None
-        self._initialize()
+
+        # RF switch proxy is a thin Redis-key facade — no hardware
+        # contact, so construction cannot fail. PicoManager owns the
+        # real serial link and publishes its device list into the
+        # "picos" Redis set; we just log it for startup observability.
+        self.sw_proxy = PicoProxy(
+            "rfswitch", self.redis.r, source="panda_client"
+        )
+        self.switch_lock = threading.Lock()
+        self.current_switch_state = None
+        available = self.redis.r.smembers("picos")
+        if available:
+            names = sorted(
+                n.decode() if isinstance(n, bytes) else n for n in available
+            )
+            self.logger.info(f"PicoManager devices: {names}")
+        else:
+            self.logger.warning("No pico devices registered by PicoManager.")
+
+        if self.cfg.get("use_vna", False):
+            self.init_VNA()
+        else:
+            self.vna = None
+            self.logger.info("VNA not initialized")
+
+        self.heartbeat_thd = threading.Thread(
+            target=self._send_heartbeat,
+            kwargs={"ex": 60},
+            daemon=True,
+        )
+        self.heartbeat_thd.start()
 
     def _get_cfg(self):
         """
@@ -82,23 +111,6 @@ class PandaClient:
         caller treats falsy as "switch failed".
         """
         return self.sw_proxy.send_command("switch", state=state)
-
-    def _initialize(self):
-        self.stop_client.clear()
-        self.init_picos()
-        if self.cfg.get("use_vna", False):
-            self.init_VNA()
-        else:
-            self.vna = None
-            self.logger.info("VNA not initialized")
-
-        # start heartbeat thread
-        self.heartbeat_thd = threading.Thread(
-            target=self._send_heartbeat,
-            kwargs={"ex": 60},
-            daemon=True,
-        )
-        self.heartbeat_thd.start()
 
     def _send_heartbeat(self, ex=60):
         """
@@ -156,37 +168,6 @@ class PandaClient:
         self.logger.info(f"vna kwargs: {kwargs}")
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
-
-    def init_picos(self):
-        """
-        Create Redis-backed proxies for pico devices.
-
-        Sensor-only devices (IMU, potmon, lidar, tempctrl) need no
-        proxy — their data flows to Redis via PicoManager
-        automatically. Only devices that require active commands
-        (e.g. the RF switch) get a proxy.
-
-        Notes
-        -----
-        PicoManager must be running as a separate service for commands
-        to be routed. If it hasn't started yet, the proxies still
-        construct successfully and will no-op until PicoManager
-        registers the devices.
-
-        """
-        r = self.redis.r
-        self.sw_proxy = PicoProxy("rfswitch", r, source="panda_client")
-        self.switch_lock = threading.Lock()
-        self.current_switch_state = None
-        # Log what PicoManager has registered
-        available = r.smembers("picos")
-        if available:
-            names = sorted(
-                n.decode() if isinstance(n, bytes) else n for n in available
-            )
-            self.logger.info(f"PicoManager devices: {names}")
-        else:
-            self.logger.warning("No pico devices registered by PicoManager.")
 
     def switch_loop(self):
         """

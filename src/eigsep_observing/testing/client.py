@@ -53,8 +53,8 @@ class DummyPandaClient(PandaClient):
 
     Starts a PicoManager with emulator-backed DummyPico* devices on
     the same (fake)redis instance before ``super().__init__`` runs, so
-    that the proxy objects created by ``init_picos`` find their devices
-    already registered.
+    that the proxy objects built inside PandaClient.__init__ find
+    their devices already registered.
     """
 
     def __init__(self, redis, default_cfg=None):
@@ -65,7 +65,8 @@ class DummyPandaClient(PandaClient):
             except FileNotFoundError:
                 default_cfg = {}
         # Start the embedded manager BEFORE super().__init__ so that
-        # PicoProxy.is_available is True when init_picos runs.
+        # PicoProxy.is_available is True when the parent constructor
+        # builds sw_proxy.
         self._manager = self._start_dummy_manager(redis)
         super().__init__(redis, default_cfg=default_cfg)
 
