@@ -117,7 +117,7 @@ class PandaClient:
         helper for operator-visible events (contract violations,
         config errors, hardware fault detection) — not for
         steady-state DEBUG/INFO telemetry, because the status stream
-        is bounded to the last 5 entries.
+        is bounded to the last ``StatusWriter.maxlen`` entries.
         """
         self.logger.warning(msg)
         self.status.send(msg, level=logging.WARNING)
