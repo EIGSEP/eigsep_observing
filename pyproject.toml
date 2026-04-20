@@ -21,9 +21,9 @@ dependencies = [
   "numpy",
   "pyyaml",
   "flask",
-  "picohost>=2.2.0",
-  "eigsep-vna==1.1.1",
-  "eigsep_redis>=0.1.0",
+  "picohost~=3.0",
+  "eigsep-vna~=1.1",
+  "eigsep_redis~=2.1",
 ]
 
 [project.optional-dependencies]
