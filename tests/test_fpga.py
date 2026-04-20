@@ -6,7 +6,6 @@ from threading import Event
 import pytest
 from unittest.mock import Mock, patch
 
-from eigsep_observing import EigsepFpga
 from eigsep_observing import corr as corr_mod
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing import DummyEigsepFpga, utils
@@ -61,35 +60,23 @@ def fpga_instance():
     """
     DummyEigsepFpga instance for FPGA tests.
 
-    Uses the real DummyEigsepObsRedis (fakeredis-backed) the dummy
-    constructs in __init__. We do *not* mock fpga.fpga, fpga.logger,
-    fpga.read_data, fpga.validate_config, or fpga.redis — the dummy
-    provides working implementations of all of those, and clobbering
-    them with bare Mocks just hides what's there. Tests that need to
-    assert on outbound redis calls should use a per-test
-    ``patch.object(fpga_instance.redis, "<method>",
-    wraps=fpga_instance.redis.<method>)`` spy scoped to the specific
-    method — see ``test_upload_config_with_validation_success`` for
-    the canonical pattern. Tests that need to control a specific
-    method (e.g. ``_read_integrations`` sequencing ``read_int`` return
-    values) should use the same per-test ``patch.object`` shape.
+    Uses the fakeredis-backed ``DummyTransport`` the dummy constructs
+    in __init__ and the per-role ``CorrConfigStore`` / ``CorrWriter``
+    surfaces the fpga builds on top of it. We do *not* mock
+    fpga.fpga, fpga.logger, fpga.read_data, fpga.validate_config, or
+    the corr surfaces — the dummy provides working implementations
+    of all of those, and clobbering them with bare Mocks just hides
+    what's there. Tests that need to assert on outbound corr calls
+    should use a per-test ``patch.object(fpga_instance.corr_config,
+    "<method>", wraps=...)`` spy scoped to the specific method — see
+    ``test_upload_config_with_validation_success`` for the canonical
+    pattern.
     """
     return DummyEigsepFpga(program=False)
 
 
 class TestEigsepFpga:
     """Test cases for EigsepFpga class."""
-
-    @patch("eigsep_observing.fpga.EigsepObsRedis")
-    def test_create_redis(self, mock_redis_class):
-        """Test _create_redis static method."""
-        mock_redis_instance = Mock()
-        mock_redis_class.return_value = mock_redis_instance
-
-        redis = EigsepFpga._create_redis("localhost", 6379)
-
-        mock_redis_class.assert_called_once_with(host="localhost", port=6379)
-        assert redis == mock_redis_instance
 
     def test_upload_config_with_validation_success(
         self, fpga_instance, caplog
@@ -98,9 +85,9 @@ class TestEigsepFpga:
         caplog.set_level(logging.DEBUG)
 
         with patch.object(
-            fpga_instance.redis.corr_config,
+            fpga_instance.corr_config,
             "upload",
-            wraps=fpga_instance.redis.corr_config.upload,
+            wraps=fpga_instance.corr_config.upload,
         ) as spy:
             fpga_instance.upload_config(validate=True)
 
@@ -118,9 +105,9 @@ class TestEigsepFpga:
                 wraps=fpga_instance.validate_config,
             ) as validate_spy,
             patch.object(
-                fpga_instance.redis.corr_config,
+                fpga_instance.corr_config,
                 "upload",
-                wraps=fpga_instance.redis.corr_config.upload,
+                wraps=fpga_instance.corr_config.upload,
             ) as upload_spy,
         ):
             fpga_instance.upload_config(validate=False)
@@ -139,9 +126,9 @@ class TestEigsepFpga:
                 side_effect=RuntimeError("Config invalid"),
             ),
             patch.object(
-                fpga_instance.redis.corr_config,
+                fpga_instance.corr_config,
                 "upload",
-                wraps=fpga_instance.redis.corr_config.upload,
+                wraps=fpga_instance.corr_config.upload,
             ) as upload_spy,
         ):
             with pytest.raises(
@@ -154,7 +141,7 @@ class TestEigsepFpga:
 
     def test_assert_config_matches_redis_match(self, fpga_instance):
         """assert_config_matches_redis is a no-op when cfg matches Redis."""
-        fpga_instance.redis.corr_config.upload(fpga_instance.cfg)
+        fpga_instance.corr_config.upload(fpga_instance.cfg)
         fpga_instance.assert_config_matches_redis()
 
     def test_assert_config_matches_redis_missing(self, fpga_instance):
@@ -168,7 +155,7 @@ class TestEigsepFpga:
         real-world failure: user edited the yaml and attached without
         --reinit.
         """
-        fpga_instance.redis.corr_config.upload(fpga_instance.cfg)
+        fpga_instance.corr_config.upload(fpga_instance.cfg)
         # Perturb a scalar and a nested field to exercise the recursive
         # diff summary.
         fpga_instance.cfg["sample_rate"] = fpga_instance.cfg["sample_rate"] / 2
@@ -207,9 +194,9 @@ class TestEigsepFpga:
                 return_value=1234567890.0,
             ),
             patch.object(
-                fpga_instance.redis.corr_config,
+                fpga_instance.corr_config,
                 "upload_header",
-                wraps=fpga_instance.redis.corr_config.upload_header,
+                wraps=fpga_instance.corr_config.upload_header,
             ) as spy_upload_header,
         ):
             fpga_instance.synchronize(delay=5)
@@ -225,7 +212,7 @@ class TestEigsepFpga:
         # Round-trip: read corr_header back through the production
         # get_corr_header path and confirm sync_time survived the
         # json-encode → json-decode pipeline intact.
-        header = fpga_instance.redis.corr_config.get_header()
+        header = fpga_instance.corr_config.get_header()
         assert header["sync_time"] == 1234567890.0
 
     def test_synchronize_default_delay(self, fpga_instance):
@@ -236,7 +223,7 @@ class TestEigsepFpga:
         ):
             fpga_instance.synchronize()
 
-        header = fpga_instance.redis.corr_config.get_header()
+        header = fpga_instance.corr_config.get_header()
         assert header["sync_time"] == 1111111111.0
 
     def test_synchronize_noise_mode(self, fpga_instance):
@@ -268,7 +255,7 @@ class TestEigsepFpga:
         spy_set_delay.assert_not_called()
         assert spy_sw_sync.call_count == 3
         assert fpga_instance.is_synchronized is True
-        header = fpga_instance.redis.corr_config.get_header()
+        header = fpga_instance.corr_config.get_header()
         assert header["sync_time"] == 2222222222.0
 
     def test_initialize_all_enabled(self, fpga_instance, caplog):
@@ -349,7 +336,7 @@ class TestEigsepFpga:
     ):
         """Header present but sync_time=0 → refuse to rehydrate."""
         caplog.set_level(logging.WARNING)
-        fpga_instance.redis.corr_config.upload_header({"sync_time": 0})
+        fpga_instance.corr_config.upload_header({"sync_time": 0})
         fpga_instance.sync_time = 0
         fpga_instance.is_synchronized = False
 
@@ -363,9 +350,9 @@ class TestEigsepFpga:
         read this alongside sync_time to detect post-sync mutations
         that weren't re-published."""
         with patch("eigsep_observing.corr.time.time", return_value=1234.0):
-            fpga_instance.redis.corr_config.upload_header({"sync_time": 42})
+            fpga_instance.corr_config.upload_header({"sync_time": 42})
 
-        header = fpga_instance.redis.corr_config.get_header()
+        header = fpga_instance.corr_config.get_header()
         assert header["sync_time"] == 42
         assert header["header_upload_unix"] == 1234.0
 
@@ -374,7 +361,7 @@ class TestEigsepFpga:
         EigsepFpga.header, a fresh dict per property access, but still)
         is not surprised with extra keys."""
         payload = {"sync_time": 42, "nchan": 1024}
-        fpga_instance.redis.corr_config.upload_header(payload)
+        fpga_instance.corr_config.upload_header(payload)
         assert payload == {"sync_time": 42, "nchan": 1024}
 
     def test_initialize_publishes_header_at_boundary(self, fpga_instance):
@@ -389,9 +376,9 @@ class TestEigsepFpga:
         publishes — that shape is covered by the dedicated sub-mutator
         tests below, not this one."""
         with patch.object(
-            fpga_instance.redis.corr_config,
+            fpga_instance.corr_config,
             "upload_header",
-            wraps=fpga_instance.redis.corr_config.upload_header,
+            wraps=fpga_instance.corr_config.upload_header,
         ) as spy:
             fpga_instance.initialize(
                 initialize_adc=False, initialize_fpga=False, sync=True
@@ -404,9 +391,9 @@ class TestEigsepFpga:
         fpga_instance.initialize_pams()
         ant = next(iter(fpga_instance.cfg["rf_chain"]["ants"]))
         with patch.object(
-            fpga_instance.redis.corr_config,
+            fpga_instance.corr_config,
             "upload_header",
-            wraps=fpga_instance.redis.corr_config.upload_header,
+            wraps=fpga_instance.corr_config.upload_header,
         ) as spy:
             fpga_instance.set_pam_atten(ant, 4)
         spy.assert_called_once()
@@ -415,9 +402,9 @@ class TestEigsepFpga:
         """set_pam_atten_all mutates all PAMs at once; same contract."""
         fpga_instance.initialize_pams()
         with patch.object(
-            fpga_instance.redis.corr_config,
+            fpga_instance.corr_config,
             "upload_header",
-            wraps=fpga_instance.redis.corr_config.upload_header,
+            wraps=fpga_instance.corr_config.upload_header,
         ) as spy:
             fpga_instance.set_pam_atten_all(6)
         spy.assert_called_once()
@@ -426,9 +413,9 @@ class TestEigsepFpga:
         """set_pol_delay mutates pol_delay (a top-level header field)
         so it must re-publish."""
         with patch.object(
-            fpga_instance.redis.corr_config,
+            fpga_instance.corr_config,
             "upload_header",
-            wraps=fpga_instance.redis.corr_config.upload_header,
+            wraps=fpga_instance.corr_config.upload_header,
         ) as spy:
             fpga_instance.set_pol_delay({"01": 3, "23": 0, "45": 0})
         spy.assert_called_once()
@@ -601,7 +588,7 @@ class TestEigsepFpga:
             None,
         ]
         with (
-            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            patch.object(fpga_instance.corr, "add") as mock_add,
             _patch_observe_thread(fpga_instance, items),
         ):
             fpga_instance.observe(pairs=pairs, timeout=10)
@@ -624,7 +611,7 @@ class TestEigsepFpga:
         items = [{"data": d1, "cnt": 1}, None]
         caplog.set_level(logging.INFO)
         with (
-            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            patch.object(fpga_instance.corr, "add") as mock_add,
             _patch_observe_thread(fpga_instance, items) as mock_thread_cls,
         ):
             fpga_instance.observe()  # no pairs arg → defaults to self.pairs
@@ -656,7 +643,7 @@ class TestEigsepFpga:
         """
         caplog.set_level(logging.INFO)
         with (
-            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            patch.object(fpga_instance.corr, "add") as mock_add,
             _patch_observe_thread(fpga_instance, [None]),
         ):
             fpga_instance.observe(pairs=["0"], timeout=1)
@@ -692,7 +679,7 @@ class TestEigsepFpga:
         items = [{"data": {"0": [i]}, "cnt": 10 + i} for i in range(5)]
         items.append(None)
         with (
-            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            patch.object(fpga_instance.corr, "add") as mock_add,
             _patch_observe_thread(fpga_instance, items),
         ):
             fpga_instance.observe(pairs=["0", "1"], timeout=10)
@@ -719,7 +706,7 @@ class TestEigsepFpga:
         )
         items = [{"data": d1, "cnt": 1}, None]
         with (
-            patch.object(fpga_instance.redis.corr, "add") as mock_add,
+            patch.object(fpga_instance.corr, "add") as mock_add,
             _patch_observe_thread(fpga_instance, items),
         ):
             fpga_instance.observe(pairs=["0"], timeout=10)
@@ -745,5 +732,5 @@ class TestEigsepFpga:
 
         # Real CorrWriter.add with sync_time=0 → dropped; nothing on
         # the stream.
-        r = fpga_instance.redis.transport.r
+        r = fpga_instance.transport.r
         assert r.xlen(CORR_STREAM) == 0

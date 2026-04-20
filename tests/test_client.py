@@ -9,11 +9,11 @@ import pytest
 import yaml
 
 from cmt_vna.testing import DummyVNA
+from eigsep_redis import ConfigStore, HeartbeatReader, StatusReader
 from eigsep_redis.keys import STATUS_STREAM
+from eigsep_redis.testing import DummyTransport
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
-
-from eigsep_observing.testing import DummyEigsepObsRedis
 
 import eigsep_observing
 from eigsep_observing.client import _SW_INT_TO_MODE
@@ -40,20 +40,29 @@ def dummy_cfg(module_tmpdir):
 
 
 @pytest.fixture
-def redis():
-    return DummyEigsepObsRedis()
+def transport():
+    return DummyTransport()
 
 
 @pytest.fixture
-def client(redis, dummy_cfg):
-    c = DummyPandaClient(redis, default_cfg=dummy_cfg)
+def client(transport, dummy_cfg):
+    c = DummyPandaClient(transport, default_cfg=dummy_cfg)
     yield c
     c.stop()
 
 
+def _status_reader(client):
+    """Build a StatusReader on the client's transport for test-side reads."""
+    return StatusReader(client.transport)
+
+
+def _heartbeat_reader(client):
+    return HeartbeatReader(client.transport)
+
+
 def test_client(client):
-    # client is initialized with redis commands
-    assert client.redis.heartbeat_reader.check()  # check heartbeat
+    # client is initialized with heartbeat ticking
+    assert _heartbeat_reader(client).check()
     # sw_proxy is always created as a generic PicoProxy
     assert client.sw_proxy is not None
     assert isinstance(client.sw_proxy, PicoProxy)
@@ -68,10 +77,10 @@ def test_get_cfg(caplog, dummy_cfg):
     caplog.set_level("INFO")
 
     # should be no config in redis at start
-    r = DummyEigsepObsRedis(port=6380)  # different port to avoid conflicts
+    t = DummyTransport()  # different transport for test isolation
     with pytest.raises(ValueError):
-        r.config.get()
-    client2 = DummyPandaClient(r, default_cfg={})
+        ConfigStore(t).get()
+    client2 = DummyPandaClient(t, default_cfg={})
     client3 = None
     try:
         # should have created a logger warning about missing config
@@ -83,7 +92,7 @@ def test_get_cfg(caplog, dummy_cfg):
         assert "upload_time" in cfg_in_redis
 
         # upload the dummy config to client2's redis
-        client2.redis.config.upload(dummy_cfg)
+        client2.config.upload(dummy_cfg)
 
         # check that they're the same
         retrieved_cfg = client2._get_cfg()
@@ -93,7 +102,7 @@ def test_get_cfg(caplog, dummy_cfg):
         compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
 
         # if reinit client2, it should get the config from redis
-        client3 = DummyPandaClient(r, default_cfg={})
+        client3 = DummyPandaClient(t, default_cfg={})
         retrieved_cfg2 = client3._get_cfg()
         compare_dicts(client3.cfg, retrieved_cfg2)
 
@@ -116,7 +125,7 @@ def test_switch_proxy_created(client):
 
 def test_pico_manager_devices_visible(client):
     """PicoManager's registered devices are visible in Redis."""
-    available = client.redis.r.smembers("picos")
+    available = client.transport.r.smembers("picos")
     names = {n.decode() if isinstance(n, bytes) else n for n in available}
     expected = {
         "tempctrl",
@@ -143,8 +152,8 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
     assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
 
-    client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-    level, status = client.redis.status_reader.read(timeout=1)
+    client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+    level, status = _status_reader(client).read(timeout=1)
     assert level == logging.WARNING
     assert "VNA not initialized" in status
 
@@ -202,7 +211,7 @@ def test_read_switch_mode_from_redis_no_rfswitch_data(client):
     decides the fallback (``vna_loop`` falls back to RFANT with a
     warning)."""
     # Wipe the rfswitch entry from the metadata snapshot.
-    client.redis.r.hdel("metadata", "rfswitch")
+    client.transport.r.hdel("metadata", "rfswitch")
     assert client._read_switch_mode_from_redis() is None
 
 
@@ -210,12 +219,12 @@ def test_read_switch_mode_from_redis_unmapped_sw_state(client):
     """Returns ``None`` if the published ``sw_state`` doesn't map to a
     known mode — guards against firmware drift."""
     bogus = json.dumps({"sensor_name": "rfswitch", "sw_state": 99999}).encode()
-    client.redis.r.hset("metadata", "rfswitch", bogus)
+    client.transport.r.hset("metadata", "rfswitch", bogus)
     assert client._read_switch_mode_from_redis() is None
 
 
 def test_vna_loop_uses_redis_published_mode_for_switch_back(
-    redis, dummy_cfg, caplog
+    transport, dummy_cfg, caplog
 ):
     """vna_loop reads ``prev_mode`` from Redis (PicoManager truth), not
     from a panda-side shadow. After a PandaClient restart that finds
@@ -224,7 +233,7 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60  # long: only one iteration before stop
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         # Pre-seed the rfswitch in Redis to simulate a state PicoManager
         # set before this PandaClient process started.
@@ -273,7 +282,7 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
 
 
 def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
-    redis, dummy_cfg, caplog
+    transport, dummy_cfg, caplog
 ):
     """If the rfswitch hasn't published, vna_loop logs a WARNING and
     falls back to RFANT — making the contract violation visible
@@ -281,10 +290,10 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         # Wipe the rfswitch entry so the helper returns None.
-        client.redis.r.hdel("metadata", "rfswitch")
+        client.transport.r.hdel("metadata", "rfswitch")
 
         switch_calls = []
         original_switch_to = client._switch_to
@@ -315,22 +324,22 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
             for r in caplog.records
         )
 
-        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-        level, status = client.redis.status_reader.read(timeout=1)
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "rfswitch state unavailable in Redis" in status
     finally:
         client.stop()
 
 
-def test_vna_loop_warns_on_failed_switch_back(redis, dummy_cfg, caplog):
+def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
     """If the post-VNA ``_switch_to(prev_mode)`` returns falsy, vna_loop
     logs a WARNING — mirrors switch_loop's "Failed to switch" pattern so
     a hardware-stuck calibrator is operator-visible instead of silent."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60  # long: only one iteration before stop
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         assert client._switch_to("RFNOFF")
         deadline = time.monotonic() + 2.0
@@ -366,15 +375,15 @@ def test_vna_loop_warns_on_failed_switch_back(redis, dummy_cfg, caplog):
             f"got records: {[r.getMessage() for r in caplog.records]}"
         )
 
-        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-        level, status = client.redis.status_reader.read(timeout=1)
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch back to RFNOFF" in status
     finally:
         client.stop()
 
 
-def test_switch_loop_warns_on_failed_switch(redis, dummy_cfg, caplog):
+def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
     """A failing ``_switch_to`` inside ``switch_loop`` must warn on both
     the local logger and the Redis status stream so the ground observer
     sees a stuck calibrator without SSHing into the panda."""
@@ -382,7 +391,7 @@ def test_switch_loop_warns_on_failed_switch(redis, dummy_cfg, caplog):
     # Give the loop exactly one mode to try; cap wait so the stop event
     # breaks us out after the first iteration.
     cfg["switch_schedule"] = {"RFNOFF": 0.01}
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
 
         def failing_switch(state):
@@ -399,8 +408,8 @@ def test_switch_loop_warns_on_failed_switch(redis, dummy_cfg, caplog):
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
-        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-        level, status = client.redis.status_reader.read(timeout=1)
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch to RFNOFF" in status
     finally:
@@ -473,7 +482,7 @@ def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
     """If the rfswitch hasn't published on entry, the session has no
     mode to restore to. Skip the restore and log a warning — auto-
     guessing RFANT would be surprising at the REPL."""
-    client.redis.r.hdel("metadata", "rfswitch")
+    client.transport.r.hdel("metadata", "rfswitch")
     assert client._read_switch_mode_from_redis() is None
 
     switch_calls = []
@@ -578,7 +587,7 @@ def test_switch_session_restores_even_on_exception(client):
     client.switch_lock.release()
 
 
-def test_switch_session_serializes_with_switch_loop(redis, dummy_cfg):
+def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
     """The session holds ``switch_lock`` for the whole block, so a
     concurrent ``switch_loop`` thread must block on the lock — its
     first ``_switch_to`` call fires only *after* the session exits.
@@ -589,7 +598,7 @@ def test_switch_session_serializes_with_switch_loop(redis, dummy_cfg):
     # Keep the schedule simple and long so switch_loop blocks on the
     # lock instead of racing through many iterations during the test.
     cfg["switch_schedule"] = {"RFANT": 60.0}
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         assert client._switch_to("RFANT")
         _wait_for_published_mode(client, "RFANT")
@@ -660,14 +669,14 @@ def test_stop_joins_heartbeat_and_emits_goodbye(client):
     """stop() sets stop_client, joins the heartbeat thread, and the
     thread's final alive=False is visible to readers. Idempotent."""
     assert client.heartbeat_thd.is_alive()
-    assert client.redis.heartbeat_reader.check() is True
+    assert _heartbeat_reader(client).check() is True
     client.stop()
     assert not client.heartbeat_thd.is_alive()
-    assert client.redis.heartbeat_reader.check() is False
+    assert _heartbeat_reader(client).check() is False
     client.stop()  # idempotent — must not raise
 
 
-def test_send_heartbeat_cycles_and_announces_shutdown(redis, dummy_cfg):
+def test_send_heartbeat_cycles_and_announces_shutdown(transport, dummy_cfg):
     """_send_heartbeat must tick more than once while running (i.e. it
     loops, not just publishes once at startup) and must emit its
     alive=False farewell on shutdown. A one-shot implementation that
@@ -676,17 +685,15 @@ def test_send_heartbeat_cycles_and_announces_shutdown(redis, dummy_cfg):
     hasn't expired yet), so we explicitly count ticks here by counting
     invocations of the writer's ``set`` method over a ~1.2s window."""
     calls = []
-    client = DummyPandaClient(redis, default_cfg=dummy_cfg)
+    client = DummyPandaClient(transport, default_cfg=dummy_cfg)
     try:
-        original_set = client.redis.heartbeat.set
+        original_set = client.heartbeat.set
 
         def recording_set(*args, **kwargs):
             calls.append(kwargs)
             return original_set(*args, **kwargs)
 
-        with patch.object(
-            client.redis.heartbeat, "set", side_effect=recording_set
-        ):
+        with patch.object(client.heartbeat, "set", side_effect=recording_set):
             # Wait for at least two 1s loop cycles so a non-looping
             # implementation would record zero ticks during the patch.
             time.sleep(1.2)
@@ -735,7 +742,7 @@ def test_measure_s11_requires_initialized_vna(client):
 
 
 def test_measure_s11_contract_violation_emits_on_both_channels(
-    redis, dummy_cfg, caplog
+    transport, dummy_cfg, caplog
 ):
     """A producer-side contract violation in ``measure_s11`` must log
     loudly locally *and* push a status-stream message so the ground
@@ -748,7 +755,7 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
     test)."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         violations = ["missing key 'npoints'", "key 'mode': expected str"]
         with patch(
@@ -774,26 +781,26 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
         # test process can read the entry the producer just pushed
         # (same rationale as the vna-reader rewind in the producer
         # contract test).
-        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-        level, status = client.redis.status_reader.read(timeout=1)
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert status == warning_msgs[0]
     finally:
         client.stop()
 
 
-def test_measure_s11_clean_payload_does_not_send_status(redis, dummy_cfg):
+def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     """Complement to the contract-violation test: on the happy path
     (real DummyVNA output passing the real validators), neither channel
     should emit a violation — we must not spam the bounded 5-entry
     status stream during normal operation."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         client.measure_s11("ant")
-        client.redis._set_last_read_id(STATUS_STREAM, "0-0")
-        level, status = client.redis.status_reader.read(timeout=0.2)
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=0.2)
     finally:
         client.stop()
     assert (level, status) == (None, None), (
@@ -802,13 +809,13 @@ def test_measure_s11_clean_payload_does_not_send_status(redis, dummy_cfg):
     )
 
 
-def test_measure_s11_uses_mode_specific_power_dbm(redis, dummy_cfg):
+def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
     """The per-mode ``power_dBm`` from ``vna_settings`` must be applied
     to the VNA before each measurement. Regression guard for a unified
     or hardcoded power that would silently bias either mode."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         client.measure_s11("rec")
         expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]

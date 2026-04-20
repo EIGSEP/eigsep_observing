@@ -2,11 +2,13 @@ from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import logging
 import numpy as np
 
+from eigsep_redis import Transport
+
+from eigsep_observing.corr import CorrReader
+from eigsep_observing.io import reshape_data
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-from eigsep_observing import EigsepObsRedis
-from eigsep_observing.io import reshape_data
 
 parser = ArgumentParser(
     description="Capture a spectrum from the SNAP correlator.",
@@ -45,7 +47,8 @@ parser.add_argument(
 )
 args = parser.parse_args()
 
-redis = EigsepObsRedis(host=args.redis_host, port=args.redis_port)
+transport = Transport(host=args.redis_host, port=args.redis_port)
+corr_reader = CorrReader(transport)
 logger.info(
     f"Connected to Redis server at {args.redis_host}:{args.redis_port}"
 )
@@ -56,7 +59,7 @@ pairs = args.pairs or all_autos + all_cross
 all_data = {}
 logger.info(f"Capturing {args.num_spec} spectra for pairs: {pairs}")
 for i in range(args.num_spec):
-    data = redis.corr_reader.read(pairs=pairs, timeout=10)[-1]
+    data = corr_reader.read(pairs=pairs, timeout=10)[-1]
     data = reshape_data(data, avg_even_odd=True)
     for k, v in data.items():
         if k not in all_data:

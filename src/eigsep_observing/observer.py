@@ -2,7 +2,16 @@ import logging
 import threading
 import time
 
+from eigsep_redis import (
+    ConfigStore,
+    HeartbeatReader,
+    MetadataStreamReader,
+    StatusReader,
+)
+
 from . import io
+from .corr import CorrConfigStore, CorrReader
+from .vna import VnaReader
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +52,7 @@ def _tick_liveness_deadline(deadline, liveness_timeout, reason):
 
 
 class EigObserver:
-    def __init__(self, redis_snap=None, redis_panda=None):
+    def __init__(self, transport_snap=None, transport_panda=None):
         """
         Main controll class and filewriter for Eigsep observing.
         Provides methods to:
@@ -56,30 +65,39 @@ class EigObserver:
 
         Parameters
         ----------
-        redis_snap : EigsepObsRedis
-            The Redis connection to the Rasperry Pi controlling the
-            SNAP correlator.
-        redis_panda : EigsepObsRedis
-            The Redis connection to the LattePanda server.
+        transport_snap : eigsep_redis.Transport
+            The Redis transport for the Rasperry Pi controlling the
+            SNAP correlator. The observer builds only the consumer-side
+            corr surfaces from it (``corr_config``, ``corr_reader``).
+        transport_panda : eigsep_redis.Transport
+            The Redis transport for the LattePanda server. The observer
+            builds only the consumer-side panda surfaces from it
+            (``config``, ``metadata_stream``, ``status_reader``,
+            ``heartbeat_reader``, ``vna_reader``).
 
         Notes
         -----
-        At least one of the Redis connections must be provided. Connect
-        to the SNAP Redis server for reading correlator data, and to
-        the LattePanda Redis server for reading metadata and controlling
-        the VNA and RF switches.
+        At least one of the transports must be provided. Connect to the
+        SNAP transport for reading correlator data, and to the
+        LattePanda transport for reading metadata and VNA measurements.
 
         """
         self.logger = logger
 
-        # redis connections
-        self.redis_snap = redis_snap
-        self.redis_panda = redis_panda
+        self.transport_snap = transport_snap
+        self.transport_panda = transport_panda
 
-        if self.redis_snap is not None:
-            self.corr_cfg = self.redis_snap.corr_config.get()
-        if self.redis_panda is not None:
-            self.cfg = self.redis_panda.config.get()
+        if transport_snap is not None:
+            self.corr_config = CorrConfigStore(transport_snap)
+            self.corr_reader = CorrReader(transport_snap)
+            self.corr_cfg = self.corr_config.get()
+        if transport_panda is not None:
+            self.config = ConfigStore(transport_panda)
+            self.metadata_stream = MetadataStreamReader(transport_panda)
+            self.status_reader = StatusReader(transport_panda)
+            self.heartbeat_reader = HeartbeatReader(transport_panda)
+            self.vna_reader = VnaReader(transport_panda)
+            self.cfg = self.config.get()
 
         self.stop_event = threading.Event()  # main stop event
 
@@ -95,16 +113,16 @@ class EigObserver:
         """
         Check if the SNAP Redis connection is established.
         """
-        return self.redis_snap is not None
+        return self.transport_snap is not None
 
     @property
     def panda_connected(self):
         """
         Check if the LattePanda Redis connection is established.
         """
-        if self.redis_panda is None:
+        if self.transport_panda is None:
             return False
-        return self.redis_panda.heartbeat_reader.check()
+        return self.heartbeat_reader.check()
 
     def status_logger(self):
         """
@@ -126,7 +144,7 @@ class EigObserver:
                 if self.stop_event.wait(1):  # wait 1s before checking again
                     return
             self.logger.debug("Panda connected.")
-            level, status = self.redis_panda.status_reader.read(timeout=0.1)
+            level, status = self.status_reader.read(timeout=0.1)
             if status is not None:
                 self.logger.log(level, status)
 
@@ -201,7 +219,7 @@ class EigObserver:
             while not self.stop_event.is_set():
                 if file.counter == 0:
                     try:
-                        header = self.redis_snap.corr_config.get_header()
+                        header = self.corr_config.get_header()
                     except ValueError as e:
                         if cached_header is not None:
                             self.logger.warning(
@@ -255,7 +273,7 @@ class EigObserver:
                         cached_sync_time = new_sync_time
                         file.set_header(header=header)
                 try:
-                    acc_cnt, data = self.redis_snap.corr_reader.read(
+                    acc_cnt, data = self.corr_reader.read(
                         pairs=pairs, timeout=timeout, unpack=True
                     )
                 except TimeoutError:
@@ -280,7 +298,7 @@ class EigObserver:
                     continue
                 self.logger.info(f"{acc_cnt=}")
                 if self.panda_connected:
-                    metadata = self.redis_panda.metadata_stream.drain()
+                    metadata = self.metadata_stream.drain()
                 else:
                     metadata = None
                 file.add_data(
@@ -321,9 +339,7 @@ class EigObserver:
                     return
                 continue
             try:
-                data, header, metadata = self.redis_panda.vna_reader.read(
-                    timeout=timeout
-                )
+                data, header, metadata = self.vna_reader.read(timeout=timeout)
             except TimeoutError:
                 continue
             if data is None:

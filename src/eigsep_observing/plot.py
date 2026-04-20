@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
+from .corr import CorrConfigStore, CorrReader
 from .io import reshape_data
 from .utils import calc_freqs_dfreq
 
@@ -43,7 +44,7 @@ class LivePlotter:
 
     def __init__(
         self,
-        redis_client,
+        transport,
         pairs=None,
         plot_delay=False,
         log_scale=True,
@@ -54,8 +55,9 @@ class LivePlotter:
 
         Parameters
         ----------
-        redis_client : EigsepObsRedis
-            Redis client instance
+        transport : eigsep_redis.Transport
+            Shared Redis transport. The plotter builds its own
+            ``CorrReader`` / ``CorrConfigStore`` surfaces from it.
         pairs : list of str
             Correlation pairs to plot (e.g., ['0', '1', '02', '13'])
         plot_delay : bool
@@ -65,7 +67,9 @@ class LivePlotter:
         poll_interval : int
             Polling interval in milliseconds to check for new data.
         """
-        self.redis = redis_client
+        self.transport = transport
+        self.corr_reader = CorrReader(transport)
+        self.corr_config = CorrConfigStore(transport)
         self.pairs = pairs or [
             "0",
             "1",
@@ -89,7 +93,7 @@ class LivePlotter:
         self.poll_interval = poll_interval
 
         # Get configuration from Redis
-        self.corr_cfg = self.redis.corr_config.get()
+        self.corr_cfg = self.corr_config.get()
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
@@ -213,7 +217,7 @@ class LivePlotter:
 
     def update_plot(self, frame):
         """Update plot data (called by animation)."""
-        data = self.redis.corr_reader.read(pairs=self.pairs, timeout=0)[-1]
+        data = self.corr_reader.read(pairs=self.pairs, timeout=0)[-1]
         data = {k: v for k, v in data.items() if k in self.pairs}
         data = reshape_data(data, avg_even_odd=True)
         # Update magnitude plot

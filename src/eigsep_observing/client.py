@@ -6,11 +6,18 @@ from contextlib import contextmanager
 import yaml
 
 from cmt_vna import VNA
+from eigsep_redis import (
+    ConfigStore,
+    HeartbeatWriter,
+    MetadataSnapshotReader,
+    StatusWriter,
+)
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .utils import get_config_path
+from .vna import VnaWriter
 
 logger = logging.getLogger(__name__)
 default_cfg_file = get_config_path("obs_config.yaml")
@@ -40,23 +47,31 @@ class PandaClient:
 
     Parameters
     ----------
-    redis : EigsepObsRedis
-        The Redis server object to push data to and read commands
-        from.
+    transport : eigsep_redis.Transport
+        Shared Redis transport. The client builds only the per-bus
+        writer/reader surfaces it actually uses (config, metadata
+        snapshot, status, heartbeat, VNA producer) — not the full
+        observer-side bus. Wrong-role access (e.g. ``corr_reader``) is
+        an ``AttributeError`` rather than a runtime foot-gun.
     default_cfg : dict
         Default configuration to use if no config is found in Redis.
     """
 
-    def __init__(self, redis, default_cfg=default_cfg):
+    def __init__(self, transport, default_cfg=default_cfg):
         self.logger = logger
-        self.redis = redis
+        self.transport = transport
+        self.config = ConfigStore(transport)
+        self.metadata_snapshot = MetadataSnapshotReader(transport)
+        self.status = StatusWriter(transport)
+        self.heartbeat = HeartbeatWriter(transport)
+        self.vna_writer = VnaWriter(transport)
         self.stop_client = threading.Event()
         cfg = self._get_cfg()
         if cfg is None:
             self.logger.warning(
                 "No configuration found in Redis, using default config."
             )
-            self.redis.config.upload(default_cfg)
+            self.config.upload(default_cfg)
             cfg = self._get_cfg()
         self.cfg = cfg
 
@@ -67,10 +82,10 @@ class PandaClient:
         # real serial link and publishes its device list into the
         # "picos" Redis set; we just log it for startup observability.
         self.sw_proxy = PicoProxy(
-            "rfswitch", self.redis.r, source="panda_client"
+            "rfswitch", self.transport.r, source="panda_client"
         )
         self.switch_lock = threading.Lock()
-        available = self.redis.r.smembers("picos")
+        available = self.transport.r.smembers("picos")
         if available:
             names = sorted(
                 n.decode() if isinstance(n, bytes) else n for n in available
@@ -97,15 +112,15 @@ class PandaClient:
 
         Panda-side ``self.logger`` writes only to a local
         ``RotatingFileHandler``; the ground observer sees the message
-        only if it's also pushed through ``self.redis.status``, which
+        only if it's also pushed through ``self.status``, which
         ``EigObserver.status_logger`` re-emits ground-side. Use this
         helper for operator-visible events (contract violations,
         config errors, hardware fault detection) — not for
         steady-state DEBUG/INFO telemetry, because the status stream
-        is bounded to the last 5 entries.
+        is bounded to the last ``StatusWriter.maxlen`` entries.
         """
         self.logger.warning(msg)
-        self.redis.status.send(msg, level=logging.WARNING)
+        self.status.send(msg, level=logging.WARNING)
 
     def _get_cfg(self):
         """
@@ -119,7 +134,7 @@ class PandaClient:
 
         """
         try:
-            cfg = self.redis.config.get()
+            cfg = self.config.get()
         except ValueError:
             return None  # no config in Redis
         upload_time = cfg["upload_time"]
@@ -152,7 +167,7 @@ class PandaClient:
         across a restart on either side.
         """
         try:
-            snap = self.redis.metadata_snapshot.get("rfswitch")
+            snap = self.metadata_snapshot.get("rfswitch")
         except KeyError:
             return None
         sw_state = snap.get("sw_state")
@@ -236,9 +251,9 @@ class PandaClient:
 
         """
         while not self.stop_client.is_set():
-            self.redis.heartbeat.set(ex=ex, alive=True)
+            self.heartbeat.set(ex=ex, alive=True)
             self.stop_client.wait(1.0)
-        self.redis.heartbeat.set(alive=False)
+        self.heartbeat.set(alive=False)
 
     def stop(self, timeout=5.0):
         """
@@ -406,7 +421,7 @@ class PandaClient:
         header = self.vna.header
         header["mode"] = mode
         header["metadata_snapshot_unix"] = time.time()
-        metadata = self.redis.metadata_snapshot.get()
+        metadata = self.metadata_snapshot.get()
 
         # Producer self-check against the VNA S11 contract (see
         # io.VNA_S11_HEADER_SCHEMA). Loud but non-blocking: never
@@ -422,7 +437,7 @@ class PandaClient:
                 + "; ".join(violations)
             )
 
-        self.redis.vna.add(s11, header=header, metadata=metadata)
+        self.vna_writer.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
 
     def vna_loop(self):
