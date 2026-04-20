@@ -149,11 +149,28 @@ class PandaClient:
     def _switch_to(self, state):
         """Route an RF switch command through PicoManager.
 
-        Returns the manager's response dict on success, or ``None`` if
-        PicoManager has not registered the rfswitch device (no-op). The
-        caller treats falsy as "switch failed".
+        Returns ``True`` on confirmed success, ``False`` on any
+        failure: unregistered device (``None`` from the proxy),
+        firmware/manager error (``RuntimeError``), or proxy timeout
+        (``TimeoutError``). Never raises: observing loops depend on
+        this to stay up across transient Pico faults so corr data
+        keeps flowing while a switch hiccup is logged for the
+        operator.
+
+        Also wired as ``switch_fn`` for ``cmt_vna.VNA`` (see
+        :meth:`init_VNA`); since eigsep-vna 1.2 every ``measure_*``
+        method raises on a falsy ``switch_fn`` return, so a switch
+        failure aborts the S11 measurement instead of contaminating
+        it.
         """
-        return self.sw_proxy.send_command("switch", state=state)
+        try:
+            result = self.sw_proxy.send_command("switch", state=state)
+        except (RuntimeError, TimeoutError) as exc:
+            self.logger.warning(
+                f"RF switch to {state} failed: {type(exc).__name__}: {exc}"
+            )
+            return False
+        return result is not None
 
     def _read_switch_mode_from_redis(self):
         """Return the RF switch mode string PicoManager last published.
