@@ -23,7 +23,7 @@ dependencies = [
   "flask",
   "picohost>=2.2.0",
   "eigsep-vna==1.1.1",
-  "fakeredis",
+  "eigsep_redis>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -31,6 +31,7 @@ dev = [
   "build",
   "twine",
   "ruff",
+  "fakeredis",
   "pyserial-mock",
   "pytest",
   "pytest-cov",
@@ -55,7 +56,6 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = [
   "--cov=eigsep_observing",
-  "--cov=eigsep_redis",
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--junitxml=junit.xml",

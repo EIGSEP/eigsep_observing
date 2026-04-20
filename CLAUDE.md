@@ -23,11 +23,11 @@ ruff format --check .             # Check formatting (line length 79)
 
 ### Core classes (all use Redis for communication):
 
-- **Transport** (`eigsep_redis/transport.py`) - Shared Redis transport object: connection, last-read-id bookkeeping, raw K/V, lifecycle. Owns nothing bus-specific. Writer and reader classes are constructed with a `Transport` and share state through it. Tests use `DummyTransport` (fakeredis-backed).
+- **Transport** (`eigsep_redis.transport`, sibling repo [`eigsep_redis`](https://github.com/EIGSEP/eigsep_redis)) - Shared Redis transport object: connection, last-read-id bookkeeping, raw K/V, lifecycle. Owns nothing bus-specific. Writer and reader classes are constructed with a `Transport` and share state through it. Tests use `DummyTransport` (fakeredis-backed). The entire Redis transport + per-bus writer/reader layer lives in the `eigsep_redis` sibling repo; `eigsep_observing` consumes it as a dependency.
 - **EigObserver** (`observer.py`) - Main orchestrator on the ground computer. Takes two transports (`transport_snap` for SNAP correlator, `transport_panda` for LattePanda) and builds *only* the consumer-side per-bus surfaces it needs: `corr_config`, `corr_reader` (SNAP side); `config`, `metadata_stream`, `status_reader`, `heartbeat_reader`, `vna_reader` (panda side). Holds no writer surface.
 - **PandaClient** (`client.py`) - Runs on the suspended LattePanda. Takes a transport and builds *only* producer-side surfaces: `config`, `metadata_snapshot` (read-only — rfswitch state check), `status`, `heartbeat`, `vna_writer`. Manages Pico devices (IMU, thermometers, peltier, lidar, RF switch) via `picohost` library. Holds no corr surface.
 - **EigsepFpga** (`fpga.py`) - SNAP FPGA/correlator driver. Takes a transport (built from `cfg["redis"]` when not supplied) and builds the corr-bus publication path: `corr` (writer), `corr_config` (store — config + header). Owns the register blocks (`blocks.py`) and the `.fpg` bitstream (`data/`). Was historically a subclass of `eigsep_corr.fpga.EigsepFpga`; the two were merged in-tree when `eigsep_corr` was archived.
-- **EigsepRedis** (`eigsep_redis/eig_redis.py`) - Shim class kept only for picohost's `add_metadata` call until the monorepo merge (see `TODO(monorepo)`). In-tree consumers build their own per-bus surfaces from a `Transport` directly.
+- **EigsepRedis** (`eigsep_redis.eig_redis`, sibling repo) - Shim class kept only for picohost's `add_metadata` call until picohost migrates to `MetadataWriter.add` (see `TODO(picohost-migration)` in the sibling repo). In-tree consumers build their own per-bus surfaces from a `Transport` directly.
 
 ### Wrong-role access is structural (writer/reader-per-bus, step 6)
 
@@ -36,7 +36,7 @@ Two structural guards now hold:
 1. **Wrong-stream writes are impossible.** `MetadataWriter` has no method that accepts a VNA payload; `CorrWriter` has no method that accepts a metadata payload; etc. Enforced by the class-level `test_bus_classes_have_no_cross_bus_methods` guard in `tests/test_redis.py`. Motivated by the VNA→metadata leak bug caught in PR review (fixed in `b8cc1ed` / `ba42f1f`, then made structural).
 2. **Wrong-role access is `AttributeError`.** `PandaClient` has no `corr_reader`; `EigObserver` has no `corr` / `vna` writer; `EigsepFpga` has no reader surface. Each consumer's `__init__` builds *only* the per-bus surfaces its role needs. Enforced by `test_consumer_role_surfaces_are_structural` in `tests/test_redis.py`.
 
-`EigsepRedis.add_metadata` remains as a one-line shim with `DeprecationWarning`, narrowly for picohost (`pico-firmware/picohost/src/picohost/base.py:65` until the monorepo merge). In-tree code must use `redis.metadata.add(...)` directly — or, more commonly, build a `MetadataWriter(transport)` on the producer side and call `.add(...)` on it.
+`EigsepRedis.add_metadata` remains as a one-line shim with `DeprecationWarning`, narrowly for picohost (`pico-firmware/picohost/src/picohost/base.py:65` until picohost migrates to `MetadataWriter.add`). In-tree code must use `redis.metadata.add(...)` directly — or, more commonly, build a `MetadataWriter(transport)` on the producer side and call `.add(...)` on it.
 
 ### Testing architecture (`testing/` subpackage):
 
@@ -44,10 +44,11 @@ Each core class has a `Dummy*` counterpart (`DummyPandaClient`, `DummyEigObserve
 
 ### Key dependencies:
 
+- [`eigsep_redis`](https://github.com/EIGSEP/eigsep_redis) - Sibling repo hosting `Transport` and all per-bus writer/reader surfaces. Consumed as a pip dep; also consumed by `picohost`.
 - `casperfpga` - SNAP board driver (lazy optional import; only required on the ground computer that actually talks to the FPGA)
 - `cmt_vna` - VNA control library
 - `picohost` - Pico microcontroller communication
-- `fakeredis` - In-memory Redis for testing
+- `fakeredis` - In-memory Redis for testing (dev-only; real deployments use a live Redis)
 
 ### Configuration (`config/*.yaml`):
 
