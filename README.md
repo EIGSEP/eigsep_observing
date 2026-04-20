@@ -10,6 +10,10 @@ Control code needed to take EIGSEP data.
 pip install -e ".[dev]"
 ```
 
+Pulls [`eigsep_redis`](https://github.com/EIGSEP/eigsep_redis) as a
+sibling runtime dependency (Redis transport + bus primitives, also
+consumed by `picohost`).
+
 ### Hardware dependency
 
 Talking to the SNAP board requires
