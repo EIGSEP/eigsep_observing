@@ -12,7 +12,6 @@ from eigsep_observing import corr as corr_mod
 from eigsep_observing.corr import CorrConfigStore, CorrReader, CorrWriter
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing.utils import compare_dicts, generate_data
-from eigsep_observing.testing import DummyEigsepObsRedis
 from eigsep_observing.vna import VnaReader, VnaWriter
 from eigsep_redis import (
     ConfigStore,
@@ -25,33 +24,88 @@ from eigsep_redis import (
     StatusWriter,
 )
 from eigsep_redis.keys import METADATA_HASH
-from eigsep_redis.testing import DummyEigsepRedis
+from eigsep_redis.testing import DummyEigsepRedis, DummyTransport
+
+
+class _BusBundle:
+    """All-surfaces test bus — convenience wrapper used only by the
+    bus-primitive tests below.
+
+    Production code builds only the per-role surfaces it needs
+    (``EigObserver`` / ``PandaClient`` / ``EigsepFpga`` each pick
+    their own subset). This helper exists so producer↔consumer
+    round-trip tests stay readable without re-introducing a
+    composition class into ``src/``.
+    """
+
+    def __init__(self, transport):
+        self.transport = transport
+        self.metadata = MetadataWriter(transport)
+        self.metadata_snapshot = MetadataSnapshotReader(transport)
+        self.metadata_stream = MetadataStreamReader(transport)
+        self.status = StatusWriter(transport)
+        self.status_reader = StatusReader(transport)
+        self.heartbeat = HeartbeatWriter(transport)
+        self.heartbeat_reader = HeartbeatReader(transport)
+        self.config = ConfigStore(transport)
+
+    @property
+    def r(self):
+        return self.transport.r
+
+    def reset(self):
+        return self.transport.reset()
+
+    def _set_last_read_id(self, stream, read_id):
+        return self.transport._set_last_read_id(stream, read_id)
+
+    def add_raw(self, key, value, ex=None):
+        return self.transport.add_raw(key, value, ex=ex)
+
+    def get_raw(self, key):
+        return self.transport.get_raw(key)
+
+    @property
+    def data_streams(self):
+        return self.transport._streams_from_set("data_streams")
+
+
+class _ObsBusBundle(_BusBundle):
+    """Observer-side all-surfaces test bus (adds corr/VNA)."""
+
+    def __init__(self, transport):
+        super().__init__(transport)
+        self.corr_config = CorrConfigStore(transport)
+        self.corr = CorrWriter(transport)
+        self.corr_reader = CorrReader(transport)
+        self.vna = VnaWriter(transport)
+        self.vna_reader = VnaReader(transport)
 
 
 @pytest.fixture
 def server():
-    return DummyEigsepRedis()
+    return _BusBundle(DummyTransport())
 
 
 @pytest.fixture
 def client(server):
-    c = DummyEigsepRedis()
+    t = DummyTransport()
     # share the underlying fakeredis so both clients talk to the
     # same in-memory DB but keep independent last-read-id state
-    c.transport.r = server.transport.r
-    return c
+    t.r = server.transport.r
+    return _BusBundle(t)
 
 
 @pytest.fixture
 def obs_server():
-    return DummyEigsepObsRedis()
+    return _ObsBusBundle(DummyTransport())
 
 
 @pytest.fixture
 def obs_client(obs_server):
-    c = DummyEigsepObsRedis()
-    c.transport.r = obs_server.transport.r
-    return c
+    t = DummyTransport()
+    t.r = obs_server.transport.r
+    return _ObsBusBundle(t)
 
 
 def test_metadata(server, client):
@@ -507,12 +561,101 @@ def test_bus_classes_have_no_cross_bus_methods():
             )
 
 
-def test_add_metadata_shim_emits_deprecation_warning(server):
-    """The picohost shim must be loud — it should disappear at the monorepo cutover."""
+def test_consumer_role_surfaces_are_structural():
+    """Structural guard: each top-level consumer (PandaClient,
+    EigObserver, EigsepFpga) builds only the per-bus surfaces its
+    role actually uses. Wrong-role access is now ``AttributeError``
+    at the *instance* level, not just a missing method on a reader.
+
+    This is the division-of-responsibility guard that step 6 of the
+    writer/reader-per-bus refactor adds on top of the already-shipped
+    wrong-stream-write guard: a ``PandaClient`` cannot hold a
+    ``CorrReader`` by accident, an ``EigObserver`` cannot hold a
+    ``CorrWriter``, etc. Introspects a live instance's ``__dict__``
+    (not the class) because the surfaces are assigned in ``__init__``.
+    """
+    from eigsep_observing import EigsepFpga
+    from eigsep_observing.testing import (
+        DummyEigObserver,
+        DummyEigsepFpga,
+        DummyPandaClient,
+    )
+
+    # --- PandaClient: writers only (+ metadata_snapshot for rfswitch
+    # reads, + config for cfg reads). Must not hold any stream reader.
+    panda = DummyPandaClient()
+    try:
+        panda_attrs = set(vars(panda))
+        for forbidden in (
+            "corr",  # CorrWriter — FPGA scope
+            "corr_reader",  # observer scope
+            "corr_config",  # observer/FPGA scope
+            "vna_reader",  # observer scope
+            "metadata_stream",  # observer scope
+            "status_reader",  # observer scope
+            "heartbeat_reader",  # observer scope
+        ):
+            assert forbidden not in panda_attrs, (
+                f"PandaClient instance must not hold {forbidden!r}"
+            )
+    finally:
+        panda.stop()
+
+    # --- EigObserver: readers only. Must not hold any stream writer.
+    obs = DummyEigObserver(
+        transport_snap=DummyTransport(),
+        transport_panda=DummyTransport(),
+    )
+    try:
+        obs_attrs = set(vars(obs))
+        for forbidden in (
+            "corr",  # CorrWriter — FPGA scope
+            "vna",  # VnaWriter — PandaClient scope
+            "metadata",  # MetadataWriter — picohost scope
+            "status",  # StatusWriter — PandaClient scope
+            "heartbeat",  # HeartbeatWriter — PandaClient scope
+        ):
+            assert forbidden not in obs_attrs, (
+                f"EigObserver instance must not hold {forbidden!r}"
+            )
+    finally:
+        obs.stop_event.set()
+        obs.status_thread.join(timeout=1)
+
+    # --- EigsepFpga: corr writer + corr_config only. Must not hold
+    # any consumer surface.
+    fpga = DummyEigsepFpga(program=False)
+    fpga_attrs = set(vars(fpga))
+    for forbidden in (
+        "corr_reader",
+        "vna_reader",
+        "metadata_stream",
+        "metadata_snapshot",
+        "status_reader",
+        "heartbeat_reader",
+    ):
+        assert forbidden not in fpga_attrs, (
+            f"EigsepFpga instance must not hold {forbidden!r}"
+        )
+
+    # Production ``EigsepFpga`` class (not the dummy) obviously has
+    # the same guarantee — reference it to keep the import meaningful.
+    assert EigsepFpga is not None
+
+
+def test_add_metadata_shim_emits_deprecation_warning():
+    """The picohost shim must be loud — it should disappear at the monorepo cutover.
+
+    Constructs ``DummyEigsepRedis`` directly because the shim lives
+    on that class, not on the per-bus writer surfaces. In-tree
+    consumers route metadata writes through ``MetadataWriter.add``.
+    """
+    shim = DummyEigsepRedis()
     with pytest.warns(DeprecationWarning, match="redis.metadata.add"):
-        server.add_metadata("via_shim", 42)
+        shim.add_metadata("via_shim", 42)
     # The shim still writes correctly in the meantime.
-    assert server.metadata_snapshot.get("via_shim") == 42
+    snapshot = MetadataSnapshotReader(shim.transport)
+    assert snapshot.get("via_shim") == 42
 
 
 def test_int32_redis_round_trip(obs_server, obs_client):

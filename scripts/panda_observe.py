@@ -2,7 +2,9 @@ from argparse import ArgumentParser
 import logging
 from threading import Thread
 
-from eigsep_observing import EigsepObsRedis, PandaClient
+from eigsep_redis import Transport
+
+from eigsep_observing import PandaClient
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger
 
@@ -19,12 +21,12 @@ args = parser.parse_args()
 
 if args.dummy:
     logger.warning("Running in DUMMY mode, no hardware will be used.")
-    redis = EigsepObsRedis(host="localhost", port=6380)
-    redis.reset()  # reset test redis database
-    client = DummyPandaClient(redis)
+    transport = Transport(host="localhost", port=6380)
+    transport.reset()  # reset test redis database
+    client = DummyPandaClient(transport=transport)
 else:
-    redis = EigsepObsRedis(host="localhost", port=6379)
-    client = PandaClient(redis)
+    transport = Transport(host="localhost", port=6379)
+    client = PandaClient(transport)
 
 logger.info(f"Client configuration: {client.cfg}")
 thds = {}

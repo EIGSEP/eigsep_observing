@@ -20,8 +20,10 @@ from threading import Event, Thread
 
 import numpy as np
 
+from eigsep_redis import Transport
+
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
-from .eig_redis import EigsepObsRedis
+from .corr import CorrConfigStore, CorrWriter
 from .utils import (
     calc_inttime,
     get_config_path,
@@ -75,7 +77,7 @@ def _cfg_diff_summary(disk_cfg, redis_cfg):
 
 
 class EigsepFpga:
-    def __init__(self, cfg=default_config, program=False):
+    def __init__(self, cfg=default_config, transport=None, program=False):
         """
         Class for interfacing with the SNAP board.
 
@@ -84,6 +86,11 @@ class EigsepFpga:
         cfg : dict
             Configuration dictionary. See `config/corr_config.yaml` for
             details.
+        transport : eigsep_redis.Transport, optional
+            Shared Redis transport. If ``None`` (the production
+            default), a :class:`Transport` is built from
+            ``cfg["redis"]["host"]`` and ``cfg["redis"]["port"]``.
+            Tests pass a ``DummyTransport`` directly.
         program : bool or str
             Whether to program the SNAP with the fpg file. Options are
             True (program if fpg_file is different from the one in
@@ -98,9 +105,12 @@ class EigsepFpga:
         self.autos = [p for p in self.pairs if len(p) == 1]
         self.crosses = [p for p in self.pairs if len(p) == 2]
 
-        # redis instance
-        rcfg = self.cfg["redis"]
-        self.redis = self._create_redis(rcfg["host"], rcfg["port"])
+        if transport is None:
+            rcfg = self.cfg["redis"]
+            transport = Transport(host=rcfg["host"], port=rcfg["port"])
+        self.transport = transport
+        self.corr_config = CorrConfigStore(transport)
+        self.corr = CorrWriter(transport)
 
         fpg_file = Path(self.cfg["fpg_file"])
         if not fpg_file.is_absolute():
@@ -130,27 +140,6 @@ class EigsepFpga:
         self.adc_initialized = False
         self.pams_initialized = False
         self.is_synchronized = False
-
-    @staticmethod
-    def _create_redis(host: str, port: int) -> EigsepObsRedis:
-        """
-        Create an EigsepObsRedis instance.
-
-        Parameters
-        ----------
-        host : str
-            The hostname for the Redis server.
-        port : int
-            The port number for the Redis server.
-
-        Returns
-        -------
-        EigsepObsRedis
-            An instance of EigsepObsRedis connected to the specified
-            Redis server.
-
-        """
-        return EigsepObsRedis(host=host, port=port)
 
     def _make_fpga(self):
         """
@@ -331,7 +320,7 @@ class EigsepFpga:
             to apply).
         """
         try:
-            redis_cfg = self.redis.corr_config.get()
+            redis_cfg = self.corr_config.get()
         except ValueError:
             raise RuntimeError(
                 "No corr config in Redis; cannot attach. "
@@ -373,7 +362,7 @@ class EigsepFpga:
                 self.logger.error(f"Configuration validation failed: {e}")
                 raise RuntimeError("Configuration validation failed") from e
         self.logger.debug("Uploading configuration to Redis.")
-        self.redis.corr_config.upload(self.cfg)
+        self.corr_config.upload(self.cfg)
 
     def initialize(
         self,
@@ -433,7 +422,7 @@ class EigsepFpga:
         # is a redundant (but harmless, freshest-wins) upload; on
         # sync=False / ADC-only paths this is the only publish that
         # reflects the freshly-initialized state.
-        self.redis.corr_config.upload_header(self.header)
+        self.corr_config.upload_header(self.header)
 
     def rehydrate_sync_from_header(self):
         """
@@ -459,7 +448,7 @@ class EigsepFpga:
             synchronize explicitly).
         """
         try:
-            header = self.redis.corr_config.get_header()
+            header = self.corr_config.get_header()
         except ValueError:
             self.logger.warning(
                 "No corr header in Redis; cannot rehydrate sync_time. "
@@ -621,7 +610,7 @@ class EigsepFpga:
             self.fpga.write_int(f"pfb_pol{key}_delay", dly)
             if verify:
                 assert self.fpga.read_uint(f"pfb_pol{key}_delay") == dly
-        self.redis.corr_config.upload_header(self.header)
+        self.corr_config.upload_header(self.header)
 
     def initialize_pams(self):
         """
@@ -676,7 +665,7 @@ class EigsepFpga:
         update_pol = self.cfg["rf_chain"]["ants"][ant]["pam"]["pol"]
         atten[update_pol] = attenuation
         pam.set_attenuation(atten["E"], atten["N"], verify=True)
-        self.redis.corr_config.upload_header(self.header)
+        self.corr_config.upload_header(self.header)
 
     def get_pam_atten(self, ant):
         """
@@ -721,7 +710,7 @@ class EigsepFpga:
             raise RuntimeError("PAMs not initialized.")
         for pam in self.pams:
             pam.set_attenuation(attenuation, attenuation, verify=True)
-        self.redis.corr_config.upload_header(self.header)
+        self.corr_config.upload_header(self.header)
 
     def synchronize(self, delay=0):
         """
@@ -753,7 +742,7 @@ class EigsepFpga:
         self.sync_time = sync_time
         self.is_synchronized = True
         # update header in redis with fresh sync time
-        self.redis.corr_config.upload_header(self.header)
+        self.corr_config.upload_header(self.header)
 
     def unpack_data(self, data):
         """
@@ -998,4 +987,4 @@ class EigsepFpga:
             data = d["data"]
             cnt = d["cnt"]
             sync_time = self.sync_time if self.is_synchronized else 0
-            self.redis.corr.add(data, cnt, sync_time, dtype=self.cfg["dtype"])
+            self.corr.add(data, cnt, sync_time, dtype=self.cfg["dtype"])

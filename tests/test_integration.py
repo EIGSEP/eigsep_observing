@@ -10,8 +10,11 @@ import time
 import pytest
 import yaml
 
+from eigsep_redis import MetadataSnapshotReader
+from eigsep_redis.testing import DummyTransport
+
 import eigsep_observing
-from eigsep_observing.testing import DummyEigsepObsRedis, DummyPandaClient
+from eigsep_observing.testing import DummyPandaClient
 
 
 @pytest.fixture()
@@ -24,20 +27,20 @@ def dummy_cfg(tmp_path):
 
 
 @pytest.fixture
-def redis():
-    return DummyEigsepObsRedis()
+def transport():
+    return DummyTransport()
 
 
 @pytest.fixture
-def client(redis, dummy_cfg):
-    c = DummyPandaClient(redis, default_cfg=dummy_cfg)
+def client(transport, dummy_cfg):
+    c = DummyPandaClient(transport, default_cfg=dummy_cfg)
     yield c
     c.stop()
 
 
 def test_picos_registered(client):
     """PicoManager should register all dummy devices in Redis."""
-    available = client.redis.r.smembers("picos")
+    available = client.transport.r.smembers("picos")
     names = {n.decode() if isinstance(n, bytes) else n for n in available}
     expected = {
         "tempctrl",
@@ -51,11 +54,11 @@ def test_picos_registered(client):
     assert names == expected
 
 
-def test_sensor_metadata_in_redis(client, redis):
+def test_sensor_metadata_in_redis(client, transport):
     """Emulators generate status that flows through redis_handler to Redis."""
     time.sleep(0.5)
 
-    metadata = redis.metadata_snapshot.get()
+    metadata = MetadataSnapshotReader(transport).get()
 
     expected_sensors = {
         "tempctrl",
@@ -72,11 +75,11 @@ def test_sensor_metadata_in_redis(client, redis):
         )
 
 
-def test_metadata_has_expected_fields(client, redis):
+def test_metadata_has_expected_fields(client, transport):
     """Verify that metadata values contain the expected sensor fields."""
     time.sleep(0.5)
 
-    metadata = redis.metadata_snapshot.get()
+    metadata = MetadataSnapshotReader(transport).get()
 
     # Check tempctrl LNA/LOAD channels
     tempctrl = metadata.get("tempctrl", {})
@@ -110,9 +113,9 @@ def test_metadata_has_expected_fields(client, redis):
     assert potmon["pot_az_angle"] is None
 
 
-def test_metadata_snapshot_single_key(client, redis):
+def test_metadata_snapshot_single_key(client, transport):
     """metadata_snapshot.get(key) returns just that sensor's data."""
     time.sleep(0.5)
-    lidar = redis.metadata_snapshot.get("lidar")
+    lidar = MetadataSnapshotReader(transport).get("lidar")
     assert isinstance(lidar, dict)
     assert "distance_m" in lidar

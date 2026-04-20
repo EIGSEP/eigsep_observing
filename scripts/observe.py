@@ -12,7 +12,9 @@ import threading
 import time
 import yaml
 
-from eigsep_observing import EigObserver, EigsepObsRedis
+from eigsep_redis import ConfigStore, Transport
+
+from eigsep_observing import EigObserver
 from eigsep_observing.testing import DummyEigObserver
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
@@ -73,34 +75,39 @@ rpi_ip = cfg["rpi_ip"]
 panda_ip = cfg["panda_ip"]
 
 
-# initialize the Redis instances
+# initialize the Redis transports
 if args.use_snap:
     logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
-    redis_snap = EigsepObsRedis(host=rpi_ip, port=redis_port)
+    transport_snap = Transport(host=rpi_ip, port=redis_port)
 else:
     logger.warning("Not connecting to RPi Redis instance.")
-    redis_snap = None
+    transport_snap = None
 if args.use_panda:
     logger.info(f"Connecting to LattePanda at {panda_ip}.")
-    redis_panda = EigsepObsRedis(host=panda_ip, port=redis_port)
+    transport_panda = Transport(host=panda_ip, port=redis_port)
 else:
     logger.warning("Not connecting to LattePanda")
-    redis_panda = None
+    transport_panda = None
 
 if args.use_panda:
     logger.info("Waiting for Panda config in Redis.")
+    panda_config = ConfigStore(transport_panda)
     while True:
         try:
-            redis_panda.config.get()
+            panda_config.get()
             break
         except ValueError:
             logger.info("Panda config not yet available, retrying...")
             time.sleep(1.0)
 
 if args.dummy:
-    observer = DummyEigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    observer = DummyEigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
 else:
-    observer = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    observer = EigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
 
 thds = {}
 thds["status"] = observer.status_thread
@@ -156,9 +163,9 @@ finally:
 if args.dummy:
     # reset Redis instances
     if args.use_snap:
-        redis_snap.reset()
+        transport_snap.reset()
     if args.use_panda:
-        redis_panda.reset()
+        transport_panda.reset()
 
 if corr_crashed[0]:
     sys.exit(1)

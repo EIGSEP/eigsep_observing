@@ -2,6 +2,7 @@ from functools import partial
 
 import yaml
 from cmt_vna.testing import DummyVNA
+from eigsep_redis.testing import DummyEigsepRedis, DummyTransport
 import picohost.testing
 from picohost.manager import PicoManager
 
@@ -57,7 +58,9 @@ class DummyPandaClient(PandaClient):
     their devices already registered.
     """
 
-    def __init__(self, redis, default_cfg=None):
+    def __init__(self, transport=None, default_cfg=None):
+        if transport is None:
+            transport = DummyTransport()
         if default_cfg is None:
             try:
                 with open(default_cfg_file, "r") as f:
@@ -67,16 +70,24 @@ class DummyPandaClient(PandaClient):
         # Start the embedded manager BEFORE super().__init__ so that
         # PicoProxy.is_available is True when the parent constructor
         # builds sw_proxy.
-        self._manager = self._start_dummy_manager(redis)
-        super().__init__(redis, default_cfg=default_cfg)
+        self._manager = self._start_dummy_manager(transport)
+        super().__init__(transport, default_cfg=default_cfg)
 
-    def _start_dummy_manager(self, redis):
-        """Create and start a PicoManager with dummy devices."""
-        mgr = PicoManager(redis)
+    def _start_dummy_manager(self, transport):
+        """Create and start a PicoManager with dummy devices.
+
+        Wraps ``transport`` in a :class:`DummyEigsepRedis` shim so the
+        picohost ``redis_handler`` (which calls ``add_metadata``) sees
+        the compatibility surface — see ``EigsepRedis.add_metadata``.
+        The shim shares the same underlying ``Transport`` as the
+        PandaClient so producers and consumers talk to the same Redis.
+        """
+        shim = DummyEigsepRedis(transport=transport)
+        mgr = PicoManager(shim)
         for name, cls in DUMMY_PICO_CLASSES.items():
-            pico = cls("/dev/dummy", eig_redis=redis, name=name)
+            pico = cls("/dev/dummy", eig_redis=shim, name=name)
             mgr.picos[name] = pico
-            redis.r.sadd("picos", name)
+            transport.r.sadd("picos", name)
         mgr.start()
         return mgr
 

@@ -3,8 +3,9 @@ import time
 from collections import defaultdict
 from math import floor
 
+from eigsep_redis.testing import DummyTransport
+
 from ..fpga import EigsepFpga, default_config
-from .eig_redis import DummyEigsepObsRedis
 from .utils import generate_data  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
@@ -138,11 +139,13 @@ class DummyEigsepFpga(EigsepFpga):
     - ``_make_fpga`` → ``DummyFpga`` (in-memory register backend)
     - ``_make_adc``  → ``DummyAdc``  (SnapAdc substitute)
     - ``_make_pam``  → ``DummyPam``  (I2C-free PAM substitute)
-    - ``_create_redis`` → ``DummyEigsepObsRedis`` (fakeredis backend)
 
     The real ``Sync`` / ``NoiseGen`` / ``Input`` / ``Pfb`` blocks run
     unchanged against ``DummyFpga``, so production register-write
-    sequences are actually exercised by tests.
+    sequences are actually exercised by tests. A fakeredis-backed
+    ``DummyTransport`` is built in place of the real ``Transport`` —
+    tests can also pass one explicitly to share state across
+    instances.
 
     After ``super().__init__()`` the dummy primes a few registers to
     reflect a freshly-configured FPGA (pfb_ctrl bits that match
@@ -151,15 +154,13 @@ class DummyEigsepFpga(EigsepFpga):
     zero and real ``Pfb.get_fft_shift`` reads the actual bits.
     """
 
-    def __init__(self, cfg=default_config, program=False):
-        super().__init__(cfg=cfg, program=program)
+    def __init__(self, cfg=default_config, transport=None, program=False):
+        if transport is None:
+            transport = DummyTransport()
+        super().__init__(cfg=cfg, transport=transport, program=program)
         # Seed pfb_ctrl with cfg fft_shift bits via the real Pfb so
         # header/validate_config report the expected value.
         self.pfb.set_fft_shift(self.cfg["fft_shift"])
-
-    @staticmethod
-    def _create_redis(host, port):
-        return DummyEigsepObsRedis(host=host, port=port)
 
     def _make_fpga(self):
         corr_acc_len = self.cfg["corr_acc_len"]

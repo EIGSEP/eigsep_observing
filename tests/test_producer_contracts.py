@@ -35,14 +35,17 @@ from picohost.testing import (
     TempCtrlEmulator,
 )
 
+from eigsep_redis.keys import STATUS_STREAM  # noqa: F401
+from eigsep_redis.testing import DummyTransport
+
 from conftest import HEADER, IMU_READING
 import eigsep_observing
 from eigsep_observing import io
 from eigsep_observing.testing import (
     DummyEigsepFpga,
-    DummyEigsepObsRedis,
     DummyPandaClient,
 )
+from eigsep_observing.vna import VnaReader
 
 
 def _potmon_post_handler_reading():
@@ -153,16 +156,16 @@ def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
         cfg = yaml.safe_load(f)
     cfg["use_vna"] = True
     cfg["vna_save_dir"] = str(tmp_path)
-    redis = DummyEigsepObsRedis()
-    client = DummyPandaClient(redis, default_cfg=cfg)
+    transport = DummyTransport()
+    client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         client.measure_s11(mode)
         # The reader skips producer-backlog by design (see
         # test_vna_reader_skips_producer_backlog); rewind to stream
         # origin so this single-threaded test picks up the entry the
         # producer just pushed.
-        client.redis._set_last_read_id("stream:vna", "0-0")
-        data, header, metadata = client.redis.vna_reader.read(timeout=1)
+        client.transport._set_last_read_id("stream:vna", "0-0")
+        data, header, metadata = VnaReader(client.transport).read(timeout=1)
     finally:
         client.stop()
 

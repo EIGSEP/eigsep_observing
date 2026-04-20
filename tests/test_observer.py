@@ -5,36 +5,39 @@ import time
 from unittest.mock import Mock, patch
 
 from cmt_vna.testing import DummyVNA
+from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
+from eigsep_redis.testing import DummyTransport
 from picohost.testing import DummyPicoRFSwitch
 
 from eigsep_observing import EigObserver
-from eigsep_observing.testing import DummyEigsepObsRedis
+from eigsep_observing.corr import CorrConfigStore
 from eigsep_observing.testing.utils import generate_data
+from eigsep_observing.vna import VnaWriter
 
 
 @pytest.fixture
-def redis_snap():
-    """DummyEigsepObsRedis seeded with a correlator config."""
-    redis = DummyEigsepObsRedis()
-    redis.corr_config.upload(
+def transport_snap():
+    """DummyTransport seeded with a correlator config."""
+    transport = DummyTransport()
+    CorrConfigStore(transport).upload(
         {
             "integration_time": 1.0,
             "pairs": ["0", "1", "2", "3", "02", "13"],
         }
     )
-    return redis
+    return transport
 
 
 @pytest.fixture
-def redis_panda():
-    """DummyEigsepObsRedis seeded with a panda config and a live heartbeat.
+def transport_panda():
+    """DummyTransport seeded with a panda config and a live heartbeat.
 
-    The real ``ConfigStore`` / ``HeartbeatReader`` / ``StatusReader``
-    run against fakeredis via ``DummyTransport``; per-test behavior is
-    applied with ``patch.object`` in the tests that need it.
+    The observer builds its own ``ConfigStore`` / ``HeartbeatReader``
+    / ``StatusReader`` surfaces from the transport; per-test behavior
+    is applied with ``patch.object`` on those surfaces.
     """
-    redis = DummyEigsepObsRedis()
-    redis.config.upload(
+    transport = DummyTransport()
+    ConfigStore(transport).upload(
         {
             "switch_schedule": {"sky": 0.05, "load": 0.02, "noise": 0.02},
             "vna_settings": {
@@ -47,55 +50,57 @@ def redis_panda():
             "vna_interval": 0.5,
         }
     )
-    redis.heartbeat.set(alive=True)
-    return redis
+    HeartbeatWriter(transport).set(alive=True)
+    return transport
 
 
 @pytest.fixture
-def observer_snap_only(redis_snap):
+def observer_snap_only(transport_snap):
     """EigObserver with only SNAP connection."""
-    obs = EigObserver(redis_snap=redis_snap)
+    obs = EigObserver(transport_snap=transport_snap)
     yield obs
     obs.stop_event.set()  # ensure any threads are stopped after test
     obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
-def observer_panda_only(redis_panda):
+def observer_panda_only(transport_panda):
     """EigObserver with only LattePanda connection."""
-    obs = EigObserver(redis_panda=redis_panda)
+    obs = EigObserver(transport_panda=transport_panda)
     yield obs
     obs.stop_event.set()
     obs.status_thread.join(timeout=1)
 
 
 @pytest.fixture
-def observer_both(redis_snap, redis_panda):
+def observer_both(transport_snap, transport_panda):
     """EigObserver with both SNAP and LattePanda connections."""
-    obs = EigObserver(redis_snap=redis_snap, redis_panda=redis_panda)
+    obs = EigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
     yield obs
     obs.stop_event.set()
     obs.status_thread.join(timeout=1)
 
 
-def test_observer_init_snap_only(observer_snap_only, redis_snap):
+def test_observer_init_snap_only(observer_snap_only, transport_snap):
     """Test EigObserver initialization with only SNAP connection."""
-    assert observer_snap_only.redis_snap is redis_snap
-    assert observer_snap_only.redis_panda is None
+    assert observer_snap_only.transport_snap is transport_snap
+    assert observer_snap_only.transport_panda is None
     assert observer_snap_only.corr_cfg is not None
 
 
-def test_observer_init_panda_only(observer_panda_only, redis_panda):
+def test_observer_init_panda_only(observer_panda_only, transport_panda):
     """Test EigObserver initialization with only LattePanda connection."""
-    assert observer_panda_only.redis_snap is None
-    assert observer_panda_only.redis_panda is redis_panda
+    assert observer_panda_only.transport_snap is None
+    assert observer_panda_only.transport_panda is transport_panda
     assert observer_panda_only.cfg is not None
 
 
-def test_observer_init_both(observer_both, redis_snap, redis_panda):
+def test_observer_init_both(observer_both, transport_snap, transport_panda):
     """Test EigObserver initialization with both connections."""
-    assert observer_both.redis_snap is redis_snap
-    assert observer_both.redis_panda is redis_panda
+    assert observer_both.transport_snap is transport_snap
+    assert observer_both.transport_panda is transport_panda
     assert observer_both.corr_cfg is not None
     assert observer_both.cfg is not None
 
@@ -103,8 +108,8 @@ def test_observer_init_both(observer_both, redis_snap, redis_panda):
 def test_observer_init_none():
     """Test EigObserver initialization with no connections."""
     observer = EigObserver()
-    assert observer.redis_snap is None
-    assert observer.redis_panda is None
+    assert observer.transport_snap is None
+    assert observer.transport_panda is None
     observer.stop_event.set()
     observer.status_thread.join(timeout=1)
 
@@ -116,7 +121,7 @@ def test_snap_connected_property(observer_snap_only, observer_panda_only):
 
 
 def test_panda_connected_property(
-    observer_snap_only, observer_panda_only, redis_panda
+    observer_snap_only, observer_panda_only, transport_panda
 ):
     """Test panda_connected property."""
     assert observer_snap_only.panda_connected is False
@@ -127,7 +132,7 @@ def test_panda_connected_property(
     assert observer_none.panda_connected is False
 
     # Test when heartbeat check fails
-    redis_panda.heartbeat.set(alive=False)
+    HeartbeatWriter(transport_panda).set(alive=False)
     assert observer_panda_only.panda_connected is False
 
     # clean up
@@ -136,13 +141,13 @@ def test_panda_connected_property(
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
+def test_record_corr_data(mock_file_class, observer_snap_only, transport_snap):
     """Test record_corr_data method."""
     observer = observer_snap_only
 
     # Upload a header with sync_time so record_corr_data can proceed
     sync_time = 1713200000.0
-    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+    CorrConfigStore(transport_snap).upload_header({"sync_time": sync_time})
 
     # Mock file instance
     mock_file = Mock()
@@ -165,7 +170,7 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
     stop_thread.start()
 
     with patch.object(
-        redis_snap.corr_reader, "read", return_value=(123, mock_data)
+        observer.corr_reader, "read", return_value=(123, mock_data)
     ) as mock_read:
         observer.record_corr_data("/tmp/test", timeout=5)
     stop_thread.join()
@@ -187,7 +192,7 @@ def test_record_corr_data(mock_file_class, observer_snap_only, redis_snap):
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_transient_header_blip_uses_cache(
-    mock_file_class, observer_snap_only, redis_snap, caplog
+    mock_file_class, observer_snap_only, caplog
 ):
     """Transient header-fetch ValueError with a valid cache → fall
     back to the cache and save the corr data. Non-corr failures must
@@ -225,12 +230,12 @@ def test_record_corr_data_transient_header_blip_uses_cache(
     caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
     with (
         patch.object(
-            redis_snap.corr_config,
+            observer.corr_config,
             "get_header",
             side_effect=header_side_effect,
         ),
         patch.object(
-            redis_snap.corr_reader, "read", side_effect=read_side_effect
+            observer.corr_reader, "read", side_effect=read_side_effect
         ),
     ):
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
@@ -246,7 +251,7 @@ def test_record_corr_data_transient_header_blip_uses_cache(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_unsynced_watchdog_crashes(
-    mock_file_class, observer_snap_only, redis_snap
+    mock_file_class, observer_snap_only
 ):
     """sync_time=0 persistently → bounded wait → RuntimeError."""
     observer = observer_snap_only
@@ -256,7 +261,7 @@ def test_record_corr_data_unsynced_watchdog_crashes(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    redis_snap.corr_config.upload_header({"sync_time": 0})
+    observer.corr_config.upload_header({"sync_time": 0})
 
     with pytest.raises(
         RuntimeError, match="SNAP has not produced a complete corr row"
@@ -273,7 +278,7 @@ def test_record_corr_data_unsynced_watchdog_crashes(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_no_header_ever_crashes(
-    mock_file_class, observer_snap_only, redis_snap
+    mock_file_class, observer_snap_only
 ):
     """get_header always raises, no cache → bounded wait → RuntimeError."""
     observer = observer_snap_only
@@ -285,7 +290,7 @@ def test_record_corr_data_no_header_ever_crashes(
 
     with (
         patch.object(
-            redis_snap.corr_config,
+            observer.corr_config,
             "get_header",
             side_effect=ValueError("no header"),
         ),
@@ -303,7 +308,7 @@ def test_record_corr_data_no_header_ever_crashes(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_resync_rolls_file(
-    mock_file_class, observer_snap_only, redis_snap, caplog
+    mock_file_class, observer_snap_only, caplog
 ):
     """A successful header fetch with a *different* non-zero sync_time
     than the cached one → close current file, open new one, continue.
@@ -338,12 +343,12 @@ def test_record_corr_data_resync_rolls_file(
     caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
     with (
         patch.object(
-            redis_snap.corr_config,
+            observer.corr_config,
             "get_header",
             side_effect=header_side_effect,
         ),
         patch.object(
-            redis_snap.corr_reader, "read", side_effect=read_side_effect
+            observer.corr_reader, "read", side_effect=read_side_effect
         ),
     ):
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
@@ -357,7 +362,7 @@ def test_record_corr_data_resync_rolls_file(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_read_timeout_watchdog_crashes(
-    mock_file_class, observer_snap_only, redis_snap
+    mock_file_class, observer_snap_only
 ):
     """Persistent ``TimeoutError`` from ``corr_reader.read`` → bounded
     wait → ``RuntimeError``. Unified with the header-side watchdog:
@@ -370,11 +375,11 @@ def test_record_corr_data_read_timeout_watchdog_crashes(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    redis_snap.corr_config.upload_header({"sync_time": 1713200000.0})
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
     with (
         patch.object(
-            redis_snap.corr_reader,
+            observer.corr_reader,
             "read",
             side_effect=TimeoutError("no data"),
         ),
@@ -392,7 +397,7 @@ def test_record_corr_data_read_timeout_watchdog_crashes(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_read_stream_absent_watchdog_crashes(
-    mock_file_class, observer_snap_only, redis_snap
+    mock_file_class, observer_snap_only
 ):
     """Persistent ``(None, {})`` from ``corr_reader.read`` (stream not
     created yet) → bounded wait → ``RuntimeError``.
@@ -404,10 +409,10 @@ def test_record_corr_data_read_stream_absent_watchdog_crashes(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    redis_snap.corr_config.upload_header({"sync_time": 1713200000.0})
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
     with (
-        patch.object(redis_snap.corr_reader, "read", return_value=(None, {})),
+        patch.object(observer.corr_reader, "read", return_value=(None, {})),
         pytest.raises(
             RuntimeError, match="SNAP has not produced a complete corr row"
         ),
@@ -422,7 +427,7 @@ def test_record_corr_data_read_stream_absent_watchdog_crashes(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_read_timeout_then_success_resets_deadline(
-    mock_file_class, observer_snap_only, redis_snap
+    mock_file_class, observer_snap_only
 ):
     """A single read timeout followed by a successful read must not
     crash. ``file.add_data`` clears ``last_write_deadline`` so the
@@ -431,7 +436,7 @@ def test_record_corr_data_read_timeout_then_success_resets_deadline(
     """
     observer = observer_snap_only
     sync_time = 1713200000.0
-    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+    observer.corr_config.upload_header({"sync_time": sync_time})
 
     mock_file = Mock()
     mock_file.counter = 0
@@ -451,7 +456,7 @@ def test_record_corr_data_read_timeout_then_success_resets_deadline(
         return (100 + calls[0], mock_data)
 
     with patch.object(
-        redis_snap.corr_reader, "read", side_effect=read_side_effect
+        observer.corr_reader, "read", side_effect=read_side_effect
     ):
         observer.record_corr_data(
             "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.05
@@ -464,7 +469,7 @@ def test_record_corr_data_read_timeout_then_success_resets_deadline(
 
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_panda_connected_drains_metadata(
-    mock_file_class, observer_both, redis_snap, redis_panda
+    mock_file_class, observer_both, transport_panda
 ):
     """When the panda is connected, the metadata stream is drained and
     forwarded to ``file.add_data``; when not, ``metadata=None`` is passed
@@ -473,7 +478,7 @@ def test_record_corr_data_panda_connected_drains_metadata(
     """
     observer = observer_both
     sync_time = 1713200000.0
-    redis_snap.corr_config.upload_header({"sync_time": sync_time})
+    observer.corr_config.upload_header({"sync_time": sync_time})
 
     mock_file = Mock()
     mock_file.counter = 0
@@ -483,19 +488,19 @@ def test_record_corr_data_panda_connected_drains_metadata(
     mock_data = generate_data(ntimes=1)
 
     # Push one sensor reading onto the panda metadata stream via the
-    # real MetadataWriter (runs against fakeredis in DummyEigsepObsRedis).
+    # real MetadataWriter (runs against fakeredis in DummyTransport).
     sample = {"temp_c": 23.5, "status": "update"}
-    redis_panda.metadata.add("sensor_a", sample)
+    MetadataWriter(transport_panda).add("sensor_a", sample)
     # Rewind last-read-id so drain() picks up the entry we just pushed
     # (xread skips entries at/before the last-generated-id by default).
-    redis_panda._set_last_read_id("stream:sensor_a", "0-0")
+    transport_panda._set_last_read_id("stream:sensor_a", "0-0")
 
     def read_side_effect(*a, **kw):
         observer.stop_event.set()
         return (123, mock_data)
 
     with patch.object(
-        redis_snap.corr_reader, "read", side_effect=read_side_effect
+        observer.corr_reader, "read", side_effect=read_side_effect
     ):
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
 
@@ -513,7 +518,7 @@ def test_record_corr_data_no_snap():
         observer.record_corr_data("/tmp")
 
 
-def test_status_logger(observer_panda_only, redis_panda, caplog):
+def test_status_logger(observer_panda_only, caplog):
     """Test status_logger method.
 
     The observer's status_logger thread is already running (started in
@@ -539,7 +544,9 @@ def test_status_logger(observer_panda_only, redis_panda, caplog):
         return (None, None)
 
     with patch.object(
-        redis_panda.status_reader, "read", side_effect=read_status_effect
+        observer_panda_only.status_reader,
+        "read",
+        side_effect=read_status_effect,
     ):
         observer_panda_only.status_thread.join(timeout=2)
 
@@ -579,7 +586,7 @@ def _make_vna_payload(vna):
 
 @patch("eigsep_observing.io.write_s11_file")
 def test_record_vna_data(
-    mock_write, observer_panda_only, redis_panda, dummy_vna
+    mock_write, observer_panda_only, transport_panda, dummy_vna
 ):
     """Test record_vna_data reads from stream and writes to file."""
     observer = observer_panda_only
@@ -587,8 +594,8 @@ def test_record_vna_data(
 
     # Push data into the Redis stream and reset read position so
     # the VNA reader picks it up on the first call.
-    redis_panda.vna.add(s11, header=header, metadata=metadata)
-    redis_panda._set_last_read_id("stream:vna", "0-0")
+    VnaWriter(transport_panda).add(s11, header=header, metadata=metadata)
+    transport_panda._set_last_read_id("stream:vna", "0-0")
 
     def stop_after_read():
         """Wait for the write, then stop."""
@@ -609,7 +616,7 @@ def test_record_vna_data(
     assert call_args[1]["save_dir"] == "/tmp/test_vna"
 
 
-def test_record_vna_data_stream_absent(observer_panda_only, redis_panda):
+def test_record_vna_data_stream_absent(observer_panda_only):
     """When no VNA data has ever been published, ``vna_reader.read``
     returns ``(None, None, None)`` and the loop retries after a wait.
     """
@@ -618,7 +625,7 @@ def test_record_vna_data_stream_absent(observer_panda_only, redis_panda):
     # No data pushed — vna_reader.read returns (None, None, None) because
     # the stream doesn't exist yet. After two None responses, stop.
     call_count = [0]
-    real_read = redis_panda.vna_reader.read
+    real_read = observer.vna_reader.read
 
     def counting_read(timeout=0):
         call_count[0] += 1
@@ -626,15 +633,13 @@ def test_record_vna_data_stream_absent(observer_panda_only, redis_panda):
             observer.stop_event.set()
         return real_read(timeout=timeout)
 
-    with patch.object(
-        redis_panda.vna_reader, "read", side_effect=counting_read
-    ):
+    with patch.object(observer.vna_reader, "read", side_effect=counting_read):
         observer.record_vna_data("/tmp/test_vna", timeout=1)
 
     assert call_count[0] >= 2
 
 
-def test_record_vna_data_timeout(observer_panda_only, redis_panda):
+def test_record_vna_data_timeout(observer_panda_only):
     """``TimeoutError`` from ``vna_reader.read`` is expected during idle
     windows between hourly VNA triggers — bare ``continue``, no log, no
     watchdog. The loop simply retries.
@@ -649,15 +654,13 @@ def test_record_vna_data_timeout(observer_panda_only, redis_panda):
             observer.stop_event.set()
         raise TimeoutError("no VNA entry")
 
-    with patch.object(
-        redis_panda.vna_reader, "read", side_effect=timeout_read
-    ):
+    with patch.object(observer.vna_reader, "read", side_effect=timeout_read):
         observer.record_vna_data("/tmp/test_vna", timeout=1)
 
     assert call_count[0] >= 2
 
 
-def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
+def test_record_vna_data_disconnect(observer_panda_only):
     """Test record_vna_data waits when panda disconnects."""
     observer = observer_panda_only
 
@@ -677,7 +680,7 @@ def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
     stop_thread.start()
 
     with patch.object(
-        redis_panda.heartbeat_reader,
+        observer.heartbeat_reader,
         "check",
         side_effect=heartbeat_side_effect,
     ) as mock_check:
@@ -688,12 +691,12 @@ def test_record_vna_data_disconnect(observer_panda_only, redis_panda):
     assert mock_check.call_count >= 2
 
 
-def test_record_vna_data_stop_event(observer_panda_only, redis_panda):
+def test_record_vna_data_stop_event(observer_panda_only, transport_panda):
     """Test record_vna_data exits on stop_event during initial wait."""
     observer = observer_panda_only
 
     # Panda not connected — will enter the initial wait loop
-    redis_panda.heartbeat.set(alive=False)
+    HeartbeatWriter(transport_panda).set(alive=False)
 
     def stop_after_delay():
         time.sleep(0.1)
