@@ -824,6 +824,219 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     )
 
 
+# The tests below exercise ``_switch_to``'s exception-to-bool
+# translation end-to-end by patching the firmware-side ``switch()``
+# method on the DummyPicoRFSwitch. PicoManager's exception handler
+# converts method exceptions into status:"error" responses, which
+# the proxy re-raises as RuntimeError — so patching the dummy device
+# is how we drive a real RuntimeError at the consumer boundary.
+# TimeoutError is induced by shortening ``sw_proxy.timeout`` and
+# sleeping past it inside the patched switch.
+
+
+def test_switch_to_returns_false_on_runtime_error(client, caplog):
+    """Regression: a firmware-side RuntimeError bypassed the old bool
+    check entirely and the proxy exception crashed the observing loop.
+    ``_switch_to`` must catch it and return False."""
+    pico = client._manager.picos["rfswitch"]
+    caplog.set_level("WARNING")
+    with patch.object(pico, "switch", side_effect=RuntimeError("fw boom")):
+        assert client._switch_to("RFNOFF") is False
+    assert any(
+        "RF switch to RFNOFF failed" in r.getMessage()
+        and "RuntimeError" in r.getMessage()
+        and "fw boom" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_switch_to_returns_false_on_timeout(client, caplog):
+    """Regression: a proxy-level TimeoutError bypassed the old bool
+    check and crashed the loop. Stall the dummy switch longer than
+    sw_proxy.timeout so _wait_response raises TimeoutError end-to-end
+    — the real path, not a mocked exception at the proxy boundary."""
+    pico = client._manager.picos["rfswitch"]
+    client.sw_proxy.timeout = 0.1
+    caplog.set_level("WARNING")
+
+    def stall(state):
+        time.sleep(0.3)
+
+    with patch.object(pico, "switch", side_effect=stall):
+        assert client._switch_to("RFNOFF") is False
+    assert any(
+        "RF switch to RFNOFF failed" in r.getMessage()
+        and "TimeoutError" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_switch_to_returns_true_on_success(client):
+    """Happy-path regression: unpatched dummy stack round-trips a
+    truthy ``{"action":"switch","result":True}`` and ``_switch_to``
+    returns True."""
+    assert client._switch_to("RFNOFF") is True
+
+
+def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
+    """switch_loop must not propagate a RuntimeError out of the proxy
+    boundary — the old bool check let it escape and crashed the loop.
+    Both warning channels (local logger and Redis status stream) must
+    still fire so the ground observer sees the stuck switch."""
+    cfg = dict(dummy_cfg)
+    cfg["switch_schedule"] = {"RFNOFF": 0.01}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        pico = client._manager.picos["rfswitch"]
+
+        def raise_and_stop(state):
+            client.stop_client.set()
+            raise RuntimeError("fw boom")
+
+        with patch.object(pico, "switch", side_effect=raise_and_stop):
+            caplog.set_level("WARNING")
+            client.switch_loop()  # must return, not raise
+
+        assert any(
+            "Failed to switch to RFNOFF" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        assert any(
+            "RuntimeError" in r.getMessage() and "fw boom" in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Failed to switch to RFNOFF" in status
+    finally:
+        client.stop()
+
+
+def test_switch_loop_survives_timeout(transport, dummy_cfg, caplog):
+    """switch_loop must not propagate a TimeoutError out of the proxy.
+    Same regression as the RuntimeError sibling, different raise
+    path."""
+    cfg = dict(dummy_cfg)
+    cfg["switch_schedule"] = {"RFNOFF": 0.01}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        client.sw_proxy.timeout = 0.1
+        pico = client._manager.picos["rfswitch"]
+
+        def stall_and_stop(state):
+            client.stop_client.set()
+            time.sleep(0.3)
+
+        with patch.object(pico, "switch", side_effect=stall_and_stop):
+            caplog.set_level("WARNING")
+            client.switch_loop()
+
+        assert any(
+            "Failed to switch to RFNOFF" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        assert any("TimeoutError" in r.getMessage() for r in caplog.records), [
+            r.getMessage() for r in caplog.records
+        ]
+
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Failed to switch to RFNOFF" in status
+    finally:
+        client.stop()
+
+
+def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
+    """Regression: a post-VNA switch-back RuntimeError used to unwind
+    vna_loop. After the fix, the warning rides both channels and the
+    loop exits cleanly."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 60
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client._switch_to("RFNOFF")
+        _wait_for_published_mode(client, "RFNOFF")
+
+        pico = client._manager.picos["rfswitch"]
+        original_switch = pico.switch
+
+        # Only fail the switch-back. The VNA's internal OSL path
+        # touches VNA* modes and must continue to succeed.
+        def switch_back_raises(state):
+            if state == "RFNOFF":
+                client.stop_client.set()
+                raise RuntimeError("stuck calibrator")
+            return original_switch(state=state)
+
+        with patch.object(pico, "switch", side_effect=switch_back_raises):
+            caplog.set_level("WARNING")
+            client.vna_loop()  # must return, not raise
+
+        assert any(
+            "Failed to switch back to RFNOFF" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        assert any(
+            "RuntimeError" in r.getMessage()
+            and "stuck calibrator" in r.getMessage()
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Failed to switch back to RFNOFF" in status
+    finally:
+        client.stop()
+
+
+def test_switch_session_restore_survives_timeout(client, caplog):
+    """Regression: a TimeoutError on the auto-restore used to escape
+    switch_session's finally block, leaving switch_lock held. After
+    the fix, the warning logs, the session exits, and the lock is
+    released."""
+    assert client._switch_to("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+
+    pico = client._manager.picos["rfswitch"]
+    original_switch = pico.switch
+    client.sw_proxy.timeout = 0.1
+
+    # Succeed on RFNOFF (user's own switch) but stall on the RFANT
+    # restore so _wait_response times out end-to-end.
+    def stall_on_restore(state):
+        if state == "RFANT":
+            time.sleep(0.3)
+            return
+        return original_switch(state=state)
+
+    caplog.set_level("WARNING")
+    with patch.object(pico, "switch", side_effect=stall_on_restore):
+        with client.switch_session() as sw:
+            assert sw("RFNOFF") is True
+
+    assert any(
+        "switch_session: failed to restore to RFANT" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+    assert any("TimeoutError" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+    assert client.switch_lock.acquire(blocking=False)
+    client.switch_lock.release()
+
+
 def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
     """The per-mode ``power_dBm`` from ``vna_settings`` must be applied
     to the VNA before each measurement. Regression guard for a unified
