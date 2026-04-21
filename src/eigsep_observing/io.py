@@ -674,6 +674,7 @@ SENSOR_SCHEMAS = {
         "status": str,
         "app_id": int,
         "sw_state": int,
+        "sw_state_name": str,
     },
     "lidar": {
         "sensor_name": str,
@@ -1011,12 +1012,16 @@ def _avg_temp_metadata(value, app_name, schema):
 
 def _avg_rfswitch_metadata(value):
     """
-    Average rfswitch metadata.  Returns the switch state if
-    constant, or ``"UNKNOWN"`` if it changed or errored.
+    Average rfswitch metadata. Returns the switch state *name*
+    (``"RFANT"``, ``"VNAO"``, ...) if constant across the integration,
+    or ``"UNKNOWN"`` if it changed or errored. Reads the human-readable
+    ``sw_state_name`` that picohost v3's rfswitch redis handler
+    publishes — no int-to-name reverse mapping is needed on the
+    consumer side.
 
     """
     status_list = [v.get("status") for v in value]
-    states = [v.get("sw_state") for v in value]
+    states = [v.get("sw_state_name") for v in value]
     if "error" in status_list:
         return "UNKNOWN"
     unique = set(s for s in states if s is not None)
@@ -1049,9 +1054,9 @@ def _avg_rfswitch_metadata(value):
 # the saved value (`any` for bools, `"UNKNOWN"` for strings) so
 # downstream can detect the issue from the file alone. Note that
 # post-picohost-1.0.0, every `int` field in SENSOR_SCHEMAS reaching
-# _avg_sensor_values is in _INVARIANT_FIELDS — the only non-invariant
-# int is rfswitch's `sw_state`, which is handled by
-# _avg_rfswitch_metadata, not _avg_sensor_values. The int `min`
+# _avg_sensor_values is in _INVARIANT_FIELDS — rfswitch's raw
+# `sw_state` int and human-readable `sw_state_name` are both handled
+# by _avg_rfswitch_metadata, not _avg_sensor_values. The int `min`
 # reduction is therefore a no-op-on-agreement safety net behind the
 # invariant ERROR log path; if a future schema adds a legitimately
 # varying int, the disagreement is silently captured by `min` rather
