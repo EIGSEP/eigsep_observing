@@ -372,8 +372,25 @@ class PandaClient:
         call again if the config changes; no hardware contact, so
         construction cannot fail.
         """
-        kwargs = self.cfg.get("motor_scanner_kwargs") or {}
-        self.motor_scanner = MotorScanner(self.transport, **kwargs)
+        self.motor_scanner = None
+        raw_kwargs = self.cfg.get("motor_scanner_kwargs")
+        kwargs = raw_kwargs or {}
+        if not isinstance(kwargs, dict):
+            self.logger.warning(
+                "Invalid motor_scanner_kwargs config; expected dict, "
+                f"got {type(raw_kwargs).__name__}. Motor scanner disabled."
+            )
+            return
+        try:
+            self.motor_scanner = MotorScanner(
+                self.transport, **kwargs
+            )
+        except TypeError as err:
+            self.logger.warning(
+                "Invalid motor_scanner_kwargs for MotorScanner: "
+                f"{err}. Motor scanner disabled."
+            )
+            return
         self.logger.info(f"Motor scanner initialized (kwargs={kwargs})")
 
     def switch_loop(self):
@@ -608,7 +625,15 @@ class PandaClient:
                 "not run."
             )
             return
-        scan_kwargs = self.cfg.get("motor_scan") or {}
+        scan_kwargs = self.cfg.get("motor_scan")
+        if scan_kwargs is None:
+            scan_kwargs = {}
+        elif not isinstance(scan_kwargs, dict):
+            self._warn_with_status(
+                f"Invalid motor_scan ({scan_kwargs!r}); motor_loop will "
+                "not run."
+            )
+            return
 
         # Push delay config once at loop entry. A failure here (motor
         # pico unreachable) is warned but not fatal — the scan call
