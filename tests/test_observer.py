@@ -567,11 +567,11 @@ def test_logger_attribute(observer_both):
 def dummy_vna():
     """DummyVNA instance for generating realistic VNA test data.
 
-    ``switch_fn`` returns ``True`` to mirror production's
-    :meth:`PandaClient._switch_to` — cmt_vna 1.2 raises on a falsy
-    return. The switch network isn't under test here.
+    ``switch_fn`` is a no-op — cmt_vna 1.3 ignores the return value
+    and only treats raised exceptions as failure. The switch network
+    isn't under test here.
     """
-    vna = DummyVNA(switch_fn=lambda state: True)
+    vna = DummyVNA(switch_fn=lambda state: None)
     vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
     return vna
 

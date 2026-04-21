@@ -869,6 +869,51 @@ def test_switch_to_returns_true_on_success(client):
     assert client._switch_to("RFNOFF") is True
 
 
+# ``_switch`` is the raise-on-failure surface wired as cmt_vna's
+# ``switch_fn`` (eigsep-vna 1.3+ contract). It mirrors ``_switch_to``'s
+# end-to-end failure paths but propagates instead of translating to
+# bool, so that a mid-S11 switch failure aborts ``measure_*`` rather
+# than contaminating the calibration.
+
+
+def test_switch_raises_on_runtime_error(client):
+    """Firmware-side RuntimeError must propagate out of ``_switch`` —
+    cmt_vna 1.3 relies on this to abort an in-flight measure_*."""
+    pico = client._manager.picos["rfswitch"]
+    with patch.object(pico, "switch", side_effect=RuntimeError("fw boom")):
+        with pytest.raises(RuntimeError, match="fw boom"):
+            client._switch("RFNOFF")
+
+
+def test_switch_raises_on_timeout(client):
+    """Proxy-level TimeoutError must propagate out of ``_switch``."""
+    pico = client._manager.picos["rfswitch"]
+    client.sw_proxy.timeout = 0.1
+
+    def stall(state):
+        time.sleep(0.3)
+
+    with patch.object(pico, "switch", side_effect=stall):
+        with pytest.raises(TimeoutError):
+            client._switch("RFNOFF")
+
+
+def test_switch_raises_on_unregistered_device(client):
+    """If ``sw_proxy.send_command`` returns ``None`` (device not
+    registered with PicoManager), ``_switch`` must raise so that
+    cmt_vna sees a switch failure instead of a silent no-op."""
+    with patch.object(client.sw_proxy, "send_command", return_value=None):
+        with pytest.raises(RuntimeError, match="not registered"):
+            client._switch("RFNOFF")
+
+
+def test_switch_returns_none_on_success(client):
+    """``_switch`` has no meaningful return on success — the contract
+    is raise-on-failure, return value ignored. Confirms the dummy
+    round-trip doesn't accidentally raise."""
+    assert client._switch("RFNOFF") is None
+
+
 def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
     """switch_loop must not propagate a RuntimeError out of the proxy
     boundary — the old bool check let it escape and crashed the loop.
