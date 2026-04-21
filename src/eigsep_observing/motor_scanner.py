@@ -262,7 +262,11 @@ class MotorScanner:
                                 mv_axis2_action, target_deg=float(val2)
                             )
                             self._wait_for_stop()
-                            time.sleep(pause_s)
+                            if stop_event is not None:
+                                if stop_event.wait(pause_s):
+                                    break
+                            else:
+                                time.sleep(pause_s)
                     axis2_rng = axis2_rng[::-1]
                 axis1_rng = axis1_rng[::-1]
                 i += 1
