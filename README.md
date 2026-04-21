@@ -28,3 +28,18 @@ pip install -r hardware-requirements.txt
 ```
 
 See that file for the current tag (currently **v0.6.0**).
+
+## Scripts
+
+Observing loops and the startup flow live in `OPERATIONS.md`. Motor
+operations run through `PicoManager` via Redis, so the manager service
+stays up during scans.
+
+```bash
+# Az/el beam scan
+python scripts/motor_control.py [--dummy] [--el_first] [--count N] \
+                                [--pause_s S] [--sleep_s S]
+
+# Interactive zeroing UI (curses)
+python scripts/motor_manual.py  [--dummy] [--deg D]
+```

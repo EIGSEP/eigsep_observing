@@ -6,7 +6,6 @@ import time
 from unittest.mock import patch
 
 import pytest
-import yaml
 
 from cmt_vna.testing import DummyVNA
 from eigsep_redis import ConfigStore, HeartbeatReader, StatusReader
@@ -17,36 +16,6 @@ from picohost.proxy import PicoProxy
 import eigsep_observing
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
-
-
-@pytest.fixture(scope="module")
-def module_tmpdir(tmp_path_factory):
-    """
-    Create a temporary directory for the module scope.
-    This will be used to store VNA files and other temporary data.
-    """
-    return tmp_path_factory.mktemp("module_tmpdir")
-
-
-@pytest.fixture()
-def dummy_cfg(module_tmpdir):
-    path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-    cfg["vna_save_dir"] = str(module_tmpdir)
-    return cfg
-
-
-@pytest.fixture
-def transport():
-    return DummyTransport()
-
-
-@pytest.fixture
-def client(transport, dummy_cfg):
-    c = DummyPandaClient(transport, default_cfg=dummy_cfg)
-    yield c
-    c.stop()
 
 
 def _status_reader(client):
