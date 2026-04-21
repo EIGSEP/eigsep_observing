@@ -148,9 +148,15 @@ class MotorScanner:
         )
 
     def home(self):
-        """Drive both axes to step position 0 and wait for completion."""
+        """Drive both axes to step position 0, one at a time.
+
+        Only one motor moves at once: az homes first, then el. Running
+        both simultaneously is a mechanical-safety hazard on the rig
+        and matches the historical ``picohost`` script behavior.
+        """
         self._await_initial_status()
         self._proxy.send_command("az_target_steps", target_steps=0)
+        self._wait_for_stop()
         self._proxy.send_command("el_target_steps", target_steps=0)
         self._wait_for_stop()
 

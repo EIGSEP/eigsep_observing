@@ -57,9 +57,11 @@ def _render(screen, zeroer, deg):
 
 def _curses_main(screen, transport, args):
     curses.noecho()
-    screen.nodelay(False)
+    screen.timeout(100)
 
     zeroer = MotorZeroer(transport)
+    zeroer.set_delay()
+    zeroer.halt()
     deg = args.deg
     zeroed = False
 

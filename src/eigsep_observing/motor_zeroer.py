@@ -15,6 +15,8 @@ from picohost.proxy import PicoProxy
 
 logger = logging.getLogger(__name__)
 
+# Linux-only: curses delivers Enter as "\n" on the terminals we target
+# (Ubuntu + Raspberry Pi). Other platforms may send KEY_ENTER / "\r".
 _KEY_ENTER = ord("\n")
 _REQUIRE_STATUS_RETRY_S = 0.5
 

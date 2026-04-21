@@ -77,7 +77,7 @@ def _parse_args():
     parser.add_argument(
         "--el_first",
         action="store_true",
-        help="Scan el as outer loop; otherwise az is outer.",
+        help="Scan az as outer loop (el is the fast axis); default is az fast.",
     )
     parser.add_argument(
         "--count",
