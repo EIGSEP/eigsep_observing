@@ -534,7 +534,10 @@ class PandaClient:
                         "recovering rfswitch to RFANT."
                     )
                     target_mode = "RFANT"
-                self.logger.info(f"Switching rfswitch to {target_mode}")
+                self.logger.info(
+                    f"Switching rfswitch to {target_mode} "
+                    f"(previous mode: {prev_mode})"
+                )
                 if not self._safe_switch(target_mode):
                     self._warn_with_status(
                         f"Failed to switch back to {target_mode}"
