@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
+from picohost.base import PicoRFSwitch
 from picohost.testing import (
     ImuEmulator,
     LidarEmulator,
@@ -80,6 +81,24 @@ def _potmon_post_handler_reading():
     return captured
 
 
+def _rfswitch_post_handler_reading():
+    """Return an rfswitch reading after _rfswitch_redis_handler.
+
+    The actual ``rfswitch`` producer is the composition
+    ``RFSwitchEmulator.get_status()`` + ``PicoRFSwitch._rfswitch_redis_handler``
+    — the emulator only emits the raw ``sw_state`` int, and the device
+    handler is where ``sw_state_name`` is added. The contract this test
+    enforces is the *post-handler* shape (what reaches Redis), so the
+    fixture has to compose the two. Mirrors ``_potmon_post_handler_reading``.
+    """
+    sw = PicoRFSwitch.__new__(PicoRFSwitch)
+    sw._name_by_state = {v: k for k, v in sw.__class__.paths.fget(sw).items()}
+    captured = {}
+    sw._base_redis_handler = lambda d: captured.update(d)
+    sw._rfswitch_redis_handler(RFSwitchEmulator().get_status())
+    return captured
+
+
 # Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
 # that returns a single fresh reading from the corresponding picohost
 # emulator. Used by test_every_schema_has_conforming_emulator below to
@@ -89,7 +108,7 @@ def _potmon_post_handler_reading():
 SENSOR_EMULATORS = {
     "imu_el": lambda: ImuEmulator(app_id=3).get_status(),
     "imu_az": lambda: ImuEmulator(app_id=6).get_status(),
-    "rfswitch": lambda: RFSwitchEmulator().get_status(),
+    "rfswitch": _rfswitch_post_handler_reading,
     "tempctrl": lambda: TempCtrlEmulator().get_status(),
     "lidar": lambda: LidarEmulator().get_status(),
     "potmon": _potmon_post_handler_reading,

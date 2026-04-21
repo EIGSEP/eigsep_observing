@@ -192,11 +192,11 @@ CORR_METADATA = {
         for i in range(NTIMES)
     ],
     "rfswitch": (
-        [0] * 20  # steady state
+        ["RFANT"] * 20  # steady state
         + ["UNKNOWN"] * 5  # transition window
-        + [1] * 20  # new steady state
+        + ["RFNOFF"] * 20  # new steady state
         + [None] * 5  # sensor dropout (gap-fill pad in _insert_sample)
-        + [1] * 10  # recovery
+        + ["RFNOFF"] * 10  # recovery
     ),
 }
 
@@ -241,6 +241,7 @@ VNA_METADATA = {
         "status": "update",
         "app_id": 5,
         "sw_state": 3,
+        "sw_state_name": "VNAS",
     },
     "rfswitch_ts": _SNAPSHOT_TS,
     "corr_sync_time": 1748732903.4203713,

@@ -12,11 +12,9 @@ from cmt_vna.testing import DummyVNA
 from eigsep_redis import ConfigStore, HeartbeatReader, StatusReader
 from eigsep_redis.keys import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
-from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing.client import _SW_INT_TO_MODE
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -194,15 +192,6 @@ def test_cfg_is_get_cfg_result_without_extra_roundtrip(client):
     serialized payload) — and would silently re-introduce drift if
     re-added on top of a different storage path."""
     assert client.cfg == client._get_cfg()
-
-
-def test_sw_int_to_mode_inverts_pico_path_str():
-    """The module-level inverse map must round-trip every PicoRFSwitch
-    path string so a firmware change to ``path_str`` is caught at
-    import-time mismatch rather than silently dropping a mode."""
-    assert set(_SW_INT_TO_MODE.values()) == set(PicoRFSwitch.path_str)
-    for mode, bits in PicoRFSwitch.path_str.items():
-        assert _SW_INT_TO_MODE[PicoRFSwitch.rbin(bits)] == mode
 
 
 def test_read_switch_mode_from_redis_returns_published_mode(client):
@@ -895,6 +884,7 @@ def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
             client.stop_client.set()
             raise RuntimeError("fw boom")
 
+        _arm_status_reader(client)
         with patch.object(pico, "switch", side_effect=raise_and_stop):
             caplog.set_level("WARNING")
             client.switch_loop()  # must return, not raise
@@ -909,7 +899,6 @@ def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch to RFNOFF" in status
@@ -932,6 +921,7 @@ def test_switch_loop_survives_timeout(transport, dummy_cfg, caplog):
             client.stop_client.set()
             time.sleep(0.3)
 
+        _arm_status_reader(client)
         with patch.object(pico, "switch", side_effect=stall_and_stop):
             caplog.set_level("WARNING")
             client.switch_loop()
@@ -945,7 +935,6 @@ def test_switch_loop_survives_timeout(transport, dummy_cfg, caplog):
             r.getMessage() for r in caplog.records
         ]
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch to RFNOFF" in status
@@ -976,6 +965,7 @@ def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
                 raise RuntimeError("stuck calibrator")
             return original_switch(state=state)
 
+        _arm_status_reader(client)
         with patch.object(pico, "switch", side_effect=switch_back_raises):
             caplog.set_level("WARNING")
             client.vna_loop()  # must return, not raise
@@ -991,7 +981,6 @@ def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch back to RFNOFF" in status
