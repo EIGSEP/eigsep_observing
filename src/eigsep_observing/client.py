@@ -87,6 +87,21 @@ class PandaClient:
         else:
             self.logger.warning("No pico devices registered by PicoManager.")
 
+        # Boot-time invariant: wake up in RFANT. RFANT is the
+        # all-switches-off state, so it's the physically safe default;
+        # anything else must be an explicit switch-out by switch_loop
+        # or switch_session. Side benefit: forces PicoManager to
+        # publish ``sw_state_name`` immediately so downstream readers
+        # have a truth to read from the first iteration. Best-effort —
+        # if the rfswitch pico is unreachable at boot, warn loudly and
+        # continue; the Python client can't enforce the hardware
+        # default on its own.
+        if not self._safe_switch("RFANT"):
+            self._warn_with_status(
+                "Boot-time RFANT initialization failed; rfswitch state "
+                "is unknown."
+            )
+
         if self.cfg.get("use_vna", False):
             self.init_VNA()
         else:
@@ -485,14 +500,32 @@ class PandaClient:
                         "post-VNA switch-back to RFANT."
                     )
                     prev_mode = "RFANT"
-                for mode in ["ant", "rec"]:
-                    self.logger.info(f"Measuring S11 of {mode} with VNA")
-                    self.measure_s11(mode)
-                self.logger.info(
-                    f"Switching back to previous mode: {prev_mode}"
-                )
-                if not self._safe_switch(prev_mode):
+                target_mode = prev_mode
+                try:
+                    for mode in ["ant", "rec"]:
+                        self.logger.info(f"Measuring S11 of {mode} with VNA")
+                        self.measure_s11(mode)
+                except Exception as exc:
+                    # Any exception from measure_s11 (``_switch`` raising
+                    # mid-OSL under the eigsep-vna 1.3 contract, VNA
+                    # instrument TimeoutError, Redis write failure, ...)
+                    # leaves the switch at whatever state cmt_vna last
+                    # drove it to. Default the recovery target to RFANT
+                    # rather than prev_mode — we've lost the
+                    # "known-good state" invariant and RFANT is the
+                    # physically safe fallback. The next switch_loop
+                    # iteration will re-assert the configured mode.
                     self._warn_with_status(
-                        f"Failed to switch back to {prev_mode}"
+                        f"VNA cycle aborted "
+                        f"({type(exc).__name__}: {exc}); "
+                        "recovering rfswitch to RFANT."
+                    )
+                    target_mode = "RFANT"
+                self.logger.info(
+                    f"Switching back to previous mode: {target_mode}"
+                )
+                if not self._safe_switch(target_mode):
+                    self._warn_with_status(
+                        f"Failed to switch back to {target_mode}"
                     )
             self.stop_client.wait(self.cfg["vna_interval"])
