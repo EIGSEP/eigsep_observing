@@ -20,6 +20,13 @@ without significant test rewrites.
 """
 
 import numpy as np
+import pytest
+import yaml
+
+from eigsep_redis.testing import DummyTransport
+
+import eigsep_observing
+from eigsep_observing.testing import DummyPandaClient
 
 # One corr file accumulates NTIMES integrations, each of duration
 # INTEGRATION_TIME seconds. FILE_TIME = NTIMES * INTEGRATION_TIME is the
@@ -258,3 +265,39 @@ S11_HEADER = {
     "mode": "ant",
     "metadata_snapshot_unix": 1748734379.905014,
 }
+
+
+# ---------------------------------------------------------------------
+# Dummy-transport / dummy-client fixtures.
+#
+# Previously private to test_client.py; promoted here so tests that
+# exercise other dummy-manager-backed subjects (MotorScanner,
+# MotorZeroer, ...) can reuse the same in-process PicoManager setup.
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def module_tmpdir(tmp_path_factory):
+    """Module-scoped temp dir for VNA save paths and similar."""
+    return tmp_path_factory.mktemp("module_tmpdir")
+
+
+@pytest.fixture()
+def dummy_cfg(module_tmpdir):
+    path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
+    cfg["vna_save_dir"] = str(module_tmpdir)
+    return cfg
+
+
+@pytest.fixture
+def transport():
+    return DummyTransport()
+
+
+@pytest.fixture
+def client(transport, dummy_cfg):
+    c = DummyPandaClient(transport, default_cfg=dummy_cfg)
+    yield c
+    c.stop()
