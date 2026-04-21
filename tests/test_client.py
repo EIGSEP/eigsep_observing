@@ -14,6 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
+from eigsep_observing import MotorScanner
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -1158,5 +1159,250 @@ def test_vna_loop_recovers_to_rfant_on_measurement_exception(
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.ERROR
         assert "VNA cycle aborted" in status
+    finally:
+        client.stop()
+
+
+# ``motor_loop`` is the sibling of ``vna_loop``: periodic action, loud
+# error recovery, honors ``stop_client``. These tests patch
+# ``motor_scanner.scan`` to drive the loop deterministically — the real
+# scan path (grid traversal, emulator tick cadence) is covered by
+# tests/test_motor_scanner.py.
+
+
+def test_use_motor_false_leaves_scanner_none(client):
+    """Default dummy_config has ``use_motor: false``, so
+    ``PandaClient.__init__`` must leave ``motor_scanner`` as ``None``.
+    Mirrors the ``self.vna is None`` convention."""
+    assert client.cfg.get("use_motor", False) is False
+    assert client.motor_scanner is None
+
+
+def test_use_motor_true_builds_scanner(transport, dummy_cfg):
+    """With ``use_motor: true``, ``motor_scanner`` is a real
+    ``MotorScanner`` bound to the same transport — so ``motor_loop`` has
+    something to drive and the dummy PicoManager's motor pico is
+    addressable through the scanner's proxy."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert isinstance(client.motor_scanner, MotorScanner)
+        # Scanner shares the client's transport, i.e. the PicoManager is
+        # reachable through the same fake redis.
+        assert client.motor_scanner.transport is client.transport
+    finally:
+        client.stop()
+
+
+def test_motor_loop_returns_when_scanner_is_none(caplog, client):
+    """motor_loop must return promptly when ``motor_scanner`` is None —
+    no polling, no silent spin. The warning must ride both channels
+    (local log + status stream) so the ground observer sees the
+    misconfiguration."""
+    assert client.motor_scanner is None  # dummy_config has use_motor: false
+    _arm_status_reader(client)
+    caplog.set_level("WARNING")
+    t0 = time.monotonic()
+    client.motor_loop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0, f"motor_loop did not return promptly ({elapsed}s)"
+    assert any(
+        "Motor scanner not initialized" in r.getMessage()
+        for r in caplog.records
+    )
+
+    level, status = _status_reader(client).read(timeout=1)
+    assert level == logging.WARNING
+    assert "Motor scanner not initialized" in status
+
+
+def test_motor_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
+    """An invalid (non-positive / non-numeric) ``motor_interval`` is a
+    config-side bug; motor_loop must refuse to run and warn loudly
+    rather than fall into a tight no-sleep scan loop."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 0  # invalid
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        _arm_status_reader(client)
+        caplog.set_level("WARNING")
+        t0 = time.monotonic()
+        client.motor_loop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0
+        assert any(
+            "Invalid motor_interval" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Invalid motor_interval" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_calls_scan_with_stop_event_and_cfg_kwargs(
+    transport, dummy_cfg
+):
+    """motor_loop forwards ``motor_scan`` kwargs to ``scan`` and injects
+    ``stop_event=self.stop_client`` so a mid-scan ``stop()`` unwinds the
+    traversal instead of having to wait for the current move to finish."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60  # long; only one scan before stop fires
+    cfg["motor_scan"] = {
+        "az_range_deg": [-1.0, 0.0, 1.0],
+        "el_range_deg": [-1.0, 0.0, 1.0],
+        "repeat_count": 1,
+    }
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        scan_calls = []
+
+        def fake_scan(**kwargs):
+            scan_calls.append(kwargs)
+            client.stop_client.set()
+
+        with patch.object(client.motor_scanner, "scan", side_effect=fake_scan):
+            client.motor_loop()
+
+        assert len(scan_calls) == 1, scan_calls
+        call = scan_calls[0]
+        assert call["stop_event"] is client.stop_client
+        assert call["az_range_deg"] == [-1.0, 0.0, 1.0]
+        assert call["el_range_deg"] == [-1.0, 0.0, 1.0]
+        assert call["repeat_count"] == 1
+    finally:
+        client.stop()
+
+
+def test_motor_loop_survives_scan_timeout_error(transport, dummy_cfg, caplog):
+    """A scan ``TimeoutError`` (stall, pico unreachable) must not unwind
+    motor_loop — the error rides both channels, the scanner is halted,
+    and the loop proceeds to the next interval. Matches the "keep the
+    loop up across transient faults" contract used by switch_loop and
+    vna_loop."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        halt_calls = []
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise TimeoutError("motor stalled for 30.0s without progress")
+
+        def recording_halt():
+            halt_calls.append(True)
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_scanner, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_scanner, "halt", side_effect=recording_halt
+            ),
+        ):
+            caplog.set_level("ERROR")
+            client.motor_loop()  # must return, not raise
+
+        assert halt_calls == [True], (
+            "motor_loop must halt the scanner after a scan exception"
+        )
+        assert any(
+            "Motor scan aborted" in r.getMessage()
+            and "TimeoutError" in r.getMessage()
+            and "halting motors" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.ERROR
+        assert "Motor scan aborted" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_survives_scan_runtime_error(transport, dummy_cfg, caplog):
+    """Sibling of the TimeoutError test. A firmware RuntimeError from
+    the scan must log at ERROR and the loop must stay up."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise RuntimeError("fw boom")
+
+        _arm_status_reader(client)
+        with patch.object(
+            client.motor_scanner, "scan", side_effect=raising_scan
+        ):
+            caplog.set_level("ERROR")
+            client.motor_loop()
+
+        assert any(
+            "Motor scan aborted" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            and "fw boom" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.ERROR
+        assert "Motor scan aborted" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_set_delay_failure_is_warning_not_fatal(
+    transport, dummy_cfg, caplog
+):
+    """A ``set_delay`` failure at loop entry is warned but non-fatal —
+    the scan call is the real retry surface and will surface the same
+    fault cleanly through the ERROR path on the next iteration."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+
+        def fake_scan(**kwargs):
+            client.stop_client.set()
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_scanner,
+                "set_delay",
+                side_effect=RuntimeError("pico unreachable"),
+            ),
+            patch.object(client.motor_scanner, "scan", side_effect=fake_scan),
+        ):
+            caplog.set_level("WARNING")
+            client.motor_loop()  # must proceed past set_delay failure
+
+        assert any(
+            "Motor set_delay failed" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            and "pico unreachable" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Motor set_delay failed" in status
     finally:
         client.stop()

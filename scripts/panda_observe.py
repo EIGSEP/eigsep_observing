@@ -1,3 +1,18 @@
+"""Panda observing client entry point.
+
+Starts the steady-state observing loops on the suspended LattePanda:
+``switch_loop`` (RF calibration schedule), ``vna_loop`` (periodic S11),
+and ``motor_loop`` (periodic az/el pointing scans). Each loop is gated
+by a ``use_*`` flag in the observing config so the panda can run with
+any subset.
+
+Dedicated observing modes that need cross-loop coordination — beam
+mapping (rfswitch pinned to RFANT), VNA-at-positions, or motion/switch
+sync — are deferred to separate top-level scripts; running them
+through this entry point would couple the steady-state loops to
+mode-specific orchestration.
+"""
+
 from argparse import ArgumentParser
 import logging
 from threading import Thread
@@ -43,6 +58,13 @@ if client.cfg["use_vna"]:
     thds["vna"] = vna_thd
     logger.info("Starting VNA thread")
     vna_thd.start()
+
+# motor (periodic az/el scans)
+if client.cfg.get("use_motor", False):
+    motor_thd = Thread(target=client.motor_loop)
+    thds["motor"] = motor_thd
+    logger.info("Starting motor thread")
+    motor_thd.start()
 
 try:
     client.stop_client.wait()  # wait until stop signal is set

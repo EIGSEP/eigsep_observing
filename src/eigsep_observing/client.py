@@ -16,6 +16,7 @@ from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
+from .motor_scanner import MotorScanner
 from .utils import get_config_path
 from .vna import VnaWriter
 
@@ -107,6 +108,12 @@ class PandaClient:
         else:
             self.vna = None
             self.logger.info("VNA not initialized")
+
+        if self.cfg.get("use_motor", False):
+            self.init_motor_scanner()
+        else:
+            self.motor_scanner = None
+            self.logger.info("Motor scanner not initialized")
 
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
@@ -351,6 +358,24 @@ class PandaClient:
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
 
+    def init_motor_scanner(self):
+        """
+        Build a :class:`MotorScanner` from the config.
+
+        ``motor_scanner_kwargs`` (optional) forwards to the
+        :class:`MotorScanner` constructor (per-axis step delays, poll
+        interval, stall timeout). Absent/empty → use scanner defaults.
+
+        Notes
+        -----
+        Called by the constructor when ``use_motor`` is true. Safe to
+        call again if the config changes; no hardware contact, so
+        construction cannot fail.
+        """
+        kwargs = self.cfg.get("motor_scanner_kwargs") or {}
+        self.motor_scanner = MotorScanner(self.transport, **kwargs)
+        self.logger.info(f"Motor scanner initialized (kwargs={kwargs})")
+
     def switch_loop(self):
         """
         Use the RF switches to switch between sky, load, and noise
@@ -543,3 +568,69 @@ class PandaClient:
                         f"Failed to switch back to {target_mode}"
                     )
             self.stop_client.wait(self.cfg["vna_interval"])
+
+    def motor_loop(self):
+        """Periodic az/el beam scans, sibling of :meth:`vna_loop`.
+
+        Runs a full ``MotorScanner.scan`` every ``motor_interval``
+        seconds with ``motor_scan`` kwargs (``az_range_deg``,
+        ``el_range_deg``, ``el_first``, ``repeat_count``, ``pause_s``,
+        ``sleep_between``). Runs concurrently with ``switch_loop`` and
+        ``vna_loop``; does **not** acquire ``switch_lock``. This is the
+        steady-state "do a pointing survey every N hours" mode, and it
+        deliberately lets switching/VNA continue uninterrupted while
+        the motors move.
+
+        Scan errors (``TimeoutError``/``RuntimeError``) are logged at
+        ERROR on both channels, the motors are halted, and the loop
+        waits for the next interval — a stalled or misconfigured motor
+        must not wedge observing.
+
+        Follow-ups (deferred; separate top-level scripts when we know
+        what we want):
+
+        * Beam mapping: scan with rfswitch pinned to RFANT for clean
+          per-position corr (needs ``switch_lock`` + switch-loop pause).
+        * VNA-at-positions: lockstep motor move / VNA measure for S11
+          vs pointing comparisons.
+        * Motion/switch sync: suppress switching while motors are
+          moving if hardware interference proves to be a concern.
+        """
+        if self.motor_scanner is None:
+            self._warn_with_status(
+                "Motor scanner not initialized. Cannot execute motor scans."
+            )
+            return
+        interval = self.cfg.get("motor_interval")
+        if not isinstance(interval, (int, float)) or interval <= 0:
+            self._warn_with_status(
+                f"Invalid motor_interval ({interval!r}); motor_loop will "
+                "not run."
+            )
+            return
+        scan_kwargs = self.cfg.get("motor_scan") or {}
+
+        # Push delay config once at loop entry. A failure here (motor
+        # pico unreachable) is warned but not fatal — the scan call
+        # below re-surfaces the same fault and drives the retry loop.
+        try:
+            self.motor_scanner.set_delay()
+        except (RuntimeError, TimeoutError) as exc:
+            self._warn_with_status(
+                f"Motor set_delay failed at loop start "
+                f"({type(exc).__name__}: {exc}); scans will retry."
+            )
+
+        while not self.stop_client.is_set():
+            try:
+                self.motor_scanner.scan(
+                    stop_event=self.stop_client, **scan_kwargs
+                )
+            except (TimeoutError, RuntimeError) as exc:
+                self._error_with_status(
+                    f"Motor scan aborted "
+                    f"({type(exc).__name__}: {exc}); halting motors."
+                )
+                self.motor_scanner.halt()
+            if self.stop_client.wait(interval):
+                return
