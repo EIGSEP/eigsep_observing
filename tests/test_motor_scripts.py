@@ -32,7 +32,9 @@ def test_motor_control_main_runs_short_scan(client, monkeypatch):
     monkeypatch.setattr(
         mc.np,
         "linspace",
-        lambda *a, **kw: small if a and a[0] == -180.0 else orig_linspace(*a, **kw),
+        lambda *a, **kw: (
+            small if a and a[0] == -180.0 else orig_linspace(*a, **kw)
+        ),
     )
     args = Namespace(el_first=False, count=1, pause_s=None, sleep_s=None)
     mc.main(client.transport, args)

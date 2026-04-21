@@ -49,16 +49,20 @@ def test_zero_halts_and_resets(client):
     zeroer.jog_az(3.0)
     zeroer.jog_el(3.0)
     assert _wait_until(
-        lambda: motor._emulator.azimuth.position
-        == motor._emulator.azimuth.target_pos,
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+        ),
         timeout=3.0,
     )
     zeroer.zero()
     # Emulator processes the reset_step_position command on its own
     # thread — wait for the state to converge rather than race it.
     assert _wait_until(
-        lambda: motor._emulator.azimuth.position == 0
-        and motor._emulator.elevation.position == 0,
+        lambda: (
+            motor._emulator.azimuth.position == 0
+            and motor._emulator.elevation.position == 0
+        ),
         timeout=2.0,
     )
     assert motor._emulator.azimuth.target_pos == 0
@@ -83,8 +87,10 @@ def test_status_text_reflects_live_metadata(client):
     # Wait for the emulator to reach the target and a status packet to
     # land in the metadata snapshot.
     assert _wait_until(
-        lambda: zeroer._reader.get("motor").get("az_pos")
-        == motor._emulator.azimuth.target_pos,
+        lambda: (
+            zeroer._reader.get("motor").get("az_pos")
+            == motor._emulator.azimuth.target_pos
+        ),
         timeout=3.0,
     )
     az, _, connected = zeroer.status_text()
@@ -151,8 +157,10 @@ def test_handle_key_enter_zeroes(client):
     motor = client._manager.picos["motor"]
     zeroer.jog_az(2.0)
     assert _wait_until(
-        lambda: motor._emulator.azimuth.position
-        == motor._emulator.azimuth.target_pos,
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+        ),
         timeout=3.0,
     )
     _, should_exit, zeroed = zeroer.handle_key(_KEY_ENTER, 1.0)

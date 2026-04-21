@@ -32,7 +32,14 @@ def test_set_delay_forwards_kwargs(client):
     scanner = _scanner(client.transport)
     scanner.set_delay(az_up_delay_us=1234)
     motor = client._manager.picos["motor"]
-    # The firmware emulator's stepper state carries the per-axis delays.
+    # The firmware emulator runs on its own thread and processes commands
+    # asynchronously — wait for the delay to propagate into the stepper
+    # state rather than racing the single-tick latency.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if motor._emulator.azimuth.up_delay_us == 1234:
+            break
+        time.sleep(0.02)
     assert motor._emulator.azimuth.up_delay_us == 1234
 
 

@@ -86,9 +86,7 @@ class MotorZeroer:
         current physical position is the scan origin.
         """
         self._proxy.send_command("halt")
-        self._proxy.send_command(
-            "reset_step_position", az_step=0, el_step=0
-        )
+        self._proxy.send_command("reset_step_position", az_step=0, el_step=0)
 
     def status_text(self):
         """Return ``(az_str, el_str, connected)`` for the UI.
