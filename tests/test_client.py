@@ -1279,26 +1279,29 @@ def test_motor_loop_calls_scan_with_stop_event_and_cfg_kwargs(
         client.stop()
 
 
-def test_motor_loop_survives_scan_timeout_error(transport, dummy_cfg, caplog):
+def test_motor_loop_survives_scan_timeout_error_and_parks_motors(
+    transport, dummy_cfg, caplog
+):
     """A scan ``TimeoutError`` (stall, pico unreachable) must not unwind
-    motor_loop — the error rides both channels, the scanner is halted,
-    and the loop proceeds to the next interval. Matches the "keep the
-    loop up across transient faults" contract used by switch_loop and
-    vna_loop."""
+    motor_loop. The error rides both channels, the loop attempts a
+    post-failure ``home()`` to park the motors at (0,0) so a subsequent
+    power loss doesn't leave the rig in a random position, and the loop
+    stays up for the next retry. ``scan`` itself halts the motors in
+    its own ``finally`` block, so motor_loop does not double-halt."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
-        halt_calls = []
+        home_calls = []
 
         def raising_scan(**kwargs):
             client.stop_client.set()
             raise TimeoutError("motor stalled for 30.0s without progress")
 
-        def recording_halt():
-            halt_calls.append(True)
+        def recording_home():
+            home_calls.append(True)
 
         _arm_status_reader(client)
         with (
@@ -1306,20 +1309,26 @@ def test_motor_loop_survives_scan_timeout_error(transport, dummy_cfg, caplog):
                 client.motor_scanner, "scan", side_effect=raising_scan
             ),
             patch.object(
-                client.motor_scanner, "halt", side_effect=recording_halt
+                client.motor_scanner, "home", side_effect=recording_home
             ),
         ):
-            caplog.set_level("ERROR")
+            caplog.set_level("INFO")
             client.motor_loop()  # must return, not raise
 
-        assert halt_calls == [True], (
-            "motor_loop must halt the scanner after a scan exception"
+        assert home_calls == [True], (
+            "motor_loop must attempt to park motors at home after scan "
+            "failure so a later power loss doesn't strand the rig at an "
+            "arbitrary grid point"
         )
         assert any(
             "Motor scan aborted" in r.getMessage()
             and "TimeoutError" in r.getMessage()
-            and "halting motors" in r.getMessage()
             and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+        assert any(
+            "Motors parked at home after scan failure" in r.getMessage()
+            and r.levelname == "INFO"
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
@@ -1332,25 +1341,36 @@ def test_motor_loop_survives_scan_timeout_error(transport, dummy_cfg, caplog):
 
 def test_motor_loop_survives_scan_runtime_error(transport, dummy_cfg, caplog):
     """Sibling of the TimeoutError test. A firmware RuntimeError from
-    the scan must log at ERROR and the loop must stay up."""
+    the scan must log at ERROR, park via ``home()``, and keep the loop
+    up."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
+        home_calls = []
 
         def raising_scan(**kwargs):
             client.stop_client.set()
             raise RuntimeError("fw boom")
 
+        def recording_home():
+            home_calls.append(True)
+
         _arm_status_reader(client)
-        with patch.object(
-            client.motor_scanner, "scan", side_effect=raising_scan
+        with (
+            patch.object(
+                client.motor_scanner, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_scanner, "home", side_effect=recording_home
+            ),
         ):
             caplog.set_level("ERROR")
             client.motor_loop()
 
+        assert home_calls == [True]
         assert any(
             "Motor scan aborted" in r.getMessage()
             and "RuntimeError" in r.getMessage()
@@ -1362,6 +1382,206 @@ def test_motor_loop_survives_scan_runtime_error(transport, dummy_cfg, caplog):
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.ERROR
         assert "Motor scan aborted" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_logs_error_when_post_failure_home_also_fails(
+    transport, dummy_cfg, caplog
+):
+    """If the post-failure ``home()`` also raises (pico still
+    unreachable, mechanical stall persists), motor_loop logs a second
+    ERROR on both channels so the operator knows motors are in an
+    unknown position — we've done what we can from Python, operator
+    intervention is required. The loop still stays up for the next
+    retry."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise TimeoutError("stall")
+
+        def raising_home():
+            raise TimeoutError("home stalled too")
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_scanner, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_scanner, "home", side_effect=raising_home
+            ),
+        ):
+            caplog.set_level("ERROR")
+            client.motor_loop()
+
+        # Both errors are logged — the original scan abort *and* the
+        # park-failure diagnosis.
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any(
+            "Motor scan aborted" in m and "TimeoutError" in m for m in msgs
+        ), msgs
+        assert any(
+            "Post-failure home() also failed" in m
+            and "home stalled too" in m
+            and "motors in unknown position" in m
+            for m in msgs
+        ), msgs
+
+        # Both rode the status stream so the ground observer sees them.
+        level1, status1 = _status_reader(client).read(timeout=1)
+        level2, status2 = _status_reader(client).read(timeout=1)
+        assert level1 == logging.ERROR
+        assert level2 == logging.ERROR
+        statuses = [status1, status2]
+        assert any("Motor scan aborted" in s for s in statuses)
+        assert any("Post-failure home() also failed" in s for s in statuses)
+    finally:
+        client.stop()
+
+
+def test_motor_loop_uses_failure_retry_interval_after_failure(
+    transport, dummy_cfg
+):
+    """After a failed scan, motor_loop waits ``motor_failure_retry_s``
+    (fast retry) instead of the full ``motor_interval``. Transient
+    faults recover quickly; without the short retry the rig could be
+    stuck at an arbitrary grid point for a full hour."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_failure_retry_s"] = 5
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        motor_waits = []
+
+        def recording_wait(timeout):
+            # Heartbeat thread calls stop_client.wait(1.0); only
+            # motor_loop's post-iteration wait has a non-1.0 timeout in
+            # this test. Pass heartbeat ticks through unmodified.
+            if timeout == 1.0:
+                return client.stop_client.is_set()
+            motor_waits.append(timeout)
+            client.stop_client.set()
+            return True
+
+        with (
+            patch.object(
+                client.motor_scanner,
+                "scan",
+                side_effect=TimeoutError("stall"),
+            ),
+            patch.object(client.motor_scanner, "home"),
+            patch.object(
+                client.stop_client, "wait", side_effect=recording_wait
+            ),
+        ):
+            client.motor_loop()
+
+        assert motor_waits == [5], (
+            f"expected one post-failure wait of motor_failure_retry_s=5s, "
+            f"got {motor_waits}"
+        )
+    finally:
+        client.stop()
+
+
+def test_motor_loop_uses_motor_interval_after_successful_scan(
+    transport, dummy_cfg
+):
+    """After a *successful* scan, the cadence must return to
+    ``motor_interval`` — the short retry only applies while we're
+    recovering from a failure. Guards against a bug where
+    ``last_failed`` never resets."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_failure_retry_s"] = 5
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        motor_waits = []
+
+        def recording_wait(timeout):
+            if timeout == 1.0:
+                return client.stop_client.is_set()
+            motor_waits.append(timeout)
+            client.stop_client.set()
+            return True
+
+        def successful_scan(**kwargs):
+            pass  # no-op: scan completed normally
+
+        with (
+            patch.object(
+                client.motor_scanner, "scan", side_effect=successful_scan
+            ),
+            patch.object(
+                client.stop_client, "wait", side_effect=recording_wait
+            ),
+        ):
+            client.motor_loop()
+
+        assert motor_waits == [3600]
+    finally:
+        client.stop()
+
+
+def test_motor_loop_invalid_failure_retry_s_falls_back_to_interval(
+    transport, dummy_cfg, caplog
+):
+    """An invalid ``motor_failure_retry_s`` is a config bug; motor_loop
+    must warn loudly and fall back to ``motor_interval`` for retries,
+    rather than falling into a tight no-sleep retry loop. Chosen over
+    "refuse to run" because the steady-state scan cadence is still
+    useful even without the fast-recovery tweak."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 42
+    cfg["motor_failure_retry_s"] = 0  # invalid
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        motor_waits = []
+
+        def recording_wait(timeout):
+            if timeout == 1.0:
+                return client.stop_client.is_set()
+            motor_waits.append(timeout)
+            client.stop_client.set()
+            return True
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_scanner,
+                "scan",
+                side_effect=TimeoutError("stall"),
+            ),
+            patch.object(client.motor_scanner, "home"),
+            patch.object(
+                client.stop_client, "wait", side_effect=recording_wait
+            ),
+        ):
+            caplog.set_level("WARNING")
+            client.motor_loop()
+
+        assert motor_waits == [42], (
+            f"expected fallback wait of motor_interval=42s, got {motor_waits}"
+        )
+        assert any(
+            "Invalid motor_failure_retry_s" in r.getMessage()
+            and "falling back to motor_interval" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
     finally:
         client.stop()
 

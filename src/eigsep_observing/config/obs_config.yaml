@@ -33,6 +33,9 @@ vna_save_dir: "/media/eigsep/T7/data/s11_data"
 # panda_observe boot. Opt in explicitly when the rig is ready to move.
 use_motor: false
 motor_interval: 3600  # seconds between scans
+motor_failure_retry_s: 60  # shorter wait after a failed scan so
+                           # transient faults recover faster than the
+                           # full motor_interval cadence
 motor_scan: {}  # kwargs forwarded to MotorScanner.scan; {} → scan defaults
 # motor_scanner_kwargs:  # optional MotorScanner ctor overrides
 #   poll_interval_s: 0.1

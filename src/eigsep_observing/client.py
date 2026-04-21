@@ -382,9 +382,7 @@ class PandaClient:
             )
             return
         try:
-            self.motor_scanner = MotorScanner(
-                self.transport, **kwargs
-            )
+            self.motor_scanner = MotorScanner(self.transport, **kwargs)
         except TypeError as err:
             self.logger.warning(
                 "Invalid motor_scanner_kwargs for MotorScanner: "
@@ -598,10 +596,27 @@ class PandaClient:
         deliberately lets switching/VNA continue uninterrupted while
         the motors move.
 
-        Scan errors (``TimeoutError``/``RuntimeError``) are logged at
-        ERROR on both channels, the motors are halted, and the loop
-        waits for the next interval — a stalled or misconfigured motor
-        must not wedge observing.
+        Failure handling. ``MotorScanner.scan`` already halts the
+        motors in its own ``finally`` block, so by the time a
+        ``TimeoutError``/``RuntimeError`` reaches us the motors are
+        stationary — but they may be stuck at an arbitrary grid point
+        rather than at home. The failure path:
+
+        1. Log the abort at ERROR on both channels.
+        2. Attempt an explicit ``home()`` to park the motors at
+           ``(0, 0)`` so a subsequent power loss (batteries dying
+           before the next scan) doesn't leave the rig in a random
+           position that's annoying to lower. If ``home()`` also
+           fails (pico still unreachable, mechanical stall persists),
+           log that at ERROR too — we've done what we can from
+           Python, operator intervention is required.
+        3. Wait ``motor_failure_retry_s`` (default 60s) before the
+           next attempt rather than the full ``motor_interval``.
+           Transient pico-comms glitches recover quickly; persistent
+           faults keep complaining loudly but at a bounded cadence.
+
+        After a successful scan, the cadence returns to
+        ``motor_interval``.
 
         Follow-ups (deferred; separate top-level scripts when we know
         what we want):
@@ -625,6 +640,17 @@ class PandaClient:
                 "not run."
             )
             return
+        failure_retry_s = self.cfg.get("motor_failure_retry_s", 60)
+        if (
+            not isinstance(failure_retry_s, (int, float))
+            or failure_retry_s <= 0
+        ):
+            self._warn_with_status(
+                f"Invalid motor_failure_retry_s ({failure_retry_s!r}); "
+                f"falling back to motor_interval ({interval}s) for "
+                "post-failure retries."
+            )
+            failure_retry_s = interval
         scan_kwargs = self.cfg.get("motor_scan")
         if scan_kwargs is None:
             scan_kwargs = {}
@@ -646,16 +672,29 @@ class PandaClient:
                 f"({type(exc).__name__}: {exc}); scans will retry."
             )
 
+        last_failed = False
         while not self.stop_client.is_set():
             try:
                 self.motor_scanner.scan(
                     stop_event=self.stop_client, **scan_kwargs
                 )
+                last_failed = False
             except (TimeoutError, RuntimeError) as exc:
+                last_failed = True
                 self._error_with_status(
-                    f"Motor scan aborted "
-                    f"({type(exc).__name__}: {exc}); halting motors."
+                    f"Motor scan aborted ({type(exc).__name__}: {exc})."
                 )
-                self.motor_scanner.halt()
-            if self.stop_client.wait(interval):
+                try:
+                    self.motor_scanner.home()
+                    self.logger.info(
+                        "Motors parked at home after scan failure."
+                    )
+                except (TimeoutError, RuntimeError) as park_exc:
+                    self._error_with_status(
+                        f"Post-failure home() also failed "
+                        f"({type(park_exc).__name__}: {park_exc}); "
+                        "motors in unknown position until next retry."
+                    )
+            wait_s = failure_retry_s if last_failed else interval
+            if self.stop_client.wait(wait_s):
                 return
