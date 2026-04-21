@@ -93,11 +93,11 @@ class PandaClient:
         # or switch_session. Side benefit: forces PicoManager to
         # publish ``sw_state_name`` immediately so downstream readers
         # have a truth to read from the first iteration. Best-effort —
-        # if the rfswitch pico is unreachable at boot, warn loudly and
+        # if the rfswitch pico is unreachable at boot, log loudly and
         # continue; the Python client can't enforce the hardware
         # default on its own.
         if not self._safe_switch("RFANT"):
-            self._warn_with_status(
+            self._error_with_status(
                 "Boot-time RFANT initialization failed; rfswitch state "
                 "is unknown."
             )
@@ -115,20 +115,33 @@ class PandaClient:
         )
         self.heartbeat_thd.start()
 
-    def _warn_with_status(self, msg):
-        """Warn locally and push to the Redis status stream.
+    def _log_with_status(self, msg, level):
+        """Log locally at ``level`` and push to the Redis status stream.
 
         Panda-side ``self.logger`` writes only to a local
         ``RotatingFileHandler``; the ground observer sees the message
         only if it's also pushed through ``self.status``, which
-        ``EigObserver.status_logger`` re-emits ground-side. Use this
-        helper for operator-visible events (contract violations,
-        config errors, hardware fault detection) — not for
-        steady-state DEBUG/INFO telemetry, because the status stream
-        is bounded to the last ``StatusWriter.maxlen`` entries.
+        ``EigObserver.status_logger`` re-emits ground-side. Use the
+        ``_warn_with_status`` / ``_error_with_status`` wrappers for
+        operator-visible events (contract violations, config errors,
+        hardware fault detection) — not for steady-state DEBUG/INFO
+        telemetry, because the status stream is bounded to the last
+        ``StatusWriter.maxlen`` entries.
         """
-        self.logger.warning(msg)
-        self.status.send(msg, level=logging.WARNING)
+        self.logger.log(level, msg)
+        self.status.send(msg, level=level)
+
+    def _warn_with_status(self, msg):
+        self._log_with_status(msg, logging.WARNING)
+
+    def _error_with_status(self, msg):
+        """ERROR-level sibling of ``_warn_with_status``.
+
+        Per CLAUDE.md, safety nets around non-corr processing that
+        swallow an exception or recover from a broken invariant must
+        log at ERROR so the upstream fault is visible and actionable.
+        """
+        self._log_with_status(msg, logging.ERROR)
 
     def _get_cfg(self):
         """
@@ -515,7 +528,7 @@ class PandaClient:
                     # "known-good state" invariant and RFANT is the
                     # physically safe fallback. The next switch_loop
                     # iteration will re-assert the configured mode.
-                    self._warn_with_status(
+                    self._error_with_status(
                         f"VNA cycle aborted "
                         f"({type(exc).__name__}: {exc}); "
                         "recovering rfswitch to RFANT."

@@ -1102,16 +1102,17 @@ def test_boot_drives_rfswitch_to_rfant(client):
     _wait_for_published_mode(client, "RFANT")
 
 
-def test_boot_warns_when_rfant_initialization_fails(
+def test_boot_errors_when_rfant_initialization_fails(
     transport, dummy_cfg, caplog
 ):
     """If the boot-time RFANT switch reports failure (rfswitch
     unreachable, PicoManager error), the operator must see a loud
-    warning so the broken boot invariant is visible. Construction
-    still succeeds — the Python client cannot enforce the hardware
-    default on its own, so we log and continue rather than refusing
-    to start."""
-    caplog.set_level("WARNING")
+    ERROR so the broken boot invariant is visible and actionable.
+    Per CLAUDE.md, safety nets around non-corr processing must log
+    at ERROR, not WARNING. Construction still succeeds — the Python
+    client cannot enforce the hardware default on its own, so we log
+    and continue rather than refusing to start."""
+    caplog.set_level("ERROR")
     with patch.object(
         eigsep_observing.PandaClient, "_safe_switch", return_value=False
     ):
@@ -1119,7 +1120,7 @@ def test_boot_warns_when_rfant_initialization_fails(
     try:
         assert any(
             "Boot-time RFANT initialization failed" in r.getMessage()
-            and r.levelname == "WARNING"
+            and r.levelname == "ERROR"
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
     finally:
@@ -1167,24 +1168,26 @@ def test_vna_loop_recovers_to_rfant_on_measurement_exception(
             patch.object(client, "_safe_switch", side_effect=recording_safe),
             patch.object(client, "measure_s11", side_effect=raising_measure),
         ):
-            caplog.set_level("WARNING")
+            caplog.set_level("ERROR")
             client.vna_loop()  # must return, not raise
 
         assert switch_calls[-1] == "RFANT", (
             f"expected recovery to RFANT (not prev_mode RFNOFF); "
             f"got sequence {switch_calls}"
         )
+        # Per CLAUDE.md, this exception-swallowing safety net must log
+        # at ERROR (not WARNING) so the upstream fault is actionable.
         assert any(
             "VNA cycle aborted" in r.getMessage()
             and "RuntimeError" in r.getMessage()
             and "simulated mid-sweep failure" in r.getMessage()
             and "recovering rfswitch to RFANT" in r.getMessage()
-            and r.levelname == "WARNING"
+            and r.levelname == "ERROR"
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
         level, status = _status_reader(client).read(timeout=1)
-        assert level == logging.WARNING
+        assert level == logging.ERROR
         assert "VNA cycle aborted" in status
     finally:
         client.stop()
