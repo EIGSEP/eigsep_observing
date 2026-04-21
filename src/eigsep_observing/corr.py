@@ -69,7 +69,7 @@ class CorrConfigStore:
         ----------
         config : dict
         """
-        self.transport._upload_dict(config, CORR_CONFIG_KEY)
+        self.transport.upload_dict(config, CORR_CONFIG_KEY)
 
     def get(self):
         """
@@ -96,7 +96,7 @@ class CorrConfigStore:
         runtime failure.
         """
         stamped = {**header, "header_upload_unix": time.time()}
-        self.transport._upload_dict(stamped, CORR_HEADER_KEY)
+        self.transport.upload_dict(stamped, CORR_HEADER_KEY)
 
     def get_header(self):
         """

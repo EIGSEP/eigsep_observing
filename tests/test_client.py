@@ -56,6 +56,22 @@ def _status_reader(client):
     return StatusReader(client.transport)
 
 
+def _arm_status_reader(client):
+    """Anchor the test-side status reader at the current stream tip.
+
+    ``DummyPandaClient`` construction starts a real ``PicoManager``
+    which publishes a ``PicoManager started`` entry onto the shared
+    ``stream:status``. Production consumers subscribe at the current
+    tip and read only forward; tests need to mirror that so
+    setup-noise isn't observed as test-subject output. Call this
+    *after* ``DummyPandaClient(...)`` and *before* the action under
+    test; subsequent ``_status_reader(client).read(...)`` calls will
+    then see only entries produced by the action.
+    """
+    tip = client.transport._get_last_read_id(STATUS_STREAM)
+    client.transport._set_last_read_id(STATUS_STREAM, tip)
+
+
 def _heartbeat_reader(client):
     return HeartbeatReader(client.transport)
 
@@ -146,13 +162,13 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     (local + status stream) so the ground observer sees the failure."""
     caplog.set_level("WARNING")
     assert client.vna is None  # dummy_config has use_vna: false
+    _arm_status_reader(client)
     t0 = time.monotonic()
     client.vna_loop()
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
     assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
 
-    client.transport._set_last_read_id(STATUS_STREAM, "0-0")
     level, status = _status_reader(client).read(timeout=1)
     assert level == logging.WARNING
     assert "VNA not initialized" in status
@@ -308,6 +324,7 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
                 client.stop_client.set()
             return result
 
+        _arm_status_reader(client)
         with patch.object(
             client, "_read_switch_mode_from_redis", return_value=None
         ):
@@ -324,7 +341,6 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
             for r in caplog.records
         )
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "rfswitch state unavailable in Redis" in status
@@ -360,6 +376,7 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
                 return None
             return original_switch_to(state)
 
+        _arm_status_reader(client)
         with patch.object(
             client, "_switch_to", side_effect=failing_switch_back
         ):
@@ -375,7 +392,6 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
             f"got records: {[r.getMessage() for r in caplog.records]}"
         )
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch back to RFNOFF" in status
@@ -398,6 +414,7 @@ def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
             client.stop_client.set()
             return None
 
+        _arm_status_reader(client)
         with patch.object(client, "_switch_to", side_effect=failing_switch):
             caplog.set_level("WARNING")
             client.switch_loop()
@@ -408,7 +425,6 @@ def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
             for r in caplog.records
         ), [r.getMessage() for r in caplog.records]
 
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Failed to switch to RFNOFF" in status
@@ -757,6 +773,7 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
+        _arm_status_reader(client)
         violations = ["missing key 'npoints'", "key 'mode': expected str"]
         with patch(
             "eigsep_observing.client._validate_vna_s11_header",
@@ -777,11 +794,9 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
         assert "key 'mode': expected str" in warning_msgs[0]
         assert "mode='ant'" in warning_msgs[0]
 
-        # Ground-visible status stream. Reset position so the single
-        # test process can read the entry the producer just pushed
-        # (same rationale as the vna-reader rewind in the producer
-        # contract test).
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
+        # Ground-visible status stream. Reader was anchored at the tip
+        # pre-action so it now sees only the entry the producer just
+        # pushed.
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert status == warning_msgs[0]
@@ -798,8 +813,8 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
+        _arm_status_reader(client)
         client.measure_s11("ant")
-        client.transport._set_last_read_id(STATUS_STREAM, "0-0")
         level, status = _status_reader(client).read(timeout=0.2)
     finally:
         client.stop()
