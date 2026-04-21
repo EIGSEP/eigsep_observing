@@ -7,8 +7,6 @@ from unittest.mock import Mock, patch
 from cmt_vna.testing import DummyVNA
 from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
 from eigsep_redis.testing import DummyTransport
-from picohost.testing import DummyPicoRFSwitch
-
 from eigsep_observing import EigObserver
 from eigsep_observing.corr import CorrConfigStore
 from eigsep_observing.testing.utils import generate_data
@@ -567,9 +565,13 @@ def test_logger_attribute(observer_both):
 
 @pytest.fixture
 def dummy_vna():
-    """DummyVNA instance for generating realistic VNA test data."""
-    switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
-    vna = DummyVNA(switch_fn=switch.switch)
+    """DummyVNA instance for generating realistic VNA test data.
+
+    ``switch_fn`` returns ``True`` to mirror production's
+    :meth:`PandaClient._switch_to` — cmt_vna 1.2 raises on a falsy
+    return. The switch network isn't under test here.
+    """
+    vna = DummyVNA(switch_fn=lambda state: True)
     vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
     return vna
 

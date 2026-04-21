@@ -6,7 +6,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from cmt_vna.testing import DummyVNA
-from picohost.testing import DummyPicoRFSwitch
 
 from eigsep_observing import corr as corr_mod
 from eigsep_observing.corr import CorrConfigStore, CorrReader, CorrWriter
@@ -381,8 +380,9 @@ def test_metadata_stream_drain_ignores_vna_stream(obs_server, obs_client):
     obs_client.metadata.add("acc_cnt", 7)
     obs_client.metadata.add("temp", 25.5)
 
-    switch = DummyPicoRFSwitch(port="/dev/null", name="switch")
-    vna = DummyVNA(switch_fn=switch.switch)
+    # switch_fn returns True to mirror production's
+    # PandaClient._switch_to — cmt_vna 1.2 raises on a falsy return.
+    vna = DummyVNA(switch_fn=lambda state: True)
     vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
     s11 = vna.measure_ant(measure_noise=True, measure_load=True)
     header = dict(vna.header)
