@@ -125,8 +125,31 @@ class MotorScanner:
                 )
             time.sleep(self.poll_interval_s)
 
+    def _await_initial_status(self, timeout=5.0):
+        """Block until the manager's reader thread has published at
+        least one motor status to Redis.
+
+        The firmware-side ``wait_for_start`` handshake inside every
+        move helper calls ``is_moving`` → ``_require_status``, which
+        raises :class:`RuntimeError` if ``last_status`` is still empty.
+        A scan that fires immediately after ``PicoManager`` boot can
+        race the reader thread; this method gives the manager a bounded
+        grace window to pump the first status packet before we start
+        issuing commands.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._motor_status() is not None:
+                return
+            time.sleep(0.05)
+        raise TimeoutError(
+            f"No motor status within {timeout:.1f}s — "
+            "is PicoManager running and the motor pico registered?"
+        )
+
     def home(self):
         """Drive both axes to step position 0 and wait for completion."""
+        self._await_initial_status()
         self._proxy.send_command("az_target_steps", target_steps=0)
         self._proxy.send_command("el_target_steps", target_steps=0)
         self._wait_for_stop()
