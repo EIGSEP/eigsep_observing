@@ -28,13 +28,6 @@ with open(default_cfg_file, "r") as f:
 # that a pico firmware change flows through automatically.
 VALID_SWITCH_STATES = set(PicoRFSwitch.path_str)
 
-# Inverse of PicoRFSwitch.path_str: {sw_state_int: mode_name}. Used to
-# map the rfswitch's published `sw_state` back to a mode string when
-# reading the current switch state from PicoManager's Redis snapshot.
-_SW_INT_TO_MODE = {
-    PicoRFSwitch.rbin(v): k for k, v in PicoRFSwitch.path_str.items()
-}
-
 
 class PandaClient:
     """
@@ -175,22 +168,22 @@ class PandaClient:
     def _read_switch_mode_from_redis(self):
         """Return the RF switch mode string PicoManager last published.
 
-        Reads ``sw_state`` from the rfswitch metadata snapshot and maps
-        it back to a mode name via :data:`_SW_INT_TO_MODE`. Returns
-        ``None`` if the rfswitch hasn't published yet or the published
-        ``sw_state`` doesn't match a known mode — the caller decides
-        the fallback. PicoManager's published state is the single
-        source of truth; the panda holds no shadow that could drift
-        across a restart on either side.
+        Reads ``sw_state_name`` from the rfswitch metadata snapshot —
+        picohost v3's rfswitch redis handler publishes the
+        human-readable name alongside the raw ``sw_state`` int, so no
+        reverse-mapping is needed here. Returns ``None`` if the
+        rfswitch hasn't published yet or if the firmware could not map
+        the raw state to a known mode (mid-switch, manual override),
+        in which case ``sw_state_name`` is ``None``. The caller
+        decides the fallback. PicoManager's published state is the
+        single source of truth; the panda holds no shadow that could
+        drift across a restart on either side.
         """
         try:
             snap = self.metadata_snapshot.get("rfswitch")
         except KeyError:
             return None
-        sw_state = snap.get("sw_state")
-        if sw_state is None:
-            return None
-        return _SW_INT_TO_MODE.get(sw_state)
+        return snap.get("sw_state_name")
 
     @contextmanager
     def switch_session(self):

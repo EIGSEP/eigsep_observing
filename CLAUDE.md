@@ -202,10 +202,14 @@ normal operation.
 
 **Two paths that bypass `_avg_sensor_values`:**
 
-- `_avg_rfswitch_metadata` returns the bare `sw_state` int or `"UNKNOWN"`
-  (not a dict). See the `RFSWITCH_TRANSITION_WINDOW_S` block in `io.py` for the
-  additional forward-window flagging that fires on consecutive-sample switch
-  state changes.
+- `_avg_rfswitch_metadata` returns the bare switch-state *name* string
+  (`"RFANT"`, `"VNAO"`, ...) or `"UNKNOWN"` (not a dict). It reads
+  `sw_state_name` from the raw samples — published by picohost v3's
+  rfswitch redis handler alongside the raw `sw_state` int — so the
+  consumer does no int-to-name reverse mapping. See the
+  `RFSWITCH_TRANSITION_WINDOW_S` block in `io.py` for the additional
+  forward-window flagging that fires on consecutive-sample switch state
+  changes.
 - `_avg_temp_metadata` first averages the top-level (non-prefixed) fields via
   `_avg_sensor_values`, then splits the `LNA_*`/`LOAD_*` channel keys into
   `tempctrl_lna`/`tempctrl_load` sub-dicts and runs `_avg_sensor_values` on
