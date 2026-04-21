@@ -24,7 +24,7 @@ from eigsep_redis import (
     StatusWriter,
 )
 from eigsep_redis.keys import METADATA_HASH
-from eigsep_redis.testing import DummyEigsepRedis, DummyTransport
+from eigsep_redis.testing import DummyTransport
 
 
 class _BusBundle:
@@ -506,11 +506,10 @@ def test_bus_classes_have_no_cross_bus_methods():
 
     Each class should expose only the surface for its own bus. The
     forbidden list is deliberately broad — it catches the original
-    god-class methods (add_metadata, add_corr_data, read_corr_data,
-    …) reappearing on any of these smaller classes.
+    god-class methods (add_corr_data, read_corr_data, …) reappearing
+    on any of these smaller classes.
     """
     cross_bus_methods = (
-        "add_metadata",
         "get_live_metadata",
         "get_metadata",
         "add_corr_data",
@@ -641,21 +640,6 @@ def test_consumer_role_surfaces_are_structural():
     # Production ``EigsepFpga`` class (not the dummy) obviously has
     # the same guarantee — reference it to keep the import meaningful.
     assert EigsepFpga is not None
-
-
-def test_add_metadata_shim_emits_deprecation_warning():
-    """The picohost shim must be loud — it should disappear at the monorepo cutover.
-
-    Constructs ``DummyEigsepRedis`` directly because the shim lives
-    on that class, not on the per-bus writer surfaces. In-tree
-    consumers route metadata writes through ``MetadataWriter.add``.
-    """
-    shim = DummyEigsepRedis()
-    with pytest.warns(DeprecationWarning, match="redis.metadata.add"):
-        shim.add_metadata("via_shim", 42)
-    # The shim still writes correctly in the meantime.
-    snapshot = MetadataSnapshotReader(shim.transport)
-    assert snapshot.get("via_shim") == 42
 
 
 def test_int32_redis_round_trip(obs_server, obs_client):

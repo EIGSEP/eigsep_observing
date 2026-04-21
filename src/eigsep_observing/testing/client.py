@@ -2,9 +2,11 @@ from functools import partial
 
 import yaml
 from cmt_vna.testing import DummyVNA
-from eigsep_redis.testing import DummyEigsepRedis, DummyTransport
+from eigsep_redis import HeartbeatWriter, MetadataWriter
+from eigsep_redis.testing import DummyTransport
 import picohost.testing
-from picohost.manager import PicoManager
+from picohost.keys import pico_heartbeat_name
+from picohost.manager import HEARTBEAT_TTL, PicoManager
 
 from .. import PandaClient
 
@@ -76,17 +78,23 @@ class DummyPandaClient(PandaClient):
     def _start_dummy_manager(self, transport):
         """Create and start a PicoManager with dummy devices.
 
-        Wraps ``transport`` in a :class:`DummyEigsepRedis` shim so the
-        picohost ``redis_handler`` (which calls ``add_metadata``) sees
-        the compatibility surface — see ``EigsepRedis.add_metadata``.
-        The shim shares the same underlying ``Transport`` as the
-        PandaClient so producers and consumers talk to the same Redis.
+        The manager and each device share ``transport`` so producers
+        (picohost) and consumers (PandaClient) talk to the same Redis.
+        Each device gets its own :class:`MetadataWriter` — the new
+        picohost device API (picohost 1.0.0+) routes status publication
+        through ``metadata_writer`` instead of the retired ``eig_redis``
+        composition shim. Per-device :class:`HeartbeatWriter` entries
+        mirror ``PicoManager._register_devices`` so ``PicoProxy``
+        availability checks succeed immediately after start.
         """
-        shim = DummyEigsepRedis(transport=transport)
-        mgr = PicoManager(shim)
+        mgr = PicoManager(transport)
+        writer = MetadataWriter(transport)
         for name, cls in DUMMY_PICO_CLASSES.items():
-            pico = cls("/dev/dummy", eig_redis=shim, name=name)
+            pico = cls("/dev/dummy", metadata_writer=writer, name=name)
             mgr.picos[name] = pico
+            hb = HeartbeatWriter(transport, name=pico_heartbeat_name(name))
+            hb.set(ex=HEARTBEAT_TTL, alive=True)
+            mgr._heartbeats[name] = hb
             transport.r.sadd("picos", name)
         mgr.start()
         return mgr

@@ -82,7 +82,7 @@ class PandaClient:
         # real serial link and publishes its device list into the
         # "picos" Redis set; we just log it for startup observability.
         self.sw_proxy = PicoProxy(
-            "rfswitch", self.transport.r, source="panda_client"
+            "rfswitch", self.transport, source="panda_client"
         )
         self.switch_lock = threading.Lock()
         available = self.transport.r.smembers("picos")
@@ -138,7 +138,7 @@ class PandaClient:
         except ValueError:
             return None  # no config in Redis
         upload_time = cfg["upload_time"]
-        # upload_time is Unix seconds (Transport._upload_dict); render
+        # upload_time is Unix seconds (Transport.upload_dict); render
         # for the operator log without changing the on-the-wire format.
         upload_str = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(upload_time)

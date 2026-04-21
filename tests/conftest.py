@@ -201,11 +201,11 @@ CORR_METADATA = {
 }
 
 # VNA_METADATA mirrors the flat ``{key: value}`` dict returned by
-# ``EigsepRedis.get_live_metadata()`` — the snapshot path used by the VNA
+# ``MetadataSnapshotReader.get()`` — the snapshot path used by the VNA
 # code in ``PandaClient.measure_s11``. Values are whatever the producer
-# last pushed via ``add_metadata``:
+# last pushed via ``MetadataWriter.add``:
 #   - picohost pushes the raw sensor dict for each sensor key
-#   - ``add_metadata`` auto-appends a ``{key}_ts`` Unix-seconds float
+#   - ``MetadataWriter.add`` auto-appends a ``{key}_ts`` Unix-seconds float
 #   - misc. scalars (e.g. ``corr_sync_time``) go in as floats
 # There is NO averaging on this path; unlike CORR_METADATA, values are
 # scalars or nested dicts, never per-sample lists.
