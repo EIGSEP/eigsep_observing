@@ -12,6 +12,7 @@ import threading
 import time
 
 import h5py
+from picohost.base import PicoRFSwitch
 
 from conftest import (
     CORR_METADATA,
@@ -491,6 +492,7 @@ def test_gap_filling():
                     "status": "update",
                     "app_id": 5,
                     "sw_state": 0,
+                    "sw_state_name": "RFANT",
                 }
             ]
         }
@@ -705,19 +707,21 @@ def test_avg_metadata():
             "sensor_name": "rfswitch",
             "status": "update",
             "app_id": 5,
-            "sw_state": 42,
+            "sw_state": 0,
+            "sw_state_name": "RFANT",
         },
         {
             "sensor_name": "rfswitch",
             "status": "update",
             "app_id": 5,
-            "sw_state": 42,
+            "sw_state": 0,
+            "sw_state_name": "RFANT",
         },
     ]
-    assert io.avg_metadata(sw_data) == 42
+    assert io.avg_metadata(sw_data) == "RFANT"
 
     # rfswitch: inconsistent state
-    sw_data[1] = dict(sw_data[1], sw_state=99)
+    sw_data[1] = dict(sw_data[1], sw_state_name="RFNOFF")
     assert io.avg_metadata(sw_data) == "UNKNOWN"
 
     # rfswitch: error status
@@ -1120,6 +1124,7 @@ def test_metadata_new_key_alignment():
                     "status": "update",
                     "app_id": 5,
                     "sw_state": 0,
+                    "sw_state_name": "RFANT",
                 }
             ],
         }
@@ -1161,6 +1166,7 @@ def test_stream_metadata_averaging():
                     "status": "update",
                     "app_id": 5,
                     "sw_state": 0,
+                    "sw_state_name": "RFANT",
                 },
             ],
         }
@@ -1168,8 +1174,8 @@ def test_stream_metadata_averaging():
 
         # IMU values should be averaged (stream: prefix stripped)
         assert f.metadata["imu_el"][0]["yaw"] == pytest.approx(0.2)
-        # rfswitch should return the state directly
-        assert f.metadata["rfswitch"][0] == 0
+        # rfswitch should return the state name directly
+        assert f.metadata["rfswitch"][0] == "RFANT"
 
         # second sample without rfswitch stream — should pad with None
         md2 = {
@@ -1326,14 +1332,15 @@ def test_metadata_end_to_end_round_trip():
             ],
         }
 
-    def _rfswitch_payload(state):
+    def _rfswitch_payload(name):
         return {
             "stream:rfswitch": [
                 {
                     "sensor_name": "rfswitch",
                     "status": "update",
                     "app_id": 5,
-                    "sw_state": state,
+                    "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                    "sw_state_name": name,
                 },
             ],
         }
@@ -1381,13 +1388,13 @@ def test_metadata_end_to_end_round_trip():
                     }
                 )
             if i < 20:
-                md.update(_rfswitch_payload(0))
+                md.update(_rfswitch_payload("RFANT"))
             elif i < 45:
-                md.update(_rfswitch_payload(1))
+                md.update(_rfswitch_payload("RFNOFF"))
             elif i < 50:
                 pass  # no rfswitch → None pad
             else:
-                md.update(_rfswitch_payload(1))
+                md.update(_rfswitch_payload("RFNOFF"))
             f.add_data(i + 1, 0.0, d, metadata=md)
 
         # The active buffer was swapped to standby on the NTIMES-th
@@ -1635,14 +1642,15 @@ def test_avg_metadata_edge_cases():
 
 
 def test_avg_rfswitch_metadata_raises_on_unhashable_state():
-    """Unhashable sw_state (e.g., a list) trips the set() call →
+    """Unhashable sw_state_name (e.g., a list) trips the set() call →
     TypeError. Must propagate to the safety net, not be swallowed."""
     value = [
         {
             "sensor_name": "rfswitch",
             "status": "update",
             "app_id": 5,
-            "sw_state": [1, 2],
+            "sw_state": 0,
+            "sw_state_name": ["RFANT", "RFNOFF"],
         }
     ]
     with pytest.raises(TypeError):
@@ -1658,6 +1666,7 @@ def test_avg_rfswitch_metadata_raises_on_non_dict_entry():
             "status": "update",
             "app_id": 5,
             "sw_state": 0,
+            "sw_state_name": "RFANT",
         },
         "not a dict",
     ]
@@ -1795,7 +1804,8 @@ def test_corr_data_saved_despite_metadata_crash(monkeypatch, caplog):
                     "sensor_name": "rfswitch",
                     "status": "update",
                     "app_id": 5,
-                    "sw_state": 7,
+                    "sw_state": 6,
+                    "sw_state_name": "RFNON",
                 }
             ],
         }
@@ -2786,6 +2796,7 @@ def test_file_writes_all_configured_pairs_with_aligned_axes(
                     "status": "update",
                     "app_id": 5,
                     "sw_state": 0,
+                    "sw_state_name": "RFANT",
                 }
             ],
         }
@@ -3065,16 +3076,17 @@ def test_corr_write_independent_of_hung_vna_write(monkeypatch):
 # ----------------------------------------------------------------------
 
 
-def _make_rfswitch_md(state):
+def _make_rfswitch_md(name):
     """Build a stream:rfswitch metadata dict with a single update
-    reading at the given switch state."""
+    reading at the given switch state name (e.g. ``"RFANT"``)."""
     return {
         "stream:rfswitch": [
             {
                 "sensor_name": "rfswitch",
                 "status": "update",
                 "app_id": 5,
-                "sw_state": state,
+                "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                "sw_state_name": name,
             }
         ]
     }
@@ -3100,21 +3112,21 @@ def test_rfswitch_transition_within_buffer_flags_forward_window(caplog):
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
 
         # Two samples in state 0 (no transition).
-        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
-        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(0))
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
         # Now switch to state 1 — transition. Logged at INFO because
         # a scheduled switch is normal operation, not an anomaly.
         with caplog.at_level(logging.INFO, logger="eigsep_observing.io"):
-            f.add_data(3, 0.0, d, metadata=_make_rfswitch_md(1))
+            f.add_data(3, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
         # Continue feeding state 1 samples — need enough to outlast
         # the 5-sample flagging window AND have a couple of clean
         # samples after. Total: 9 samples in a 10-slot buffer.
         for i in range(4, 10):
-            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(1))
+            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
 
-        # The first two samples (state 0) are unchanged.
-        assert f.metadata["rfswitch"][0] == 0
-        assert f.metadata["rfswitch"][1] == 0
+        # The first two samples (state RFANT) are unchanged.
+        assert f.metadata["rfswitch"][0] == "RFANT"
+        assert f.metadata["rfswitch"][1] == "RFANT"
         # Sample 3 (index 2) is the transition trigger — flagged.
         # Window = ceil(0.5 / 0.1) = 5, so indices 2, 3, 4, 5, 6 are
         # flagged UNKNOWN.
@@ -3123,13 +3135,14 @@ def test_rfswitch_transition_within_buffer_flags_forward_window(caplog):
                 f"index {i} expected UNKNOWN, got {f.metadata['rfswitch'][i]!r}"
             )
         # Indices 7 and 8 are back to the new state.
-        assert f.metadata["rfswitch"][7] == 1
-        assert f.metadata["rfswitch"][8] == 1
+        assert f.metadata["rfswitch"][7] == "RFNOFF"
+        assert f.metadata["rfswitch"][8] == "RFNOFF"
 
         # INFO log was emitted.
         infos = [r for r in caplog.records if r.levelno == logging.INFO]
         assert any(
-            "transition detected" in r.getMessage() and "0→1" in r.getMessage()
+            "transition detected" in r.getMessage()
+            and "RFANT→RFNOFF" in r.getMessage()
             for r in infos
         ), f"expected transition INFO, got: {[r.getMessage() for r in infos]}"
 
@@ -3147,11 +3160,11 @@ def test_rfswitch_no_transition_no_flagging(caplog):
 
         with caplog.at_level(logging.INFO, logger="eigsep_observing.io"):
             for i in range(5):
-                f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md(3))
+                f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md("VNAS"))
 
         # All five samples carry the raw state, no UNKNOWN.
         for i in range(5):
-            assert f.metadata["rfswitch"][i] == 3
+            assert f.metadata["rfswitch"][i] == "VNAS"
 
         # No transition log at any level.
         assert not any(
@@ -3182,21 +3195,21 @@ def test_rfswitch_transition_at_buffer_boundary_flags_only_new_buffer():
         # Fill the first buffer entirely with state 0. The 3rd
         # sample triggers corr_write → swap → reset.
         for i in range(ntimes):
-            f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md(0))
+            f.add_data(i + 1, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
         f._write_queue.join()
 
-        # The first file is on disk with all state 0.
+        # The first file is on disk with all state RFANT.
         files_before = sorted(glob.glob(str(save_dir / "*.h5")))
         assert len(files_before) == 1
         _, _, first_meta_before = io.read_hdf5(files_before[0])
         for v in first_meta_before["rfswitch"]:
-            assert v == 0
+            assert v == "RFANT"
 
         # Now add the FIRST sample of the second buffer with state 1.
         # _prev_rfswitch_state survived the buffer swap, so this
         # triggers a cross-boundary transition detection. Window=1
         # at this int_time, so only this one sample is flagged.
-        f.add_data(ntimes + 1, 0.0, d, metadata=_make_rfswitch_md(1))
+        f.add_data(ntimes + 1, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
 
         # Active buffer's first sample is UNKNOWN (forward flag).
         assert f.metadata["rfswitch"][0] == "UNKNOWN"
@@ -3234,20 +3247,20 @@ def test_rfswitch_transition_window_scales_with_integration_time(caplog):
             d = {"0": np.full(spec_len, 1, dtype=dtype)}
 
             # Anchor with state 0, then transition to state 1.
-            f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+            f.add_data(1, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
             for i in range(2, 2 + expected_n + 2):
-                f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(1))
+                f.add_data(i, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
 
-            # Index 0 is state 0 (anchor).
-            assert f.metadata["rfswitch"][0] == 0
+            # Index 0 is state RFANT (anchor).
+            assert f.metadata["rfswitch"][0] == "RFANT"
             # Indices 1..expected_n are flagged UNKNOWN.
             for i in range(1, 1 + expected_n):
                 assert f.metadata["rfswitch"][i] == "UNKNOWN", (
                     f"int_time={int_time}: index {i} expected UNKNOWN, "
                     f"got {f.metadata['rfswitch'][i]!r}"
                 )
-            # The next sample (after the window) is back to state 1.
-            assert f.metadata["rfswitch"][1 + expected_n] == 1, (
+            # The next sample (after the window) is back to state RFNOFF.
+            assert f.metadata["rfswitch"][1 + expected_n] == "RFNOFF", (
                 f"int_time={int_time}: window did not end at "
                 f"expected index {1 + expected_n}"
             )
@@ -3271,17 +3284,17 @@ def test_rfswitch_missing_reading_mid_window_still_flagged():
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
 
         # Anchor and trigger transition.
-        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
-        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(1))
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
         # Now feed samples WITHOUT any rfswitch metadata at all
         # while still in the transition window.
         f.add_data(3, 0.0, d, metadata=None)
         f.add_data(4, 0.0, d, metadata=None)
 
         # Sample 0 = anchor state.
-        assert f.metadata["rfswitch"][0] == 0
+        assert f.metadata["rfswitch"][0] == "RFANT"
         # Samples 1, 2, 3 are inside the window (window=5 here).
-        # Sample 1 was the trigger and has raw state 1 forced to UNKNOWN.
+        # Sample 1 was the trigger and has raw state RFNOFF forced to UNKNOWN.
         # Samples 2, 3 had no rfswitch reading but still get flagged.
         assert f.metadata["rfswitch"][1] == "UNKNOWN"
         assert f.metadata["rfswitch"][2] == "UNKNOWN"
@@ -3306,23 +3319,23 @@ def test_rfswitch_consecutive_transitions_reset_window(caplog):
         d = {"0": np.full(spec_len, 1, dtype=dtype)}
 
         # Anchor with state 0.
-        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md(0))
+        f.add_data(1, 0.0, d, metadata=_make_rfswitch_md("RFANT"))
         # Transition to state 1 → window of 5.
-        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md(1))
+        f.add_data(2, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
         # Two samples into the window, transition to state 2 →
         # window resets to 5.
-        f.add_data(3, 0.0, d, metadata=_make_rfswitch_md(1))
-        f.add_data(4, 0.0, d, metadata=_make_rfswitch_md(2))
+        f.add_data(3, 0.0, d, metadata=_make_rfswitch_md("RFNOFF"))
+        f.add_data(4, 0.0, d, metadata=_make_rfswitch_md("RFNON"))
         # Now five more samples of state 2.
         for i in range(5, 10):
-            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md(2))
+            f.add_data(i, 0.0, d, metadata=_make_rfswitch_md("RFNON"))
 
-        # Index 0: anchor state 0.
-        assert f.metadata["rfswitch"][0] == 0
-        # Index 1, 2: first window (state 1 transition).
+        # Index 0: anchor state RFANT.
+        assert f.metadata["rfswitch"][0] == "RFANT"
+        # Index 1, 2: first window (RFNOFF transition).
         assert f.metadata["rfswitch"][1] == "UNKNOWN"
         assert f.metadata["rfswitch"][2] == "UNKNOWN"
-        # Index 3: second transition trigger (state 2). UNKNOWN.
+        # Index 3: second transition trigger (RFNON). UNKNOWN.
         # Window resets to 5 starting here, so indices 3-7 are
         # UNKNOWN.
         for i in range(3, 8):
@@ -3330,7 +3343,7 @@ def test_rfswitch_consecutive_transitions_reset_window(caplog):
                 f"index {i} expected UNKNOWN (in reset window), "
                 f"got {f.metadata['rfswitch'][i]!r}"
             )
-        # Index 8: back to raw state 2.
-        assert f.metadata["rfswitch"][8] == 2
+        # Index 8: back to raw state RFNON.
+        assert f.metadata["rfswitch"][8] == "RFNON"
 
         f.close()
