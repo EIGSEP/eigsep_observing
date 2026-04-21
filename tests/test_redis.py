@@ -380,9 +380,9 @@ def test_metadata_stream_drain_ignores_vna_stream(obs_server, obs_client):
     obs_client.metadata.add("acc_cnt", 7)
     obs_client.metadata.add("temp", 25.5)
 
-    # switch_fn returns True to mirror production's
-    # PandaClient._switch_to — cmt_vna 1.2 raises on a falsy return.
-    vna = DummyVNA(switch_fn=lambda state: True)
+    # switch_fn is a no-op — cmt_vna 1.3 ignores the return value and
+    # only treats raised exceptions as failure.
+    vna = DummyVNA(switch_fn=lambda state: None)
     vna.setup(fstart=1e6, fstop=250e6, npoints=10, ifbw=100, power_dBm=0)
     s11 = vna.measure_ant(measure_noise=True, measure_load=True)
     header = dict(vna.header)

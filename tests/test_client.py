@@ -202,7 +202,7 @@ def test_read_switch_mode_from_redis_returns_published_mode(client):
     """
     # Drive the rfswitch to a non-default mode and wait for the firmware
     # status publish to land in Redis.
-    assert client._switch_to("RFNON")
+    assert client._safe_switch("RFNON")
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         if client._read_switch_mode_from_redis() == "RFNON":
@@ -242,7 +242,7 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
     try:
         # Pre-seed the rfswitch in Redis to simulate a state PicoManager
         # set before this PandaClient process started.
-        assert client._switch_to("RFNOFF")
+        assert client._safe_switch("RFNOFF")
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if client._read_switch_mode_from_redis() == "RFNOFF":
@@ -251,7 +251,7 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
         assert client._read_switch_mode_from_redis() == "RFNOFF"
 
         switch_calls = []
-        original_switch_to = client._switch_to
+        original_safe_switch = client._safe_switch
 
         # Stop after the post-VNA switch-back. The VNA's internal
         # switch_fn only touches VNA* modes (VNAANT, VNARF, ...);
@@ -259,20 +259,20 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
         # stop_client here (instead of patching stop_client.wait)
         # avoids racing the heartbeat thread, which shares the same
         # Event and would otherwise see the patched wait().
-        def recording_switch_to(state):
+        def recording_safe_switch(state):
             switch_calls.append(state)
-            result = original_switch_to(state)
+            result = original_safe_switch(state)
             if state == "RFNOFF":
                 client.stop_client.set()
             return result
 
         with patch.object(
-            client, "_switch_to", side_effect=recording_switch_to
+            client, "_safe_switch", side_effect=recording_safe_switch
         ):
             caplog.set_level("INFO")
             client.vna_loop()
 
-        # The last _switch_to call from vna_loop itself is the
+        # The last _safe_switch call from vna_loop itself is the
         # switch-back; intermediate calls come from VNA OSL/ant/rec.
         assert switch_calls, "vna_loop made no switch calls"
         assert switch_calls[-1] == "RFNOFF", (
@@ -301,14 +301,14 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
         client.transport.r.hdel("metadata", "rfswitch")
 
         switch_calls = []
-        original_switch_to = client._switch_to
+        original_safe_switch = client._safe_switch
 
         # See sibling test: RFANT is the fallback switch-back target and
         # isn't hit by the VNA's internal VNA*-mode switching, so it's
         # safe to key the stop on it without racing the heartbeat.
-        def recording_switch_to(state):
+        def recording_safe_switch(state):
             switch_calls.append(state)
-            result = original_switch_to(state)
+            result = original_safe_switch(state)
             if state == "RFANT":
                 client.stop_client.set()
             return result
@@ -318,7 +318,7 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
             client, "_read_switch_mode_from_redis", return_value=None
         ):
             with patch.object(
-                client, "_switch_to", side_effect=recording_switch_to
+                client, "_safe_switch", side_effect=recording_safe_switch
             ):
                 caplog.set_level("WARNING")
                 client.vna_loop()
@@ -338,7 +338,7 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
 
 
 def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
-    """If the post-VNA ``_switch_to(prev_mode)`` returns falsy, vna_loop
+    """If the post-VNA ``_safe_switch(prev_mode)`` returns falsy, vna_loop
     logs a WARNING — mirrors switch_loop's "Failed to switch" pattern so
     a hardware-stuck calibrator is operator-visible instead of silent."""
     cfg = dict(dummy_cfg)
@@ -346,7 +346,7 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
     cfg["vna_interval"] = 60  # long: only one iteration before stop
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
-        assert client._switch_to("RFNOFF")
+        assert client._safe_switch("RFNOFF")
         deadline = time.monotonic() + 2.0
         while time.monotonic() < deadline:
             if client._read_switch_mode_from_redis() == "RFNOFF":
@@ -354,7 +354,7 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
             time.sleep(0.05)
         assert client._read_switch_mode_from_redis() == "RFNOFF"
 
-        original_switch_to = client._switch_to
+        original_safe_switch = client._safe_switch
 
         # Only fail the switch-back (RFNOFF). The VNA's internal
         # switch_fn touches VNA* modes and must continue to succeed, or
@@ -363,11 +363,11 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
             if state == "RFNOFF":
                 client.stop_client.set()
                 return None
-            return original_switch_to(state)
+            return original_safe_switch(state)
 
         _arm_status_reader(client)
         with patch.object(
-            client, "_switch_to", side_effect=failing_switch_back
+            client, "_safe_switch", side_effect=failing_switch_back
         ):
             caplog.set_level("WARNING")
             client.vna_loop()
@@ -389,7 +389,7 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
 
 
 def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
-    """A failing ``_switch_to`` inside ``switch_loop`` must warn on both
+    """A failing ``_safe_switch`` inside ``switch_loop`` must warn on both
     the local logger and the Redis status stream so the ground observer
     sees a stuck calibrator without SSHing into the panda."""
     cfg = dict(dummy_cfg)
@@ -404,7 +404,7 @@ def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
             return None
 
         _arm_status_reader(client)
-        with patch.object(client, "_switch_to", side_effect=failing_switch):
+        with patch.object(client, "_safe_switch", side_effect=failing_switch):
             caplog.set_level("WARNING")
             client.switch_loop()
 
@@ -435,18 +435,18 @@ def test_switch_session_auto_restores_on_exit(client, caplog):
     """Happy path: enter with published mode=RFANT, switch to RFNOFF
     inside, exit → session auto-restores to RFANT. Matches the REPL
     "switch, measure, switch back" use case."""
-    assert client._switch_to("RFANT")
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
     switch_calls = []
-    original_switch_to = client._switch_to
+    original_safe_switch = client._safe_switch
 
     def recording(state):
         switch_calls.append(state)
-        return original_switch_to(state)
+        return original_safe_switch(state)
 
     caplog.set_level("WARNING")
-    with patch.object(client, "_switch_to", side_effect=recording):
+    with patch.object(client, "_safe_switch", side_effect=recording):
         with client.switch_session() as sw:
             assert sw("RFNOFF") is True
 
@@ -461,24 +461,24 @@ def test_switch_session_auto_restores_on_exit(client, caplog):
 
 def test_switch_session_noop_block_skips_restore(client):
     """If the caller enters a session but never invokes ``sw``, the
-    context manager must not emit a restore ``_switch_to`` — the user
+    context manager must not emit a restore ``_safe_switch`` — the user
     didn't change state, so no bookkeeping is required."""
-    assert client._switch_to("RFANT")
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
     switch_calls = []
-    original_switch_to = client._switch_to
+    original_safe_switch = client._safe_switch
 
     def recording(state):
         switch_calls.append(state)
-        return original_switch_to(state)
+        return original_safe_switch(state)
 
-    with patch.object(client, "_switch_to", side_effect=recording):
+    with patch.object(client, "_safe_switch", side_effect=recording):
         with client.switch_session():
             pass
 
     assert switch_calls == [], (
-        f"no-op switch_session block must not call _switch_to; "
+        f"no-op switch_session block must not call _safe_switch; "
         f"got {switch_calls}"
     )
 
@@ -491,14 +491,14 @@ def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
     assert client._read_switch_mode_from_redis() is None
 
     switch_calls = []
-    original_switch_to = client._switch_to
+    original_safe_switch = client._safe_switch
 
     def recording(state):
         switch_calls.append(state)
-        return original_switch_to(state)
+        return original_safe_switch(state)
 
     caplog.set_level("WARNING")
-    with patch.object(client, "_switch_to", side_effect=recording):
+    with patch.object(client, "_safe_switch", side_effect=recording):
         with client.switch_session() as sw:
             assert sw("RFNOFF") is True
 
@@ -512,22 +512,22 @@ def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
 
 
 def test_switch_session_warns_on_failed_restore(client, caplog):
-    """If the auto-restore ``_switch_to`` returns falsy, the session
+    """If the auto-restore ``_safe_switch`` returns falsy, the session
     logs a warning but still releases the lock — a stuck switch must
     not wedge the session."""
-    assert client._switch_to("RFANT")
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
-    original_switch_to = client._switch_to
+    original_safe_switch = client._safe_switch
 
     # Succeed on RFNOFF (user's own switch) but fail the RFANT restore.
     def restore_fails(state):
         if state == "RFANT":
             return None
-        return original_switch_to(state)
+        return original_safe_switch(state)
 
     caplog.set_level("WARNING")
-    with patch.object(client, "_switch_to", side_effect=restore_fails):
+    with patch.object(client, "_safe_switch", side_effect=restore_fails):
         with client.switch_session() as sw:
             assert sw("RFNOFF") is True
 
@@ -544,12 +544,12 @@ def test_switch_session_warns_on_failed_restore(client, caplog):
 def test_switch_session_sw_warns_and_returns_false_on_failure(client, caplog):
     """The yielded callable warns and returns ``False`` when the
     underlying switch fails, so interactive users can branch on
-    success without having to plumb ``_switch_to``'s falsy sentinel."""
-    assert client._switch_to("RFANT")
+    success without having to plumb ``_safe_switch``'s falsy sentinel."""
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
     caplog.set_level("WARNING")
-    with patch.object(client, "_switch_to", return_value=None):
+    with patch.object(client, "_safe_switch", return_value=None):
         with client.switch_session() as sw:
             assert sw("RFNOFF") is False
 
@@ -565,20 +565,20 @@ def test_switch_session_restores_even_on_exception(client):
     (the caller's measurement failed), but auto-restore and lock
     release must still happen — that's the whole point of using a
     context manager for this."""
-    assert client._switch_to("RFANT")
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
     switch_calls = []
-    original_switch_to = client._switch_to
+    original_safe_switch = client._safe_switch
 
     def recording(state):
         switch_calls.append(state)
-        return original_switch_to(state)
+        return original_safe_switch(state)
 
     class _Boom(Exception):
         pass
 
-    with patch.object(client, "_switch_to", side_effect=recording):
+    with patch.object(client, "_safe_switch", side_effect=recording):
         with pytest.raises(_Boom):
             with client.switch_session() as sw:
                 sw("RFNOFF")
@@ -595,9 +595,9 @@ def test_switch_session_restores_even_on_exception(client):
 def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
     """The session holds ``switch_lock`` for the whole block, so a
     concurrent ``switch_loop`` thread must block on the lock — its
-    first ``_switch_to`` call fires only *after* the session exits.
+    first ``_safe_switch`` call fires only *after* the session exits.
     Distinguishes switch_loop's calls from the session's own by
-    thread identity, since both go through the patched ``_switch_to``.
+    thread identity, since both go through the patched ``_safe_switch``.
     """
     cfg = dict(dummy_cfg)
     # Keep the schedule simple and long so switch_loop blocks on the
@@ -605,14 +605,14 @@ def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
     cfg["switch_schedule"] = {"RFANT": 60.0}
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
-        assert client._switch_to("RFANT")
+        assert client._safe_switch("RFANT")
         _wait_for_published_mode(client, "RFANT")
 
         main_ident = threading.get_ident()
         inside_session = threading.Event()
         loop_got_lock = threading.Event()
         loop_fired_during_session = threading.Event()
-        original_switch_to = client._switch_to
+        original_safe_switch = client._safe_switch
 
         # Only calls from the switch_loop thread (not the main-thread
         # session's own ``sw(...)``) count as "loop got the lock."
@@ -621,9 +621,11 @@ def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
                 if inside_session.is_set():
                     loop_fired_during_session.set()
                 loop_got_lock.set()
-            return original_switch_to(state)
+            return original_safe_switch(state)
 
-        with patch.object(client, "_switch_to", side_effect=observing_switch):
+        with patch.object(
+            client, "_safe_switch", side_effect=observing_switch
+        ):
             t = threading.Thread(target=client.switch_loop, daemon=True)
             # Take the session lock *before* starting switch_loop so
             # switch_loop is guaranteed to block on the first iter.
@@ -652,7 +654,7 @@ def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
                 "switch_loop did not acquire lock within 2s of session exit"
             )
             assert not loop_fired_during_session.is_set(), (
-                "switch_loop executed _switch_to while session was still "
+                "switch_loop executed _safe_switch while session was still "
                 "inside its block"
             )
 
@@ -813,7 +815,7 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     )
 
 
-# The tests below exercise ``_switch_to``'s exception-to-bool
+# The tests below exercise ``_safe_switch``'s exception-to-bool
 # translation end-to-end by patching the firmware-side ``switch()``
 # method on the DummyPicoRFSwitch. PicoManager's exception handler
 # converts method exceptions into status:"error" responses, which
@@ -823,14 +825,14 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
 # sleeping past it inside the patched switch.
 
 
-def test_switch_to_returns_false_on_runtime_error(client, caplog):
+def test_safe_switch_returns_false_on_runtime_error(client, caplog):
     """Regression: a firmware-side RuntimeError bypassed the old bool
     check entirely and the proxy exception crashed the observing loop.
-    ``_switch_to`` must catch it and return False."""
+    ``_safe_switch`` must catch it and return False."""
     pico = client._manager.picos["rfswitch"]
     caplog.set_level("WARNING")
     with patch.object(pico, "switch", side_effect=RuntimeError("fw boom")):
-        assert client._switch_to("RFNOFF") is False
+        assert client._safe_switch("RFNOFF") is False
     assert any(
         "RF switch to RFNOFF failed" in r.getMessage()
         and "RuntimeError" in r.getMessage()
@@ -840,7 +842,7 @@ def test_switch_to_returns_false_on_runtime_error(client, caplog):
     ), [r.getMessage() for r in caplog.records]
 
 
-def test_switch_to_returns_false_on_timeout(client, caplog):
+def test_safe_switch_returns_false_on_timeout(client, caplog):
     """Regression: a proxy-level TimeoutError bypassed the old bool
     check and crashed the loop. Stall the dummy switch longer than
     sw_proxy.timeout so _wait_response raises TimeoutError end-to-end
@@ -853,7 +855,7 @@ def test_switch_to_returns_false_on_timeout(client, caplog):
         time.sleep(0.3)
 
     with patch.object(pico, "switch", side_effect=stall):
-        assert client._switch_to("RFNOFF") is False
+        assert client._safe_switch("RFNOFF") is False
     assert any(
         "RF switch to RFNOFF failed" in r.getMessage()
         and "TimeoutError" in r.getMessage()
@@ -862,11 +864,56 @@ def test_switch_to_returns_false_on_timeout(client, caplog):
     ), [r.getMessage() for r in caplog.records]
 
 
-def test_switch_to_returns_true_on_success(client):
+def test_safe_switch_returns_true_on_success(client):
     """Happy-path regression: unpatched dummy stack round-trips a
-    truthy ``{"action":"switch","result":True}`` and ``_switch_to``
+    truthy ``{"action":"switch","result":True}`` and ``_safe_switch``
     returns True."""
-    assert client._switch_to("RFNOFF") is True
+    assert client._safe_switch("RFNOFF") is True
+
+
+# ``_switch`` is the raise-on-failure surface wired as cmt_vna's
+# ``switch_fn`` (eigsep-vna 1.3+ contract). It mirrors ``_safe_switch``'s
+# end-to-end failure paths but propagates instead of translating to
+# bool, so that a mid-S11 switch failure aborts ``measure_*`` rather
+# than contaminating the calibration.
+
+
+def test_switch_raises_on_runtime_error(client):
+    """Firmware-side RuntimeError must propagate out of ``_switch`` —
+    cmt_vna 1.3 relies on this to abort an in-flight measure_*."""
+    pico = client._manager.picos["rfswitch"]
+    with patch.object(pico, "switch", side_effect=RuntimeError("fw boom")):
+        with pytest.raises(RuntimeError, match="fw boom"):
+            client._switch("RFNOFF")
+
+
+def test_switch_raises_on_timeout(client):
+    """Proxy-level TimeoutError must propagate out of ``_switch``."""
+    pico = client._manager.picos["rfswitch"]
+    client.sw_proxy.timeout = 0.1
+
+    def stall(state):
+        time.sleep(0.3)
+
+    with patch.object(pico, "switch", side_effect=stall):
+        with pytest.raises(TimeoutError):
+            client._switch("RFNOFF")
+
+
+def test_switch_raises_on_unregistered_device(client):
+    """If ``sw_proxy.send_command`` returns ``None`` (device not
+    registered with PicoManager), ``_switch`` must raise so that
+    cmt_vna sees a switch failure instead of a silent no-op."""
+    with patch.object(client.sw_proxy, "send_command", return_value=None):
+        with pytest.raises(RuntimeError, match="not registered"):
+            client._switch("RFNOFF")
+
+
+def test_switch_returns_none_on_success(client):
+    """``_switch`` has no meaningful return on success — the contract
+    is raise-on-failure, return value ignored. Confirms the dummy
+    round-trip doesn't accidentally raise."""
+    assert client._switch("RFNOFF") is None
 
 
 def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
@@ -951,7 +998,7 @@ def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
     cfg["vna_interval"] = 60
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
-        assert client._switch_to("RFNOFF")
+        assert client._safe_switch("RFNOFF")
         _wait_for_published_mode(client, "RFNOFF")
 
         pico = client._manager.picos["rfswitch"]
@@ -993,7 +1040,7 @@ def test_switch_session_restore_survives_timeout(client, caplog):
     switch_session's finally block, leaving switch_lock held. After
     the fix, the warning logs, the session exits, and the lock is
     released."""
-    assert client._switch_to("RFANT")
+    assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
     pico = client._manager.picos["rfswitch"]

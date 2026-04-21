@@ -139,31 +139,48 @@ class PandaClient:
         self.logger.info(f"Using config from Redis, updated at {upload_str}.")
         return cfg
 
-    def _switch_to(self, state):
-        """Route an RF switch command through PicoManager.
+    def _switch(self, state):
+        """Route an RF switch command through PicoManager; raise on failure.
+
+        Wired as ``switch_fn`` for ``cmt_vna.VNA`` (see :meth:`init_VNA`).
+        Matches the eigsep-vna 1.3 ``switch_fn`` contract: raise on any
+        failure, return is ignored. A switch failure during an S11
+        measurement propagates out of ``measure_*`` and aborts the run
+        instead of contaminating it.
+
+        Raises
+        ------
+        RuntimeError
+            Firmware/manager error, or device not registered with
+            PicoManager (``None`` from the proxy).
+        TimeoutError
+            Proxy timeout waiting for the firmware response.
+        """
+        result = self.sw_proxy.send_command("switch", state=state)
+        if result is None:
+            raise RuntimeError(
+                f"RF switch to {state} failed: rfswitch device not "
+                f"registered with PicoManager."
+            )
+
+    def _safe_switch(self, state):
+        """Bool-returning wrapper around :meth:`_switch` for observing loops.
 
         Returns ``True`` on confirmed success, ``False`` on any
-        failure: unregistered device (``None`` from the proxy),
-        firmware/manager error (``RuntimeError``), or proxy timeout
-        (``TimeoutError``). Never raises: observing loops depend on
-        this to stay up across transient Pico faults so corr data
-        keeps flowing while a switch hiccup is logged for the
-        operator.
-
-        Also wired as ``switch_fn`` for ``cmt_vna.VNA`` (see
-        :meth:`init_VNA`); since eigsep-vna 1.2 every ``measure_*``
-        method raises on a falsy ``switch_fn`` return, so a switch
-        failure aborts the S11 measurement instead of contaminating
-        it.
+        failure. Never raises: observing loops depend on this to stay
+        up across transient Pico faults so corr data keeps flowing
+        while a switch hiccup is logged for the operator. Not wired
+        as ``switch_fn`` — cmt_vna gets the raising :meth:`_switch`
+        directly so a mid-measurement switch failure aborts cleanly.
         """
         try:
-            result = self.sw_proxy.send_command("switch", state=state)
+            self._switch(state)
         except (RuntimeError, TimeoutError) as exc:
             self.logger.warning(
                 f"RF switch to {state} failed: {type(exc).__name__}: {exc}"
             )
             return False
-        return result is not None
+        return True
 
     def _read_switch_mode_from_redis(self):
         """Return the RF switch mode string PicoManager last published.
@@ -191,7 +208,7 @@ class PandaClient:
 
         Acquires :attr:`switch_lock` (pausing ``switch_loop`` and
         ``vna_loop`` for the duration of the block), yields a callable
-        ``sw(mode) -> bool`` that routes through :meth:`_switch_to`, and
+        ``sw(mode) -> bool`` that routes through :meth:`_safe_switch`, and
         restores the mode that was active on entry when the block
         exits. Matches the common "switch, measure, switch back" REPL
         pattern without manual bookkeeping.
@@ -228,7 +245,7 @@ class PandaClient:
                         f"{VALID_SWITCH_STATES}"
                     )
                     return False
-                if not self._switch_to(mode):
+                if not self._safe_switch(mode):
                     self.logger.warning(f"Failed to switch to {mode}")
                     return False
                 switched = True
@@ -244,7 +261,7 @@ class PandaClient:
                             "(rfswitch had not published); skipping "
                             "auto-restore."
                         )
-                    elif not self._switch_to(prev_mode):
+                    elif not self._safe_switch(prev_mode):
                         self.logger.warning(
                             f"switch_session: failed to restore to {prev_mode}"
                         )
@@ -298,7 +315,7 @@ class PandaClient:
             port=self.cfg["vna_port"],
             timeout=self.cfg["vna_timeout"],
             save_dir=self.cfg["vna_save_dir"],
-            switch_fn=self._switch_to,
+            switch_fn=self._switch,
         )
         kwargs = self.cfg["vna_settings"].copy()
         kwargs["power_dBm"] = kwargs["power_dBm"]["ant"]
@@ -364,7 +381,7 @@ class PandaClient:
                 hold_lock_during_wait = mode != "RFANT"
                 with self.switch_lock:
                     self.logger.info(f"Switching to {mode} measurements")
-                    if not self._switch_to(mode):
+                    if not self._safe_switch(mode):
                         self._warn_with_status(f"Failed to switch to {mode}")
                     if hold_lock_during_wait and self._wait_or_stop(wait_time):
                         return
@@ -474,7 +491,7 @@ class PandaClient:
                 self.logger.info(
                     f"Switching back to previous mode: {prev_mode}"
                 )
-                if not self._switch_to(prev_mode):
+                if not self._safe_switch(prev_mode):
                     self._warn_with_status(
                         f"Failed to switch back to {prev_mode}"
                     )
