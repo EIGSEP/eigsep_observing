@@ -1089,3 +1089,105 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
         assert client.vna.power_dBm == expected_ant
     finally:
         client.stop()
+
+
+def test_boot_drives_rfswitch_to_rfant(client):
+    """Boot invariant: ``PandaClient.__init__`` must drive the rfswitch
+    to RFANT so the system always wakes up in the physically safe
+    (all-switches-off) state, regardless of the previous switch
+    position. Side benefit: PicoManager publishes ``sw_state_name``
+    before any observing-loop iteration, so downstream
+    ``_read_switch_mode_from_redis`` has a truth to read from the
+    first read."""
+    _wait_for_published_mode(client, "RFANT")
+
+
+def test_boot_errors_when_rfant_initialization_fails(
+    transport, dummy_cfg, caplog
+):
+    """If the boot-time RFANT switch reports failure (rfswitch
+    unreachable, PicoManager error), the operator must see a loud
+    ERROR so the broken boot invariant is visible and actionable.
+    Per CLAUDE.md, safety nets around non-corr processing must log
+    at ERROR, not WARNING. Construction still succeeds — the Python
+    client cannot enforce the hardware default on its own, so we log
+    and continue rather than refusing to start."""
+    caplog.set_level("ERROR")
+    with patch.object(
+        eigsep_observing.PandaClient, "_safe_switch", return_value=False
+    ):
+        client = DummyPandaClient(transport, default_cfg=dummy_cfg)
+    try:
+        assert any(
+            "Boot-time RFANT initialization failed" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+    finally:
+        client.stop()
+
+
+def test_vna_loop_recovers_to_rfant_on_measurement_exception(
+    transport, dummy_cfg, caplog
+):
+    """When ``measure_s11`` raises mid-sweep (``_switch`` raising under
+    the eigsep-vna 1.3 contract, a VNA instrument ``TimeoutError``, a
+    Redis write failure), ``vna_loop`` must recover the switch to
+    RFANT rather than die — ``prev_mode`` is stale (the VNA has been
+    driving the switch through VNA* states) and RFANT is the
+    physically safe fallback. The loop must stay up so the next
+    ``vna_interval`` tick (and the concurrent ``switch_loop``) can
+    resume normal operation."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 60  # long: one iteration then stop via RFANT
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        # Pre-seed a non-RFANT prev_mode so the recovery to RFANT is
+        # distinguishable from a restore to prev_mode.
+        assert client._safe_switch("RFNOFF")
+        _wait_for_published_mode(client, "RFNOFF")
+
+        switch_calls = []
+        original_safe_switch = client._safe_switch
+
+        def recording_safe(state):
+            switch_calls.append(state)
+            result = original_safe_switch(state)
+            # Stop after the recovery fires so the while loop exits
+            # on the next iteration check.
+            if state == "RFANT":
+                client.stop_client.set()
+            return result
+
+        def raising_measure(mode):
+            raise RuntimeError(f"simulated mid-sweep failure in {mode}")
+
+        _arm_status_reader(client)
+        with (
+            patch.object(client, "_safe_switch", side_effect=recording_safe),
+            patch.object(client, "measure_s11", side_effect=raising_measure),
+        ):
+            caplog.set_level("ERROR")
+            client.vna_loop()  # must return, not raise
+
+        assert switch_calls[-1] == "RFANT", (
+            f"expected recovery to RFANT (not prev_mode RFNOFF); "
+            f"got sequence {switch_calls}"
+        )
+        # Per CLAUDE.md, this exception-swallowing safety net must log
+        # at ERROR (not WARNING) so the upstream fault is actionable.
+        assert any(
+            "VNA cycle aborted" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            and "simulated mid-sweep failure" in r.getMessage()
+            and "recovering rfswitch to RFANT" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.ERROR
+        assert "VNA cycle aborted" in status
+    finally:
+        client.stop()
