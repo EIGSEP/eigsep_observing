@@ -36,7 +36,7 @@ jobs:
           python -m pip install .[dev]
       - name: Test with pytest
         run: |
-          pytest
+          pytest -n auto
       - name: Upload coverage report
         if: github.actor != 'dependabot[bot]'
         uses: codecov/codecov-action@v6
@@ -90,4 +90,4 @@ jobs:
           "
       - name: Test with pytest
         run: |
-          pytest
+          pytest -n auto
