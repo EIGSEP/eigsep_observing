@@ -1446,13 +1446,14 @@ def test_motor_loop_logs_error_when_post_failure_home_also_fails(
         client.stop()
 
 
-def test_motor_loop_uses_failure_retry_interval_after_failure(
+def test_motor_loop_waits_motor_interval_when_inline_park_succeeds(
     transport, dummy_cfg
 ):
-    """After a failed scan, motor_loop waits ``motor_failure_retry_s``
-    (fast retry) instead of the full ``motor_interval``. Transient
-    faults recover quickly; without the short retry the rig could be
-    stuck at an arbitrary grid point for a full hour."""
+    """When a scan fails but the inline ``home()`` succeeds, motor_loop
+    is back to a safe state — motors parked, no recovery needed — and
+    the next wait uses the normal ``motor_interval`` cadence, not the
+    fast retry. The fast retry is reserved for recovery mode (scan
+    failure + inline park also failed)."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     cfg["motor_interval"] = 3600
@@ -1463,9 +1464,6 @@ def test_motor_loop_uses_failure_retry_interval_after_failure(
         motor_waits = []
 
         def recording_wait(timeout):
-            # Heartbeat thread calls stop_client.wait(1.0); only
-            # motor_loop's post-iteration wait has a non-1.0 timeout in
-            # this test. Pass heartbeat ticks through unmodified.
             if timeout == 1.0:
                 return client.stop_client.is_set()
             motor_waits.append(timeout)
@@ -1478,7 +1476,56 @@ def test_motor_loop_uses_failure_retry_interval_after_failure(
                 "scan",
                 side_effect=TimeoutError("stall"),
             ),
-            patch.object(client.motor_scanner, "home"),
+            patch.object(client.motor_scanner, "home"),  # park succeeds
+            patch.object(
+                client.stop_client, "wait", side_effect=recording_wait
+            ),
+        ):
+            client.motor_loop()
+
+        assert motor_waits == [3600], (
+            f"inline park succeeded → expected motor_interval=3600s wait, "
+            f"got {motor_waits}"
+        )
+    finally:
+        client.stop()
+
+
+def test_motor_loop_uses_failure_retry_interval_after_failed_park(
+    transport, dummy_cfg
+):
+    """When BOTH the scan and the inline ``home()`` fail, motor_loop
+    enters recovery mode and waits ``motor_failure_retry_s`` (fast
+    retry) instead of the full ``motor_interval``. Transient faults
+    recover quickly; without the short retry the rig could sit stuck
+    at an arbitrary position for a full hour."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_failure_retry_s"] = 5
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        motor_waits = []
+
+        def recording_wait(timeout):
+            if timeout == 1.0:
+                return client.stop_client.is_set()
+            motor_waits.append(timeout)
+            client.stop_client.set()
+            return True
+
+        with (
+            patch.object(
+                client.motor_scanner,
+                "scan",
+                side_effect=TimeoutError("stall"),
+            ),
+            patch.object(
+                client.motor_scanner,
+                "home",
+                side_effect=TimeoutError("park also failed"),
+            ),
             patch.object(
                 client.stop_client, "wait", side_effect=recording_wait
             ),
@@ -1486,8 +1533,141 @@ def test_motor_loop_uses_failure_retry_interval_after_failure(
             client.motor_loop()
 
         assert motor_waits == [5], (
-            f"expected one post-failure wait of motor_failure_retry_s=5s, "
-            f"got {motor_waits}"
+            f"scan+park both failed → expected motor_failure_retry_s=5s "
+            f"wait, got {motor_waits}"
+        )
+    finally:
+        client.stop()
+
+
+def test_motor_loop_recovery_retries_home_only_not_full_scan(
+    transport, dummy_cfg
+):
+    """During recovery mode (scan + inline park both failed), motor_loop
+    must retry ``home()`` only at the fast cadence and NOT re-run the
+    full scan. Re-running the grid every failure_retry_s during a
+    persistent fault would churn the motors and flood the bounded
+    status stream; once parked, we're safe, so there's no benefit."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_failure_retry_s"] = 5
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        scan_calls = []
+        home_calls = []
+
+        def raising_scan(**kwargs):
+            scan_calls.append(kwargs)
+            raise TimeoutError("stall")
+
+        def raising_home():
+            home_calls.append(True)
+            raise TimeoutError("home stalled")
+
+        # Let the loop iterate twice so we observe one recovery pass
+        # before we shut it down. The second motor_loop wait returns
+        # True, setting stop.
+        motor_waits = []
+
+        def recording_wait(timeout):
+            if timeout == 1.0:
+                return client.stop_client.is_set()
+            motor_waits.append(timeout)
+            if len(motor_waits) >= 2:
+                client.stop_client.set()
+                return True
+            return False  # proceed to next iteration
+
+        with (
+            patch.object(
+                client.motor_scanner, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_scanner, "home", side_effect=raising_home
+            ),
+            patch.object(
+                client.stop_client, "wait", side_effect=recording_wait
+            ),
+        ):
+            client.motor_loop()
+
+        # First iteration: scan + inline home (both fail).
+        # Second iteration: recovery — home only, scan NOT called again.
+        assert len(scan_calls) == 1, (
+            f"recovery mode must not re-run scan; got {len(scan_calls)} "
+            f"scan calls"
+        )
+        assert len(home_calls) == 2, (
+            f"recovery mode must retry home() after the inline park "
+            f"failure; got {len(home_calls)} home calls"
+        )
+        # Both waits used the fast-retry cadence.
+        assert motor_waits == [5, 5], motor_waits
+    finally:
+        client.stop()
+
+
+def test_motor_loop_exits_recovery_when_home_finally_succeeds(
+    transport, dummy_cfg
+):
+    """Once recovery-mode ``home()`` finally succeeds (transient fault
+    cleared), motor_loop exits recovery and the next iteration runs a
+    full scan again at ``motor_interval`` cadence. Guards against a
+    bug where ``needs_park`` never clears."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_failure_retry_s"] = 5
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        scan_calls = []
+        home_calls = []
+
+        def failing_then_success_scan(**kwargs):
+            scan_calls.append(kwargs)
+            if len(scan_calls) == 1:
+                raise TimeoutError("first scan stalls")
+            # second scan (post-recovery) succeeds; trigger shutdown
+            client.stop_client.set()
+
+        def home_side_effect():
+            home_calls.append(True)
+            if len(home_calls) == 1:
+                # inline park after first scan failure — raise
+                raise TimeoutError("park fails first")
+            # second home (recovery retry) — succeed
+
+        def fast_wait(timeout):
+            # Pass everything through instantly — we don't care about
+            # wait durations in this test, only the call sequence.
+            return client.stop_client.is_set()
+
+        with (
+            patch.object(
+                client.motor_scanner,
+                "scan",
+                side_effect=failing_then_success_scan,
+            ),
+            patch.object(
+                client.motor_scanner, "home", side_effect=home_side_effect
+            ),
+            patch.object(client.stop_client, "wait", side_effect=fast_wait),
+        ):
+            client.motor_loop()
+
+        # Expected sequence across iterations:
+        #   1. scan fails → inline home fails → needs_park = True
+        #   2. recovery: home succeeds → needs_park = False
+        #   3. scan succeeds → sets stop
+        assert len(scan_calls) == 2, (
+            f"recovery must exit and run scan again; got {len(scan_calls)} "
+            f"scan calls"
+        )
+        assert len(home_calls) == 2, (
+            f"expected inline home + one recovery home; got {len(home_calls)}"
         )
     finally:
         client.stop()
@@ -1541,7 +1721,10 @@ def test_motor_loop_invalid_failure_retry_s_falls_back_to_interval(
     must warn loudly and fall back to ``motor_interval`` for retries,
     rather than falling into a tight no-sleep retry loop. Chosen over
     "refuse to run" because the steady-state scan cadence is still
-    useful even without the fast-recovery tweak."""
+    useful even without the fast-recovery tweak. Drives the fallback
+    through the recovery-mode wait path by failing both scan and
+    inline home, so the wait observed is specifically the
+    failure_retry_s fallback and not the normal-cadence wait."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     cfg["motor_interval"] = 42
@@ -1565,7 +1748,11 @@ def test_motor_loop_invalid_failure_retry_s_falls_back_to_interval(
                 "scan",
                 side_effect=TimeoutError("stall"),
             ),
-            patch.object(client.motor_scanner, "home"),
+            patch.object(
+                client.motor_scanner,
+                "home",
+                side_effect=TimeoutError("park also stalled"),
+            ),
             patch.object(
                 client.stop_client, "wait", side_effect=recording_wait
             ),
