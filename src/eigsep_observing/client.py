@@ -766,12 +766,13 @@ class PandaClient:
                 return
 
     def tempctrl_loop(self):
-        """Periodic setpoint re-apply + health check for the LNA/LOAD peltiers.
+        """Seed firmware config once, then poll health forever.
 
-        Every ``tempctrl_interval`` seconds push the yaml-configured
-        settings (watchdog, clamps, setpoints, enable flags) to the
-        tempctrl pico and inspect the latest metadata snapshot for
-        operator-actionable faults:
+        The first iteration calls ``apply_settings`` to push the
+        yaml-configured watchdog / clamps / setpoints / enable flags to
+        the tempctrl pico. Once that succeeds the loop switches to
+        health-check-only mode: every ``tempctrl_interval`` seconds it
+        inspects the metadata snapshot for operator-actionable faults:
 
         * firmware watchdog tripped (channels disabled by firmware),
         * a channel's ``status == "error"`` (thermistor read failed),
@@ -780,19 +781,20 @@ class PandaClient:
           thermal-interface degradation, setpoint outside achievable
           range).
 
-        Defensive re-apply is idempotent: on unchanged config the pico
-        just replaces current values with identical ones, so a missed
-        state-reset (pico reboot) self-heals on the next iteration
-        without any explicit recovery state machine. Unlike
-        :meth:`motor_loop`, there is no "stuck at an arbitrary
-        position" failure mode to guard against — the firmware
-        watchdog is the safety net.
+        Reboot recovery is owned by picohost:
+        :class:`picohost.base.PicoPeltier` caches the last config each
+        setter pushed and replays it from ``on_reconnect``. On EIGSEP
+        hardware every firmware reset path (hard watchdog, brownout,
+        picotool re-flash via BOOTSEL) drops USB CDC, so the replay
+        fires on the serial-link reconnect without the panda needing a
+        periodic re-apply as insurance.
 
-        Command-delivery errors (``RuntimeError``/``TimeoutError`` from
-        the proxy) log at WARNING on both channels and the loop sleeps
-        ``tempctrl_interval`` before retrying; a persistent pico
-        outage just means warnings at the loop cadence, not
-        quadratic-blowup retries.
+        If the initial ``apply_settings`` fails (proxy/manager transient
+        — ``RuntimeError`` / ``TimeoutError``) it is retried on the
+        same cadence until it succeeds, then the loop locks into
+        health-check-only mode. A persistent command-delivery outage
+        just means warnings at the loop cadence, not quadratic-blowup
+        retries.
         """
         if self.tempctrl is None:
             self._warn_with_status(
@@ -807,16 +809,19 @@ class PandaClient:
             )
             return
 
+        applied = False
         while not self.stop_client.is_set():
-            try:
-                self.tempctrl.apply_settings()
-            except (RuntimeError, TimeoutError) as exc:
-                self._warn_with_status(
-                    f"Tempctrl apply_settings failed "
-                    f"({type(exc).__name__}: {exc}); will retry in "
-                    f"{interval}s."
-                )
-            else:
+            if not applied:
+                try:
+                    self.tempctrl.apply_settings()
+                    applied = True
+                except (RuntimeError, TimeoutError) as exc:
+                    self._warn_with_status(
+                        f"Tempctrl apply_settings failed "
+                        f"({type(exc).__name__}: {exc}); will retry in "
+                        f"{interval}s."
+                    )
+            if applied:
                 status = self.tempctrl.get_status()
                 if status is not None:
                     self._tempctrl_health_check(status)

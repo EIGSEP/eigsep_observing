@@ -1906,10 +1906,11 @@ def test_tempctrl_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
         client.stop()
 
 
-def test_tempctrl_loop_applies_settings_then_stops(transport, dummy_cfg):
+def test_tempctrl_loop_applies_settings_once_then_stops(transport, dummy_cfg):
     """One pass through the loop calls ``apply_settings`` and honors
-    ``stop_client``. We patch ``apply_settings`` so we don't race the
-    emulator; the gating contract is what this test covers."""
+    ``stop_client``. Gating contract + single-seed contract: only the
+    first iteration seeds firmware config; picohost owns reboot replay,
+    so there is no periodic re-apply."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_interval"] = 60  # long; only one iteration
@@ -1930,39 +1931,113 @@ def test_tempctrl_loop_applies_settings_then_stops(transport, dummy_cfg):
         client.stop()
 
 
-def test_tempctrl_loop_survives_apply_runtime_error(
-    transport, dummy_cfg, caplog
-):
-    """Command-delivery failures log a WARNING on both channels and do
-    not unwind the loop — the next iteration retries."""
+def test_tempctrl_loop_does_not_reapply_after_success(transport, dummy_cfg):
+    """After apply_settings succeeds once, subsequent iterations run
+    the health check only — no re-apply. picohost's PicoPeltier caches
+    the last-applied config and replays it on reconnect, which makes
+    panda-side periodic re-apply redundant. Regression guard so we
+    don't drift back to the old "apply every iteration" shape."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    cfg["tempctrl_interval"] = 60
+    cfg["tempctrl_interval"] = 0.01  # fast so we run many iterations
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        apply_calls = []
+        health_calls = []
+
+        def fake_apply():
+            apply_calls.append(True)
+
+        def fake_health(status):
+            health_calls.append(status)
+            if len(health_calls) >= 5:
+                client.stop_client.set()
+
+        with (
+            patch.object(
+                client.tempctrl, "apply_settings", side_effect=fake_apply
+            ),
+            patch.object(
+                client.tempctrl,
+                "get_status",
+                return_value={
+                    "watchdog_tripped": False,
+                    "LNA_status": "update",
+                    "LOAD_status": "update",
+                },
+            ),
+            patch.object(
+                client, "_tempctrl_health_check", side_effect=fake_health
+            ),
+        ):
+            client.tempctrl_loop()
+        assert apply_calls == [True]  # seeded once, not re-applied
+        assert len(health_calls) >= 5  # health check runs every iteration
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_retries_apply_until_success(
+    transport, dummy_cfg, caplog
+):
+    """If the initial apply_settings raises RuntimeError / TimeoutError
+    (proxy/manager transient), retry on the same cadence until it
+    sticks, then lock into health-check-only mode. Guards both the
+    failure-survival contract (loop doesn't unwind on RuntimeError)
+    and the retry-on-init-failure contract."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 0.01
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         _arm_status_reader(client)
         apply_calls = []
 
-        def raising_apply():
+        def flaky_apply():
             apply_calls.append(True)
-            client.stop_client.set()
-            raise RuntimeError("pico unreachable")
+            if len(apply_calls) < 3:
+                raise RuntimeError(f"transient #{len(apply_calls)}")
+            # third call succeeds; stop after one health-check iteration
+            # so the rest of the loop is pure health check.
 
-        with patch.object(
-            client.tempctrl, "apply_settings", side_effect=raising_apply
+        health_calls = []
+
+        def fake_health(status):
+            health_calls.append(status)
+            if len(health_calls) >= 2:
+                client.stop_client.set()
+
+        with (
+            patch.object(
+                client.tempctrl, "apply_settings", side_effect=flaky_apply
+            ),
+            patch.object(
+                client.tempctrl,
+                "get_status",
+                return_value={
+                    "watchdog_tripped": False,
+                    "LNA_status": "update",
+                    "LOAD_status": "update",
+                },
+            ),
+            patch.object(
+                client, "_tempctrl_health_check", side_effect=fake_health
+            ),
         ):
             caplog.set_level("WARNING")
-            client.tempctrl_loop()  # must return, not raise
-        assert apply_calls == [True]
-        assert any(
-            "Tempctrl apply_settings failed" in r.getMessage()
-            and "RuntimeError" in r.getMessage()
-            and r.levelname == "WARNING"
-            for r in caplog.records
+            client.tempctrl_loop()
+        # Two failed attempts + one success; no re-apply after success.
+        assert apply_calls == [True, True, True]
+        assert (
+            sum(
+                1
+                for r in caplog.records
+                if "Tempctrl apply_settings failed" in r.getMessage()
+                and "RuntimeError" in r.getMessage()
+                and r.levelname == "WARNING"
+            )
+            == 2
         )
-        level, status = _status_reader(client).read(timeout=1)
-        assert level == logging.WARNING
-        assert "Tempctrl apply_settings failed" in status
     finally:
         client.stop()
 
