@@ -64,6 +64,12 @@ addopts = [
   "--timeout=60",
 ]
 
+[tool.coverage.run]
+omit = [
+  "src/eigsep_observing/contract_tests/*",
+  "src/eigsep_observing/_test_fixtures.py",
+]
+
 [tool.ruff]
 line-length = 79
 
