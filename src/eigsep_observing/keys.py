@@ -4,7 +4,7 @@ Central registry of Redis keys owned by ``eigsep_observing``.
 Complements ``eigsep_redis.keys`` — this module holds observer-side
 keys (corr, vna) that don't belong in the shared lower-level package.
 Cross-package uniqueness is enforced by
-``tests/test_key_uniqueness.py``.
+``src/eigsep_observing/contract_tests/test_key_uniqueness.py``.
 """
 
 CORR_STREAM = "stream:corr"

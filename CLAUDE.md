@@ -229,7 +229,7 @@ against the **post-`_pot_redis_handler`** shape, not the raw
 `PotMonEmulator.get_status()` output. The emulator only emits voltages;
 the slope/intercept and derived angle fields are added by
 `PicoPotentiometer._pot_redis_handler` at Redis-publish time. The
-producer-contract test (`tests/test_producer_contracts.py`) composes the
+producer-contract test (`src/eigsep_observing/contract_tests/test_producer_contracts.py`) composes the
 two by bypassing `PicoPotentiometer.__init__` and calling
 `_pot_redis_handler` directly with a calibrated cal dict — see
 `_potmon_post_handler_reading` there. The picohost scalar-only contract
@@ -328,7 +328,9 @@ silently normalizes bugs. Two rules:
    are bugs in the test suite.
 
 These rules apply doubly to "golden" fixtures shared across many tests
-(e.g. `HEADER`, `CORR_METADATA`, `VNA_METADATA` in `tests/test_io.py`).
+(e.g. `HEADER`, `CORR_METADATA`, `VNA_METADATA` in
+`src/eigsep_observing/_test_fixtures.py`, re-exported via
+`tests/conftest.py` for `test_io.py`).
 Shared fixtures amplify drift: one wrong value rots every test that
 touches it. Related values should be derived from a single source of
 truth — e.g. `FILE_TIME = NTIMES * INTEGRATION_TIME` rather than two
