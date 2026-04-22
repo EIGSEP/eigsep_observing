@@ -16,6 +16,7 @@ from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
+from .motor_scanner import MotorScanner
 from .utils import get_config_path
 from .vna import VnaWriter
 
@@ -107,6 +108,12 @@ class PandaClient:
         else:
             self.vna = None
             self.logger.info("VNA not initialized")
+
+        if self.cfg.get("use_motor", False):
+            self.init_motor_scanner()
+        else:
+            self.motor_scanner = None
+            self.logger.info("Motor scanner not initialized")
 
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
@@ -351,6 +358,39 @@ class PandaClient:
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
 
+    def init_motor_scanner(self):
+        """
+        Build a :class:`MotorScanner` from the config.
+
+        ``motor_scanner_kwargs`` (optional) forwards to the
+        :class:`MotorScanner` constructor (per-axis step delays, poll
+        interval, stall timeout). Absent/empty → use scanner defaults.
+
+        Notes
+        -----
+        Called by the constructor when ``use_motor`` is true. Safe to
+        call again if the config changes; no hardware contact, so
+        construction cannot fail.
+        """
+        self.motor_scanner = None
+        raw_kwargs = self.cfg.get("motor_scanner_kwargs")
+        kwargs = raw_kwargs or {}
+        if not isinstance(kwargs, dict):
+            self.logger.warning(
+                "Invalid motor_scanner_kwargs config; expected dict, "
+                f"got {type(raw_kwargs).__name__}. Motor scanner disabled."
+            )
+            return
+        try:
+            self.motor_scanner = MotorScanner(self.transport, **kwargs)
+        except TypeError as err:
+            self.logger.warning(
+                "Invalid motor_scanner_kwargs for MotorScanner: "
+                f"{err}. Motor scanner disabled."
+            )
+            return
+        self.logger.info(f"Motor scanner initialized (kwargs={kwargs})")
+
     def switch_loop(self):
         """
         Use the RF switches to switch between sky, load, and noise
@@ -543,3 +583,150 @@ class PandaClient:
                         f"Failed to switch back to {target_mode}"
                     )
             self.stop_client.wait(self.cfg["vna_interval"])
+
+    def motor_loop(self):
+        """Periodic az/el beam scans, sibling of :meth:`vna_loop`.
+
+        Runs a full ``MotorScanner.scan`` every ``motor_interval``
+        seconds with ``motor_scan`` kwargs (``az_range_deg``,
+        ``el_range_deg``, ``el_first``, ``repeat_count``, ``pause_s``,
+        ``sleep_between``). Runs concurrently with ``switch_loop`` and
+        ``vna_loop``; does **not** acquire ``switch_lock``. This is the
+        steady-state "do a pointing survey every N hours" mode, and it
+        deliberately lets switching/VNA continue uninterrupted while
+        the motors move.
+
+        Failure handling. ``MotorScanner.scan`` already halts the
+        motors in its own ``finally`` block, so by the time a
+        ``TimeoutError``/``RuntimeError`` reaches us the motors are
+        stationary — but they may be stuck at an arbitrary grid point
+        rather than at home. The failure path:
+
+        1. Log the abort at ERROR on both channels.
+        2. Attempt an inline ``home()`` to park the motors at
+           ``(0, 0)`` so a subsequent power loss (batteries dying
+           before the next scan) doesn't leave the rig in a random
+           position that's annoying to lower.
+        3. If the inline park succeeded, return to normal cadence —
+           the next full scan fires at ``motor_interval``.
+        4. If the inline park also failed, enter **recovery mode**:
+           subsequent iterations retry ``home()`` only (no full scan)
+           at ``motor_failure_retry_s`` cadence. Running a full grid
+           every failure_retry_s would churn the motors and flood the
+           bounded status stream during a persistent fault; once
+           parked we're safe, so there's no benefit to re-running the
+           scan fast. Recovery-mode park failures log at INFO locally
+           only (no status push) so the status ring keeps the
+           original actionable ERROR.
+        5. When recovery-mode ``home()`` finally succeeds, the loop
+           exits recovery and waits ``motor_interval`` before the
+           next real scan.
+
+        After a successful scan, the cadence is ``motor_interval``.
+
+        Follow-ups (deferred; separate top-level scripts when we know
+        what we want):
+
+        * Beam mapping: scan with rfswitch pinned to RFANT for clean
+          per-position corr (needs ``switch_lock`` + switch-loop pause).
+        * VNA-at-positions: lockstep motor move / VNA measure for S11
+          vs pointing comparisons.
+        * Motion/switch sync: suppress switching while motors are
+          moving if hardware interference proves to be a concern.
+        """
+        if self.motor_scanner is None:
+            self._warn_with_status(
+                "Motor scanner not initialized. Cannot execute motor scans."
+            )
+            return
+        interval = self.cfg.get("motor_interval")
+        if not isinstance(interval, (int, float)) or interval <= 0:
+            self._warn_with_status(
+                f"Invalid motor_interval ({interval!r}); motor_loop will "
+                "not run."
+            )
+            return
+        failure_retry_s = self.cfg.get("motor_failure_retry_s", 60)
+        if (
+            not isinstance(failure_retry_s, (int, float))
+            or failure_retry_s <= 0
+        ):
+            self._warn_with_status(
+                f"Invalid motor_failure_retry_s ({failure_retry_s!r}); "
+                f"falling back to motor_interval ({interval}s) for "
+                "post-failure retries."
+            )
+            failure_retry_s = interval
+        scan_kwargs = self.cfg.get("motor_scan")
+        if scan_kwargs is None:
+            scan_kwargs = {}
+        elif not isinstance(scan_kwargs, dict):
+            self._warn_with_status(
+                f"Invalid motor_scan ({scan_kwargs!r}); motor_loop will "
+                "not run."
+            )
+            return
+
+        # Push delay config once at loop entry. A failure here (motor
+        # pico unreachable) is warned but not fatal — the scan call
+        # below re-surfaces the same fault and drives the retry loop.
+        try:
+            self.motor_scanner.set_delay()
+        except (RuntimeError, TimeoutError) as exc:
+            self._warn_with_status(
+                f"Motor set_delay failed at loop start "
+                f"({type(exc).__name__}: {exc}); scans will retry."
+            )
+
+        needs_park = False
+        while not self.stop_client.is_set():
+            if needs_park:
+                # Recovery mode: retry ``home()`` only. Do NOT run a
+                # full scan — see docstring step 4.
+                try:
+                    self.motor_scanner.home()
+                    needs_park = False
+                    self._log_with_status(
+                        "Motors parked at home after prior scan failure.",
+                        logging.INFO,
+                    )
+                    wait_s = interval
+                except (TimeoutError, RuntimeError) as exc:
+                    # Log locally only so repeated failures during a
+                    # persistent fault don't flood the bounded status
+                    # stream. Operator already saw the original ERROR
+                    # pair explaining that we'd retry.
+                    self.logger.info(
+                        f"Park retry still failing "
+                        f"({type(exc).__name__}: {exc}); "
+                        f"retrying in {failure_retry_s}s."
+                    )
+                    wait_s = failure_retry_s
+            else:
+                try:
+                    self.motor_scanner.scan(
+                        stop_event=self.stop_client, **scan_kwargs
+                    )
+                    wait_s = interval
+                except (TimeoutError, RuntimeError) as exc:
+                    self._error_with_status(
+                        f"Motor scan aborted ({type(exc).__name__}: {exc})."
+                    )
+                    try:
+                        self.motor_scanner.home()
+                        self.logger.info(
+                            "Motors parked at home after scan failure."
+                        )
+                        wait_s = interval
+                    except (TimeoutError, RuntimeError) as park_exc:
+                        self._error_with_status(
+                            f"Post-failure home() also failed "
+                            f"({type(park_exc).__name__}: {park_exc}); "
+                            "motors in unknown position — retrying "
+                            f"park every {failure_retry_s}s (no full "
+                            "scans until parked)."
+                        )
+                        needs_park = True
+                        wait_s = failure_retry_s
+            if self.stop_client.wait(wait_s):
+                return

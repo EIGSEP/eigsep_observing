@@ -27,3 +27,8 @@ vna_settings:
     ant: 0.0
     rec: -40.0
 vna_save_dir: "/home/christian/Documents/research/eigsep/eigsep_observing/test_s11_data"
+# motor
+use_motor: false
+motor_interval: 1  # seconds between scans
+motor_failure_retry_s: 0.5  # fast retry for tests
+motor_scan: {}
