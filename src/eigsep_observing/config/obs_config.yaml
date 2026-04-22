@@ -40,3 +40,22 @@ motor_scan: {}  # kwargs forwarded to MotorScanner.scan; {} → scan defaults
 # motor_scanner_kwargs:  # optional MotorScanner ctor overrides
 #   poll_interval_s: 0.1
 #   stall_timeout_s: 30.0
+# tempctrl (LNA + LOAD peltier control)
+# Default off: turning this on drives power into the peltiers. Opt in
+# explicitly when the rig is thermally instrumented and watchdog-
+# monitored. tempctrl_settings is re-applied every tempctrl_interval
+# seconds (idempotent) so a pico reboot is self-healing.
+use_tempctrl: false
+tempctrl_interval: 60  # seconds between setpoint re-apply + health check
+tempctrl_settings:
+  watchdog_timeout_ms: 30000  # 0 disables; must exceed keepalive cadence
+  LNA:
+    enable: true
+    target_C: 25.0
+    hysteresis_C: 0.5
+    clamp: 0.6  # max drive duty [0, 1]
+  LOAD:
+    enable: true
+    target_C: 25.0
+    hysteresis_C: 0.5
+    clamp: 0.6

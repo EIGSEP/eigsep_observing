@@ -17,6 +17,7 @@ from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .motor_scanner import MotorScanner
+from .tempctrl_client import TempCtrlClient
 from .utils import get_config_path
 from .vna import VnaWriter
 
@@ -69,8 +70,6 @@ class PandaClient:
             cfg = self._get_cfg()
         self.cfg = cfg
 
-        self.peltier = None
-
         # RF switch proxy is a thin Redis-key facade — no hardware
         # contact, so construction cannot fail. PicoManager owns the
         # real serial link and publishes its device list into the
@@ -114,6 +113,12 @@ class PandaClient:
         else:
             self.motor_scanner = None
             self.logger.info("Motor scanner not initialized")
+
+        if self.cfg.get("use_tempctrl", False):
+            self.init_tempctrl()
+        else:
+            self.tempctrl = None
+            self.logger.info("Tempctrl not initialized")
 
         self.heartbeat_thd = threading.Thread(
             target=self._send_heartbeat,
@@ -390,6 +395,35 @@ class PandaClient:
             )
             return
         self.logger.info(f"Motor scanner initialized (kwargs={kwargs})")
+
+    def init_tempctrl(self):
+        """
+        Build a :class:`TempCtrlClient` from the config.
+
+        ``tempctrl_settings`` (yaml, nested per-channel) forwards to the
+        :class:`TempCtrlClient` constructor and is re-applied every
+        iteration of :meth:`tempctrl_loop`. Absent/empty → no settings
+        are pushed by :meth:`TempCtrlClient.apply_settings` (firmware
+        keeps whatever it had).
+
+        Notes
+        -----
+        Called by the constructor when ``use_tempctrl`` is true. Safe
+        to call again if the config changes; no hardware contact, so
+        construction cannot fail for config reasons — only an
+        obviously-wrong (non-dict) settings block disables the client.
+        """
+        self.tempctrl = None
+        raw_settings = self.cfg.get("tempctrl_settings")
+        settings = raw_settings or {}
+        if not isinstance(settings, dict):
+            self.logger.warning(
+                "Invalid tempctrl_settings config; expected dict, "
+                f"got {type(raw_settings).__name__}. Tempctrl disabled."
+            )
+            return
+        self.tempctrl = TempCtrlClient(self.transport, settings=settings)
+        self.logger.info(f"Tempctrl initialized (settings={settings})")
 
     def switch_loop(self):
         """
@@ -730,3 +764,111 @@ class PandaClient:
                         wait_s = failure_retry_s
             if self.stop_client.wait(wait_s):
                 return
+
+    def tempctrl_loop(self):
+        """Periodic setpoint re-apply + health check for the LNA/LOAD peltiers.
+
+        Every ``tempctrl_interval`` seconds push the yaml-configured
+        settings (watchdog, clamps, setpoints, enable flags) to the
+        tempctrl pico and inspect the latest metadata snapshot for
+        operator-actionable faults:
+
+        * firmware watchdog tripped (channels disabled by firmware),
+        * a channel's ``status == "error"`` (thermistor read failed),
+        * drive saturated at the clamp while the channel is still far
+          from its target (peltier can't keep up — fan failure,
+          thermal-interface degradation, setpoint outside achievable
+          range).
+
+        Defensive re-apply is idempotent: on unchanged config the pico
+        just replaces current values with identical ones, so a missed
+        state-reset (pico reboot) self-heals on the next iteration
+        without any explicit recovery state machine. Unlike
+        :meth:`motor_loop`, there is no "stuck at an arbitrary
+        position" failure mode to guard against — the firmware
+        watchdog is the safety net.
+
+        Command-delivery errors (``RuntimeError``/``TimeoutError`` from
+        the proxy) log at WARNING on both channels and the loop sleeps
+        ``tempctrl_interval`` before retrying; a persistent pico
+        outage just means warnings at the loop cadence, not
+        quadratic-blowup retries.
+        """
+        if self.tempctrl is None:
+            self._warn_with_status(
+                "Tempctrl not initialized. Cannot run tempctrl_loop."
+            )
+            return
+        interval = self.cfg.get("tempctrl_interval")
+        if not isinstance(interval, (int, float)) or interval <= 0:
+            self._warn_with_status(
+                f"Invalid tempctrl_interval ({interval!r}); tempctrl_loop "
+                "will not run."
+            )
+            return
+
+        while not self.stop_client.is_set():
+            try:
+                self.tempctrl.apply_settings()
+            except (RuntimeError, TimeoutError) as exc:
+                self._warn_with_status(
+                    f"Tempctrl apply_settings failed "
+                    f"({type(exc).__name__}: {exc}); will retry in "
+                    f"{interval}s."
+                )
+            else:
+                status = self.tempctrl.get_status()
+                if status is not None:
+                    self._tempctrl_health_check(status)
+            if self.stop_client.wait(interval):
+                return
+
+    def _tempctrl_health_check(self, status):
+        """Emit operator-visible warnings for tempctrl fault states.
+
+        Called once per :meth:`tempctrl_loop` iteration on the latest
+        metadata snapshot. Three warn conditions:
+
+        1. ``watchdog_tripped`` — firmware disabled both channels
+           because panda-side commands stopped arriving. The next
+           ``apply_settings`` will re-arm once the link recovers, but
+           the operator needs to see why the peltiers went dark.
+        2. Per-channel ``status == "error"`` — thermistor read failed
+           on that side. Control is disabled by firmware for the
+           affected channel until the sensor recovers.
+        3. Per-channel drive saturated at the clamp while
+           ``|T_now - T_target| > 1°C`` — the peltier is trying its
+           hardest and still losing ground, i.e. a fan or
+           thermal-interface fault, or a setpoint outside the rig's
+           thermal capability. Uses a ±0.02 slack on the clamp check
+           because ``drive_level`` is a floating-point duty cycle and
+           we don't want to false-fire on the last bit of rounding.
+        """
+        if status.get("watchdog_tripped"):
+            self._warn_with_status(
+                "Tempctrl firmware watchdog tripped; channels disabled."
+            )
+        for ch in ("LNA", "LOAD"):
+            if status.get(f"{ch}_status") == "error":
+                self._warn_with_status(
+                    f"Tempctrl {ch} thermistor in error state; "
+                    "firmware has disabled that channel."
+                )
+                continue
+            drive = status.get(f"{ch}_drive_level")
+            clamp = status.get(f"{ch}_clamp")
+            t_now = status.get(f"{ch}_T_now")
+            t_target = status.get(f"{ch}_T_target")
+            if (
+                drive is not None
+                and clamp is not None
+                and t_now is not None
+                and t_target is not None
+                and abs(drive) >= abs(clamp) - 0.02
+                and abs(t_now - t_target) > 1.0
+            ):
+                self._warn_with_status(
+                    f"Tempctrl {ch} drive saturated at clamp "
+                    f"({drive:.2f}/{clamp:.2f}) with T_now={t_now:.2f}°C "
+                    f"vs target={t_target:.2f}°C; peltier cannot keep up."
+                )

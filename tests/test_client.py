@@ -14,7 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing import MotorScanner
+from eigsep_observing import MotorScanner, TempCtrlClient
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -1811,5 +1811,242 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Motor set_delay failed" in status
+    finally:
+        client.stop()
+
+
+# ``tempctrl_loop`` mirrors ``motor_loop``: periodic action gated by a
+# ``use_*`` flag. Unit tests for the command dispatch + emulator state
+# live in tests/test_tempctrl_client.py; these tests cover the
+# gating and loop-level behavior.
+
+
+def test_use_tempctrl_false_leaves_client_none(client):
+    """Default dummy_config has ``use_tempctrl: false``; PandaClient
+    must leave ``self.tempctrl`` as ``None`` and skip the init call."""
+    assert client.cfg.get("use_tempctrl", False) is False
+    assert client.tempctrl is None
+
+
+def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
+    """With ``use_tempctrl: true``, ``self.tempctrl`` is a real
+    ``TempCtrlClient`` bound to the same transport."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert isinstance(client.tempctrl, TempCtrlClient)
+        assert client.tempctrl.transport is client.transport
+        # Settings from dummy_config land on the client object.
+        assert client.tempctrl.settings.get("watchdog_timeout_ms") == 30000
+        assert client.tempctrl.settings["LNA"]["target_C"] == 25.0
+    finally:
+        client.stop()
+
+
+def test_tempctrl_settings_non_dict_disables_client(
+    transport, dummy_cfg, caplog
+):
+    """A non-dict ``tempctrl_settings`` is a config-side bug. Bail out
+    loudly and leave the client disabled; do not construct a
+    ``TempCtrlClient`` against garbage."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = "not a dict"
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.tempctrl is None
+        assert any(
+            "Invalid tempctrl_settings" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_returns_when_client_is_none(caplog, client):
+    """``tempctrl_loop`` must return promptly when disabled — no tight
+    spin, warning rides both channels."""
+    assert client.tempctrl is None
+    _arm_status_reader(client)
+    caplog.set_level("WARNING")
+    t0 = time.monotonic()
+    client.tempctrl_loop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert any(
+        "Tempctrl not initialized" in r.getMessage() for r in caplog.records
+    )
+    level, status = _status_reader(client).read(timeout=1)
+    assert level == logging.WARNING
+    assert "Tempctrl not initialized" in status
+
+
+def test_tempctrl_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
+    """Non-positive / non-numeric ``tempctrl_interval`` → refuse to run."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 0
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        _arm_status_reader(client)
+        caplog.set_level("WARNING")
+        t0 = time.monotonic()
+        client.tempctrl_loop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0
+        assert any(
+            "Invalid tempctrl_interval" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_applies_settings_then_stops(transport, dummy_cfg):
+    """One pass through the loop calls ``apply_settings`` and honors
+    ``stop_client``. We patch ``apply_settings`` so we don't race the
+    emulator; the gating contract is what this test covers."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 60  # long; only one iteration
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        apply_calls = []
+
+        def fake_apply():
+            apply_calls.append(True)
+            client.stop_client.set()
+
+        with patch.object(
+            client.tempctrl, "apply_settings", side_effect=fake_apply
+        ):
+            client.tempctrl_loop()
+        assert apply_calls == [True]
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_survives_apply_runtime_error(
+    transport, dummy_cfg, caplog
+):
+    """Command-delivery failures log a WARNING on both channels and do
+    not unwind the loop — the next iteration retries."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 60
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        _arm_status_reader(client)
+        apply_calls = []
+
+        def raising_apply():
+            apply_calls.append(True)
+            client.stop_client.set()
+            raise RuntimeError("pico unreachable")
+
+        with patch.object(
+            client.tempctrl, "apply_settings", side_effect=raising_apply
+        ):
+            caplog.set_level("WARNING")
+            client.tempctrl_loop()  # must return, not raise
+        assert apply_calls == [True]
+        assert any(
+            "Tempctrl apply_settings failed" in r.getMessage()
+            and "RuntimeError" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Tempctrl apply_settings failed" in status
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
+    """When the metadata snapshot reports ``watchdog_tripped``, the
+    health check emits an operator-visible WARNING so the peltiers
+    going dark is visible ground-side."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": True,
+                "LNA_status": "update",
+                "LOAD_status": "update",
+            }
+        )
+        assert any(
+            "Tempctrl firmware watchdog tripped" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
+    """Per-channel ``status == "error"`` (thermistor read failed) must
+    ride the status stream so the operator sees the dead sensor."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LNA_status": "error",
+                "LOAD_status": "update",
+            }
+        )
+        assert any(
+            "LNA thermistor in error state" in r.getMessage()
+            for r in caplog.records
+        )
+        assert not any(
+            "LOAD thermistor in error state" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
+    """Drive saturated at the clamp while still >1°C from target =
+    peltier can't keep up. Log loudly for the operator."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LNA_status": "update",
+                "LOAD_status": "update",
+                "LNA_drive_level": 0.6,
+                "LNA_clamp": 0.6,
+                "LNA_T_now": 35.0,
+                "LNA_T_target": 25.0,
+                "LOAD_drive_level": 0.05,
+                "LOAD_clamp": 0.6,
+                "LOAD_T_now": 25.1,
+                "LOAD_T_target": 25.0,
+            }
+        )
+        assert any(
+            "LNA drive saturated at clamp" in r.getMessage()
+            for r in caplog.records
+        )
+        assert not any(
+            "LOAD drive saturated" in r.getMessage() for r in caplog.records
+        )
     finally:
         client.stop()
