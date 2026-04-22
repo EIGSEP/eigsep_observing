@@ -15,13 +15,16 @@ mode-specific orchestration.
 
 from argparse import ArgumentParser
 import logging
+from pathlib import Path
 from threading import Thread
 
-from eigsep_redis import Transport
+import yaml
+
+from eigsep_redis import ConfigStore, Transport
 
 from eigsep_observing import PandaClient
 from eigsep_observing.testing import DummyPandaClient
-from eigsep_observing.utils import configure_eig_logger
+from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
 configure_eig_logger(level=logging.INFO)
@@ -29,18 +32,40 @@ logger = logging.getLogger(__name__)
 
 parser = ArgumentParser(description="Panda observing client")
 parser.add_argument(
+    "--cfg_file",
+    dest="cfg_file",
+    type=Path,
+    default=None,
+    help=(
+        "Observing config yaml (switch schedule, VNA settings, motor "
+        "params). Published to Redis on launch and consumed by the "
+        "ground-side observer. Defaults to the packaged "
+        "obs_config.yaml, or dummy_config.yaml with --dummy."
+    ),
+)
+parser.add_argument(
     "--dummy", action="store_true", help="Run in dummy mode (no hardware)"
 )
 args = parser.parse_args()
 
+if args.cfg_file is None:
+    args.cfg_file = get_config_path(
+        "dummy_config.yaml" if args.dummy else "obs_config.yaml"
+    )
+
+logger.info(f"Loading observing config from {args.cfg_file}")
+with open(args.cfg_file, "r") as f:
+    cfg = yaml.safe_load(f)
 
 if args.dummy:
     logger.warning("Running in DUMMY mode, no hardware will be used.")
     transport = Transport(host="localhost", port=6380)
     transport.reset()  # reset test redis database
-    client = DummyPandaClient(transport=transport)
+    ConfigStore(transport).upload(cfg)
+    client = DummyPandaClient(transport=transport, default_cfg=cfg)
 else:
     transport = Transport(host="localhost", port=6379)
+    ConfigStore(transport).upload(cfg)
     client = PandaClient(transport)
 
 logger.info(f"Client configuration: {client.cfg}")

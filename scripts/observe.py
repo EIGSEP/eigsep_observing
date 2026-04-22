@@ -7,16 +7,14 @@ disk. The Panda runs autonomously — start it before running this script.
 import argparse
 import logging
 import sys
-from pathlib import Path
 import threading
 import time
-import yaml
 
 from eigsep_redis import ConfigStore, Transport
 
 from eigsep_observing import EigObserver
 from eigsep_observing.testing import DummyEigObserver
-from eigsep_observing.utils import configure_eig_logger, get_config_path
+from eigsep_observing.utils import configure_eig_logger
 
 # logger with rotating file handler
 configure_eig_logger(level=logging.INFO)
@@ -28,15 +26,29 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
 parser.add_argument(
-    "--cfg_file",
-    dest="cfg_file",
-    type=Path,
-    default=get_config_path("obs_config.yaml"),
-    help=(
-        "Configuration file for the observer. Used for IP addresses "
-        "and observer-side settings (save directories, ntimes). "
-        "The Panda reads its own config from Redis."
-    ),
+    "--rpi-ip",
+    dest="rpi_ip",
+    default="10.10.10.10",
+    help="IP of the RPi hosting the SNAP correlator Redis.",
+)
+parser.add_argument(
+    "--panda-ip",
+    dest="panda_ip",
+    default="10.10.10.11",
+    help="IP of the LattePanda hosting the observing-config Redis.",
+)
+parser.add_argument(
+    "--corr-save-dir",
+    dest="corr_save_dir",
+    default="/media/eigsep/T7/data",
+    help="Directory for correlator HDF5 files.",
+)
+parser.add_argument(
+    "--corr-ntimes",
+    dest="corr_ntimes",
+    type=int,
+    default=240,
+    help="Integrations per correlator HDF5 file.",
 )
 parser.add_argument(
     "--snap",
@@ -65,14 +77,14 @@ if args.dummy:
         "No actual data will be recorded."
     )
     redis_port = 6380  # test port for mock Redis
-    args.cfg_file = get_config_path("dummy_config.yaml")
+    # Dummy mode always targets the fakeredis instance started by
+    # panda_observe --dummy on the same machine.
+    rpi_ip = "localhost"
+    panda_ip = "localhost"
 else:
     redis_port = 6379
-
-with open(args.cfg_file, "r") as f:
-    cfg = yaml.safe_load(f)
-rpi_ip = cfg["rpi_ip"]
-panda_ip = cfg["panda_ip"]
+    rpi_ip = args.rpi_ip
+    panda_ip = args.panda_ip
 
 
 # initialize the Redis transports
@@ -119,8 +131,8 @@ corr_crashed = [False]
 def _corr_target():
     try:
         observer.record_corr_data(
-            cfg["corr_save_dir"],
-            ntimes=cfg["corr_ntimes"],
+            args.corr_save_dir,
+            ntimes=args.corr_ntimes,
             timeout=10,
         )
     except Exception:

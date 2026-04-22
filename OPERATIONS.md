@@ -10,14 +10,17 @@ NETWORK
 STARTUP ORDER
   1. SSH into panda:     ssh eigsep@10.10.10.11
   2. Start panda client: python scripts/panda_observe.py
-  3. On ground computer:  python scripts/observe.py
+  3. On ground RPi:  python scripts/observe.py
 
 STOP
   Ctrl-C on either script. Threads shut down gracefully.
 
 CONFIG
-  Panda owns the config. Edit obs_config.yaml on the panda,
-  then restart panda_observe.py. The observer reads it from Redis.
+  Panda owns the observing config (switch schedule, VNA, motor).
+  Edit obs_config.yaml on the panda, then restart panda_observe.py
+  — it uploads the yaml to Redis on launch. The observer reads the
+  observing config from Redis; its only CLI knobs are host-local
+  (IPs, save dir, ntimes).
 
 LOGS
   Rotating log file: eigsep.log (10 MB, 5 backups)
@@ -40,8 +43,12 @@ python scripts/observe.py --no-snap
 python scripts/panda_observe.py --dummy  # terminal 1
 python scripts/observe.py --dummy        # terminal 2
 
-# Custom config file (for IP addresses / save dirs)
-python scripts/observe.py --cfg_file /path/to/my_config.yaml
+# Custom observing config (switch schedule / VNA / motor) — panda side
+python scripts/panda_observe.py --cfg_file /path/to/my_config.yaml
+
+# Override host-local knobs — observer side (no yaml, CLI flags only)
+python scripts/observe.py --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
+    --corr-save-dir /mnt/data --corr-ntimes 120
 ```
 
 ### If something crashes
@@ -56,10 +63,11 @@ python scripts/observe.py --cfg_file /path/to/my_config.yaml
 ### Changing configuration
 
 1. SSH into panda
-2. Edit `obs_config.yaml`
+2. Edit `obs_config.yaml` (or pass `--cfg_file` at launch)
 3. Ctrl-C on `panda_observe.py`
-4. Restart `panda_observe.py` (reads new config, uploads to Redis)
-5. Optionally restart `observe.py` (it will read the new config from Redis)
+4. Restart `panda_observe.py` (reads new yaml, uploads to Redis)
+5. Optionally restart `observe.py` (it will read the new config from Redis
+   for VNA save dir and `use_vna` gating; host-local knobs stay as CLI flags)
 
 ---
 
@@ -131,11 +139,11 @@ STEP 1: Start Panda                    STEP 2: Start Observer
 
 panda_observe.py                       observe.py
   │                                      │
-  ├─ Connect to local Redis              ├─ Read obs_config.yaml
-  │                                      │    (IP addresses, save dirs)
-  ├─ PandaClient.__init__()              │
-  │   ├─ Read config from Redis          ├─ Connect to RPi Redis
-  │   │   (or fall back to YAML)         ├─ Connect to Panda Redis
+  ├─ Connect to local Redis              ├─ Parse CLI flags
+  ├─ Load --cfg_file yaml                │    (IPs, save dir, ntimes)
+  ├─ Upload yaml to Redis (authoritative)│
+  ├─ PandaClient.__init__()              ├─ Connect to RPi Redis
+  │   ├─ Read config from Redis          ├─ Connect to Panda Redis
   │   ├─ Discover picos on serial        │
   │   ├─ Add pico info to config         ├─ EigObserver.__init__()
   │   ├─ Upload enriched config          │   ├─ Read corr_config from RPi Redis
@@ -243,11 +251,11 @@ Sensor metadata
 ### Config Ownership
 
 ```
-obs_config.yaml (on panda disk)
+obs_config.yaml (on panda disk, selected by --cfg_file)
   │
-  │ read at startup by PandaClient
+  │ read at panda_observe.py startup, uploaded to Redis
   ▼
-Redis "config" key
+Redis "config" key (authoritative; overwritten on each launch)
   │
   │ PandaClient enriches with pico info,
   │ re-uploads with timestamp
@@ -260,17 +268,19 @@ Official config record
 
 
 To change config:
-  1. Edit obs_config.yaml on panda
+  1. Edit obs_config.yaml on panda (or pass --cfg_file PATH)
   2. Restart panda_observe.py
-     └─ reads YAML, discovers picos, uploads to Redis
-  3. Restart observe.py (optional, if save dirs changed)
-     └─ reads new config from Redis
+     └─ uploads YAML to Redis, discovers picos, re-uploads with pico info
+  3. Restart observe.py if host-local knobs changed
+     (--corr-save-dir, --corr-ntimes, --rpi-ip, --panda-ip)
+     └─ observer reads the observing config from Redis automatically
 ```
 
 ### Network Addresses
 
-These are the defaults from `obs_config.yaml`. Actual IPs may differ
-per deployment — check your config file.
+Panda-side defaults live in `obs_config.yaml`. Ground-side defaults are
+baked into `observe.py` as CLI flag defaults (`--rpi-ip`, `--panda-ip`).
+Actual IPs may differ per deployment — pass them explicitly if so.
 
 ```
 Ground computer:  user machine (runs observe.py)
