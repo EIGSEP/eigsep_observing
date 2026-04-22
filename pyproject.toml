@@ -53,7 +53,7 @@ where = ["src"]
 "eigsep_observing" = ["config/*.yaml", "data/*.fpg"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src/eigsep_observing/contract_tests"]
 pythonpath = ["src"]
 addopts = [
   "--cov=eigsep_observing",
