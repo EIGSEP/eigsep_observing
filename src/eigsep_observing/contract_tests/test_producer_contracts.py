@@ -16,6 +16,10 @@ The end-to-end ``DummyEigsepFpga → File → corr_write → read_hdf5``
 round-trip lives here as well: it's the canonical contract test that
 ties the producer side to the file format on disk, and conceptually
 belongs with the rest of the producer-conformance suite.
+
+This module ships under ``src/`` rather than ``tests/`` so that the
+eigsep-field CLI (``eigsep-field verify``) can run it on installs that
+only have the wheel and no test tree — see ``contract_tests/__init__.py``.
 """
 
 import glob
@@ -39,9 +43,9 @@ from picohost.testing import (
 from eigsep_redis.keys import STATUS_STREAM  # noqa: F401
 from eigsep_redis.testing import DummyTransport
 
-from conftest import HEADER, IMU_READING
 import eigsep_observing
 from eigsep_observing import io
+from eigsep_observing._test_fixtures import HEADER, IMU_READING
 from eigsep_observing.testing import (
     DummyEigsepFpga,
     DummyPandaClient,

@@ -1,5 +1,4 @@
-"""
-Cross-package Redis-key uniqueness guard.
+"""Cross-package Redis-key uniqueness guard.
 
 Every Redis key/stream/set this repo writes to lives in
 ``eigsep_redis.keys`` or ``eigsep_observing.keys``. Two constants
@@ -10,6 +9,13 @@ never happens.
 If this test fails, pick a new name — do not "fix" it by deleting one
 of the duplicates. The right fix depends on which key is actually in
 use at runtime.
+
+This module ships under ``src/`` (alongside the producer-contract
+suite) rather than ``tests/`` so that ``eigsep-field verify`` can run
+it on wheel-only installs via
+``pytest --pyargs eigsep_observing.contract_tests``. The uniqueness
+check also catches mixed-version pins that CI's pre-release gate
+cannot see (e.g. an on-Pi hand upgrade of ``eigsep_redis``).
 """
 
 from eigsep_observing import keys as obs_keys

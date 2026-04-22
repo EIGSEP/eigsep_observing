@@ -53,7 +53,7 @@ where = ["src"]
 "eigsep_observing" = ["config/*.yaml", "data/*.fpg"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src/eigsep_observing/contract_tests"]
 pythonpath = ["src"]
 addopts = [
   "--cov=eigsep_observing",
@@ -62,6 +62,12 @@ addopts = [
   "--junitxml=junit.xml",
   "-o junit_family=legacy",
   "--timeout=60",
+]
+
+[tool.coverage.run]
+omit = [
+  "src/eigsep_observing/contract_tests/*",
+  "src/eigsep_observing/_test_fixtures.py",
 ]
 
 [tool.ruff]

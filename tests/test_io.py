@@ -2698,9 +2698,9 @@ def test_metadata_filler_is_none_when_stream_appears_late():
 
 
 # Producer/fixture contract conformance tests live in
-# tests/test_producer_contracts.py — they test external producers
-# (picohost emulators, DummyEigsepFpga) against the schemas in io.py
-# rather than testing io.py itself.
+# src/eigsep_observing/contract_tests/test_producer_contracts.py — they
+# test external producers (picohost emulators, DummyEigsepFpga) against
+# the schemas in io.py rather than testing io.py itself.
 
 
 # Production correlation pair lists. CURRENT is what corr_config.yaml
