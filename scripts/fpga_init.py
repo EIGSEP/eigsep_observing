@@ -8,6 +8,7 @@ from threading import Thread  # noqa: E402
 
 import IPython  # noqa: E402
 import yaml  # noqa: E402
+from eigsep_redis import Transport  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 from eigsep_observing.utils import get_config_path, load_config  # noqa: E402
@@ -95,7 +96,10 @@ else:
 
 if args.dummy_mode:
     logger.warning("Running in DUMMY mode.")
-    fpga = DummyEigsepFpga(cfg=cfg, wiring=wiring, program=program)
+    transport = Transport(host="localhost", port=6380)
+    fpga = DummyEigsepFpga(
+        cfg=cfg, wiring=wiring, transport=transport, program=program
+    )
 else:
     snap_ip = cfg["snap_ip"]
     logger.info(f"Connecting to Eigsep correlator at {snap_ip}.")

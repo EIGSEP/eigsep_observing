@@ -5,6 +5,9 @@
 *.eig
 *.npz
 
+# run_fake_observation.sh output
+logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

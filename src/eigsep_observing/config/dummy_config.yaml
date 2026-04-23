@@ -33,7 +33,7 @@ motor_interval: 1  # seconds between scans
 motor_failure_retry_s: 0.5  # fast retry for tests
 motor_scan: {}
 # tempctrl
-use_tempctrl: false
+use_tempctrl: true
 tempctrl_interval: 1  # seconds; short for tests
 tempctrl_settings:
   watchdog_timeout_ms: 30000
