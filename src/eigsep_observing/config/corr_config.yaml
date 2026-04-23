@@ -22,5 +22,11 @@ redis:
   host: localhost
   port: 6379
 pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
+# Cadence for raw ADC snapshot publishing to Redis (seconds between
+# frames). Set to null or 0 to disable. Stats (mean/power/RMS per
+# ADC core) publish every integration regardless and land in the
+# corr file via the metadata-averaging path — this period only
+# controls the raw-samples stream, which is diagnostic-only.
+adc_snapshot_period_s: 1.0
 # Hardware wiring (antenna → FEM → PAM → SNAP input mapping) lives in
 # `wiring.yaml`, not here. This file is software-only.

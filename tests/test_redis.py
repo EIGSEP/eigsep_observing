@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from cmt_vna.testing import DummyVNA
 
 from eigsep_observing import corr as corr_mod
+from eigsep_observing.adc import AdcSnapshotReader, AdcSnapshotWriter
 from eigsep_observing.corr import CorrConfigStore, CorrReader, CorrWriter
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing.utils import compare_dicts, generate_data
@@ -543,6 +544,8 @@ def test_bus_classes_have_no_cross_bus_methods():
         },
         VnaWriter: {"add", "maxlen"},
         VnaReader: {"read"},
+        AdcSnapshotWriter: {"add", "maxlen"},
+        AdcSnapshotReader: {"read"},
     }
     # CorrConfigStore legitimately owns upload/get/upload_header/
     # get_header — those are its surface, not cross-bus. Scope the
@@ -593,6 +596,10 @@ def test_consumer_role_surfaces_are_structural():
             "metadata_stream",  # observer scope
             "status_reader",  # observer scope
             "heartbeat_reader",  # observer scope
+            "adc_metadata_writer",  # MetadataWriter — FPGA scope
+            "adc_snapshot_writer",  # AdcSnapshotWriter — FPGA scope
+            "adc_metadata_stream",  # observer scope
+            "adc_snapshot_reader",  # observer/live-status scope
         ):
             assert forbidden not in panda_attrs, (
                 f"PandaClient instance must not hold {forbidden!r}"
@@ -613,6 +620,8 @@ def test_consumer_role_surfaces_are_structural():
             "metadata",  # MetadataWriter — picohost scope
             "status",  # StatusWriter — PandaClient scope
             "heartbeat",  # HeartbeatWriter — PandaClient scope
+            "adc_metadata_writer",  # MetadataWriter — FPGA scope
+            "adc_snapshot_writer",  # AdcSnapshotWriter — FPGA scope
         ):
             assert forbidden not in obs_attrs, (
                 f"EigObserver instance must not hold {forbidden!r}"
@@ -621,8 +630,9 @@ def test_consumer_role_surfaces_are_structural():
         obs.stop_event.set()
         obs.status_thread.join(timeout=1)
 
-    # --- EigsepFpga: corr writer + corr_config only. Must not hold
-    # any consumer surface.
+    # --- EigsepFpga: producer-side writers + corr_config only (corr
+    # writer, adc_metadata_writer, adc_snapshot_writer). Must not
+    # hold any consumer surface.
     fpga = DummyEigsepFpga(program=False)
     fpga_attrs = set(vars(fpga))
     for forbidden in (
@@ -632,6 +642,7 @@ def test_consumer_role_surfaces_are_structural():
         "metadata_snapshot",
         "status_reader",
         "heartbeat_reader",
+        "adc_snapshot_reader",
     ):
         assert forbidden not in fpga_attrs, (
             f"EigsepFpga instance must not hold {forbidden!r}"

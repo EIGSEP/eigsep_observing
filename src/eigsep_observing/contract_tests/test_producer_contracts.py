@@ -23,9 +23,11 @@ only have the wheel and no test tree — see ``contract_tests/__init__.py``.
 """
 
 import glob
+import json
 import tempfile
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -103,9 +105,39 @@ def _rfswitch_post_handler_reading():
     return captured
 
 
+def _adc_stats_post_publish_reading():
+    """Return an adc_stats reading after EigsepFpga._publish_adc_stats.
+
+    adc_stats isn't a picohost emulator — it's produced by
+    ``EigsepFpga._publish_adc_stats``, which reads the on-FPGA
+    ``rms_levels`` register via ``Input.get_stats`` and composes the
+    per-core payload. The contract this test enforces is the
+    *post-publish* Redis shape, so the fixture drives the real method
+    end-to-end and reads the payload back off the transport hash.
+    Mirrors the _potmon / _rfswitch post-handler pattern — same
+    "compose producer + real publish path to get the Redis shape"
+    idea, with an FPGA-side producer in place of a pico.
+    """
+    fpga = DummyEigsepFpga(program=False)
+    # Synthetic but schema-realistic: 12 cores × 3 stats, shape matches
+    # the real Input.get_stats(sum_cores=False) return.
+    means = np.linspace(-0.1, 0.1, 12)
+    powers = np.linspace(5.0, 15.0, 12)
+    rmss = np.sqrt(powers)
+    with patch.object(
+        fpga.inp, "get_stats", return_value=(means, powers, rmss)
+    ):
+        fpga._publish_adc_stats()
+    raw = fpga.transport.r.hget("metadata", "adc_stats")
+    return json.loads(raw.decode("utf-8"))
+
+
 # Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
-# that returns a single fresh reading from the corresponding picohost
-# emulator. Used by test_every_schema_has_conforming_emulator below to
+# that returns a single fresh reading from the corresponding producer.
+# Most entries are picohost emulators; ``adc_stats`` is an FPGA-side
+# adapter (register read + compose-in-publish) but structurally behaves
+# like a pico from the schema's perspective, so it lives in the same
+# registry. Used by test_every_schema_has_conforming_emulator below to
 # mechanically enforce that adding an entry to SENSOR_SCHEMAS without a
 # real-producer contract test is impossible: the parametrized test runs
 # over SENSOR_SCHEMAS keys, so a missing registration fails CI loudly.
@@ -116,6 +148,7 @@ SENSOR_EMULATORS = {
     "tempctrl": lambda: TempCtrlEmulator().get_status(),
     "lidar": lambda: LidarEmulator().get_status(),
     "potmon": _potmon_post_handler_reading,
+    "adc_stats": _adc_stats_post_publish_reading,
 }
 
 

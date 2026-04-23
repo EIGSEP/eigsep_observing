@@ -683,6 +683,35 @@ SENSOR_SCHEMAS = {
         "app_id": int,
         "distance_m": float,
     },
+    # `adc_stats` is produced by the SNAP-side correlator (not a pico),
+    # published on the SNAP transport via a second ``MetadataWriter``
+    # that lives in ``EigsepFpga``. One entry is emitted per corr
+    # integration from ``Input.get_stats(sum_cores=False)`` — mean,
+    # power, and RMS for each of the 12 ADC cores (6 SNAP inputs × 2
+    # interleaved cores). Field names are ``input{N}_core{C}_{stat}``
+    # where ``N`` is the snap-input index 0..5 (same label the corr
+    # file uses for auto-correlations) and ``C`` is the interleaved
+    # ADC core 0/1: ``get_stats`` returns 12 values where indices
+    # ``2N`` and ``2N+1`` are the pair that ``sum_cores=True`` would
+    # average into snap input ``N``. Keeping cores split preserves the
+    # interleaved-imbalance diagnostic while making each field trivially
+    # joinable to the corr data it describes. Envelope is minimal: no
+    # ``app_id`` (not a picohost app) and no invariant fields beyond
+    # ``sensor_name``. The 36 floats go through the standard float→mean
+    # reduction, so each integration row in the HDF5 file carries the
+    # per-core RMS averaged over the integration — visible to offline
+    # data analysts as a flagging / quality trace alongside the corr
+    # data.
+    "adc_stats": {
+        "sensor_name": str,
+        "status": str,
+        **{
+            f"input{n}_core{c}_{stat}": float
+            for n in range(6)
+            for c in range(2)
+            for stat in ("mean", "power", "rms")
+        },
+    },
 }
 
 
