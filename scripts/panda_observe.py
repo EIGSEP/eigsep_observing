@@ -2,9 +2,9 @@
 
 Starts the steady-state observing loops on the suspended LattePanda:
 ``switch_loop`` (RF calibration schedule), ``vna_loop`` (periodic S11),
-and ``motor_loop`` (periodic az/el pointing scans). Each loop is gated
-by a ``use_*`` flag in the observing config so the panda can run with
-any subset.
+``motor_loop`` (periodic az/el pointing scans), and ``tempctrl_loop``
+Each loop is gated by a ``use_*`` flag in the observing config so the
+panda can run with any subset.
 
 Dedicated observing modes that need cross-loop coordination — beam
 mapping (rfswitch pinned to RFANT), VNA-at-positions, or motion/switch
@@ -90,6 +90,13 @@ if client.cfg.get("use_motor", False):
     thds["motor"] = motor_thd
     logger.info("Starting motor thread")
     motor_thd.start()
+
+# tempctrl
+if client.cfg.get("use_tempctrl", False):
+    tempctrl_thd = Thread(target=client.tempctrl_loop)
+    thds["tempctrl"] = tempctrl_thd
+    logger.info("Starting tempctrl thread")
+    tempctrl_thd.start()
 
 try:
     client.stop_client.wait()  # wait until stop signal is set

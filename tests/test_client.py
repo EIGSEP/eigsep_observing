@@ -14,7 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing import MotorScanner
+from eigsep_observing import MotorScanner, TempCtrlClient
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -1811,5 +1811,363 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Motor set_delay failed" in status
+    finally:
+        client.stop()
+
+
+# ``tempctrl_loop`` mirrors ``motor_loop``: periodic action gated by a
+# ``use_*`` flag. Unit tests for the command dispatch + emulator state
+# live in tests/test_tempctrl_client.py; these tests cover the
+# gating and loop-level behavior.
+
+
+def test_use_tempctrl_false_leaves_client_none(client):
+    """Default dummy_config has ``use_tempctrl: false``; PandaClient
+    must leave ``self.tempctrl`` as ``None`` and skip the init call."""
+    assert client.cfg.get("use_tempctrl", False) is False
+    assert client.tempctrl is None
+
+
+def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
+    """With ``use_tempctrl: true``, ``self.tempctrl`` is a real
+    ``TempCtrlClient`` bound to the same transport."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert isinstance(client.tempctrl, TempCtrlClient)
+        assert client.tempctrl.transport is client.transport
+        # Settings from dummy_config land on the client object.
+        assert client.tempctrl.settings.get("watchdog_timeout_ms") == 30000
+        assert client.tempctrl.settings["LNA"]["target_C"] == 25.0
+    finally:
+        client.stop()
+
+
+def test_tempctrl_settings_non_dict_disables_client(
+    transport, dummy_cfg, caplog
+):
+    """A non-dict ``tempctrl_settings`` is a config-side bug. Bail out
+    loudly and leave the client disabled; do not construct a
+    ``TempCtrlClient`` against garbage."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = "not a dict"
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.tempctrl is None
+        assert any(
+            "Invalid tempctrl_settings" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_settings_bad_numeric_disables_client(
+    transport, dummy_cfg, caplog
+):
+    """A typo'd numeric field (e.g. ``target_C: "twenty-five"``) must
+    fail up front at ``init_tempctrl`` — otherwise the coercion
+    ``TypeError``/``ValueError`` would only surface inside
+    ``apply_settings`` and unwind the ``tempctrl_loop`` thread on the
+    first iteration, stopping the health check entirely."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = {
+        "LNA": {"target_C": "twenty-five"},
+    }
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.tempctrl is None
+        assert any(
+            "Invalid tempctrl_settings" in r.getMessage()
+            and "target_C" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_returns_when_client_is_none(caplog, client):
+    """``tempctrl_loop`` must return promptly when disabled — no tight
+    spin, warning rides both channels."""
+    assert client.tempctrl is None
+    _arm_status_reader(client)
+    caplog.set_level("WARNING")
+    t0 = time.monotonic()
+    client.tempctrl_loop()
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.0
+    assert any(
+        "Tempctrl not initialized" in r.getMessage() for r in caplog.records
+    )
+    level, status = _status_reader(client).read(timeout=1)
+    assert level == logging.WARNING
+    assert "Tempctrl not initialized" in status
+
+
+def test_tempctrl_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
+    """Non-positive / non-numeric ``tempctrl_interval`` → refuse to run."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 0
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        _arm_status_reader(client)
+        caplog.set_level("WARNING")
+        t0 = time.monotonic()
+        client.tempctrl_loop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0
+        assert any(
+            "Invalid tempctrl_interval" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_applies_settings_once_then_stops(transport, dummy_cfg):
+    """One pass through the loop calls ``apply_settings`` and honors
+    ``stop_client``. Gating contract + single-seed contract: only the
+    first iteration seeds firmware config; picohost owns reboot replay,
+    so there is no periodic re-apply."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 60  # long; only one iteration
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        apply_calls = []
+
+        def fake_apply():
+            apply_calls.append(True)
+            client.stop_client.set()
+
+        with patch.object(
+            client.tempctrl, "apply_settings", side_effect=fake_apply
+        ):
+            client.tempctrl_loop()
+        assert apply_calls == [True]
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_does_not_reapply_after_success(transport, dummy_cfg):
+    """After apply_settings succeeds once, subsequent iterations run
+    the health check only — no re-apply. picohost's PicoPeltier caches
+    the last-applied config and replays it on reconnect, which makes
+    panda-side periodic re-apply redundant. Regression guard so we
+    don't drift back to the old "apply every iteration" shape."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 0.01  # fast so we run many iterations
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        apply_calls = []
+        health_calls = []
+
+        def fake_apply():
+            apply_calls.append(True)
+
+        def fake_health(status):
+            health_calls.append(status)
+            if len(health_calls) >= 5:
+                client.stop_client.set()
+
+        with (
+            patch.object(
+                client.tempctrl, "apply_settings", side_effect=fake_apply
+            ),
+            patch.object(
+                client.tempctrl,
+                "get_status",
+                return_value={
+                    "watchdog_tripped": False,
+                    "LNA_status": "update",
+                    "LOAD_status": "update",
+                },
+            ),
+            patch.object(
+                client, "_tempctrl_health_check", side_effect=fake_health
+            ),
+        ):
+            client.tempctrl_loop()
+        assert apply_calls == [True]  # seeded once, not re-applied
+        assert len(health_calls) >= 5  # health check runs every iteration
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_retries_apply_until_success(
+    transport, dummy_cfg, caplog
+):
+    """If the initial apply_settings raises RuntimeError / TimeoutError
+    (proxy/manager transient), retry on the same cadence until it
+    sticks, then lock into health-check-only mode. Guards both the
+    failure-survival contract (loop doesn't unwind on RuntimeError)
+    and the retry-on-init-failure contract."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_interval"] = 0.01
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        _arm_status_reader(client)
+        apply_calls = []
+
+        def flaky_apply():
+            apply_calls.append(True)
+            if len(apply_calls) < 3:
+                raise RuntimeError(f"transient #{len(apply_calls)}")
+            # third call succeeds; stop after one health-check iteration
+            # so the rest of the loop is pure health check.
+
+        health_calls = []
+
+        def fake_health(status):
+            health_calls.append(status)
+            if len(health_calls) >= 2:
+                client.stop_client.set()
+
+        with (
+            patch.object(
+                client.tempctrl, "apply_settings", side_effect=flaky_apply
+            ),
+            patch.object(
+                client.tempctrl,
+                "get_status",
+                return_value={
+                    "watchdog_tripped": False,
+                    "LNA_status": "update",
+                    "LOAD_status": "update",
+                },
+            ),
+            patch.object(
+                client, "_tempctrl_health_check", side_effect=fake_health
+            ),
+        ):
+            caplog.set_level("WARNING")
+            client.tempctrl_loop()
+        # Two failed attempts + one success; no re-apply after success.
+        assert apply_calls == [True, True, True]
+        assert (
+            sum(
+                1
+                for r in caplog.records
+                if "Tempctrl apply_settings failed" in r.getMessage()
+                and "RuntimeError" in r.getMessage()
+                and r.levelname == "WARNING"
+            )
+            == 2
+        )
+    finally:
+        client.stop()
+
+
+# The three `_tempctrl_health_check` tests below pass sparse snapshots
+# (3–11 of the 24 fields in the full tempctrl SENSOR_SCHEMAS shape — see
+# io.py). The deviation from real-data shape is deliberate and defensible:
+# `_tempctrl_health_check` is a pure reader that uses `.get()` with
+# None-guards on every field, so unspecified keys are silently treated
+# as "not present / not-relevant." Each test drives a single fault
+# branch (watchdog / thermistor-error / saturated-drive), and including
+# the other ~20 irrelevant fields would only add noise without changing
+# behavior. A producer-side contract drift (a field renamed or dropped
+# in the real snapshot) is caught by the producer-contract suite in
+# contract_tests/test_producer_contracts.py, not by these branch tests.
+
+
+def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
+    """When the metadata snapshot reports ``watchdog_tripped``, the
+    health check emits an operator-visible WARNING so the peltiers
+    going dark is visible ground-side."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above.
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": True,
+                "LNA_status": "update",
+                "LOAD_status": "update",
+            }
+        )
+        assert any(
+            "Tempctrl firmware watchdog tripped" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
+    """Per-channel ``status == "error"`` (thermistor read failed) must
+    ride the status stream so the operator sees the dead sensor."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above.
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LNA_status": "error",
+                "LOAD_status": "update",
+            }
+        )
+        assert any(
+            "LNA thermistor in error state" in r.getMessage()
+            for r in caplog.records
+        )
+        assert not any(
+            "LOAD thermistor in error state" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
+    """Drive saturated at the clamp while still >1°C from target =
+    peltier can't keep up. Log loudly for the operator."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above. The drive/
+        # clamp/T_now/T_target quartet per channel is the full input to
+        # the saturation check; the rest of the 24-field schema is
+        # irrelevant to this branch.
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LNA_status": "update",
+                "LOAD_status": "update",
+                "LNA_drive_level": 0.6,
+                "LNA_clamp": 0.6,
+                "LNA_T_now": 35.0,
+                "LNA_T_target": 25.0,
+                "LOAD_drive_level": 0.05,
+                "LOAD_clamp": 0.6,
+                "LOAD_T_now": 25.1,
+                "LOAD_T_target": 25.0,
+            }
+        )
+        assert any(
+            "LNA drive saturated at clamp" in r.getMessage()
+            for r in caplog.records
+        )
+        assert not any(
+            "LOAD drive saturated" in r.getMessage() for r in caplog.records
+        )
     finally:
         client.stop()

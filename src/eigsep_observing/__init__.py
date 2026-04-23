@@ -6,4 +6,5 @@ from .observer import EigObserver
 from .fpga import EigsepFpga
 from .motor_scanner import MotorScanner
 from .motor_zeroer import MotorZeroer
+from .tempctrl_client import TempCtrlClient
 from . import testing
