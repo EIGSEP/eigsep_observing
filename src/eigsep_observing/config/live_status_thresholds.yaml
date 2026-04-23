@@ -1,0 +1,52 @@
+# Live-status dashboard threshold overrides.
+#
+# Signals whose bands follow from obs_config / corr_header are
+# computed in eigsep_observing.live_status.signals.default_thresholds
+# and do NOT need to appear here. Examples: tempctrl.LNA_T_now,
+# tempctrl.LNA_drive_level, corr.acc_cadence_s,
+# file.seconds_since_write.
+#
+# This file holds:
+#   - signals with no config-derived source (ADC RMS, clipping),
+#   - tuning knobs for the derived layer (tempctrl danger half-width),
+#   - placeholders for site-specific signals that an operator must
+#     set by eye after deployment (lidar range, potmon angles).
+#
+# Signals left at `healthy: null` render as grey "unknown" tiles on
+# the dashboard. Silently-green is not an option.
+
+# ADC linearity / saturation — pure physics, no config pin.
+adc.rms:
+  healthy: [10.0, 20.0]
+  danger:  [5.0, 30.0]
+adc.clipping_fraction:
+  healthy: [0.0, 0.001]
+  danger:  [0.0, 0.01]
+
+# Tempctrl danger-band half-width in Celsius. Applied by Thresholds
+# during band merge: default_thresholds leaves tempctrl danger unset,
+# and Thresholds fills [target_C - k, target_C + k] when no explicit
+# per-signal danger override is provided below.
+# Healthy band stays at target ± 2*hysteresis regardless.
+tempctrl.danger_k_C: 10.0
+
+# Correlator auto-correlation median magnitude — calibrate with a
+# known-healthy run before setting. Leaving null means the tile
+# renders grey "unknown".
+corr.auto_mag_median:
+  healthy: null  # TODO: set from a healthy run
+  danger:  null
+
+# Site-geometry signals — operator fills these in after deployment.
+lidar.distance_m:
+  healthy: null  # TODO: set from site geometry
+potmon.pot_el_angle:
+  healthy: null  # TODO
+potmon.pot_az_angle:
+  healthy: null  # TODO
+
+# Escape hatch: any entry here overrides the derived default for that
+# signal. Example:
+# tempctrl.LNA_T_now:
+#   healthy: [22.0, 28.0]
+#   danger:  [18.0, 32.0]

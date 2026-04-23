@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EIGSEP live status</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+<script src="{{ url_for('plotly_js') }}"></script>
+</head>
+<body>
+<header>
+  <h1>EIGSEP live status</h1>
+  <div id="health-summary" class="health">
+    <span class="tile" id="tile-snap">SNAP: ?</span>
+    <span class="tile" id="tile-panda">Panda: ?</span>
+    <span class="tile" id="tile-observing">Observing: ?</span>
+    <span class="tile" id="tile-file">Last file: ?</span>
+  </div>
+</header>
+
+<main class="grid">
+  <section class="card wide">
+    <h2>Correlation spectra</h2>
+    <div id="plot-mag" class="plot"></div>
+    <div id="plot-phase" class="plot"></div>
+  </section>
+
+  <section class="card">
+    <h2>RF switch</h2>
+    <div id="rfswitch"></div>
+  </section>
+
+  <section class="card">
+    <h2>ADC (clipping + RMS)</h2>
+    <div id="adc-tiles"></div>
+  </section>
+
+  <section class="card">
+    <h2>Tempctrl</h2>
+    <div id="tempctrl-tiles"></div>
+  </section>
+
+  <section class="card">
+    <h2>Picos (status + age)</h2>
+    <div id="metadata-tiles"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Event log (status stream)</h2>
+    <ul id="status-log"></ul>
+  </section>
+</main>
+
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

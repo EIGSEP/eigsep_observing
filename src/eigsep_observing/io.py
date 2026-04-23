@@ -1253,7 +1253,15 @@ def _avg_sensor_values(value, schema=None, *, app_name=""):
 
 
 class File:
-    def __init__(self, save_dir, pairs, ntimes, cfg, writer_timeout=30.0):
+    def __init__(
+        self,
+        save_dir,
+        pairs,
+        ntimes,
+        cfg,
+        writer_timeout=30.0,
+        on_write=None,
+    ):
         """
         Initialize the File object for saving correlation data.
         Uses a double-buffered async writer so that HDF5 I/O never
@@ -1280,6 +1288,15 @@ class File:
             current buffer. Default 30s — well above a normal HDF5
             write of one buffer (sub-second) and well below the
             shortest realistic buffer cadence.
+        on_write : callable or None
+            Optional ``on_write(path, mtime_unix)`` callback invoked
+            from the writer thread after a successful ``os.rename``.
+            Used by ``EigObserver`` to publish the live-status
+            file-write heartbeat to Redis so a dashboard on a
+            different host can see new files land without needing
+            access to ``save_dir`` on disk. Exceptions raised by the
+            callback are caught and logged at ERROR — corr data is
+            sacred, a flaky heartbeat must not corrupt the writer.
 
         """
         self.logger = logger
@@ -1288,6 +1305,7 @@ class File:
         self.pairs = pairs
         self.cfg = cfg
         self._writer_timeout = writer_timeout
+        self._on_write = on_write
         self._dropped_buffers = 0
         # RF switch transition tracking — see Phase 11 in
         # add_data. Forward-only: never mutates previously-written
@@ -1684,6 +1702,15 @@ class File:
                 os.unlink(tmp_path)
             raise
         os.rename(tmp_path, fname)
+        if self._on_write is not None:
+            try:
+                self._on_write(fname, time.time())
+            except Exception as exc:
+                self.logger.error(
+                    f"on_write callback raised for {fname}: {exc}. "
+                    "File is already on disk; heartbeat will be stale "
+                    "until the next successful write."
+                )
 
     def corr_write(self, fname=None):
         """

@@ -11,6 +11,7 @@ from eigsep_redis import (
 
 from . import io
 from .corr import CorrConfigStore, CorrReader
+from .file_heartbeat import publish as publish_file_heartbeat
 from .vna import VnaReader
 
 logger = logging.getLogger(__name__)
@@ -215,7 +216,18 @@ class EigObserver:
             f"File time: {file_time} s"
         )
 
-        file = io.File(save_dir, pairs, ntimes, self.corr_cfg)
+        on_write = (
+            (
+                lambda path, mtime_unix: publish_file_heartbeat(
+                    self.transport_snap, path, mtime_unix
+                )
+            )
+            if self.transport_snap is not None
+            else None
+        )
+        file = io.File(
+            save_dir, pairs, ntimes, self.corr_cfg, on_write=on_write
+        )
         cached_header = None
         cached_sync_time = None
         last_write_deadline = None
@@ -271,7 +283,11 @@ class EigObserver:
                             )
                             file.close()
                             file = io.File(
-                                save_dir, pairs, ntimes, self.corr_cfg
+                                save_dir,
+                                pairs,
+                                ntimes,
+                                self.corr_cfg,
+                                on_write=on_write,
                             )
                         cached_header = header
                         cached_sync_time = new_sync_time
