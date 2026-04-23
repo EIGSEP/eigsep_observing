@@ -7,7 +7,7 @@ from .io import reshape_data
 from .utils import calc_freqs_dfreq
 
 
-def pairs_to_labels(pairs, corr_cfg):
+def pairs_to_labels(pairs, wiring):
     """
     Map correlation pairs to antenna labels.
 
@@ -15,7 +15,9 @@ def pairs_to_labels(pairs, corr_cfg):
     ----------
     pairs : list of str
         List of correlation pairs (e.g., ['0', '1', '02', '13'])
-    corr_cfg : dict
+    wiring : dict
+        Hardware wiring manifest (see ``config/wiring.yaml``), typically
+        fetched via ``CorrConfigStore.get_header()["wiring"]``.
 
     Returns
     -------
@@ -24,8 +26,8 @@ def pairs_to_labels(pairs, corr_cfg):
 
     """
     labels = {}
-    for ant, cfg in corr_cfg["rf_chain"]["ants"].items():
-        inp = str(cfg["snap"]["input"])
+    for ant, spec in wiring["ants"].items():
+        inp = str(spec["snap"]["input"])
         if inp in pairs:
             labels[inp] = ant
 
@@ -98,7 +100,7 @@ class LivePlotter:
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
         self.plot_labels = self.pairs  # XXX
-        # pairs_to_labels(self.pairs, self.corr_cfg)
+        # pairs_to_labels(self.pairs, self.corr_config.get_header()["wiring"])
 
         # Frequency axis
         freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)

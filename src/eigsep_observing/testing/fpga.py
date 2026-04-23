@@ -5,7 +5,7 @@ from math import floor
 
 from eigsep_redis.testing import DummyTransport
 
-from ..fpga import EigsepFpga, default_config
+from ..fpga import EigsepFpga, default_config, default_wiring
 from .utils import generate_data  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
@@ -154,10 +154,18 @@ class DummyEigsepFpga(EigsepFpga):
     zero and real ``Pfb.get_fft_shift`` reads the actual bits.
     """
 
-    def __init__(self, cfg=default_config, transport=None, program=False):
+    def __init__(
+        self,
+        cfg=default_config,
+        wiring=default_wiring,
+        transport=None,
+        program=False,
+    ):
         if transport is None:
             transport = DummyTransport()
-        super().__init__(cfg=cfg, transport=transport, program=program)
+        super().__init__(
+            cfg=cfg, wiring=wiring, transport=transport, program=program
+        )
         # Seed pfb_ctrl with cfg fft_shift bits via the real Pfb so
         # header/validate_config report the expected value.
         self.pfb.set_fft_shift(self.cfg["fft_shift"])

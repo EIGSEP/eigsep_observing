@@ -19,6 +19,7 @@ from queue import Queue
 from threading import Event, Thread
 
 import numpy as np
+import yaml
 
 from eigsep_redis import Transport
 
@@ -45,6 +46,9 @@ if not USE_CASPERFPGA:
 
 default_config_file = get_config_path("corr_config.yaml")
 default_config = load_config(default_config_file)
+default_wiring_file = get_config_path("wiring.yaml")
+with open(default_wiring_file, "r") as _wf:
+    default_wiring = yaml.safe_load(_wf)
 
 
 def _cfg_diff_summary(disk_cfg, redis_cfg):
@@ -77,15 +81,29 @@ def _cfg_diff_summary(disk_cfg, redis_cfg):
 
 
 class EigsepFpga:
-    def __init__(self, cfg=default_config, transport=None, program=False):
+    def __init__(
+        self,
+        cfg=default_config,
+        wiring=default_wiring,
+        transport=None,
+        program=False,
+    ):
         """
         Class for interfacing with the SNAP board.
 
         Parameters
         ----------
         cfg : dict
-            Configuration dictionary. See `config/corr_config.yaml` for
-            details.
+            Software configuration dictionary (sample_rate, FFT shift,
+            accumulation length, dtype, redis). See
+            `config/corr_config.yaml`.
+        wiring : dict
+            Hardware wiring manifest (snap_id + per-antenna FEM / SNAP
+            input / optional PAM mapping). See `config/wiring.yaml`.
+            Kept separate from ``cfg`` so it can be edited in the field
+            without tripping ``assert_config_matches_redis`` — the
+            standalone ``scripts/republish_header.py`` updates the
+            corr header's wiring block without touching the FPGA.
         transport : eigsep_redis.Transport, optional
             Shared Redis transport. If ``None`` (the production
             default), a :class:`Transport` is built from
@@ -101,6 +119,7 @@ class EigsepFpga:
         self.logger.debug("Initializing EigsepFpga")
         cfg = deepcopy(cfg)
         self.cfg = cfg
+        self.wiring = deepcopy(wiring)
         self.pairs = cfg["pairs"]
         self.autos = [p for p in self.pairs if len(p) == 1]
         self.crosses = [p for p in self.pairs if len(p) == 2]
@@ -195,9 +214,14 @@ class EigsepFpga:
         else:
             sample_rate = self.cfg["sample_rate"]
             adc_gain = self.cfg["adc_gain"]
-        rf_chain = self.cfg["rf_chain"].copy()
-        if self.pams_initialized:  # update PAM attenuation
-            for ant in rf_chain["ants"]:
+        wiring = deepcopy(self.wiring)
+        ants_with_pam = [
+            ant for ant, spec in wiring["ants"].items() if "pam" in spec
+        ]
+        if self.pams_initialized and ants_with_pam:
+            # Refresh attenuation from hardware so the header reflects
+            # live state rather than the declarative value in wiring.yaml.
+            for ant in ants_with_pam:
                 try:
                     atten = self.get_pam_atten(ant)
                 except OSError as e:
@@ -206,7 +230,22 @@ class EigsepFpga:
                     )
                     self.pams_initialized = False
                     break
-                rf_chain["ants"][ant]["pam"]["atten"] = atten
+                wiring["ants"][ant]["pam"]["atten"] = atten
+        elif ants_with_pam and not self.pams_initialized:
+            # Wiring declares PAMs but this process hasn't initialized
+            # them. The published header will carry the declarative
+            # atten from yaml without a hardware confirmation — warn
+            # so the operator knows to `--reinit` rather than relying
+            # on `republish_header.py`. No throttle: header is only
+            # accessed at state-change publication points (initialize,
+            # synchronize, set_pol_delay, observe-start), so this fires
+            # a handful of times per process at most.
+            self.logger.warning(
+                f"Wiring declares PAMs on {ants_with_pam} but "
+                "pams_initialized=False; published atten values "
+                "are declarative, not hardware-confirmed. Run "
+                "fpga_init.py --reinit to initialize PAMs."
+            )
         if self.is_synchronized:
             sync_time = self.sync_time
         else:
@@ -243,7 +282,7 @@ class EigsepFpga:
             "redis": self.cfg["redis"],
             "sync_time": sync_time,
             "integration_time": t_int,
-            "rf_chain": rf_chain,
+            "wiring": wiring,
         }
         return m
 
@@ -262,7 +301,7 @@ class EigsepFpga:
         """
         return {
             name: ant["snap"]["input"]
-            for name, ant in self.cfg["rf_chain"]["ants"].items()
+            for name, ant in self.wiring["ants"].items()
         }
 
     def validate_config(self):
@@ -279,9 +318,12 @@ class EigsepFpga:
         fails = []
         for key, value in self.header.items():
             cfg_value = self.cfg.get(key)
-            if key == "sync_time":
-                continue  # sync_time is not in cfg
-            if key in ("pam_atten", "pol_delay"):
+            if key in ("sync_time", "wiring"):
+                # sync_time is runtime-only; wiring lives in
+                # self.wiring, not self.cfg, and is validated by shape
+                # at load time rather than against cfg.
+                continue
+            if key == "pol_delay":
                 if set(value.keys()) != set(cfg_value.keys()):
                     fails.append(key)
                 elif any(value[k] != cfg_value[k] for k in value.keys()):
@@ -616,11 +658,18 @@ class EigsepFpga:
         """
         Initialize the PAMs.
 
-        Notes
-        -----
-        This is called by `initialize_fpga`.
-
+        No-op when no antenna in ``self.wiring`` declares a ``pam:``
+        block — PAMs are optional in the wiring manifest. Called by
+        ``initialize_fpga``; can also be called directly.
         """
+        ants_with_pam = {
+            ant: spec
+            for ant, spec in self.wiring["ants"].items()
+            if "pam" in spec
+        }
+        if not ants_with_pam:
+            self.logger.info("No PAMs declared in wiring; skipping PAM init.")
+            return
         self.pams = []
         for num in range(3):
             pam = self._make_pam(num)
@@ -629,8 +678,8 @@ class EigsepFpga:
         self.blocks.extend(self.pams)
         self.pams_initialized = True
 
-        for ant in self.cfg["rf_chain"]["ants"]:
-            atten = self.cfg["rf_chain"]["ants"][ant]["pam"]["atten"]
+        for ant, spec in ants_with_pam.items():
+            atten = spec["pam"]["atten"]
             self.logger.info(f"Setting PAM attenuation for {ant} to {atten}")
             self.set_pam_atten(ant, atten)
 
@@ -658,11 +707,11 @@ class EigsepFpga:
         """
         if not self.pams_initialized:
             raise RuntimeError("PAMs not initialized.")
-        num = self.cfg["rf_chain"]["ants"][ant]["pam"]["num"]
+        num = self.wiring["ants"][ant]["pam"]["num"]
         pam = self.pams[num]
         atten_e, atten_n = pam.get_attenuation()
         atten = {"E": atten_e, "N": atten_n}
-        update_pol = self.cfg["rf_chain"]["ants"][ant]["pam"]["pol"]
+        update_pol = self.wiring["ants"][ant]["pam"]["pol"]
         atten[update_pol] = attenuation
         pam.set_attenuation(atten["E"], atten["N"], verify=True)
         self.corr_config.upload_header(self.header)
@@ -684,11 +733,11 @@ class EigsepFpga:
         """
         if not self.pams_initialized:
             raise RuntimeError("PAMs not initialized.")
-        num = self.cfg["rf_chain"]["ants"][ant]["pam"]["num"]
+        num = self.wiring["ants"][ant]["pam"]["num"]
         pam = self.pams[num]
         atten_e, atten_n = pam.get_attenuation()
         atten = {"E": atten_e, "N": atten_n}
-        pol = self.cfg["rf_chain"]["ants"][ant]["pam"]["pol"]
+        pol = self.wiring["ants"][ant]["pam"]["pol"]
         return atten[pol]
 
     def set_pam_atten_all(self, attenuation):
