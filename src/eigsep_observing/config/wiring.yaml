@@ -1,0 +1,51 @@
+# EIGSEP hardware wiring manifest (SNAP C000069, 5-antenna layout).
+#
+# This file is declarative: it describes the intended RF wiring between
+# antennas, front-end modules (FEMs), optional PAMs, and SNAP digital
+# inputs. Physically wire the hardware to match the values here. Any
+# mismatch means the file header on corr HDF5 files is wrong, which is
+# the thing you actually care about at analysis time.
+#
+# ---------------------------------------------------------------------
+# Editing in the field
+# ---------------------------------------------------------------------
+# If the recorded wiring is wrong and you want subsequent corr files to
+# carry a corrected header *without* re-initializing the SNAP:
+#
+#     1. Edit this file to match the actual hardware.
+#     2. Run:  python scripts/republish_header.py
+#     3. The next corr file opened by observe.py will reflect the fix.
+#        The in-flight file keeps its file-start header snapshot (by
+#        design). panda_observe.py, motors, tempctrl, VNA, and RF switch
+#        are unaffected.
+#
+# ---------------------------------------------------------------------
+# PAM block is optional
+# ---------------------------------------------------------------------
+# PAMs have been removed from the current deployment. The `pam:` block
+# on each antenna is optional: omit it entirely if that antenna has no
+# PAM. If ANY antenna has a `pam:` block, `initialize_pams` runs during
+# FPGA init. If PAMs return, copy an entry like:
+#
+#     pam: {id: 375, num: 2, pol: E, atten: 8}
+#
+# onto each antenna that has one (num is the SNAP PAM position 0/1/2;
+# pol is the PAM channel E or N; atten is dB in [0, 15]).
+
+snap_id: C000069
+ants:
+  box:
+    fem: {id: "eigsep1"}
+    snap: {input: 4, label: N8}
+  viv1-N:
+    fem: {id: 32, pol: N}
+    snap: {input: 2, label: N4}
+  viv1-E:
+    fem: {id: 32, pol: E}
+    snap: {input: 3, label: E6}
+  viv2-N:
+    fem: {id: 348, pol: N}
+    snap: {input: 0, label: N0}
+  viv2-E:
+    fem: {id: 348, pol: E}
+    snap: {input: 1, label: E2}

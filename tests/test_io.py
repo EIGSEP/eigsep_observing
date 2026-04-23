@@ -320,6 +320,41 @@ def test_write_read_hdf5():
         assert "nchan" in bad_read_header
 
 
+def test_write_read_header_roundtrip_with_wiring():
+    """The nested ``wiring`` dict in the header survives the HDF5
+    write→read cycle with structure and types preserved. Guards the
+    contract that ``_write_dataset`` JSON-encodes dict-valued header
+    fields and ``_read_dataset`` decodes them back."""
+    data = generate_data(reshape=True)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        fname = Path(tmpdir) / "wiring_roundtrip.h5"
+        io.write_hdf5(fname, data, HEADER)
+        _, read_header, _ = io.read_hdf5(fname)
+
+    assert "wiring" in read_header
+    wiring = read_header["wiring"]
+    assert wiring["snap_id"] == HEADER["wiring"]["snap_id"]
+    # Antenna names preserved.
+    assert set(wiring["ants"].keys()) == set(HEADER["wiring"]["ants"].keys())
+    # Nested structure preserved (fem + snap sub-dicts); PAM absent as
+    # in the source fixture.
+    ant_name = next(iter(HEADER["wiring"]["ants"]))
+    ant = wiring["ants"][ant_name]
+    src = HEADER["wiring"]["ants"][ant_name]
+    assert ant["fem"]["id"] == src["fem"]["id"]
+    assert ant["fem"]["pol"] == src["fem"]["pol"]
+    assert ant["snap"]["input"] == src["snap"]["input"]
+    assert ant["snap"]["label"] == src["snap"]["label"]
+    assert "pam" not in ant
+
+
+def test_validate_corr_header_accepts_dict_wiring():
+    """``wiring`` must be typed dict in CORR_HEADER_SCHEMA; a valid
+    header with a wiring dict passes validation."""
+    violations = io._validate_corr_header(HEADER)
+    assert violations == [], violations
+
+
 def test_int32_hdf5_round_trip_dtypes():
     """Int32 corr data round-trips through write_hdf5 → read_hdf5.
 
@@ -1988,6 +2023,7 @@ def test_validate_corr_header():
         "dtype": ">i4",
         "integration_time": 0.1,
         "sample_rate": 500.0,  # MHz
+        "wiring": {"snap_id": "C000069", "ants": {}},
     }
     assert io._validate_corr_header(valid) == []
 

@@ -36,24 +36,36 @@ NTIMES = 60
 INTEGRATION_TIME = 1.0  # seconds
 FILE_TIME = NTIMES * INTEGRATION_TIME  # seconds
 
-# HEADER mimics EigsepFpga().header: the static-configuration portion of a
+# HEADER mimics EigsepFpga.header: the static-configuration portion of a
 # corr file. Units match corr_config.yaml: sample_rate is in MHz (NOT Hz).
+#
+# ``pol_delay`` is a nested dict (one key per pol-pair) matching the
+# shape emitted by the real header property — not three flat keys.
+# ``wiring`` is the hardware manifest (split out of the old ``rf_chain``
+# key in corr_config.yaml); a single antenna with no ``pam:`` block is
+# included so consumers exercise the PAM-absent code path.
 HEADER = {
     "dtype": ">i4",
     "acc_bins": 2,
     "avg_even_odd": True,
     "nchan": 1024,
-    "fgp_file": "fpg_files/eigsep_fengine.fpg",
+    "fpg_file": "fpg_files/eigsep_fengine.fpg",
     "fpg_version": [0, 0],
     "corr_acc_len": 2**28,
     "corr_scalar": 2**9,
-    "pol01_delay": 0,
-    "pol23_delay": 0,
-    "pol45_delay": 0,
+    "pol_delay": {"01": 0, "23": 0, "45": 0},
     "fft_shift": 0x00FF,
     "sample_rate": 500.0,  # MHz, matching corr_config.yaml convention
-    "gain": 4,
-    "pam_atten": {"0": 8, "1": 8, "2": 8},
+    "adc_gain": 4,
+    "wiring": {
+        "snap_id": "C000069",
+        "ants": {
+            "viv1-N": {
+                "fem": {"id": 32, "pol": "N"},
+                "snap": {"input": 2, "label": "N4"},
+            },
+        },
+    },
     "sync_time": 1748732903.4203713,
     "integration_time": INTEGRATION_TIME,
     "file_time": FILE_TIME,

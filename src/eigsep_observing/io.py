@@ -532,6 +532,7 @@ CORR_HEADER_SCHEMA = {
     "dtype": str,  # must also be parseable by np.dtype
     "integration_time": float,
     "sample_rate": float,
+    "wiring": dict,
 }
 
 

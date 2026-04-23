@@ -71,8 +71,45 @@ def fpga_instance():
     "<method>", wraps=...)`` spy scoped to the specific method — see
     ``test_upload_config_with_validation_success`` for the canonical
     pattern.
+
+    Uses the default wiring shipped in ``config/wiring.yaml``, which has
+    no ``pam:`` blocks — PAM-specific tests build their own fixture via
+    ``fpga_with_pams`` below.
     """
     return DummyEigsepFpga(program=False)
+
+
+# Wiring with PAMs declared on every antenna — used by tests that
+# exercise ``initialize_pams`` / ``set_pam_atten`` / ``get_pam_atten``.
+# Three antennas span all three PAM board positions (num 0/1/2) and
+# both polarizations, so the tests cover the dual-pol path on PAM 0 as
+# well as the single-pol path on PAM 1.
+_WIRING_WITH_PAMS = {
+    "snap_id": "C000069",
+    "ants": {
+        "ant0N": {
+            "fem": {"id": 32, "pol": "N"},
+            "pam": {"id": 376, "num": 0, "pol": "N", "atten": 8},
+            "snap": {"input": 0, "label": "N0"},
+        },
+        "ant0E": {
+            "fem": {"id": 32, "pol": "E"},
+            "pam": {"id": 376, "num": 0, "pol": "E", "atten": 8},
+            "snap": {"input": 1, "label": "E2"},
+        },
+        "ant1N": {
+            "fem": {"id": 348, "pol": "N"},
+            "pam": {"id": 377, "num": 1, "pol": "N", "atten": 8},
+            "snap": {"input": 2, "label": "N4"},
+        },
+    },
+}
+
+
+@pytest.fixture
+def fpga_with_pams():
+    """DummyEigsepFpga whose wiring declares PAMs on every antenna."""
+    return DummyEigsepFpga(wiring=_WIRING_WITH_PAMS, program=False)
 
 
 class TestEigsepFpga:
@@ -159,15 +196,14 @@ class TestEigsepFpga:
         # Perturb a scalar and a nested field to exercise the recursive
         # diff summary.
         fpga_instance.cfg["sample_rate"] = fpga_instance.cfg["sample_rate"] / 2
-        first_ant = next(iter(fpga_instance.cfg["rf_chain"]["ants"]))
-        fpga_instance.cfg["rf_chain"]["ants"][first_ant]["pam"]["atten"] += 1
+        fpga_instance.cfg["pol_delay"]["01"] += 1
 
         with pytest.raises(RuntimeError) as exc:
             fpga_instance.assert_config_matches_redis()
 
         msg = str(exc.value)
         assert "sample_rate" in msg
-        assert f"rf_chain.ants.{first_ant}.pam.atten" in msg
+        assert "pol_delay.01" in msg
         assert "--reinit" in msg
 
     def test_synchronize(self, fpga_instance):
@@ -385,29 +421,107 @@ class TestEigsepFpga:
             )
         assert spy.call_count == 2
 
-    def test_set_pam_atten_publishes_header(self, fpga_instance):
-        """set_pam_atten mutates header-relevant state (rf_chain atten),
+    def test_set_pam_atten_publishes_header(self, fpga_with_pams):
+        """set_pam_atten mutates header-relevant state (wiring atten),
         so it must re-publish."""
-        fpga_instance.initialize_pams()
-        ant = next(iter(fpga_instance.cfg["rf_chain"]["ants"]))
+        fpga_with_pams.initialize_pams()
+        ant = next(iter(fpga_with_pams.wiring["ants"]))
         with patch.object(
-            fpga_instance.corr_config,
+            fpga_with_pams.corr_config,
             "upload_header",
-            wraps=fpga_instance.corr_config.upload_header,
+            wraps=fpga_with_pams.corr_config.upload_header,
         ) as spy:
-            fpga_instance.set_pam_atten(ant, 4)
+            fpga_with_pams.set_pam_atten(ant, 4)
         spy.assert_called_once()
 
-    def test_set_pam_atten_all_publishes_header(self, fpga_instance):
+    def test_set_pam_atten_all_publishes_header(self, fpga_with_pams):
         """set_pam_atten_all mutates all PAMs at once; same contract."""
-        fpga_instance.initialize_pams()
+        fpga_with_pams.initialize_pams()
         with patch.object(
-            fpga_instance.corr_config,
+            fpga_with_pams.corr_config,
             "upload_header",
-            wraps=fpga_instance.corr_config.upload_header,
+            wraps=fpga_with_pams.corr_config.upload_header,
         ) as spy:
-            fpga_instance.set_pam_atten_all(6)
+            fpga_with_pams.set_pam_atten_all(6)
         spy.assert_called_once()
+
+    def test_header_includes_wiring(self, fpga_instance):
+        """The corr header carries the full wiring manifest."""
+        header = fpga_instance.header
+        assert "wiring" in header
+        assert header["wiring"]["snap_id"] == fpga_instance.wiring["snap_id"]
+        assert (
+            header["wiring"]["ants"].keys()
+            == fpga_instance.wiring["ants"].keys()
+        )
+
+    def test_header_no_rf_chain_key(self, fpga_instance):
+        """Header carries ``wiring``, not the legacy ``rf_chain`` key."""
+        assert "rf_chain" not in fpga_instance.header
+
+    def test_initialize_pams_skipped_when_no_pams_in_wiring(
+        self, fpga_instance, caplog
+    ):
+        """Wiring with no ``pam:`` blocks → initialize_pams is a no-op
+        and ``pams_initialized`` stays False."""
+        assert not any(
+            "pam" in spec for spec in fpga_instance.wiring["ants"].values()
+        )
+        caplog.set_level(logging.INFO)
+        fpga_instance.initialize_pams()
+        assert fpga_instance.pams_initialized is False
+        assert not hasattr(fpga_instance, "pams") or fpga_instance.pams == []
+        assert "No PAMs declared in wiring" in caplog.text
+
+    def test_initialize_pams_runs_when_pams_in_wiring(self, fpga_with_pams):
+        """Wiring with ``pam:`` blocks → 3 PAMs built, per-ant atten set."""
+        fpga_with_pams.initialize_pams()
+        assert fpga_with_pams.pams_initialized is True
+        assert len(fpga_with_pams.pams) == 3
+        # Each declared ant's PAM reports the configured attenuation
+        # back from hardware on its configured pol.
+        for ant, spec in fpga_with_pams.wiring["ants"].items():
+            assert fpga_with_pams.get_pam_atten(ant) == spec["pam"]["atten"]
+
+    def test_set_pam_atten_reads_from_wiring(self, fpga_with_pams):
+        """set_pam_atten reads num/pol from wiring (not cfg) and pokes
+        the corresponding PAM's polarization channel."""
+        fpga_with_pams.initialize_pams()
+        ant = "ant1N"  # PAM num=1, pol=N
+        fpga_with_pams.set_pam_atten(ant, 12)
+        # Pam 1's N channel should now read 12; E channel unchanged (0).
+        pam1 = fpga_with_pams.pams[1]
+        assert pam1.get_attenuation() == (0, 12)
+
+    def test_set_pam_atten_raises_without_pams(self, fpga_instance):
+        """set_pam_atten on a fpga with no PAMs initialized raises."""
+        assert fpga_instance.pams_initialized is False
+        with pytest.raises(RuntimeError, match="PAMs not initialized"):
+            fpga_instance.set_pam_atten("any", 4)
+
+    def test_header_logs_warning_when_pam_declared_but_not_initialized(
+        self, fpga_with_pams, caplog
+    ):
+        """Wiring declares PAMs but initialize_pams hasn't run → the
+        header property emits a WARNING so the operator knows the
+        published atten is declarative, not hardware-confirmed."""
+        assert fpga_with_pams.pams_initialized is False
+        caplog.set_level(logging.WARNING)
+        _ = fpga_with_pams.header
+        assert any(
+            "Wiring declares PAMs" in rec.message
+            and rec.levelno == logging.WARNING
+            for rec in caplog.records
+        )
+
+    def test_validate_config_ignores_wiring(self, fpga_instance):
+        """validate_config does not compare wiring against cfg — wiring
+        is a separate dict, and a mismatch there should not fail a cfg
+        validation."""
+        # Perturb wiring (which is not in cfg at all); cfg matches
+        # hardware so validate_config should succeed.
+        fpga_instance.wiring["snap_id"] = "MISMATCHED"
+        fpga_instance.validate_config()  # should not raise
 
     def test_set_pol_delay_publishes_header(self, fpga_instance):
         """set_pol_delay mutates pol_delay (a top-level header field)

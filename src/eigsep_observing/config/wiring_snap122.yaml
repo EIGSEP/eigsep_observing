@@ -1,0 +1,25 @@
+# EIGSEP hardware wiring manifest (SNAP C000122, 6-antenna layout).
+# See `wiring.yaml` for the authoritative docstring on how this file is
+# used (declarative, edit-then-`scripts/republish_header.py`, optional
+# `pam:` block per antenna).
+
+snap_id: C000122
+ants:
+  box:
+    fem: {id: "eigsep1"}
+    snap: {input: 0, label: N0}
+  viv1:
+    fem: {id: 12, pol: E}
+    snap: {input: 1, label: E2}
+  viv2-N:
+    fem: {id: 32, pol: N}
+    snap: {input: 2, label: N4}
+  viv2-E:
+    fem: {id: 32, pol: E}
+    snap: {input: 3, label: E6}
+  viv3-N:
+    fem: {id: 348, pol: N}
+    snap: {input: 4, label: N8}
+  viv3-E:
+    fem: {id: 348, pol: E}
+    snap: {input: 5, label: E10}

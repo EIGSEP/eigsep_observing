@@ -7,6 +7,7 @@ import argparse  # noqa: E402
 from threading import Thread  # noqa: E402
 
 import IPython  # noqa: E402
+import yaml  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 from eigsep_observing.utils import get_config_path, load_config  # noqa: E402
@@ -52,6 +53,16 @@ parser.add_argument(
     help="Configuration file for Eigsep Fpga.",
 )
 parser.add_argument(
+    "--wiring_file",
+    dest="wiring_file",
+    default=str(get_config_path("wiring.yaml")),
+    help=(
+        "Hardware wiring manifest (antenna → FEM → SNAP input). Edit "
+        "and re-run scripts/republish_header.py to correct a file "
+        "header without --reinit."
+    ),
+)
+parser.add_argument(
     "--dummy",
     dest="dummy_mode",
     action="store_true",
@@ -74,6 +85,8 @@ if (args.program or args.force_program) and not args.reinit:
     )
 
 cfg = load_config(args.config_file)
+with open(args.wiring_file, "r") as _wf:
+    wiring = yaml.safe_load(_wf)
 
 if args.force_program:
     program = "force"
@@ -82,11 +95,11 @@ else:
 
 if args.dummy_mode:
     logger.warning("Running in DUMMY mode.")
-    fpga = DummyEigsepFpga(cfg=cfg, program=program)
+    fpga = DummyEigsepFpga(cfg=cfg, wiring=wiring, program=program)
 else:
     snap_ip = cfg["snap_ip"]
     logger.info(f"Connecting to Eigsep correlator at {snap_ip}.")
-    fpga = EigsepFpga(cfg=cfg, program=program)
+    fpga = EigsepFpga(cfg=cfg, wiring=wiring, program=program)
 
 if args.reinit:
     # Fresh observing block: full init + sync.

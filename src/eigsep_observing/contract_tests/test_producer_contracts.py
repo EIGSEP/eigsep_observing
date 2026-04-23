@@ -237,6 +237,10 @@ def test_dummy_fpga_header_round_trips_through_file():
         save_dir = Path(tmpdir)
         ntimes = 3
         f = io.File(save_dir, ["0"], ntimes, cfg)
+        # Mirror observer.py: after construction, overlay the corr
+        # header (which carries wiring / pol_delay dict / sync_time
+        # from ``EigsepFpga.header``) on top of the cfg-only base.
+        f.set_header(header=fpga.header)
 
         spec_len = io.data_shape(1, cfg["acc_bins"], cfg["nchan"])[1]
         dtype = np.dtype(cfg["dtype"])
