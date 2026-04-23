@@ -91,6 +91,10 @@ class EigObserver:
             self.corr_config = CorrConfigStore(transport_snap)
             self.corr_reader = CorrReader(transport_snap)
             self.corr_cfg = self.corr_config.get()
+            # SNAP-side diagnostic surface: drains ``adc_stats`` on
+            # every corr integration and feeds the file via the same
+            # averaging path as panda sensors.
+            self.adc_metadata_stream = MetadataStreamReader(transport_snap)
         if transport_panda is not None:
             self.config = ConfigStore(transport_panda)
             self.metadata_stream = MetadataStreamReader(transport_panda)
@@ -300,6 +304,13 @@ class EigObserver:
                 if self.panda_connected:
                     metadata = self.metadata_stream.drain()
                 else:
+                    metadata = {}
+                # adc_stats lives on the SNAP transport,
+                # merge into the same metadata dict
+                adc = self.adc_metadata_stream.drain()
+                if adc:
+                    metadata.update(adc)
+                if not metadata:
                     metadata = None
                 file.add_data(
                     acc_cnt, cached_sync_time, data, metadata=metadata

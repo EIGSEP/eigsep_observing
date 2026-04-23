@@ -21,8 +21,9 @@ from threading import Event, Thread
 import numpy as np
 import yaml
 
-from eigsep_redis import Transport
+from eigsep_redis import MetadataWriter, Transport
 
+from .adc import AdcSnapshotWriter
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
 from .corr import CorrConfigStore, CorrWriter
 from .utils import (
@@ -130,6 +131,11 @@ class EigsepFpga:
         self.transport = transport
         self.corr_config = CorrConfigStore(transport)
         self.corr = CorrWriter(transport)
+        # ADC diagnostic surfaces. Stats ride the metadata bus (reused
+        # averaging path → file header); raw snapshots are binary and
+        # live only in Redis for the live-status app to consume.
+        self.adc_metadata_writer = MetadataWriter(transport)
+        self.adc_snapshot_writer = AdcSnapshotWriter(transport)
 
         fpg_file = Path(self.cfg["fpg_file"])
         if not fpg_file.is_absolute():
@@ -232,14 +238,6 @@ class EigsepFpga:
                     break
                 wiring["ants"][ant]["pam"]["atten"] = atten
         elif ants_with_pam and not self.pams_initialized:
-            # Wiring declares PAMs but this process hasn't initialized
-            # them. The published header will carry the declarative
-            # atten from yaml without a hardware confirmation — warn
-            # so the operator knows to `--reinit` rather than relying
-            # on `republish_header.py`. No throttle: header is only
-            # accessed at state-change publication points (initialize,
-            # synchronize, set_pol_delay, observe-start), so this fires
-            # a handful of times per process at most.
             self.logger.warning(
                 f"Wiring declares PAMs on {ants_with_pam} but "
                 "pams_initialized=False; published atten values "
@@ -320,8 +318,8 @@ class EigsepFpga:
             cfg_value = self.cfg.get(key)
             if key in ("sync_time", "wiring"):
                 # sync_time is runtime-only; wiring lives in
-                # self.wiring, not self.cfg, and is validated by shape
-                # at load time rather than against cfg.
+                # self.wiring, not self.cfg, so there's nothing in
+                # cfg to compare against.
                 continue
             if key == "pol_delay":
                 if set(value.keys()) != set(cfg_value.keys()):
@@ -948,6 +946,81 @@ class EigsepFpga:
         )
         return data
 
+    def _publish_adc_stats(self):
+        """
+        Read per-core stats from the on-FPGA ``rms_levels`` register and
+        publish them on the metadata bus.
+
+        Called from ``_read_integrations`` on every corr integration.
+        Failures are logged at ERROR and swallowed — corr data is
+        sacred, and a missing ADC stats row is strictly diagnostic.
+        """
+        try:
+            means, powers, rmss = self.inp.get_stats(sum_cores=False)
+            payload = {"sensor_name": "adc", "status": "update"}
+            # get_stats returns 12 values where indices 2N and 2N+1 are
+            # the interleaved ADC cores of snap input N. Label with the
+            # same input index the corr file uses for autos.
+            for i in range(len(means)):
+                n, c = i // 2, i % 2
+                payload[f"input{n}_core{c}_mean"] = float(means[i])
+                payload[f"input{n}_core{c}_power"] = float(powers[i])
+                payload[f"input{n}_core{c}_rms"] = float(rmss[i])
+            self.adc_metadata_writer.add("adc_stats", payload)
+        except Exception as e:
+            self.logger.error(f"Failed to publish adc_stats: {e}")
+
+    def _publish_adc_snapshot(self):
+        """
+        Pull raw ADC samples for every antenna and publish one snapshot
+        frame on the diagnostic stream.
+
+        Called from ``_publish_snapshots_loop`` at the configured
+        cadence. Failures are logged at ERROR and swallowed.
+        """
+        try:
+            ant_ids = list(self.wiring["ants"].keys())
+            n_snap_inputs = self.inp.nstreams // 2
+            # Each "antenna" in the Input block is two SNAP inputs
+            # (x/y pol); iterate over snap-input pairs regardless of
+            # wiring labels so an unconfigured slot still publishes
+            # whatever the FPGA returns (useful for bench debug).
+            frames = []
+            for ant_idx in range(n_snap_inputs // 2):
+                x, y = self.inp.get_adc_snapshot(ant_idx)
+                frames.append(np.stack([x, y]).astype(np.int8))
+            data = np.stack(frames)  # (n_ants, 2, n_samples)
+            sync_time = self.sync_time if self.is_synchronized else None
+            try:
+                cnt = self.fpga.read_int("corr_acc_cnt")
+            except Exception as e:
+                # corr_acc_cnt is a late-bound alignment hint; the
+                # snapshot (samples + unix_ts + sync_time) is still
+                # useful without it, so degrade gracefully — but log
+                # loudly so a chronic FPGA register issue is visible.
+                self.logger.error(
+                    "Failed to read corr_acc_cnt for adc_snapshot: %s", e
+                )
+                cnt = None
+            self.adc_snapshot_writer.add(
+                data,
+                unix_ts=time.time(),
+                sync_time=sync_time,
+                corr_acc_cnt=cnt,
+                wiring={"ants": {k: self.wiring["ants"][k] for k in ant_ids}},
+            )
+        except Exception as e:
+            self.logger.error(f"Failed to publish adc_snapshot: {e}")
+
+    def _publish_snapshots_loop(self, period):
+        """Background thread: publish one ADC snapshot every
+        ``period`` seconds until ``self.event`` is set. Gated on
+        ``is_synchronized`` so pre-sync noise doesn't fill the stream."""
+        while not self.event.wait(period):
+            if not self.is_synchronized:
+                continue
+            self._publish_adc_snapshot()
+
     def _read_integrations(self, pairs, timeout=10):
         """
         Read integrated correlations from the SNAP board.
@@ -982,6 +1055,8 @@ class EigsepFpga:
                     "next integration."
                 )
             self.queue.put({"data": data, "cnt": cnt})
+            if self.is_synchronized:
+                self._publish_adc_stats()
             t = time.time()
 
     def end_observing(self):
@@ -1017,6 +1092,23 @@ class EigsepFpga:
         if pairs is None:
             pairs = self.pairs
         self.logger.info(f"Starting observation for pairs: {pairs}.")
+
+        snapshot_period = self.cfg.get("adc_snapshot_period_s")
+        if snapshot_period and snapshot_period > 0:
+            snapshot_thd = Thread(
+                target=self._publish_snapshots_loop,
+                args=(snapshot_period,),
+                daemon=True,
+            )
+            snapshot_thd.start()
+            self.logger.info(
+                f"ADC snapshot publisher started (period={snapshot_period}s)."
+            )
+        else:
+            self.logger.info(
+                "ADC snapshot publisher disabled "
+                "(adc_snapshot_period_s is unset or 0)."
+            )
 
         thd = Thread(
             target=self._read_integrations,
