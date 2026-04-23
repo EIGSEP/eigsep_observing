@@ -402,28 +402,35 @@ class PandaClient:
 
         ``tempctrl_settings`` (yaml, nested per-channel) forwards to the
         :class:`TempCtrlClient` constructor and is re-applied every
-        iteration of :meth:`tempctrl_loop`. Absent/empty → no settings
-        are pushed by :meth:`TempCtrlClient.apply_settings` (firmware
-        keeps whatever it had).
+        iteration of :meth:`tempctrl_loop`. Absent → no settings are
+        pushed by :meth:`TempCtrlClient.apply_settings` (firmware keeps
+        whatever it had).
 
         Notes
         -----
         Called by the constructor when ``use_tempctrl`` is true. Safe
         to call again if the config changes; no hardware contact, so
-        construction cannot fail for config reasons — only an
-        obviously-wrong (non-dict) settings block disables the client.
+        construction cannot fail for config reasons — only a malformed
+        settings block (non-dict at any level, bad numeric type, or
+        non-bool ``enable``) disables the client. Validation happens
+        in :meth:`TempCtrlClient._coerce_settings` so a bad field
+        surfaces here rather than unwinding the loop thread on the
+        first apply.
         """
         self.tempctrl = None
         raw_settings = self.cfg.get("tempctrl_settings")
-        settings = raw_settings or {}
-        if not isinstance(settings, dict):
+        try:
+            self.tempctrl = TempCtrlClient(
+                self.transport, settings=raw_settings
+            )
+        except (TypeError, ValueError) as err:
             self.logger.warning(
-                "Invalid tempctrl_settings config; expected dict, "
-                f"got {type(raw_settings).__name__}. Tempctrl disabled."
+                f"Invalid tempctrl_settings: {err}. Tempctrl disabled."
             )
             return
-        self.tempctrl = TempCtrlClient(self.transport, settings=settings)
-        self.logger.info(f"Tempctrl initialized (settings={settings})")
+        self.logger.info(
+            f"Tempctrl initialized (settings={self.tempctrl.settings})"
+        )
 
     def switch_loop(self):
         """

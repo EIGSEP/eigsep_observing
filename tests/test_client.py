@@ -1866,6 +1866,33 @@ def test_tempctrl_settings_non_dict_disables_client(
         client.stop()
 
 
+def test_tempctrl_settings_bad_numeric_disables_client(
+    transport, dummy_cfg, caplog
+):
+    """A typo'd numeric field (e.g. ``target_C: "twenty-five"``) must
+    fail up front at ``init_tempctrl`` — otherwise the coercion
+    ``TypeError``/``ValueError`` would only surface inside
+    ``apply_settings`` and unwind the ``tempctrl_loop`` thread on the
+    first iteration, stopping the health check entirely."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = {
+        "LNA": {"target_C": "twenty-five"},
+    }
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.tempctrl is None
+        assert any(
+            "Invalid tempctrl_settings" in r.getMessage()
+            and "target_C" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
 def test_tempctrl_loop_returns_when_client_is_none(caplog, client):
     """``tempctrl_loop`` must return promptly when disabled — no tight
     spin, warning rides both channels."""

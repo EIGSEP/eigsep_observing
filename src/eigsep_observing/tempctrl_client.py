@@ -60,8 +60,78 @@ class TempCtrlClient:
         self.transport = transport
         self._proxy = PicoProxy("tempctrl", transport, source=source)
         self._reader = MetadataSnapshotReader(transport)
-        self.settings = dict(settings) if settings else {}
+        self.settings = self._coerce_settings(settings)
         self.logger = logger
+
+    @staticmethod
+    def _coerce_settings(raw):
+        """Validate yaml settings and pre-coerce each field to the
+        firmware-ready type, so :meth:`apply_settings` cannot raise
+        :class:`TypeError` / :class:`ValueError` mid-loop on a bad
+        config.
+
+        ``None`` → ``{}`` (nothing to push). Missing top-level
+        sections (``watchdog_timeout_ms``, ``LNA``, ``LOAD``) are
+        skipped, matching :meth:`apply_settings`' "keep whatever
+        firmware had" behavior.
+
+        Raises
+        ------
+        ValueError
+            Settings is not a dict, a per-channel section is not a
+            dict, ``enable`` is not a real bool, or a numeric field is
+            not int/float-coercible. Raised at construction so the
+            caller (:meth:`PandaClient.init_tempctrl`) can disable
+            tempctrl with a single WARNING instead of unwinding the
+            loop thread on the first apply. A YAML string like
+            ``"false"`` parses as truthy under ``bool(...)`` — so
+            ``enable`` must be a real ``bool``, not merely truthy.
+        """
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"tempctrl settings must be a dict, got {type(raw).__name__}"
+            )
+        out = {}
+        if "watchdog_timeout_ms" in raw:
+            val = raw["watchdog_timeout_ms"]
+            try:
+                out["watchdog_timeout_ms"] = int(val)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"watchdog_timeout_ms: {val!r} not int-coercible ({exc})"
+                ) from exc
+        for ch in ("LNA", "LOAD"):
+            if ch not in raw:
+                continue
+            section = raw[ch]
+            if not isinstance(section, dict):
+                raise ValueError(
+                    f"tempctrl[{ch}] must be a dict, got "
+                    f"{type(section).__name__}"
+                )
+            coerced = {}
+            for fname in ("target_C", "hysteresis_C", "clamp"):
+                if fname in section:
+                    val = section[fname]
+                    try:
+                        coerced[fname] = float(val)
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"tempctrl[{ch}].{fname}: {val!r} not "
+                            f"float-coercible ({exc})"
+                        ) from exc
+            if "enable" in section:
+                val = section["enable"]
+                if not isinstance(val, bool):
+                    raise ValueError(
+                        f"tempctrl[{ch}].enable: {val!r} must be a "
+                        f"bool, got {type(val).__name__}"
+                    )
+                coerced["enable"] = val
+            out[ch] = coerced
+        return out
 
     @property
     def is_available(self):

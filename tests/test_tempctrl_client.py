@@ -177,3 +177,50 @@ def test_is_available_reflects_registration(client):
     tc = TempCtrlClient(client.transport)
     # Dummy manager registers ``tempctrl`` in ``DUMMY_PICO_CLASSES``.
     assert tc.is_available
+
+
+@pytest.mark.parametrize(
+    "bad_settings, needle",
+    [
+        ("not a dict", "must be a dict"),
+        (["not", "a", "dict"], "must be a dict"),
+        ({"LNA": "not a dict"}, "LNA"),
+        ({"LNA": {"target_C": "twenty-five"}}, "target_C"),
+        ({"LOAD": {"clamp": "oops"}}, "clamp"),
+        ({"watchdog_timeout_ms": "forever"}, "watchdog_timeout_ms"),
+        # YAML `enable: "false"` parses as the truthy string "False";
+        # bool(...) would silently arm the channel. Reject it loudly.
+        ({"LNA": {"enable": "false"}}, "enable"),
+    ],
+)
+def test_coerce_settings_raises_on_bad_config(bad_settings, needle):
+    """Bad yaml types surface as ``ValueError`` at construction time
+    so :meth:`PandaClient.init_tempctrl` can disable the client loudly
+    rather than the loop thread unwinding on the first apply."""
+    with pytest.raises(ValueError, match=needle):
+        TempCtrlClient._coerce_settings(bad_settings)
+
+
+def test_coerce_settings_none_returns_empty():
+    """Explicit ``None`` is the documented "no settings" sentinel."""
+    assert TempCtrlClient._coerce_settings(None) == {}
+
+
+def test_coerce_settings_normalizes_types():
+    """Int literals in float fields are accepted and promoted to float;
+    bool ``enable`` is preserved as-is."""
+    out = TempCtrlClient._coerce_settings(
+        {
+            "watchdog_timeout_ms": 30000,
+            "LNA": {
+                "enable": True,
+                "target_C": 25,  # int in a float field
+                "clamp": 1,
+            },
+        }
+    )
+    assert out["watchdog_timeout_ms"] == 30000
+    assert isinstance(out["LNA"]["target_C"], float)
+    assert out["LNA"]["target_C"] == 25.0
+    assert isinstance(out["LNA"]["clamp"], float)
+    assert out["LNA"]["enable"] is True
