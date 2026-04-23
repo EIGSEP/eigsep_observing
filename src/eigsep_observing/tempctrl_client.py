@@ -7,12 +7,6 @@ can push setpoints/clamps/enable flags to the LNA and LOAD Peltier
 channels and read back the most recent status without reaching inside
 the :class:`picohost.manager.PicoManager` process. Mirrors the role of
 :class:`eigsep_observing.motor_scanner.MotorScanner` for the motor pico.
-
-Unlike motor scans, tempctrl commands are atomic — there is no
-multi-step orchestration and no stall/timeout concept on the panda
-side. The firmware runs its own closed-loop hysteresis control; the
-Python side just publishes fresh setpoints periodically and watches
-the metadata snapshot for health.
 """
 
 import logging
@@ -53,8 +47,6 @@ class TempCtrlClient:
     source : str
         Identifier stamped on proxy command stream entries.
     """
-
-    _CHANNELS = ("LNA", "LOAD")
 
     def __init__(self, transport, *, settings=None, source="panda_client"):
         self.transport = transport

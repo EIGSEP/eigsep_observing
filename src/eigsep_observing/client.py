@@ -842,9 +842,7 @@ class PandaClient:
         metadata snapshot. Three warn conditions:
 
         1. ``watchdog_tripped`` — firmware disabled both channels
-           because panda-side commands stopped arriving. The next
-           ``apply_settings`` will re-arm once the link recovers, but
-           the operator needs to see why the peltiers went dark.
+           because panda-side commands stopped arriving.
         2. Per-channel ``status == "error"`` — thermistor read failed
            on that side. Control is disabled by firmware for the
            affected channel until the sensor recovers.
