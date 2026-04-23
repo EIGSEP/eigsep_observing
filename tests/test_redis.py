@@ -652,6 +652,44 @@ def test_consumer_role_surfaces_are_structural():
     # the same guarantee — reference it to keep the import meaningful.
     assert EigsepFpga is not None
 
+    # --- LiveStatusAggregator: pure reader/store consumer role. Must
+    # not hold any writer. Runs in a separate process from
+    # ``EigObserver`` but consumes from the same two Redis servers
+    # with its own ``Transport`` instances — see the module docstring
+    # in ``eigsep_observing.live_status.aggregator`` for why.
+    #
+    # Guard is type-based (isinstance over vars().values()) rather
+    # than name-based so a writer attached under any unexpected
+    # attribute name still fails closed. The other three roles above
+    # still use the name-based form; flipping them would be the
+    # permitted-list refactor tracked in the project memory, not this
+    # PR's scope.
+    from eigsep_observing.live_status import LiveStatusAggregator
+
+    forbidden_writer_types = (
+        CorrWriter,
+        VnaWriter,
+        MetadataWriter,
+        StatusWriter,
+        HeartbeatWriter,
+        AdcSnapshotWriter,
+    )
+
+    agg = LiveStatusAggregator(
+        transport_snap=DummyTransport(),
+        transport_panda=DummyTransport(),
+        obs_cfg={"use_tempctrl": False, "corr_ntimes": 240},
+    )
+    try:
+        for attr_name, attr_value in vars(agg).items():
+            assert not isinstance(attr_value, forbidden_writer_types), (
+                "LiveStatusAggregator instance must not hold writer "
+                f"objects; found {type(attr_value).__name__} on "
+                f"attribute {attr_name!r}"
+            )
+    finally:
+        agg.stop(timeout=1.0)
+
 
 def test_int32_redis_round_trip(obs_server, obs_client):
     """Int32 data survives add_corr_data → read_corr_data bit-for-bit.

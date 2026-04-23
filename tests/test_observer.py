@@ -173,19 +173,71 @@ def test_record_corr_data(mock_file_class, observer_snap_only, transport_snap):
         observer.record_corr_data("/tmp/test", timeout=5)
     stop_thread.join()
 
-    # Verify File was created with correct parameters
-    mock_file_class.assert_called_once_with(
-        "/tmp/test",  # save_dir
-        ["0", "1", "2", "3", "02", "13"],  # pairs (default)
-        240,  # ntimes
+    # Verify File was created with correct parameters. The
+    # ``on_write`` kwarg is a lambda bound to the live transport so
+    # the live-status dashboard can publish the file-heartbeat; any
+    # callable is acceptable here — its behavior is tested in
+    # ``test_record_corr_data_publishes_file_heartbeat``.
+    mock_file_class.assert_called_once()
+    args, kwargs = mock_file_class.call_args
+    assert args == (
+        "/tmp/test",
+        ["0", "1", "2", "3", "02", "13"],
+        240,
         observer.corr_cfg,
     )
+    assert callable(kwargs["on_write"])
 
     # Verify data was read and added
     mock_read.assert_called()
     mock_file.add_data.assert_called_with(
         123, sync_time, mock_data, metadata=None
     )
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_on_write_publishes_heartbeat(
+    mock_file_class, observer_snap_only, transport_snap
+):
+    """The ``on_write`` callback wired into ``io.File`` must publish
+    the file-heartbeat K/V on the SNAP transport. The dashboard runs
+    on a different host and has no filesystem access to
+    ``corr_save_dir``, so Redis is the only surface the writer can
+    signal through."""
+    from eigsep_observing.file_heartbeat import read as read_heartbeat
+
+    observer = observer_snap_only
+    CorrConfigStore(transport_snap).upload_header(
+        {"sync_time": 1_713_200_000.0}
+    )
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    # Stop the loop after the first add_data so the test stays tight.
+    def _stop_after_add(*a, **kw):
+        observer.stop_event.set()
+
+    mock_file.add_data.side_effect = _stop_after_add
+    mock_data = generate_data(ntimes=1)
+
+    with patch.object(
+        observer.corr_reader, "read", return_value=(1, mock_data)
+    ):
+        observer.record_corr_data("/tmp/test", timeout=1)
+
+    # The callback the observer wired into io.File:
+    on_write = mock_file_class.call_args.kwargs["on_write"]
+
+    # Simulate the writer thread firing the callback after os.rename.
+    on_write("/data/corr_20260424_120000.h5", 1_713_200_100.0)
+
+    out = read_heartbeat(transport_snap, now=1_713_200_300.0)
+    assert out["newest_h5_path"] == "/data/corr_20260424_120000.h5"
+    assert out["mtime_unix"] == 1_713_200_100.0
+    assert out["seconds_since_write"] == 200.0
 
 
 @patch("eigsep_observing.io.File")
