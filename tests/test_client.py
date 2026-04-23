@@ -2069,6 +2069,19 @@ def test_tempctrl_loop_retries_apply_until_success(
         client.stop()
 
 
+# The three `_tempctrl_health_check` tests below pass sparse snapshots
+# (3–11 of the 24 fields in the full tempctrl SENSOR_SCHEMAS shape — see
+# io.py). The deviation from real-data shape is deliberate and defensible:
+# `_tempctrl_health_check` is a pure reader that uses `.get()` with
+# None-guards on every field, so unspecified keys are silently treated
+# as "not present / not-relevant." Each test drives a single fault
+# branch (watchdog / thermistor-error / saturated-drive), and including
+# the other ~20 irrelevant fields would only add noise without changing
+# behavior. A producer-side contract drift (a field renamed or dropped
+# in the real snapshot) is caught by the producer-contract suite in
+# contract_tests/test_producer_contracts.py, not by these branch tests.
+
+
 def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
     """When the metadata snapshot reports ``watchdog_tripped``, the
     health check emits an operator-visible WARNING so the peltiers
@@ -2078,6 +2091,7 @@ def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above.
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": True,
@@ -2101,6 +2115,7 @@ def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above.
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": False,
@@ -2128,6 +2143,10 @@ def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
         caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above. The drive/
+        # clamp/T_now/T_target quartet per channel is the full input to
+        # the saturation check; the rest of the 24-field schema is
+        # irrelevant to this branch.
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": False,
