@@ -25,7 +25,10 @@ if redis-cli -p "${REDIS_PORT}" ping >/dev/null 2>&1; then
     echo "Redis already listening on :${REDIS_PORT}"
 else
     echo "Starting redis-server on :${REDIS_PORT} (daemonized)"
-    redis-server --port "${REDIS_PORT}" --daemonize yes
+    # Disable persistence: this is a dev harness, no snapshots or AOF
+    # files should land in the repo root.
+    redis-server --port "${REDIS_PORT}" --daemonize yes \
+        --save "" --appendonly no
     # Give the daemon a moment to bind the port.
     sleep 1
     if ! redis-cli -p "${REDIS_PORT}" ping >/dev/null 2>&1; then
@@ -41,6 +44,32 @@ fi
 PANDA_LOG="${LOG_DIR}/panda_observe.log"
 FPGA_LOG="${LOG_DIR}/fpga_init.log"
 OBS_LOG="${LOG_DIR}/observe.log"
+
+# --- Shutdown handling ---------------------------------------------------
+# Install trap BEFORE launching children so a Ctrl-C, kill, SSH
+# disconnect (HUP), or set -e abort during the startup window cannot
+# leave Python children orphaned. PIDs start empty; `${VAR:-}` guards
+# in cleanup handle the pre-launch window. Trap disarms itself on
+# entry so re-entry from EXIT after INT/TERM/HUP is a no-op.
+# Order: observer first so its HDF5 file flushes, then FPGA, then panda.
+PANDA_PID=""
+FPGA_PID=""
+OBS_PID=""
+
+cleanup() {
+    trap - INT TERM HUP EXIT
+    echo ""
+    echo "Shutting down fake observation pipeline..."
+    kill -TERM "${OBS_PID:-}" 2>/dev/null || true
+    wait "${OBS_PID:-}" 2>/dev/null || true
+    kill -TERM "${FPGA_PID:-}" 2>/dev/null || true
+    wait "${FPGA_PID:-}" 2>/dev/null || true
+    kill -TERM "${PANDA_PID:-}" 2>/dev/null || true
+    wait "${PANDA_PID:-}" 2>/dev/null || true
+    echo "All processes stopped. Redis daemon still running on :${REDIS_PORT}."
+    echo "Stop it with: redis-cli -p ${REDIS_PORT} shutdown"
+}
+trap cleanup INT TERM HUP EXIT
 
 echo "Launching panda_observe --dummy -> ${PANDA_LOG}"
 python "${SCRIPT_DIR}/panda_observe.py" --dummy \
@@ -71,22 +100,6 @@ echo "  Logs in ${LOG_DIR}/"
 echo "  Press Ctrl-C to stop (observer is flushed first)."
 echo "================================================================"
 
-# --- Shutdown handling ---------------------------------------------------
-# Observer first so its HDF5 file flushes cleanly, then FPGA, then panda.
-cleanup() {
-    echo ""
-    echo "Shutting down fake observation pipeline..."
-    kill -TERM "${OBS_PID}" 2>/dev/null || true
-    wait "${OBS_PID}" 2>/dev/null || true
-    kill -TERM "${FPGA_PID}" 2>/dev/null || true
-    wait "${FPGA_PID}" 2>/dev/null || true
-    kill -TERM "${PANDA_PID}" 2>/dev/null || true
-    wait "${PANDA_PID}" 2>/dev/null || true
-    echo "All processes stopped. Redis daemon still running on :${REDIS_PORT}."
-    echo "Stop it with: redis-cli -p ${REDIS_PORT} shutdown"
-}
-trap cleanup INT TERM
-
-# Block until any child exits or we get a signal.
+# Block until any child exits or we get a signal. The EXIT trap
+# will run cleanup on fall-through.
 wait -n "${PANDA_PID}" "${FPGA_PID}" "${OBS_PID}" || true
-cleanup
