@@ -1,5 +1,5 @@
 __author__ = "Christian Hellum Bye"
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 from .client import PandaClient
 from .observer import EigObserver
