@@ -1821,11 +1821,17 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
 # gating and loop-level behavior.
 
 
-def test_use_tempctrl_false_leaves_client_none(client):
-    """Default dummy_config has ``use_tempctrl: false``; PandaClient
-    must leave ``self.tempctrl`` as ``None`` and skip the init call."""
-    assert client.cfg.get("use_tempctrl", False) is False
-    assert client.tempctrl is None
+def test_use_tempctrl_false_leaves_client_none(transport, dummy_cfg):
+    """With ``use_tempctrl: false``, PandaClient must leave
+    ``self.tempctrl`` as ``None`` and skip the init call."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = False
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.cfg.get("use_tempctrl", False) is False
+        assert client.tempctrl is None
+    finally:
+        client.stop()
 
 
 def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
@@ -1893,22 +1899,31 @@ def test_tempctrl_settings_bad_numeric_disables_client(
         client.stop()
 
 
-def test_tempctrl_loop_returns_when_client_is_none(caplog, client):
+def test_tempctrl_loop_returns_when_client_is_none(
+    caplog, transport, dummy_cfg
+):
     """``tempctrl_loop`` must return promptly when disabled — no tight
     spin, warning rides both channels."""
-    assert client.tempctrl is None
-    _arm_status_reader(client)
-    caplog.set_level("WARNING")
-    t0 = time.monotonic()
-    client.tempctrl_loop()
-    elapsed = time.monotonic() - t0
-    assert elapsed < 1.0
-    assert any(
-        "Tempctrl not initialized" in r.getMessage() for r in caplog.records
-    )
-    level, status = _status_reader(client).read(timeout=1)
-    assert level == logging.WARNING
-    assert "Tempctrl not initialized" in status
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = False
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.tempctrl is None
+        _arm_status_reader(client)
+        caplog.set_level("WARNING")
+        t0 = time.monotonic()
+        client.tempctrl_loop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.0
+        assert any(
+            "Tempctrl not initialized" in r.getMessage()
+            for r in caplog.records
+        )
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "Tempctrl not initialized" in status
+    finally:
+        client.stop()
 
 
 def test_tempctrl_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
