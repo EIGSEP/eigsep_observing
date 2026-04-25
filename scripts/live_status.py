@@ -17,6 +17,7 @@ import logging
 import signal
 import sys
 
+import redis
 from eigsep_redis import Transport
 
 from eigsep_observing import utils
@@ -28,6 +29,28 @@ from eigsep_observing.live_status import (
 
 
 logger = logging.getLogger(__name__)
+
+
+class _LazyTransport(Transport):
+    """Transport that skips the eager ``ping()`` in ``_make_redis``.
+
+    The dashboard's whole job is to *monitor* bus health, including the
+    bus-down state. Failing fast in the constructor turns "panda is
+    down" into a startup crash instead of a red tile. The aggregator's
+    per-tick error handling already catches connection errors and
+    flips ``snap_connected`` / ``panda_connected`` to False, which is
+    exactly the right UX for a monitor.
+    """
+
+    def _make_redis(self, host, port):
+        return redis.Redis(
+            host=host,
+            port=port,
+            decode_responses=False,
+            socket_timeout=None,
+            socket_connect_timeout=None,
+            retry_on_timeout=False,
+        )
 
 
 def _parse_bind(spec: str) -> tuple[str, int]:
@@ -94,8 +117,10 @@ def main(argv=None):
     obs_cfg_path = args.obs_config or utils.get_config_path("obs_config.yaml")
     obs_cfg = utils.load_config(obs_cfg_path, compute_inttime=False)
 
-    transport_snap = Transport(host=args.snap_host, port=args.snap_port)
-    transport_panda = Transport(host=args.panda_host, port=args.panda_port)
+    transport_snap = _LazyTransport(host=args.snap_host, port=args.snap_port)
+    transport_panda = _LazyTransport(
+        host=args.panda_host, port=args.panda_port
+    )
 
     thresholds = Thresholds.from_yaml(
         obs_cfg, corr_header=None, yaml_path=args.thresholds
