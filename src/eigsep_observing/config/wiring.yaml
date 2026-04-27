@@ -1,4 +1,4 @@
-# EIGSEP hardware wiring manifest (SNAP C000069, 5-antenna layout).
+# EIGSEP hardware wiring manifest (SNAP C000069, 5-input layout).
 #
 # This file is declarative: it describes the intended RF wiring between
 # antennas, front-end modules (FEMs), optional PAMs, and SNAP digital
@@ -33,10 +33,11 @@
 # pol is the PAM channel E or N; atten is dB in [0, 15]).
 
 snap_id: C000069
+# snap_id: C000122  # spare SNAP
 ants:
   box:
     fem: {id: "eigsep1"}
-    snap: {input: 4, label: N8}
+    snap: {input: 0, label: N0}
   viv1-N:
     fem: {id: 32, pol: N}
     snap: {input: 2, label: N4}
@@ -45,7 +46,7 @@ ants:
     snap: {input: 3, label: E6}
   viv2-N:
     fem: {id: 348, pol: N}
-    snap: {input: 0, label: N0}
+    snap: {input: 4, label: N8}
   viv2-E:
     fem: {id: 348, pol: E}
-    snap: {input: 1, label: E2}
+    snap: {input: 5, label: E10}
