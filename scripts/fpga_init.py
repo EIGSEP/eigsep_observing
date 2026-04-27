@@ -10,6 +10,7 @@ import IPython  # noqa: E402
 import yaml  # noqa: E402
 from eigsep_redis import Transport  # noqa: E402
 from eigsep_observing import EigsepFpga  # noqa: E402
+from eigsep_observing.snap_reinit import publish as publish_snap_reinit  # noqa: E402
 from eigsep_observing.testing import DummyEigsepFpga  # noqa: E402
 from eigsep_observing.utils import get_config_path, load_config  # noqa: E402
 
@@ -110,6 +111,12 @@ if args.reinit:
     fpga.initialize(initialize_adc=True, initialize_fpga=True, sync=True)
     # Validate cfg against freshly-initialized hardware and publish.
     fpga.upload_config(validate=True)
+    # Bump the reinit heartbeat so the live-status dashboard surfaces
+    # supervised crash-recoveries. Each systemd restart of this script
+    # passes --reinit and increments the same counter; the operator
+    # sees thermal-cycling activity at a glance without tailing
+    # journalctl.
+    publish_snap_reinit(fpga.transport)
 else:
     # Attach path: SNAP is already running; recover sync_time from the
     # header so CorrWriter.add doesn't drop every integration.

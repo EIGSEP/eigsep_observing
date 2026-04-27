@@ -171,6 +171,24 @@ function updateHealth(h, fileData) {
         ? `Last file: ${fmt(fileData.seconds_since_write, 0)}s ago`
         : "Last file: —";
   }
+
+  const reinitTile = document.getElementById("tile-reinit");
+  const reinit = h.snap_reinit || {};
+  // No "ok" / "warn" classification: the count is informational, the
+  // operator interprets it. A high count overnight means "SNAP was
+  // thermal-cycling"; the dashboard surfaces it without judging.
+  if (reinit.count === null || reinit.count === undefined) {
+    reinitTile.className = "tile unknown";
+    reinitTile.textContent = "Reinits: —";
+  } else {
+    reinitTile.className = "tile";
+    const ageStr =
+      reinit.seconds_since_reinit !== null &&
+      reinit.seconds_since_reinit !== undefined
+        ? ` (${fmt(reinit.seconds_since_reinit, 0)}s ago)`
+        : "";
+    reinitTile.textContent = `Reinits: ${reinit.count}${ageStr}`;
+  }
 }
 
 // ---- metadata + adc + tempctrl + rfswitch --------------------------

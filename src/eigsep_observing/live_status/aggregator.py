@@ -54,6 +54,7 @@ from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
 from ..file_heartbeat import read as read_file_heartbeat
 from ..io import reshape_data
+from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
 from .signals import SIGNAL_REGISTRY
 from .thresholds import Thresholds
@@ -126,6 +127,16 @@ class StateSnapshot:
             "newest_h5_path": None,
             "mtime_unix": None,
             "seconds_since_write": None,
+        }
+    )
+
+    # SNAP --reinit heartbeat (bumped by fpga_init.py on each
+    # successful supervised re-init; surfaces thermal-cycling).
+    snap_reinit: dict = field(
+        default_factory=lambda: {
+            "count": None,
+            "last_reinit_unix": None,
+            "seconds_since_reinit": None,
         }
     )
 
@@ -284,6 +295,7 @@ class LiveStatusAggregator:
                 metadata_snapshot=dict(s.metadata_snapshot),
                 status_log=deque(s.status_log, maxlen=s.status_log.maxlen),
                 file_heartbeat=dict(s.file_heartbeat),
+                snap_reinit=dict(s.snap_reinit),
             )
 
     # -- SNAP drain loop -------------------------------------------
@@ -352,6 +364,17 @@ class LiveStatusAggregator:
         )
         any_ok = any_ok or ok
 
+        # SNAP --reinit heartbeat (raw K/V, published by
+        # ``scripts/fpga_init.py`` after each supervised --reinit).
+        # Same shape contract as the file heartbeat: missing key
+        # resolves to the empty-sentinel dict.
+        reinit_h, ok = self._read_benign_missing(
+            "snap_reinit.read",
+            lambda: read_snap_reinit(self.transport_snap, now=now),
+            errors,
+        )
+        any_ok = any_ok or ok
+
         with self._lock:
             s = self.state
             s.snap_last_tick_unix = now
@@ -413,6 +436,9 @@ class LiveStatusAggregator:
 
             if file_h is not None:
                 s.file_heartbeat = file_h
+
+            if reinit_h is not None:
+                s.snap_reinit = reinit_h
 
     def _read_corr(self) -> tuple[Optional[tuple], bool]:
         """Drain the corr stream to the latest entry; reshape the tail.
