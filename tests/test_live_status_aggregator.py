@@ -259,6 +259,29 @@ def test_snap_tick_computes_cadence_from_acc_cnt_delta(agg, seeded):
     assert 0.1 < state.corr_cadence_s < 1.0
 
 
+def test_snap_tick_drains_corr_backlog_to_latest(agg, seeded):
+    """Regression: a tick must consume the full backlog and surface the
+    *newest* entry, not the next one in stream order.
+
+    Before the drain-to-tail fix, ``CorrReader.read`` consumed one
+    entry per tick at ``count=1``; with a 4 Hz producer and a 2 Hz
+    drain (default ``snap_tick_s=0.5``), the position pointer fell
+    behind by ~2 entries/sec, surfacing as ~10 s of plot lag after
+    20 s of dashboard runtime. Seeding three entries here would have
+    landed acc_cnt=10 in the state on the first tick, not acc_cnt=12.
+    """
+    snap, _ = seeded
+    writer = CorrWriter(snap)
+    for cnt in (10, 11, 12):
+        writer.add(_make_corr_row(), cnt=cnt, sync_time=1000.0, dtype=DTYPE)
+    _rewind_streams(snap, ["stream:corr"])
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.corr_acc_cnt == 12
+
+
 def test_snap_tick_drains_adc_stats_stream(agg, seeded):
     snap, _ = seeded
     writer = MetadataWriter(snap)

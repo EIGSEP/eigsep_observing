@@ -43,6 +43,22 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   font-size: 12px;
 }
 
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle input { margin: 0; cursor: pointer; }
+
 .tile.ok      { background: var(--ok);      color: #fff; }
 .tile.warn    { background: var(--warn);    color: #000; }
 .tile.danger  { background: var(--danger);  color: #fff; }
