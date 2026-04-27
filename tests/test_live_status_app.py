@@ -240,9 +240,81 @@ def test_corr_route_has_pairs_and_freqs(client):
     # Cross pair has both.
     assert data["pairs"]["02"]["mag"] is not None
     assert data["pairs"]["02"]["phase"] is not None
+    # No wiring in CORR_HEADER fixture → label field present but null.
+    assert data["pairs"]["0"]["label"] is None
+    assert data["pairs"]["02"]["label"] is None
     # Frequency axis in MHz.
     assert data["freq_mhz"] is not None
     assert len(data["freq_mhz"]) == NCHAN
+
+
+def test_corr_and_adc_routes_use_wiring_labels_when_published():
+    """When the corr header carries a wiring manifest, the API should
+    expose ``label`` on each pair (autos as the antenna name, crosses
+    as ``"{a} / {b}"``) and on each ADC per-input entry. Lab/test setups
+    that publish no wiring fall back to ``label=None`` — covered by the
+    base ``test_corr_route_has_pairs_and_freqs`` above.
+    """
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+    CorrConfigStore(snap).upload_header(
+        {
+            **CORR_HEADER,
+            "wiring": {
+                "ants": {
+                    "ant0": {"snap": {"input": 0}},
+                    "ant2": {"snap": {"input": 2}},
+                }
+            },
+        }
+    )
+    CorrWriter(snap).add(
+        {"0": _auto_bytes(), "02": _cross_bytes()},
+        cnt=100,
+        sync_time=CORR_HEADER["sync_time"],
+        dtype=DTYPE,
+    )
+    MetadataWriter(snap).add(
+        "adc_stats",
+        {
+            "sensor_name": "adc_stats",
+            "status": "update",
+            **{
+                f"input{n}_core{c}_{stat}": 15.0
+                for n in range(6)
+                for c in range(2)
+                for stat in ("mean", "power", "rms")
+            },
+        },
+    )
+    _rewind(snap, ["stream:corr", "stream:adc_stats"])
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+        read_timeout_s=0.05,
+    )
+    try:
+        agg._snap_tick()
+        client = create_app(agg).test_client()
+
+        corr = client.get("/api/corr").get_json()["data"]
+        assert corr["pairs"]["0"]["label"] == "ant0"
+        assert corr["pairs"]["02"]["label"] == "ant0 / ant2"
+
+        adc = client.get("/api/adc").get_json()["data"]
+        per_input = {
+            entry["input"]: entry["label"] for entry in adc["per_input"]
+        }
+        assert per_input[0] == "ant0"
+        assert per_input[2] == "ant2"
+        # Inputs without a wiring entry stay None (lab/test scenario).
+        assert per_input[1] is None
+        assert per_input[3] is None
+    finally:
+        agg.stop(timeout=1.0)
 
 
 def test_metadata_route_includes_classify(client):

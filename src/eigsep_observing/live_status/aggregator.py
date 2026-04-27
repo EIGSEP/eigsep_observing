@@ -415,37 +415,60 @@ class LiveStatusAggregator:
                 s.file_heartbeat = file_h
 
     def _read_corr(self) -> tuple[Optional[tuple], bool]:
-        """One CorrReader.read call with a finite timeout.
+        """Drain the corr stream to the latest entry; reshape the tail.
 
-        Returns ``(result, ok)``. ``ok`` is True when the call
-        round-tripped to Redis (even if no new data landed in the
-        window — that's a ``TimeoutError`` from ``CorrReader``, not a
-        connectivity failure). ``ok=False`` means a transport error
-        fired. ``result`` is ``(acc_cnt, pairs_data)`` when data was
-        available, else ``None``.
+        ``CorrReader.read`` consumes one stream entry per call. The
+        producer publishes at the integration cadence (~4 Hz at the
+        default ``corr_acc_len``); this drain ticks at
+        ``1/snap_tick_s`` (~2 Hz). Reading one entry per tick falls
+        behind by ~2 entries/sec, which surfaces as a growing display
+        lag — the legacy ``live_plotter`` polls faster than the
+        producer (FuncAnimation at 20 Hz) and therefore never lags.
+        Drain to the tail so the plot always reflects the most recent
+        integration; intermediate entries are discarded because the
+        dashboard renders current state, not history.
+
+        Returns ``(result, ok)``. ``ok`` is True when every call
+        round-tripped to Redis (a ``TimeoutError`` from ``CorrReader``
+        is the natural drain-exit and counts as success). ``ok=False``
+        means a transport error fired during the drain. ``result`` is
+        ``(acc_cnt, pairs_data)`` for the *latest* drained entry, or
+        ``None`` if the tick saw no new entries.
         """
-        try:
-            acc_cnt, pairs_data = self.corr_reader.read(
-                timeout=self._read_timeout_s, unpack=True
-            )
-        except TimeoutError:
+        last_acc_cnt: Optional[int] = None
+        last_pairs: Optional[dict] = None
+        # First read waits up to read_timeout_s for *any* new entry;
+        # subsequent reads use a tiny timeout so the drain only consumes
+        # entries already in Redis at this moment and never blocks
+        # waiting for the producer's next push (which would let a
+        # fast producer starve _snap_tick from ever returning).
+        timeout = self._read_timeout_s
+        while True:
+            try:
+                acc_cnt, pairs_data = self.corr_reader.read(
+                    timeout=timeout, unpack=True
+                )
+            except TimeoutError:
+                break
+            except RedisError as exc:
+                logger.error("corr_reader.read transport failure: %s", exc)
+                return None, False
+            except Exception as exc:
+                logger.error("corr_reader.read failed: %s", exc)
+                return None, False
+            if acc_cnt is None:
+                break
+            last_acc_cnt = acc_cnt
+            last_pairs = pairs_data
+            timeout = 0.001
+        if last_acc_cnt is None:
             return None, True
-        except RedisError as exc:
-            logger.error("corr_reader.read transport failure: %s", exc)
-            return None, False
-        except Exception as exc:
-            logger.error("corr_reader.read failed: %s", exc)
-            return None, False
-        if acc_cnt is None:
-            return None, True
-        # Reshape even/odd average (same pattern as plot.py /
-        # File._insert_sample).
         try:
-            reshaped = reshape_data(pairs_data, avg_even_odd=True)
+            reshaped = reshape_data(last_pairs, avg_even_odd=True)
         except Exception as exc:
             logger.error("reshape_data failed: %s", exc)
             return None, True
-        return (acc_cnt, reshaped), True
+        return (last_acc_cnt, reshaped), True
 
     def _read_adc_snapshot(self) -> tuple[Optional[tuple], bool]:
         """One AdcSnapshotReader.read call with a finite timeout.

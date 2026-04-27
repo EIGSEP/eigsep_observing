@@ -28,13 +28,54 @@ def _envelope(data: Any, warnings: Optional[list] = None) -> dict:
     return {"ok": True, "data": data, "warnings": warnings or []}
 
 
+def _input_to_ant(wiring: Optional[dict]) -> dict[str, str]:
+    """Invert ``wiring["ants"]`` to ``{snap_input_str: antenna_name}``.
+
+    Permissive: missing ``snap.input`` fields are skipped, an absent or
+    empty wiring returns an empty map. Lab/test setups that publish no
+    wiring (or wire to test loads) end up with ``{}``, and the
+    front-end falls back to raw input numbers.
+    """
+    if not wiring:
+        return {}
+    out: dict[str, str] = {}
+    for ant, spec in (wiring.get("ants") or {}).items():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        if inp is None:
+            continue
+        out[str(inp)] = ant
+    return out
+
+
+def _pair_label(pair: str, input_to_ant: dict[str, str]) -> Optional[str]:
+    """Antenna-friendly label for a corr pair, or ``None`` if unmappable.
+
+    Crosses follow the ``"{a} / {b}"`` convention from
+    ``plot.pairs_to_labels``. A pair with any input not in the map
+    yields ``None`` so the front-end can fall back to the raw key
+    rather than rendering a half-mapped label.
+    """
+    if len(pair) == 1:
+        return input_to_ant.get(pair)
+    if len(pair) == 2:
+        a = input_to_ant.get(pair[0])
+        b = input_to_ant.get(pair[1])
+        if a is None or b is None:
+            return None
+        return f"{a} / {b}"
+    return None
+
+
 def _corr_payload(state: StateSnapshot) -> dict:
     pairs_out: dict[str, dict] = {}
     freqs = state.corr_freqs
+    input_to_ant = _input_to_ant((state.corr_header or {}).get("wiring"))
     if state.corr_pairs and freqs is not None:
         for pair, arr in state.corr_pairs.items():
             if arr is None or arr.size == 0:
                 continue
+            label = _pair_label(pair, input_to_ant)
             # Aggregator stores the output of reshape_data(avg_even_odd=True):
             #   autos   → shape (ntimes=1, nchan) int32
             #   crosses → shape (ntimes=1, nchan, 2) int32
@@ -49,12 +90,14 @@ def _corr_payload(state: StateSnapshot) -> dict:
                 pairs_out[pair] = {
                     "mag": mag.tolist(),
                     "phase": phase.tolist(),
+                    "label": label,
                 }
             else:
                 row = arr[0] if arr.ndim == 2 else arr
                 pairs_out[pair] = {
                     "mag": np.asarray(row, dtype=np.float64).tolist(),
                     "phase": None,
+                    "label": label,
                 }
     return {
         "acc_cnt": state.corr_acc_cnt,
@@ -112,6 +155,13 @@ def _metadata_payload(
 
 def _adc_payload(state: StateSnapshot) -> dict:
     adc_stats = state.adc_stats_latest or {}
+    # Prefer the corr header's wiring (canonical, written on every
+    # state-changing FPGA call); fall back to the ADC sidecar so
+    # standalone ADC snapshots still carry labels even when corr
+    # publishing is paused.
+    sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
+    header_wiring = (state.corr_header or {}).get("wiring")
+    input_to_ant = _input_to_ant(header_wiring or sidecar_wiring)
     per_input = []
     for n in range(6):
         for c in range(2):
@@ -126,6 +176,7 @@ def _adc_payload(state: StateSnapshot) -> dict:
                     "mean": mean,
                     "power": power,
                     "clip_frac": state.adc_clip_fraction.get(str(n)),
+                    "label": input_to_ant.get(str(n)),
                 }
             )
     return {

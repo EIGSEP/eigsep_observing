@@ -1,6 +1,34 @@
 "use strict";
 
 const POLL_MS = 1000;
+const WIRING_TOGGLE_KEY = "eigsep.useWiringLabels";
+
+// Wiring-labels toggle. Persisted in localStorage so the user's
+// choice survives reloads; gracefully no-ops when no labels are
+// present in the API payload (e.g. lab benches with no wiring).
+function getUseWiringLabels() {
+  try {
+    return localStorage.getItem(WIRING_TOGGLE_KEY) !== "0";
+  } catch (e) {
+    return true;
+  }
+}
+
+function setUseWiringLabels(on) {
+  try {
+    localStorage.setItem(WIRING_TOGGLE_KEY, on ? "1" : "0");
+  } catch (e) {
+    // localStorage unavailable (e.g. private mode); checkbox state still works.
+  }
+}
+
+// Pick wiring label when the toggle is on AND the API gave us one;
+// otherwise fall back to the raw key the caller passed in (input
+// number, pair string, etc.).
+function pickLabel(rawKey, apiLabel) {
+  if (getUseWiringLabels() && apiLabel) return apiLabel;
+  return rawKey;
+}
 
 function tileClass(classify) {
   return `tile ${classify || "unknown"}`;
@@ -31,13 +59,20 @@ async function fetchJson(path) {
 
 // ---- corr spectra ---------------------------------------------------
 
+// Plotly log axes take ranges in log10. [-2, 9] mirrors the legacy
+// live_plotter ylim of (1e-2, 1e9); fixed range avoids autoscale jitter.
 const magLayout = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
   paper_bgcolor: "#1a1a1a",
   plot_bgcolor: "#111",
   font: { color: "#eee" },
-  xaxis: { title: "Frequency (MHz)", gridcolor: "#333" },
-  yaxis: { title: "Magnitude", type: "log", gridcolor: "#333" },
+  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  yaxis: {
+    title: "Amplitude [arb. units]",
+    type: "log",
+    range: [-2, 9],
+    gridcolor: "#333",
+  },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
 };
@@ -47,11 +82,17 @@ const phaseLayout = {
   paper_bgcolor: "#1a1a1a",
   plot_bgcolor: "#111",
   font: { color: "#eee" },
-  xaxis: { title: "Frequency (MHz)", gridcolor: "#333" },
-  yaxis: { title: "Phase (rad)", range: [-Math.PI, Math.PI], gridcolor: "#333" },
+  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  yaxis: {
+    title: "Phase [deg]",
+    range: [-180, 180],
+    gridcolor: "#333",
+  },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
 };
+
+const RAD_TO_DEG = 180 / Math.PI;
 
 let magPlotInitialized = false;
 let phasePlotInitialized = false;
@@ -64,23 +105,24 @@ function updateCorr(corr) {
   for (const pair of Object.keys(corr.pairs)) {
     const p = corr.pairs[pair];
     if (!p) continue;
+    const name = pickLabel(pair, p.label);
     if (p.mag) {
       magTraces.push({
         x: freqs,
         y: p.mag,
         type: "scatter",
         mode: "lines",
-        name: pair,
+        name,
         line: { width: 1.5 },
       });
     }
     if (p.phase) {
       phaseTraces.push({
         x: freqs,
-        y: p.phase,
+        y: p.phase.map((v) => v * RAD_TO_DEG),
         type: "scatter",
         mode: "lines",
-        name: pair,
+        name,
         line: { width: 1.5 },
       });
     }
@@ -194,8 +236,9 @@ function renderAdcTiles(adc) {
       entry.clip_frac !== null && entry.clip_frac !== undefined
         ? fmt(entry.clip_frac * 100, 2) + "%"
         : "—";
+    const inputName = pickLabel(`in${entry.input}`, entry.label);
     row.append(
-      makeSpan("label", `in${entry.input}/c${entry.core}`),
+      makeSpan("label", `${inputName}/c${entry.core}`),
       makeSpan("value", `rms ${rmsStr}`),
       makeSpan("value", `clip ${clipStr}`)
     );
@@ -257,6 +300,11 @@ function renderStatusLog(entries) {
 
 // ---- poll loop ------------------------------------------------------
 
+// Last successful payloads cached so the wiring-labels toggle can
+// re-render immediately without waiting up to POLL_MS for the next tick.
+let lastCorr = null;
+let lastAdc = null;
+
 async function tick() {
   try {
     const [health, corr, metadata, adc, rfswitch, file, status] = await Promise.all([
@@ -268,6 +316,8 @@ async function tick() {
       fetchJson("/api/file"),
       fetchJson("/api/status"),
     ]);
+    lastCorr = corr.data;
+    lastAdc = adc.data;
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
     renderMetadataTiles(metadata.data);
@@ -280,5 +330,17 @@ async function tick() {
   }
 }
 
+function initWiringToggle() {
+  const cb = document.getElementById("toggle-wiring");
+  if (!cb) return;
+  cb.checked = getUseWiringLabels();
+  cb.addEventListener("change", () => {
+    setUseWiringLabels(cb.checked);
+    if (lastCorr) updateCorr(lastCorr);
+    if (lastAdc) renderAdcTiles(lastAdc);
+  });
+}
+
+initWiringToggle();
 tick();
 setInterval(tick, POLL_MS);
