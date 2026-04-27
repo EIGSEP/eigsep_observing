@@ -1,3 +1,27 @@
+"""Capture N spectra from the SNAP correlator into a single HDF5 file.
+
+Used for testing / on-off measurements where we deliberately do *not*
+want full timestream observing files. Output is the standard
+``io.write_hdf5`` shape, so it's read back with::
+
+    from eigsep_observing.io import read_hdf5
+    data, header, metadata = read_hdf5("spectrum.h5")
+
+- ``data``: ``dict[str, np.ndarray]`` keyed by pair name. Autos
+  (``"0"``..``"5"``) are int32 shape ``(num_spec, nchan)``; cross
+  pairs (``"02"``, ``"04"``, ...) are reconstructed to complex128
+  shape ``(num_spec, nchan)``.
+- ``header``: every ``CORR_HEADER_SCHEMA`` field
+  (``nchan``, ``sample_rate``, ``integration_time``, ``acc_bins``,
+  ``dtype``, ``avg_even_odd``, ``wiring``) plus ``sync_time``,
+  ``header_upload_unix``, ``acc_cnt`` (one per spectrum), and
+  ``times``/``freqs``/``dfreq`` computed by ``append_corr_header``.
+- ``metadata``: ``{}`` when ``--panda-host`` is not set. Otherwise a
+  per-key list of length ``num_spec`` with one
+  ``MetadataSnapshotReader.get()`` value per spectrum (point-in-time,
+  mirroring the VNA path). ``_ts`` freshness keys are filtered out.
+"""
+
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import logging
 
