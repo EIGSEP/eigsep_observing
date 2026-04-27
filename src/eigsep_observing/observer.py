@@ -18,7 +18,14 @@ logger = logging.getLogger(__name__)
 
 
 def _tick_liveness_deadline(deadline, liveness_timeout, reason):
-    """Advance the SNAP-liveness deadline; raise if expired.
+    """Advance the SNAP-liveness deadline; log loudly when it expires.
+
+    The SNAP-side producer has its own systemd-managed restart loop
+    (``deploy/systemd/eigsep-observe.service``); the consumer's job
+    here is to keep waiting and surface the silence in the log
+    instead of suiciding. Crash-recovery visibility lives on the
+    live-status dashboard via ``snap_reinit`` and ``file_heartbeat``,
+    not via this consumer process exiting.
 
     Parameters
     ----------
@@ -27,28 +34,30 @@ def _tick_liveness_deadline(deadline, liveness_timeout, reason):
         if no failure has been seen since the last successful write.
     liveness_timeout : float
         Tolerated duration without a complete corr row, in seconds.
+        Each crossing logs an ``ERROR`` and re-arms for another
+        ``liveness_timeout`` interval — so a permanently-silent SNAP
+        produces a periodic reminder, not a one-shot warning that
+        scrolls off.
     reason : str
-        What triggered this tick; surfaced in the ``RuntimeError``.
+        What triggered this tick; surfaced in the log line.
 
     Returns
     -------
     float
         Updated deadline. Set to ``monotonic() + liveness_timeout`` on
-        the first failure since the last clear; unchanged thereafter.
-
-    Raises
-    ------
-    RuntimeError
-        If ``deadline`` is in the past.
+        the first failure since the last clear; re-armed by the same
+        amount each time the deadline elapses; otherwise unchanged.
     """
     now = time.monotonic()
     if deadline is None:
         return now + liveness_timeout
     if now > deadline:
-        raise RuntimeError(
+        logger.error(
             f"SNAP has not produced a complete corr row for "
-            f"{liveness_timeout}s: {reason}"
+            f"{liveness_timeout}s: {reason}. Continuing to wait — "
+            "supervisor handles SNAP recovery."
         )
+        return now + liveness_timeout
     return deadline
 
 
@@ -169,12 +178,15 @@ class EigObserver:
         timeout : int
             The time in seconds to wait for data from the correlator.
         liveness_timeout : float
-            Bounded wait, in seconds, for the SNAP to produce a
-            complete corr row (valid header with non-zero
-            ``sync_time`` *and* an entry on the corr stream).
-            Exceeding this deadline raises ``RuntimeError`` so the
-            process crashes visibly rather than silently accumulating
-            unusable data.
+            Tolerated duration, in seconds, with no complete corr row
+            (valid header with non-zero ``sync_time`` *and* an entry
+            on the corr stream) before the watchdog logs an ``ERROR``.
+            The watchdog only logs — it does not raise — because the
+            SNAP-side producer is supervised by systemd and recovers
+            on its own. The consumer keeps waiting; the log is for
+            operator visibility, not flow control. Each crossing
+            re-arms the deadline so a permanently-silent SNAP keeps
+            producing periodic reminders.
 
         Notes
         -----
@@ -187,12 +199,13 @@ class EigObserver:
         - ``(None, {})`` from ``corr_reader.read`` (stream absent)
 
         The deadline starts on the first such failure and is cleared
-        when ``file.add_data`` completes. Crossing it raises
-        ``RuntimeError``. The consumer only cares *whether* a row
-        arrived, not *why* it did not — duck-typing on "did I get a
-        complete row?" is more trustworthy than classifying header vs.
-        stream failures, because ``get_header`` reads a persistent
-        Redis hash and a stale header can survive a dead SNAP.
+        when ``file.add_data`` completes. Crossing it logs an
+        ``ERROR`` and re-arms; it does not exit. The consumer only
+        cares *whether* a row arrived, not *why* it did not —
+        duck-typing on "did I get a complete row?" is more
+        trustworthy than classifying header vs. stream failures,
+        because ``get_header`` reads a persistent Redis hash and a
+        stale header can survive a dead SNAP.
 
         A ``ValueError`` from ``get_header`` *with* a cached header
         is treated as a transient metadata-path blip: the cached

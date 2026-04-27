@@ -1,0 +1,42 @@
+[Unit]
+Description=EIGSEP corr-data file writer (observe.py)
+Documentation=https://github.com/EIGSEP/eigsep_observing/blob/main/deploy/systemd/README.md
+After=network-online.target redis-server.service eigsep-observe.service
+Wants=network-online.target redis-server.service eigsep-observe.service
+# Unbounded retries — see eigsep-observe.service for rationale.
+StartLimitIntervalSec=0
+
+[Service]
+# Edit these three paths via `systemctl edit eigsep-observe-writer.service`
+# (drop-in override) for your deployment.
+User=eigsep
+Group=eigsep
+WorkingDirectory=/home/eigsep/eigsep_observing
+ExecStart=/home/eigsep/eigsep_observing/.venv/bin/python scripts/observe.py
+
+# --- Recovery policy --------------------------------------------------
+# observe.py no longer suicides on SNAP producer silence — the
+# liveness watchdog logs and keeps waiting because the SNAP-side
+# eigsep-observe.service handles producer recovery. So this unit
+# only restarts on genuine crashes (Python segfault, unhandled
+# exception in the corr or VNA thread, OOM).
+#
+# Unbounded retries match the supervisor: a bug-induced crash loop
+# surfaces as a stale "Last file" tile on the live-status dashboard,
+# not as systemd-gave-up.
+Restart=on-failure
+RestartSec=30s
+
+# observe.py handles SIGINT cleanly (joins threads, flushes the
+# in-flight HDF5 file via try/finally). SIGTERM would skip the
+# finally; send SIGINT instead.
+KillSignal=SIGINT
+TimeoutStopSec=30s
+
+PrivateTmp=no
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

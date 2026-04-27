@@ -226,6 +226,29 @@ def test_health_route(client):
     assert data["panda_connected"] is True
     assert data["panda_heartbeat"] is True
     assert data["observing_inferred"] is True
+    # snap_reinit always present (empty-sentinel before any publish).
+    assert "snap_reinit" in data
+    assert data["snap_reinit"]["count"] is None
+
+
+def test_health_route_surfaces_snap_reinit_count(agg_primed):
+    """When fpga_init.py has bumped the counter, the /api/health
+    payload must surface the count and a fresh seconds_since_reinit
+    derived against ``now`` (not the drain-tick time)."""
+    from eigsep_observing.snap_reinit import publish as publish_reinit
+
+    publish_reinit(agg_primed.transport_snap)
+    publish_reinit(agg_primed.transport_snap)
+    agg_primed._snap_tick()
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    body = client.get("/api/health").get_json()
+    data = body["data"]
+    assert data["snap_reinit"]["count"] == 2
+    assert data["snap_reinit"]["last_reinit_unix"] is not None
+    assert data["snap_reinit"]["seconds_since_reinit"] is not None
 
 
 def test_corr_route_has_pairs_and_freqs(client):

@@ -452,6 +452,38 @@ def test_snap_tick_reads_file_heartbeat_from_redis(agg, seeded):
     assert state.file_heartbeat["seconds_since_write"] is not None
 
 
+def test_snap_tick_reads_snap_reinit_from_redis(agg, seeded):
+    """fpga_init.py publishes a reinit heartbeat on each supervised
+    --reinit; the aggregator must surface it on the same SNAP-side
+    transport so the dashboard can render the count."""
+    from eigsep_observing.snap_reinit import publish as publish_reinit
+
+    snap, _ = seeded
+    publish_reinit(snap)
+    publish_reinit(snap)
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.snap_reinit["count"] == 2
+    assert state.snap_reinit["last_reinit_unix"] is not None
+    assert state.snap_reinit["seconds_since_reinit"] is not None
+
+
+def test_snap_tick_snap_reinit_absent_returns_empty(agg, seeded):
+    """When fpga_init.py has never published (e.g. fresh deploy or
+    Redis was flushed), the aggregator carries the empty-sentinel
+    dict so the dashboard renders an unknown tile, not an error."""
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.snap_reinit == {
+        "count": None,
+        "last_reinit_unix": None,
+        "seconds_since_reinit": None,
+    }
+
+
 # ---------------------------------------------------------------------
 # Thresholds recompute on re-sync
 # ---------------------------------------------------------------------

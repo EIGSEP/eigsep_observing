@@ -259,6 +259,13 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
     if state.corr_last_unix is not None:
         timeout_s = _corr_observing_timeout_s(state)
         observing_inferred = (now - state.corr_last_unix) < timeout_s
+    reinit = dict(state.snap_reinit or {})
+    # Recompute the age against ``now`` so the dashboard's "Reinits"
+    # tile shows fresh seconds-since values between drain ticks.
+    last_unix = reinit.get("last_reinit_unix")
+    reinit["seconds_since_reinit"] = (
+        max(0.0, now - last_unix) if last_unix is not None else None
+    )
     return {
         "snap_connected": state.snap_connected,
         "panda_connected": state.panda_connected,
@@ -269,6 +276,7 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "panda_last_tick_unix": state.panda_last_tick_unix,
         "snap_error": state.snap_error,
         "panda_error": state.panda_error,
+        "snap_reinit": reinit,
     }
 
 

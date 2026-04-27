@@ -1,0 +1,51 @@
+[Unit]
+Description=EIGSEP SNAP supervisor (fpga_init.py --reinit -p)
+Documentation=https://github.com/EIGSEP/eigsep_observing/blob/main/deploy/systemd/README.md
+After=network-online.target redis-server.service
+Wants=network-online.target redis-server.service
+# Unbounded retries: the field deployment has no wifi, prime
+# observing is overnight, and a SNAP that thermal-cycles overnight
+# will self-heal as it cools. The operator-visible signal lives on
+# the live-status dashboard (Reinits tile + Last file freshness),
+# not on systemd giving up.
+StartLimitIntervalSec=0
+
+[Service]
+# Edit these three paths via `systemctl edit eigsep-observe.service`
+# (drop-in override) for your deployment — the values below are the
+# canonical layout, not a hard requirement.
+User=eigsep
+Group=eigsep
+WorkingDirectory=/home/eigsep/eigsep_observing
+ExecStart=/home/eigsep/eigsep_observing/.venv/bin/python scripts/fpga_init.py --reinit -p
+
+# --- Recovery policy --------------------------------------------------
+# Always re-init on crash. The observed failure mode is a casperfpga
+# register-read timeout — the SNAP has rebooted, bitstream is gone,
+# and a fresh sync_time per recovery is honest (each post-crash file
+# is its own observing block). See:
+#   /deploy/systemd/README.md
+Restart=on-failure
+RestartSec=30s
+
+# fpga_init.py catches KeyboardInterrupt (SIGINT) and runs
+# fpga.end_observing() in a finally block, but does not handle
+# SIGTERM. Sending SIGINT instead lets the existing shutdown path
+# run cleanly; any process still alive after TimeoutStopSec gets
+# SIGKILL'd as a backstop.
+KillSignal=SIGINT
+TimeoutStopSec=30s
+
+# Hardware integration — disable systemd's private-tmp / namespace
+# hardening because casperfpga opens raw sockets to the SNAP and
+# may rely on shared paths. Re-enable individually if you confirm
+# they are safe in your deployment.
+PrivateTmp=no
+
+# Logs go to journald; tail with:
+#   journalctl -u eigsep-observe.service -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

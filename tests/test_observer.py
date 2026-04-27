@@ -300,10 +300,16 @@ def test_record_corr_data_transient_header_blip_uses_cache(
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data_unsynced_watchdog_crashes(
-    mock_file_class, observer_snap_only
+def test_record_corr_data_unsynced_watchdog_logs_and_waits(
+    mock_file_class, observer_snap_only, caplog
 ):
-    """sync_time=0 persistently → bounded wait → RuntimeError."""
+    """sync_time=0 persistently → ERROR log → loop keeps waiting.
+
+    The producer is supervised by systemd; the consumer must not
+    suicide on producer silence. Verify that the watchdog logs the
+    persistent silence at ERROR but ``record_corr_data`` returns
+    cleanly when ``stop_event`` is set, with no exception raised.
+    """
     observer = observer_snap_only
 
     mock_file = Mock()
@@ -313,24 +319,32 @@ def test_record_corr_data_unsynced_watchdog_crashes(
 
     observer.corr_config.upload_header({"sync_time": 0})
 
-    with pytest.raises(
-        RuntimeError, match="SNAP has not produced a complete corr row"
-    ):
+    stop_after = threading.Timer(1.5, observer.stop_event.set)
+    stop_after.start()
+    caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
+    try:
         observer.record_corr_data(
             "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
         )
+    finally:
+        stop_after.cancel()
 
     # No data should have been read or written — no sync anchor.
     mock_file.add_data.assert_not_called()
     # Partial-buffer flush still runs (try/finally).
     mock_file.close.assert_called()
+    # Watchdog logged the persistent silence at ERROR.
+    assert any(
+        "SNAP has not produced a complete corr row" in rec.message
+        for rec in caplog.records
+    )
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data_no_header_ever_crashes(
-    mock_file_class, observer_snap_only
+def test_record_corr_data_no_header_ever_logs_and_waits(
+    mock_file_class, observer_snap_only, caplog
 ):
-    """get_header always raises, no cache → bounded wait → RuntimeError."""
+    """get_header always raises, no cache → ERROR log → keep waiting."""
     observer = observer_snap_only
 
     mock_file = Mock()
@@ -338,22 +352,27 @@ def test_record_corr_data_no_header_ever_crashes(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    with (
-        patch.object(
+    stop_after = threading.Timer(1.5, observer.stop_event.set)
+    stop_after.start()
+    caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
+    try:
+        with patch.object(
             observer.corr_config,
             "get_header",
             side_effect=ValueError("no header"),
-        ),
-        pytest.raises(
-            RuntimeError, match="SNAP has not produced a complete corr row"
-        ),
-    ):
-        observer.record_corr_data(
-            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
-        )
+        ):
+            observer.record_corr_data(
+                "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
+            )
+    finally:
+        stop_after.cancel()
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
+    assert any(
+        "SNAP has not produced a complete corr row" in rec.message
+        for rec in caplog.records
+    )
 
 
 @patch("eigsep_observing.io.File")
@@ -411,12 +430,13 @@ def test_record_corr_data_resync_rolls_file(
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data_read_timeout_watchdog_crashes(
-    mock_file_class, observer_snap_only
+def test_record_corr_data_read_timeout_watchdog_logs_and_waits(
+    mock_file_class, observer_snap_only, caplog
 ):
-    """Persistent ``TimeoutError`` from ``corr_reader.read`` → bounded
-    wait → ``RuntimeError``. Unified with the header-side watchdog:
-    the consumer only cares whether complete rows arrive.
+    """Persistent ``TimeoutError`` from ``corr_reader.read`` → ERROR
+    log → keep waiting. Unified with the header-side watchdog: the
+    consumer only cares whether complete rows arrive, and on
+    persistent silence it logs but never raises.
     """
     observer = observer_snap_only
 
@@ -427,30 +447,35 @@ def test_record_corr_data_read_timeout_watchdog_crashes(
 
     observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
-    with (
-        patch.object(
+    stop_after = threading.Timer(1.5, observer.stop_event.set)
+    stop_after.start()
+    caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
+    try:
+        with patch.object(
             observer.corr_reader,
             "read",
             side_effect=TimeoutError("no data"),
-        ),
-        pytest.raises(
-            RuntimeError, match="SNAP has not produced a complete corr row"
-        ),
-    ):
-        observer.record_corr_data(
-            "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.2
-        )
+        ):
+            observer.record_corr_data(
+                "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.2
+            )
+    finally:
+        stop_after.cancel()
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
+    assert any(
+        "SNAP has not produced a complete corr row" in rec.message
+        for rec in caplog.records
+    )
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data_read_stream_absent_watchdog_crashes(
-    mock_file_class, observer_snap_only
+def test_record_corr_data_read_stream_absent_watchdog_logs_and_waits(
+    mock_file_class, observer_snap_only, caplog
 ):
     """Persistent ``(None, {})`` from ``corr_reader.read`` (stream not
-    created yet) → bounded wait → ``RuntimeError``.
+    created yet) → ERROR log → keep waiting.
     """
     observer = observer_snap_only
 
@@ -461,18 +486,25 @@ def test_record_corr_data_read_stream_absent_watchdog_crashes(
 
     observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
-    with (
-        patch.object(observer.corr_reader, "read", return_value=(None, {})),
-        pytest.raises(
-            RuntimeError, match="SNAP has not produced a complete corr row"
-        ),
-    ):
-        observer.record_corr_data(
-            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
-        )
+    stop_after = threading.Timer(1.5, observer.stop_event.set)
+    stop_after.start()
+    caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
+    try:
+        with patch.object(
+            observer.corr_reader, "read", return_value=(None, {})
+        ):
+            observer.record_corr_data(
+                "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
+            )
+    finally:
+        stop_after.cancel()
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
+    assert any(
+        "SNAP has not produced a complete corr row" in rec.message
+        for rec in caplog.records
+    )
 
 
 @patch("eigsep_observing.io.File")
