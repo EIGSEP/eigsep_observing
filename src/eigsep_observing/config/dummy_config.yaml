@@ -32,6 +32,15 @@ use_motor: false
 motor_interval: 1  # seconds between scans
 motor_failure_retry_s: 0.5  # fast retry for tests
 motor_scan: {}
+
+# motion-switch coordination (default off; tests opt in per-fixture)
+serialize_motion_and_switching: false
+
+# vna position sweep (used by scripts/vna_position_sweep.py)
+vna_position_sweep:
+  az_grid_deg: [-1.0, 1.0]
+  el_grid_deg: [-1.0, 1.0]
+  settle_s: 0.0
 # tempctrl
 use_tempctrl: true
 tempctrl_interval: 1  # seconds; short for tests

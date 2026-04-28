@@ -38,6 +38,18 @@ motor_interval: 3600  # seconds between scans
 motor_failure_retry_s: 60  # shorter wait after a failed scan to home
 motor_scan: {}  # kwargs forwarded to MotorScanner.scan; {}
 
+# motion-switch coordination
+# When true, motor moves and RF switching mutually exclude each other
+# at per-move granularity. Default off — opt in if motor stepping pulses
+# turn out to bleed RF interference into VNA/correlator data.
+serialize_motion_and_switching: false
+
+# vna position sweep (used by scripts/vna_position_sweep.py)
+vna_position_sweep:
+  az_grid_deg: [0, 90, 180, 270]
+  el_grid_deg: [0, 90, 180, 270]
+  settle_s: 2.0  # post-move dwell before VNA fires
+
 # tempctrl
 use_tempctrl: false
 tempctrl_interval: 60  # seconds between setpoint re-apply + health check

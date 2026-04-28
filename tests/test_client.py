@@ -2186,3 +2186,193 @@ def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
         )
     finally:
         client.stop()
+
+
+# ---------------------------------------------------------------------
+# MotionSwitchCoordinator + run_calibration_sequence
+# ---------------------------------------------------------------------
+
+
+def test_panda_client_builds_coord_with_default_off(client):
+    """Default behavior: ``serialize_motion_and_switching`` absent or
+    false → coord built with ``serialize=False`` → motor_loop is
+    byte-for-byte preserved.
+    """
+    assert client.coord is not None
+    assert client.coord.serialize is False
+    # The lock the coord wraps is the same one ``switch_lock`` exposes,
+    # so existing tests probing ``client.switch_lock.acquire`` keep
+    # working regardless of which surface the lock is grabbed through.
+    assert client.coord.lock is client.switch_lock
+
+
+def test_panda_client_builds_coord_serialize_on_when_flag_set(
+    transport, dummy_cfg
+):
+    """When the yaml flag is true, the coord serializes."""
+    cfg = dict(dummy_cfg)
+    cfg["serialize_motion_and_switching"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        assert client.coord.serialize is True
+    finally:
+        client.stop()
+
+
+def test_switch_lock_is_rlock(client):
+    """``switch_lock`` must be an RLock so the no-switch-observation
+    script's outer ``switch_session`` can host an inner per-move
+    ``motion_section`` from the same thread without deadlocking.
+    """
+    assert client.switch_lock.acquire(blocking=False)
+    # Re-entry from the same thread succeeds for an RLock; would
+    # block forever for a plain Lock.
+    assert client.switch_lock.acquire(blocking=False)
+    client.switch_lock.release()
+    client.switch_lock.release()
+
+
+def test_run_calibration_sequence_skips_vna_when_uninitialized(client, caplog):
+    """No VNA → calibration logs a warning and proceeds to dwells."""
+    assert client.vna is None  # dummy_cfg has use_vna: false
+    caplog.set_level("WARNING")
+    schedule = {"RFANT": 60, "RFNOFF": 0.05}
+    completed = client.run_calibration_sequence(schedule=schedule)
+    assert completed is True
+    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+
+
+def test_run_calibration_sequence_filters_rfant(transport, dummy_cfg):
+    """RFANT entries in the schedule must be skipped during
+    calibration; only non-RFANT modes should drive the switch.
+    """
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        seen = []
+        with patch.object(client, "measure_s11", lambda mode: None):
+            with patch.object(
+                client,
+                "_safe_switch",
+                side_effect=lambda state: seen.append(state) or True,
+            ):
+                schedule = {
+                    "RFANT": 0.05,
+                    "RFNOFF": 0.05,
+                    "RFNON": 0.05,
+                }
+                completed = client.run_calibration_sequence(schedule=schedule)
+        assert completed is True
+        assert "RFANT" not in seen
+        assert seen == ["RFNOFF", "RFNON"]
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_vna_first_then_dwells(transport, dummy_cfg):
+    """``measure_s11`` must run before any non-RFANT switch dwell, so
+    the VNA cal solution corresponds to the moment of bracketing
+    (before noise dwells warm anything up).
+    """
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        order = []
+        with patch.object(
+            client,
+            "measure_s11",
+            side_effect=lambda mode: order.append(f"vna:{mode}"),
+        ):
+            with patch.object(
+                client,
+                "_safe_switch",
+                side_effect=lambda state: (
+                    order.append(f"switch:{state}") or True
+                ),
+            ):
+                schedule = {"RFNOFF": 0.05}
+                client.run_calibration_sequence(schedule=schedule)
+        assert order == ["vna:ant", "vna:rec", "switch:RFNOFF"]
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_respects_stop_event(transport, dummy_cfg):
+    """Setting ``stop_client`` mid-dwell must return False promptly so
+    the no-switch-observation script can unwind cleanly.
+    """
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        with patch.object(client, "measure_s11", lambda mode: None):
+            with patch.object(client, "_safe_switch", return_value=True):
+                # Long dwell; trip stop_client from a thread.
+                def tripper():
+                    time.sleep(0.1)
+                    client.stop_client.set()
+
+                t = threading.Thread(target=tripper, daemon=True)
+                t.start()
+
+                started = time.monotonic()
+                completed = client.run_calibration_sequence(
+                    schedule={"RFNOFF": 60.0}
+                )
+                elapsed = time.monotonic() - started
+                t.join(timeout=1.0)
+        assert completed is False
+        assert elapsed < 2.0, (
+            f"calibration did not honor stop_client (elapsed={elapsed:.2f}s)"
+        )
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_rejects_non_dict_schedule(
+    transport, dummy_cfg
+):
+    """Non-dict ``switch_schedule`` is a config-shape bug; raise
+    ``ValueError`` rather than warn-and-skip, matching how
+    ``no_switch_observation.py`` validates ``motor_scan``.
+    """
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = False
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        with pytest.raises(ValueError, match="switch_schedule must be a dict"):
+            client.run_calibration_sequence(schedule=["RFNOFF", 0.05])
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_skips_invalid_modes(
+    transport, dummy_cfg, caplog
+):
+    """Unknown switch modes in the schedule are warned and skipped —
+    don't poison the calibration flow with a typo.
+    """
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        seen = []
+        caplog.set_level("WARNING")
+        with patch.object(client, "measure_s11", lambda mode: None):
+            with patch.object(
+                client,
+                "_safe_switch",
+                side_effect=lambda state: seen.append(state) or True,
+            ):
+                schedule = {"NOT_A_MODE": 0.05, "RFNOFF": 0.05}
+                client.run_calibration_sequence(schedule=schedule)
+        assert seen == ["RFNOFF"]
+        assert any(
+            "invalid switch mode" in r.getMessage()
+            and "NOT_A_MODE" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
