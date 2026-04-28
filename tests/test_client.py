@@ -14,7 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing import MotorScanner, TempCtrlClient
+from eigsep_observing import MotorClient, TempCtrlClient
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -1165,42 +1165,42 @@ def test_vna_loop_recovers_to_rfant_on_measurement_exception(
 
 # ``motor_loop`` is the sibling of ``vna_loop``: periodic action, loud
 # error recovery, honors ``stop_client``. These tests patch
-# ``motor_scanner.scan`` to drive the loop deterministically — the real
+# ``motor_client.scan`` to drive the loop deterministically — the real
 # scan path (grid traversal, emulator tick cadence) is covered by
-# tests/test_motor_scanner.py.
+# tests/test_motor_client.py.
 
 
-def test_use_motor_false_leaves_scanner_none(client):
+def test_use_motor_false_leaves_motor_client_none(client):
     """Default dummy_config has ``use_motor: false``, so
-    ``PandaClient.__init__`` must leave ``motor_scanner`` as ``None``.
+    ``PandaClient.__init__`` must leave ``motor_client`` as ``None``.
     Mirrors the ``self.vna is None`` convention."""
     assert client.cfg.get("use_motor", False) is False
-    assert client.motor_scanner is None
+    assert client.motor_client is None
 
 
-def test_use_motor_true_builds_scanner(transport, dummy_cfg):
-    """With ``use_motor: true``, ``motor_scanner`` is a real
-    ``MotorScanner`` bound to the same transport — so ``motor_loop`` has
+def test_use_motor_true_builds_motor_client(transport, dummy_cfg):
+    """With ``use_motor: true``, ``motor_client`` is a real
+    ``MotorClient`` bound to the same transport — so ``motor_loop`` has
     something to drive and the dummy PicoManager's motor pico is
-    addressable through the scanner's proxy."""
+    addressable through the client's proxy."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:
-        assert isinstance(client.motor_scanner, MotorScanner)
-        # Scanner shares the client's transport, i.e. the PicoManager is
-        # reachable through the same fake redis.
-        assert client.motor_scanner.transport is client.transport
+        assert isinstance(client.motor_client, MotorClient)
+        # Motor client shares the panda client's transport, i.e. the
+        # PicoManager is reachable through the same fake redis.
+        assert client.motor_client.transport is client.transport
     finally:
         client.stop()
 
 
-def test_motor_loop_returns_when_scanner_is_none(caplog, client):
-    """motor_loop must return promptly when ``motor_scanner`` is None —
+def test_motor_loop_returns_when_motor_client_is_none(caplog, client):
+    """motor_loop must return promptly when ``motor_client`` is None —
     no polling, no silent spin. The warning must ride both channels
     (local log + status stream) so the ground observer sees the
     misconfiguration."""
-    assert client.motor_scanner is None  # dummy_config has use_motor: false
+    assert client.motor_client is None  # dummy_config has use_motor: false
     _arm_status_reader(client)
     caplog.set_level("WARNING")
     t0 = time.monotonic()
@@ -1208,13 +1208,13 @@ def test_motor_loop_returns_when_scanner_is_none(caplog, client):
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0, f"motor_loop did not return promptly ({elapsed}s)"
     assert any(
-        "Motor scanner not initialized" in r.getMessage()
+        "Motor client not initialized" in r.getMessage()
         for r in caplog.records
     )
 
     level, status = _status_reader(client).read(timeout=1)
     assert level == logging.WARNING
-    assert "Motor scanner not initialized" in status
+    assert "Motor client not initialized" in status
 
 
 def test_motor_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
@@ -1266,7 +1266,7 @@ def test_motor_loop_calls_scan_with_stop_event_and_cfg_kwargs(
             scan_calls.append(kwargs)
             client.stop_client.set()
 
-        with patch.object(client.motor_scanner, "scan", side_effect=fake_scan):
+        with patch.object(client.motor_client, "scan", side_effect=fake_scan):
             client.motor_loop()
 
         assert len(scan_calls) == 1, scan_calls
@@ -1306,10 +1306,10 @@ def test_motor_loop_survives_scan_timeout_error_and_parks_motors(
         _arm_status_reader(client)
         with (
             patch.object(
-                client.motor_scanner, "scan", side_effect=raising_scan
+                client.motor_client, "scan", side_effect=raising_scan
             ),
             patch.object(
-                client.motor_scanner, "home", side_effect=recording_home
+                client.motor_client, "home", side_effect=recording_home
             ),
         ):
             caplog.set_level("INFO")
@@ -1361,10 +1361,10 @@ def test_motor_loop_survives_scan_runtime_error(transport, dummy_cfg, caplog):
         _arm_status_reader(client)
         with (
             patch.object(
-                client.motor_scanner, "scan", side_effect=raising_scan
+                client.motor_client, "scan", side_effect=raising_scan
             ),
             patch.object(
-                client.motor_scanner, "home", side_effect=recording_home
+                client.motor_client, "home", side_effect=recording_home
             ),
         ):
             caplog.set_level("ERROR")
@@ -1412,10 +1412,10 @@ def test_motor_loop_logs_error_when_post_failure_home_also_fails(
         _arm_status_reader(client)
         with (
             patch.object(
-                client.motor_scanner, "scan", side_effect=raising_scan
+                client.motor_client, "scan", side_effect=raising_scan
             ),
             patch.object(
-                client.motor_scanner, "home", side_effect=raising_home
+                client.motor_client, "home", side_effect=raising_home
             ),
         ):
             caplog.set_level("ERROR")
@@ -1472,11 +1472,11 @@ def test_motor_loop_waits_motor_interval_when_inline_park_succeeds(
 
         with (
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "scan",
                 side_effect=TimeoutError("stall"),
             ),
-            patch.object(client.motor_scanner, "home"),  # park succeeds
+            patch.object(client.motor_client, "home"),  # park succeeds
             patch.object(
                 client.stop_client, "wait", side_effect=recording_wait
             ),
@@ -1517,12 +1517,12 @@ def test_motor_loop_uses_failure_retry_interval_after_failed_park(
 
         with (
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "scan",
                 side_effect=TimeoutError("stall"),
             ),
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "home",
                 side_effect=TimeoutError("park also failed"),
             ),
@@ -1582,10 +1582,10 @@ def test_motor_loop_recovery_retries_home_only_not_full_scan(
 
         with (
             patch.object(
-                client.motor_scanner, "scan", side_effect=raising_scan
+                client.motor_client, "scan", side_effect=raising_scan
             ),
             patch.object(
-                client.motor_scanner, "home", side_effect=raising_home
+                client.motor_client, "home", side_effect=raising_home
             ),
             patch.object(
                 client.stop_client, "wait", side_effect=recording_wait
@@ -1647,12 +1647,12 @@ def test_motor_loop_exits_recovery_when_home_finally_succeeds(
 
         with (
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "scan",
                 side_effect=failing_then_success_scan,
             ),
             patch.object(
-                client.motor_scanner, "home", side_effect=home_side_effect
+                client.motor_client, "home", side_effect=home_side_effect
             ),
             patch.object(client.stop_client, "wait", side_effect=fast_wait),
         ):
@@ -1701,7 +1701,7 @@ def test_motor_loop_uses_motor_interval_after_successful_scan(
 
         with (
             patch.object(
-                client.motor_scanner, "scan", side_effect=successful_scan
+                client.motor_client, "scan", side_effect=successful_scan
             ),
             patch.object(
                 client.stop_client, "wait", side_effect=recording_wait
@@ -1744,12 +1744,12 @@ def test_motor_loop_invalid_failure_retry_s_falls_back_to_interval(
         _arm_status_reader(client)
         with (
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "scan",
                 side_effect=TimeoutError("stall"),
             ),
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "home",
                 side_effect=TimeoutError("park also stalled"),
             ),
@@ -1792,11 +1792,11 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
         _arm_status_reader(client)
         with (
             patch.object(
-                client.motor_scanner,
+                client.motor_client,
                 "set_delay",
                 side_effect=RuntimeError("pico unreachable"),
             ),
-            patch.object(client.motor_scanner, "scan", side_effect=fake_scan),
+            patch.object(client.motor_client, "scan", side_effect=fake_scan),
         ):
             caplog.set_level("WARNING")
             client.motor_loop()  # must proceed past set_delay failure

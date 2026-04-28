@@ -167,7 +167,7 @@ def test_serialize_setter_flips_at_runtime():
 def test_motion_section_propagates_exception():
     """An exception raised inside a held motion section must release
     the lock — otherwise a transient TimeoutError in
-    ``MotorScanner._wait_for_stop`` would wedge the next switch.
+    ``MotorClient._wait_for_stop`` would wedge the next switch.
     """
     coord = _coord(serialize=True)
 

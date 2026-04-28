@@ -101,9 +101,9 @@ def main(transport, args):
     client = _build_client(transport, cfg, args.dummy)
     status = StatusWriter(transport)
 
-    if client.motor_scanner is None:
+    if client.motor_client is None:
         raise RuntimeError(
-            "Motor scanner not initialized; check motor pico registration."
+            "Motor client not initialized; check motor pico registration."
         )
     if client.vna is None:
         raise RuntimeError("VNA not initialized; check vna config block.")
@@ -118,15 +118,15 @@ def main(transport, args):
     )
 
     try:
-        client.motor_scanner.set_delay()
-        client.motor_scanner.halt()
-        client.motor_scanner.home()
+        client.motor_client.set_delay()
+        client.motor_client.halt()
+        client.motor_client.home()
         for idx, (az, el) in enumerate(grid):
             if client.stop_client.is_set():
                 logger.info("stop_client set; aborting sweep")
                 break
             logger.info(f"[{idx + 1}/{len(grid)}] move_to az={az}, el={el}")
-            client.motor_scanner.move_to(az_deg=az, el_deg=el)
+            client.motor_client.move_to(az_deg=az, el_deg=el)
             if settle_s > 0 and client.stop_client.wait(settle_s):
                 break
             with client.coord.switch_section():
@@ -135,7 +135,7 @@ def main(transport, args):
                         f"[{idx + 1}/{len(grid)}] measure_s11({mode!r})"
                     )
                     client.measure_s11(mode)
-        client.motor_scanner.home()
+        client.motor_client.home()
     except KeyboardInterrupt:
         logger.info("Sweep interrupted by user")
     except (TimeoutError, RuntimeError) as exc:
@@ -145,7 +145,7 @@ def main(transport, args):
             level=logging.ERROR,
         )
     finally:
-        client.motor_scanner.halt()
+        client.motor_client.halt()
         status.send("vna_position_sweep ended")
         logger.info("vna_position_sweep ended")
         client.stop()

@@ -11,7 +11,7 @@ Flow:
    the calibration solution across the scan.
 
 The scan-phase pin is implemented by holding ``client.switch_session``
-for the entire ``MotorScanner.scan`` call. With per-move
+for the entire ``MotorClient.scan`` call. With per-move
 ``coord.motion_section`` re-acquiring the same ``RLock``, this only
 works because :attr:`PandaClient.switch_lock` is an ``RLock``. A plain
 ``Lock`` would deadlock on the first move.
@@ -84,23 +84,24 @@ def main(transport, args):
             f"motor_scan must be a dict; got {type(scan_kwargs).__name__}."
         )
 
-    client = _build_client(transport, cfg, args.dummy)
     status = StatusWriter(transport)
-
-    if client.motor_scanner is None:
-        raise RuntimeError(
-            "Motor scanner not initialized; check motor pico registration."
-        )
-    if client.vna is None:
-        raise RuntimeError("VNA not initialized; check vna config block.")
-
-    status.send("no_switch_observation started")
-    logger.info("no_switch_observation started")
-
+    client = None
     try:
-        client.motor_scanner.set_delay()
-        client.motor_scanner.halt()
-        client.motor_scanner.home()
+        client = _build_client(transport, cfg, args.dummy)
+        if client.motor_client is None:
+            raise RuntimeError(
+                "Motor client not initialized; check motor pico "
+                "registration."
+            )
+        if client.vna is None:
+            raise RuntimeError("VNA not initialized; check vna config block.")
+
+        status.send("no_switch_observation started")
+        logger.info("no_switch_observation started")
+
+        client.motor_client.set_delay()
+        client.motor_client.halt()
+        client.motor_client.home()
 
         if not _calibration(client, status, "pre-scan"):
             return
@@ -117,11 +118,11 @@ def main(transport, args):
                 "no_switch_observation: rfswitch pinned RFANT, scanning"
             )
             logger.info("rfswitch pinned RFANT; starting scan")
-            client.motor_scanner.scan(
+            client.motor_client.scan(
                 stop_event=client.stop_client, **scan_kwargs
             )
 
-        client.motor_scanner.home()
+        client.motor_client.home()
 
         if client.stop_client.is_set():
             logger.warning(
@@ -138,10 +139,12 @@ def main(transport, args):
             level=logging.ERROR,
         )
     finally:
-        client.motor_scanner.halt()
+        if client is not None:
+            if client.motor_client is not None:
+                client.motor_client.halt()
+            client.stop()
         status.send("no_switch_observation ended")
         logger.info("no_switch_observation ended")
-        client.stop()
 
 
 def _parse_args():

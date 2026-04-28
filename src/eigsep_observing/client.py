@@ -17,7 +17,7 @@ from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .motion_switch import MotionSwitchCoordinator
-from .motor_scanner import MotorScanner
+from .motor_client import MotorClient
 from .tempctrl_client import TempCtrlClient
 from .utils import get_config_path
 from .vna import VnaWriter
@@ -80,7 +80,7 @@ class PandaClient:
         )
         # ``RLock`` (not plain ``Lock``) so the no-switch-observation
         # script can hold an outer ``switch_session`` while inner
-        # ``MotorScanner.scan`` re-acquires per move via
+        # ``MotorClient.scan`` re-acquires per move via
         # ``coord.motion_section`` from the same thread.
         self.switch_lock = threading.RLock()
         self.coord = MotionSwitchCoordinator(
@@ -121,10 +121,10 @@ class PandaClient:
             self.logger.info("VNA not initialized")
 
         if self.cfg.get("use_motor", False):
-            self.init_motor_scanner()
+            self.init_motor_client()
         else:
-            self.motor_scanner = None
-            self.logger.info("Motor scanner not initialized")
+            self.motor_client = None
+            self.logger.info("Motor client not initialized")
 
         if self.cfg.get("use_tempctrl", False):
             self.init_tempctrl()
@@ -375,13 +375,13 @@ class PandaClient:
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
 
-    def init_motor_scanner(self):
+    def init_motor_client(self):
         """
-        Build a :class:`MotorScanner` from the config.
+        Build a :class:`MotorClient` from the config.
 
-        ``motor_scanner_kwargs`` (optional) forwards to the
-        :class:`MotorScanner` constructor (per-axis step delays, poll
-        interval, stall timeout). Absent/empty → use scanner defaults.
+        ``motor_client_kwargs`` (optional) forwards to the
+        :class:`MotorClient` constructor (per-axis step delays, poll
+        interval, stall timeout). Absent/empty → use client defaults.
 
         Notes
         -----
@@ -389,26 +389,26 @@ class PandaClient:
         call again if the config changes; no hardware contact, so
         construction cannot fail.
         """
-        self.motor_scanner = None
-        raw_kwargs = self.cfg.get("motor_scanner_kwargs")
+        self.motor_client = None
+        raw_kwargs = self.cfg.get("motor_client_kwargs")
         kwargs = raw_kwargs or {}
         if not isinstance(kwargs, dict):
             self.logger.warning(
-                "Invalid motor_scanner_kwargs config; expected dict, "
-                f"got {type(raw_kwargs).__name__}. Motor scanner disabled."
+                "Invalid motor_client_kwargs config; expected dict, "
+                f"got {type(raw_kwargs).__name__}. Motor client disabled."
             )
             return
         try:
-            self.motor_scanner = MotorScanner(
+            self.motor_client = MotorClient(
                 self.transport, coord=self.coord, **kwargs
             )
         except TypeError as err:
             self.logger.warning(
-                "Invalid motor_scanner_kwargs for MotorScanner: "
-                f"{err}. Motor scanner disabled."
+                "Invalid motor_client_kwargs for MotorClient: "
+                f"{err}. Motor client disabled."
             )
             return
-        self.logger.info(f"Motor scanner initialized (kwargs={kwargs})")
+        self.logger.info(f"Motor client initialized (kwargs={kwargs})")
 
     def init_tempctrl(self):
         """
@@ -743,7 +743,7 @@ class PandaClient:
     def motor_loop(self):
         """Periodic az/el beam scans, sibling of :meth:`vna_loop`.
 
-        Runs a full ``MotorScanner.scan`` every ``motor_interval``
+        Runs a full ``MotorClient.scan`` every ``motor_interval``
         seconds with ``motor_scan`` kwargs (``az_range_deg``,
         ``el_range_deg``, ``el_first``, ``repeat_count``, ``pause_s``,
         ``sleep_between``). Runs concurrently with ``switch_loop`` and
@@ -752,7 +752,7 @@ class PandaClient:
         deliberately lets switching/VNA continue uninterrupted while
         the motors move.
 
-        Failure handling. ``MotorScanner.scan`` already halts the
+        Failure handling. ``MotorClient.scan`` already halts the
         motors in its own ``finally`` block, so by the time a
         ``TimeoutError``/``RuntimeError`` reaches us the motors are
         stationary — but they may be stuck at an arbitrary grid point
@@ -790,9 +790,9 @@ class PandaClient:
         * Motion/switch sync: suppress switching while motors are
           moving if hardware interference proves to be a concern.
         """
-        if self.motor_scanner is None:
+        if self.motor_client is None:
             self._warn_with_status(
-                "Motor scanner not initialized. Cannot execute motor scans."
+                "Motor client not initialized. Cannot execute motor scans."
             )
             return
         interval = self.cfg.get("motor_interval")
@@ -827,7 +827,7 @@ class PandaClient:
         # pico unreachable) is warned but not fatal — the scan call
         # below re-surfaces the same fault and drives the retry loop.
         try:
-            self.motor_scanner.set_delay()
+            self.motor_client.set_delay()
         except (RuntimeError, TimeoutError) as exc:
             self._warn_with_status(
                 f"Motor set_delay failed at loop start "
@@ -840,7 +840,7 @@ class PandaClient:
                 # Recovery mode: retry ``home()`` only. Do NOT run a
                 # full scan — see docstring step 4.
                 try:
-                    self.motor_scanner.home()
+                    self.motor_client.home()
                     needs_park = False
                     self._log_with_status(
                         "Motors parked at home after prior scan failure.",
@@ -860,7 +860,7 @@ class PandaClient:
                     wait_s = failure_retry_s
             else:
                 try:
-                    self.motor_scanner.scan(
+                    self.motor_client.scan(
                         stop_event=self.stop_client, **scan_kwargs
                     )
                     wait_s = interval
@@ -869,7 +869,7 @@ class PandaClient:
                         f"Motor scan aborted ({type(exc).__name__}: {exc})."
                     )
                     try:
-                        self.motor_scanner.home()
+                        self.motor_client.home()
                         self.logger.info(
                             "Motors parked at home after scan failure."
                         )

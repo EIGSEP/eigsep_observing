@@ -1,12 +1,12 @@
 """
-Client-side motor scan orchestrator.
+Client-side motor orchestrator.
 
 Wraps a :class:`picohost.proxy.PicoProxy` (``motor``) and a
-:class:`eigsep_redis.MetadataSnapshotReader` to run az/el beam scans
+:class:`eigsep_redis.MetadataSnapshotReader` to drive the motor pico
 from outside the :class:`picohost.manager.PicoManager` process. The
 manager has a single shared ``cmd_loop`` dispatch thread; running a
 full ``scan`` as one server-side action would stall command routing
-for every other pico, so ``MotorScanner`` issues one movement at a
+for every other pico, so ``MotorClient`` issues one movement at a
 time and polls the metadata snapshot for completion client-side.
 """
 
@@ -24,8 +24,8 @@ from .motion_switch import MotionSwitchCoordinator
 logger = logging.getLogger(__name__)
 
 
-class MotorScanner:
-    """Run az/el beam scans through ``PicoManager`` via Redis.
+class MotorClient:
+    """Drive the motor pico through ``PicoManager`` via Redis.
 
     Parameters
     ----------
@@ -41,7 +41,7 @@ class MotorScanner:
     source : str
         Identifier stamped on proxy command stream entries.
     coord : MotionSwitchCoordinator or None
-        Optional coordinator. When ``None``, the scanner builds an
+        Optional coordinator. When ``None``, the client builds an
         internal coordinator with ``serialize=False`` so standalone use
         (e.g. ``scripts/motor_control.py``) is unchanged.
         :class:`PandaClient` passes its own coordinator so the panda's
@@ -58,7 +58,7 @@ class MotorScanner:
         el_dn_delay_us=600,
         poll_interval_s=0.1,
         stall_timeout_s=30.0,
-        source="motor_scanner",
+        source="motor_client",
         coord=None,
     ):
         self.transport = transport

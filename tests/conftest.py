@@ -40,7 +40,7 @@ from eigsep_observing.testing import DummyPandaClient
 # Dummy-transport / dummy-client fixtures.
 #
 # Previously private to test_client.py; promoted here so tests that
-# exercise other dummy-manager-backed subjects (MotorScanner,
+# exercise other dummy-manager-backed subjects (MotorClient,
 # MotorZeroer, ...) can reuse the same in-process PicoManager setup.
 # ---------------------------------------------------------------------
 
