@@ -128,9 +128,7 @@ def main() -> None:
 
     if args.reinit:
         # Fresh observing block: full init + sync.
-        fpga.initialize(
-            initialize_adc=True, initialize_fpga=True, sync=True
-        )
+        fpga.initialize(initialize_adc=True, initialize_fpga=True, sync=True)
         # Validate cfg against freshly-initialized hardware and publish.
         fpga.upload_config(validate=True)
         # Bump the reinit heartbeat so the live-status dashboard surfaces

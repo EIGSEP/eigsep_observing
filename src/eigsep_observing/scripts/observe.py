@@ -1,8 +1,10 @@
 """Observing-side file writer.
 
 Reads configuration from Redis (uploaded by PandaClient) and writes
-correlation and VNA data to disk. The Panda runs autonomously — start
-it before running this script.
+correlation and VNA data to disk. Either start order works: the script
+blocks on a 1 s retry loop until the Panda's ``ConfigStore`` is
+populated, and the systemd unit's ``Restart=on-failure`` covers the
+case where the Panda host is entirely unreachable.
 
 Installed as the ``eigsep-observe`` console script and run by the
 ``eigsep-observe-writer.service`` systemd unit (see ``deploy/systemd/``).
