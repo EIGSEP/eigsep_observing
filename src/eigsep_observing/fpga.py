@@ -242,7 +242,7 @@ class EigsepFpga:
                 f"Wiring declares PAMs on {ants_with_pam} but "
                 "pams_initialized=False; published atten values "
                 "are declarative, not hardware-confirmed. Run "
-                "fpga_init.py --reinit to initialize PAMs."
+                "eigsep-fpga-init --reinit to initialize PAMs."
             )
         if self.is_synchronized:
             sync_time = self.sync_time
@@ -339,7 +339,7 @@ class EigsepFpga:
         Attach-path assertion: ``self.cfg`` must match the config
         already in Redis.
 
-        The attach path (``fpga_init.py`` without ``--reinit``) does
+        The attach path (``eigsep-fpga-init`` without ``--reinit``) does
         not re-initialize the hardware, so ``validate_config`` — which
         compares ``self.cfg`` against ``self.header`` — is vacuous for
         fields that the header echoes from ``self.cfg`` when a block's

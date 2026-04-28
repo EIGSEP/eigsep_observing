@@ -1,7 +1,7 @@
 """Tests for eigsep_observing.snap_reinit (Redis K/V heartbeat).
 
 Mirrors :mod:`tests.test_file_heartbeat` — the dashboard runs on a
-different host than ``fpga_init.py``, so the heartbeat must flow
+different host than ``eigsep-fpga-init``, so the heartbeat must flow
 through Redis. Tests drive the publish/read pair end-to-end against
 ``DummyTransport`` (fakeredis-backed).
 """

@@ -11,13 +11,14 @@ Wants=network-online.target redis-server.service
 StartLimitIntervalSec=0
 
 [Service]
-# Edit these three paths via `systemctl edit eigsep-observe.service`
+# Edit User/Group/ExecStart via `systemctl edit eigsep-observe.service`
 # (drop-in override) for your deployment — the values below are the
-# canonical layout, not a hard requirement.
+# canonical layout, not a hard requirement. ExecStart resolves to the
+# `eigsep-fpga-init` console script installed by the wheel, so the
+# specific path only depends on which venv hosts eigsep_observing.
 User=eigsep
 Group=eigsep
-WorkingDirectory=/home/eigsep/eigsep_observing
-ExecStart=/home/eigsep/eigsep_observing/.venv/bin/python scripts/fpga_init.py --reinit -p
+ExecStart=/home/eigsep/eigsep_observing/.venv/bin/eigsep-fpga-init --reinit -p
 
 # --- Recovery policy --------------------------------------------------
 # Always re-init on crash. The observed failure mode is a casperfpga

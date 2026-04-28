@@ -27,6 +27,15 @@ dependencies = [
   "eigsep_redis~=2.1",
 ]
 
+[project.scripts]
+# Console scripts for the systemd-supervised observing path. The
+# scripts live under src/eigsep_observing/scripts/ so they ship inside
+# the wheel and resolve to /<venv>/bin on install — required by
+# downstream image builds that install from a wheelhouse and have no
+# source checkout. See deploy/systemd/README.md.
+eigsep-fpga-init = "eigsep_observing.scripts.fpga_init:main"
+eigsep-observe   = "eigsep_observing.scripts.observe:main"
+
 [project.optional-dependencies]
 dev = [
   "build",

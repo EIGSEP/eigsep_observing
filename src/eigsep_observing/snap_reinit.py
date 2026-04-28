@@ -1,6 +1,7 @@
 """Cross-process heartbeat for SNAP ``--reinit`` events.
 
-Published by ``scripts/fpga_init.py`` after a successful ``--reinit``
+Published by ``eigsep_observing.scripts.fpga_init`` (the
+``eigsep-fpga-init`` console script) after a successful ``--reinit``
 init, consumed by ``LiveStatusAggregator``. Mirrors
 :mod:`eigsep_observing.file_heartbeat`: a single Redis key holds a
 small JSON blob, overwritten on each publish — consumers only ever
@@ -8,7 +9,7 @@ care about the latest count and timestamp.
 
 Operationally this surfaces SNAP recovery activity on the live-status
 dashboard. The supervisor (``deploy/systemd/eigsep-observe.service``)
-restarts ``fpga_init.py --reinit -p`` on hardware failure; each
+restarts ``eigsep-fpga-init --reinit -p`` on hardware failure; each
 successful re-init bumps the counter, so the operator can see at a
 glance whether the SNAP has been thermal-cycling without checking
 ``journalctl``.
@@ -40,7 +41,7 @@ def publish(transport) -> None:
     correctness — losing a count must not block a successful init.
 
     Production has a single writer (the systemd-managed
-    ``fpga_init.py``), so the read-modify-write is not racy in
+    ``eigsep-fpga-init``), so the read-modify-write is not racy in
     practice; concurrent publishers would only lose a count or two.
     """
     try:

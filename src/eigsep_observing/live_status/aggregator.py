@@ -130,7 +130,7 @@ class StateSnapshot:
         }
     )
 
-    # SNAP --reinit heartbeat (bumped by fpga_init.py on each
+    # SNAP --reinit heartbeat (bumped by eigsep-fpga-init on each
     # successful supervised re-init; surfaces thermal-cycling).
     snap_reinit: dict = field(
         default_factory=lambda: {
@@ -364,8 +364,9 @@ class LiveStatusAggregator:
         )
         any_ok = any_ok or ok
 
-        # SNAP --reinit heartbeat (raw K/V, published by
-        # ``scripts/fpga_init.py`` after each supervised --reinit).
+        # SNAP --reinit heartbeat (raw K/V, published by the
+        # ``eigsep-fpga-init`` console script after each supervised
+        # --reinit).
         # Same shape contract as the file heartbeat: missing key
         # resolves to the empty-sentinel dict.
         reinit_h, ok = self._read_benign_missing(

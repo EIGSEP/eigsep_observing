@@ -144,7 +144,7 @@ def test_republish_header_rejects_invalid_wiring(tmp_path, wiring_yaml):
 
 def test_republish_header_cold_state_exits(tmp_path):
     """No header in Redis → script exits nonzero with a cold-boot
-    message. Operator should run fpga_init.py first."""
+    message. Operator should run eigsep-fpga-init first."""
     transport = DummyTransport()
     # Intentionally no upload_header call.
 
