@@ -36,7 +36,7 @@ vna_save_dir: "/media/eigsep/T7/data/s11_data"
 use_motor: false
 motor_interval: 3600  # seconds between scans
 motor_failure_retry_s: 60  # shorter wait after a failed scan to home
-motor_scan: {}  # kwargs forwarded to MotorScanner.scan; {}
+motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
 
 # motion-switch coordination
 # When true, motor moves and RF switching mutually exclude each other

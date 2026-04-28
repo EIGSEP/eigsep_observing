@@ -14,7 +14,7 @@ import time
 import numpy as np
 from eigsep_redis import StatusWriter, Transport
 
-from eigsep_observing import MotorScanner
+from eigsep_observing import MotorClient
 from eigsep_observing.testing import DummyPandaClient  # noqa: F401 (for --dummy)
 from eigsep_observing.utils import configure_eig_logger
 
@@ -38,16 +38,16 @@ def _build_transport(dummy):
 
 def main(transport, args):
     status = StatusWriter(transport)
-    scanner = MotorScanner(transport)
+    motor = MotorClient(transport)
 
     started = time.monotonic()
     status.send("motor_control started")
     logger.info("motor_control started")
 
     try:
-        scanner.set_delay()
-        scanner.halt()
-        scanner.scan(
+        motor.set_delay()
+        motor.halt()
+        motor.scan(
             az_range_deg=np.linspace(-180.0, 180.0, 10),
             el_range_deg=np.linspace(-180.0, 180.0, 10),
             el_first=args.el_first,
@@ -60,7 +60,7 @@ def main(transport, args):
     except (TimeoutError, RuntimeError) as exc:
         logger.error("Motor scan aborted: %s", exc)
     finally:
-        scanner.halt()
+        motor.halt()
         elapsed = time.monotonic() - started
         msg = f"motor_control ended (duration={elapsed:.1f}s)"
         status.send(msg)

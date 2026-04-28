@@ -24,7 +24,7 @@ _REQUIRE_STATUS_RETRY_S = 0.5
 class MotorZeroer:
     """Drive motor jog/zero commands through ``PicoManager`` via Redis.
 
-    Parameters mirror :class:`eigsep_observing.motor_scanner.MotorScanner`
+    Parameters mirror :class:`eigsep_observing.motor_client.MotorClient`
     for consistency — the same delay values apply to manual jogging.
     """
 

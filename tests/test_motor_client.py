@@ -1,4 +1,4 @@
-"""Tests for ``MotorScanner`` driven against the dummy PicoManager.
+"""Tests for ``MotorClient`` driven against the dummy PicoManager.
 
 The ``client`` fixture starts an in-process ``PicoManager`` with a
 ``DummyPicoMotor`` whose ``MotorEmulator`` advances deterministically
@@ -13,15 +13,15 @@ import time
 import numpy as np
 import pytest
 
-from eigsep_observing import MotionSwitchCoordinator, MotorScanner
+from eigsep_observing import MotionSwitchCoordinator, MotorClient
 
 
 SMALL_RANGE = np.array([-1.0, 0.0, 1.0])
 LONG_TIMEOUT = 5.0
 
 
-def _scanner(transport, *, coord=None):
-    return MotorScanner(
+def _motor(transport, *, coord=None):
+    return MotorClient(
         transport,
         poll_interval_s=0.02,
         stall_timeout_s=LONG_TIMEOUT,
@@ -30,61 +30,61 @@ def _scanner(transport, *, coord=None):
 
 
 def test_set_delay_forwards_kwargs(client):
-    scanner = _scanner(client.transport)
-    scanner.set_delay(az_up_delay_us=1234)
-    motor = client._manager.picos["motor"]
+    motor = _motor(client.transport)
+    motor.set_delay(az_up_delay_us=1234)
+    motor_pico = client._manager.picos["motor"]
     # The firmware emulator runs on its own thread and processes commands
     # asynchronously — wait for the delay to propagate into the stepper
     # state rather than racing the single-tick latency.
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
-        if motor._emulator.azimuth.up_delay_us == 1234:
+        if motor_pico._emulator.azimuth.up_delay_us == 1234:
             break
         time.sleep(0.02)
-    assert motor._emulator.azimuth.up_delay_us == 1234
+    assert motor_pico._emulator.azimuth.up_delay_us == 1234
 
 
 def test_scan_hits_home_before_and_after(client):
-    scanner = _scanner(client.transport)
-    scanner.scan(
+    motor = _motor(client.transport)
+    motor.scan(
         az_range_deg=SMALL_RANGE,
         el_range_deg=SMALL_RANGE,
         repeat_count=1,
     )
-    motor = client._manager.picos["motor"]
-    assert motor._emulator.azimuth.target_pos == 0
-    assert motor._emulator.elevation.target_pos == 0
-    assert motor._emulator.azimuth.position == 0
-    assert motor._emulator.elevation.position == 0
+    motor_pico = client._manager.picos["motor"]
+    assert motor_pico._emulator.azimuth.target_pos == 0
+    assert motor_pico._emulator.elevation.target_pos == 0
+    assert motor_pico._emulator.azimuth.position == 0
+    assert motor_pico._emulator.elevation.position == 0
 
 
 def test_scan_covers_grid_with_pause(client):
     """With ``pause_s`` set, axis2 is stepped through every grid value."""
-    scanner = _scanner(client.transport)
-    motor = client._manager.picos["motor"]
+    motor = _motor(client.transport)
+    motor_pico = client._manager.picos["motor"]
     observed_az_targets = []
 
-    real_wait = scanner._wait_for_stop
+    real_wait = motor._wait_for_stop
 
     def recording_wait(*args, **kwargs):
-        observed_az_targets.append(motor._emulator.azimuth.target_pos)
+        observed_az_targets.append(motor_pico._emulator.azimuth.target_pos)
         return real_wait(*args, **kwargs)
 
-    scanner._wait_for_stop = recording_wait
-    scanner.scan(
+    motor._wait_for_stop = recording_wait
+    motor.scan(
         az_range_deg=SMALL_RANGE,
         el_range_deg=SMALL_RANGE,
         repeat_count=1,
         pause_s=0.0,
     )
-    expected_steps = {motor.deg_to_steps(float(v)) for v in SMALL_RANGE}
+    expected_steps = {motor_pico.deg_to_steps(float(v)) for v in SMALL_RANGE}
     assert expected_steps.issubset(set(observed_az_targets))
 
 
 def test_scan_stop_event_returns_early(client):
     """Setting the stop event mid-scan breaks out of the loop before
     ``repeat_count`` is reached and halts the motor."""
-    scanner = _scanner(client.transport)
+    motor = _motor(client.transport)
     stop_event = threading.Event()
 
     # Long pause + huge repeat_count means the scan will run forever
@@ -98,7 +98,7 @@ def test_scan_stop_event_returns_early(client):
     t.start()
 
     started = time.monotonic()
-    scanner.scan(
+    motor.scan(
         az_range_deg=SMALL_RANGE,
         el_range_deg=SMALL_RANGE,
         repeat_count=10_000,
@@ -115,39 +115,39 @@ def test_scan_stop_event_returns_early(client):
 def test_wait_for_stop_timeout(client):
     """If the emulator stops advancing while a target is still
     outstanding, ``_wait_for_stop`` raises ``TimeoutError``."""
-    scanner = MotorScanner(
+    motor = MotorClient(
         client.transport,
         poll_interval_s=0.02,
         stall_timeout_s=0.3,
     )
-    motor = client._manager.picos["motor"]
+    motor_pico = client._manager.picos["motor"]
     # Wait for the reader thread to publish at least one status before
     # issuing commands — the firmware's wait_for_start calls is_moving
     # which requires a populated last_status.
-    assert _wait_until_motor_status_available(scanner)
+    assert _wait_until_motor_status_available(motor)
     # Command a long move so the emulator is mid-traversal.
-    scanner._proxy.send_command("az_target_deg", target_deg=100.0)
+    motor._proxy.send_command("az_target_deg", target_deg=100.0)
     # Wait for Redis metadata to reflect the new non-zero target.
-    assert _wait_until_metadata_target_non_zero(scanner)
+    assert _wait_until_metadata_target_non_zero(motor)
     # Freeze the emulator mid-move — pos stays below target forever.
-    motor._emulator.stop()
+    motor_pico._emulator.stop()
     with pytest.raises(TimeoutError):
-        scanner._wait_for_stop(timeout=0.3)
+        motor._wait_for_stop(timeout=0.3)
 
 
-def _wait_until_motor_status_available(scanner, timeout=2.0):
+def _wait_until_motor_status_available(motor, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if scanner._motor_status() is not None:
+        if motor._motor_status() is not None:
             return True
         time.sleep(0.02)
     return False
 
 
-def _wait_until_metadata_target_non_zero(scanner, timeout=2.0):
+def _wait_until_metadata_target_non_zero(motor, timeout=2.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = scanner._motor_status()
+        status = motor._motor_status()
         if status and status.get("az_target_pos"):
             return True
         time.sleep(0.02)
@@ -157,45 +157,45 @@ def _wait_until_metadata_target_non_zero(scanner, timeout=2.0):
 def test_wait_for_stop_returns_when_aligned(client):
     """Reach home first so az_pos == az_target_pos; _wait_for_stop
     should return immediately without raising."""
-    scanner = _scanner(client.transport)
-    scanner.home()
+    motor = _motor(client.transport)
+    motor.home()
     # Now positions are aligned at zero; another wait should no-op.
-    scanner._wait_for_stop(timeout=0.5)
+    motor._wait_for_stop(timeout=0.5)
 
 
 def test_halt_swallows_timeout(client, monkeypatch):
     """halt() must not propagate proxy failures — callers lean on it
     from finally blocks and interrupt handlers."""
-    scanner = _scanner(client.transport)
+    motor = _motor(client.transport)
 
     def boom(*_a, **_k):
         raise TimeoutError("simulated")
 
-    monkeypatch.setattr(scanner._proxy, "send_command", boom)
-    scanner.halt()  # should log + swallow
+    monkeypatch.setattr(motor._proxy, "send_command", boom)
+    motor.halt()  # should log + swallow
 
 
 def test_scan_el_first_swaps_axes(client):
     """el_first=True makes azimuth the outer loop. The emulator's
     ``az.target_pos`` should plateau while el steps through the inner
     range at each az value."""
-    scanner = _scanner(client.transport)
-    motor = client._manager.picos["motor"]
+    motor = _motor(client.transport)
+    motor_pico = client._manager.picos["motor"]
     observed_pairs = []
 
-    real_wait = scanner._wait_for_stop
+    real_wait = motor._wait_for_stop
 
     def recording_wait(*args, **kwargs):
         observed_pairs.append(
             (
-                motor._emulator.azimuth.target_pos,
-                motor._emulator.elevation.target_pos,
+                motor_pico._emulator.azimuth.target_pos,
+                motor_pico._emulator.elevation.target_pos,
             )
         )
         return real_wait(*args, **kwargs)
 
-    scanner._wait_for_stop = recording_wait
-    scanner.scan(
+    motor._wait_for_stop = recording_wait
+    motor.scan(
         az_range_deg=SMALL_RANGE,
         el_range_deg=SMALL_RANGE,
         el_first=True,
@@ -215,60 +215,60 @@ def test_scan_el_first_swaps_axes(client):
 
 
 def test_default_coord_is_serialize_off(client):
-    """Standalone ``MotorScanner`` (no ``coord=`` kwarg) must build an
+    """Standalone ``MotorClient`` (no ``coord=`` kwarg) must build an
     internal coordinator with ``serialize=False``. Otherwise existing
     callers (``scripts/motor_control.py``, the ``motor_loop`` path
     when ``serialize_motion_and_switching`` is unset) would silently
     start serializing against switching.
     """
-    scanner = _scanner(client.transport)
-    assert scanner.coord.serialize is False
+    motor = _motor(client.transport)
+    assert motor.coord.serialize is False
 
 
 def test_move_to_az_only(client):
     """``move_to(az_deg=...)`` issues only the az command and waits."""
-    scanner = _scanner(client.transport)
-    motor = client._manager.picos["motor"]
-    expected = motor.deg_to_steps(1.0)
-    scanner.move_to(az_deg=1.0)
-    assert motor._emulator.azimuth.target_pos == expected
-    assert motor._emulator.elevation.target_pos == 0
+    motor = _motor(client.transport)
+    motor_pico = client._manager.picos["motor"]
+    expected = motor_pico.deg_to_steps(1.0)
+    motor.move_to(az_deg=1.0)
+    assert motor_pico._emulator.azimuth.target_pos == expected
+    assert motor_pico._emulator.elevation.target_pos == 0
 
 
 def test_move_to_az_and_el(client):
     """Both axes drive sequentially; final positions match targets."""
-    scanner = _scanner(client.transport)
-    motor = client._manager.picos["motor"]
-    az_expected = motor.deg_to_steps(1.0)
-    el_expected = motor.deg_to_steps(-1.0)
-    scanner.move_to(az_deg=1.0, el_deg=-1.0)
-    assert motor._emulator.azimuth.target_pos == az_expected
-    assert motor._emulator.elevation.target_pos == el_expected
+    motor = _motor(client.transport)
+    motor_pico = client._manager.picos["motor"]
+    az_expected = motor_pico.deg_to_steps(1.0)
+    el_expected = motor_pico.deg_to_steps(-1.0)
+    motor.move_to(az_deg=1.0, el_deg=-1.0)
+    assert motor_pico._emulator.azimuth.target_pos == az_expected
+    assert motor_pico._emulator.elevation.target_pos == el_expected
 
 
 def test_move_to_no_args_is_noop(client):
     """``move_to()`` with neither axis supplied does nothing."""
-    scanner = _scanner(client.transport)
-    motor = client._manager.picos["motor"]
-    scanner.move_to()
-    assert motor._emulator.azimuth.target_pos == 0
-    assert motor._emulator.elevation.target_pos == 0
+    motor = _motor(client.transport)
+    motor_pico = client._manager.picos["motor"]
+    motor.move_to()
+    assert motor_pico._emulator.azimuth.target_pos == 0
+    assert motor_pico._emulator.elevation.target_pos == 0
 
 
 def test_move_to_axis_order_drives_el_first(client):
     """``axis_order=("el","az")`` drives el before az. The target
     plateau pattern proves the order: while el is still settling, az
     has not yet been issued."""
-    scanner = _scanner(client.transport)
+    motor = _motor(client.transport)
     seen_targets = []
-    real_send = scanner._proxy.send_command
+    real_send = motor._proxy.send_command
 
     def recording_send(action, **kwargs):
         seen_targets.append(action)
         return real_send(action, **kwargs)
 
-    scanner._proxy.send_command = recording_send
-    scanner.move_to(az_deg=1.0, el_deg=-1.0, axis_order=("el", "az"))
+    motor._proxy.send_command = recording_send
+    motor.move_to(az_deg=1.0, el_deg=-1.0, axis_order=("el", "az"))
     moves = [a for a in seen_targets if "_target_deg" in a]
     assert moves == ["el_target_deg", "az_target_deg"]
 
@@ -280,12 +280,12 @@ def test_move_to_acquires_coord_when_serialized(client):
     the lock without re-entering it.
     """
     coord = MotionSwitchCoordinator(threading.RLock(), serialize=True)
-    scanner = _scanner(client.transport, coord=coord)
-    motor = client._manager.picos["motor"]
+    motor = _motor(client.transport, coord=coord)
+    motor_pico = client._manager.picos["motor"]
 
     move_started = threading.Event()
     move_done = threading.Event()
-    real_wait = scanner._wait_for_stop
+    real_wait = motor._wait_for_stop
     release_wait = threading.Event()
 
     def gated_wait(*args, **kwargs):
@@ -295,10 +295,10 @@ def test_move_to_acquires_coord_when_serialized(client):
         release_wait.wait(timeout=2.0)
         return real_wait(*args, **kwargs)
 
-    scanner._wait_for_stop = gated_wait
+    motor._wait_for_stop = gated_wait
 
     def runner():
-        scanner.move_to(az_deg=1.0)
+        motor.move_to(az_deg=1.0)
         move_done.set()
 
     t = threading.Thread(target=runner, daemon=True)
@@ -321,7 +321,9 @@ def test_move_to_acquires_coord_when_serialized(client):
     assert move_done.wait(timeout=2.0)
     t.join(timeout=1.0)
     p.join(timeout=1.0)
-    assert motor._emulator.azimuth.target_pos == motor.deg_to_steps(1.0)
+    assert motor_pico._emulator.azimuth.target_pos == motor_pico.deg_to_steps(
+        1.0
+    )
 
 
 def test_move_to_does_not_block_switch_when_serialize_off(client):
@@ -330,11 +332,11 @@ def test_move_to_does_not_block_switch_when_serialize_off(client):
     pre-coordinator behavior of ``motor_loop``.
     """
     coord = MotionSwitchCoordinator(threading.RLock(), serialize=False)
-    scanner = _scanner(client.transport, coord=coord)
+    motor = _motor(client.transport, coord=coord)
 
     move_started = threading.Event()
     move_done = threading.Event()
-    real_wait = scanner._wait_for_stop
+    real_wait = motor._wait_for_stop
     release_wait = threading.Event()
 
     def gated_wait(*args, **kwargs):
@@ -342,10 +344,10 @@ def test_move_to_does_not_block_switch_when_serialize_off(client):
         release_wait.wait(timeout=2.0)
         return real_wait(*args, **kwargs)
 
-    scanner._wait_for_stop = gated_wait
+    motor._wait_for_stop = gated_wait
 
     def runner():
-        scanner.move_to(az_deg=1.0)
+        motor.move_to(az_deg=1.0)
         move_done.set()
 
     t = threading.Thread(target=runner, daemon=True)
@@ -366,16 +368,16 @@ def test_scan_uses_send_and_wait_helper(client):
     rather than the inline send + wait pattern. A regression that
     drops the helper would silently bypass per-move serialization.
     """
-    scanner = _scanner(client.transport)
+    motor = _motor(client.transport)
     calls = []
-    real = scanner._send_and_wait
+    real = motor._send_and_wait
 
     def recording(action, *, label, timeout=None, **kwargs):
         calls.append((action, label))
         return real(action, label=label, timeout=timeout, **kwargs)
 
-    scanner._send_and_wait = recording
-    scanner.scan(
+    motor._send_and_wait = recording
+    motor.scan(
         az_range_deg=SMALL_RANGE,
         el_range_deg=SMALL_RANGE,
         repeat_count=1,

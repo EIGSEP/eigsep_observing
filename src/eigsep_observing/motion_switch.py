@@ -13,7 +13,7 @@ This module provides the coordinator that mediates that decision. One
 * ``switch_section`` always acquires (replaces ``with switch_lock``).
 * ``motion_section`` acquires only when ``serialize`` is True.
 * The same thread can re-enter from a wrapped context — required by
-  the no-switch-observation script, which hosts a ``MotorScanner.scan``
+  the no-switch-observation script, which hosts a ``MotorClient.scan``
   inside an outer ``switch_session``.
 
 Default-off: with ``serialize=False`` the motion side is a true no-op
@@ -47,6 +47,10 @@ class MotionSwitchCoordinator:
         self._lock = lock
         self._serialize = bool(serialize)
         self._logger = logger or logging.getLogger(__name__)
+
+    @property
+    def lock(self):
+        return self._lock
 
     @property
     def serialize(self):

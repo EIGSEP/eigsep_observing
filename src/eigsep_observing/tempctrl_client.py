@@ -6,7 +6,7 @@ Wraps a :class:`picohost.proxy.PicoProxy` (``tempctrl``) and a
 can push setpoints/clamps/enable flags to the LNA and LOAD Peltier
 channels and read back the most recent status without reaching inside
 the :class:`picohost.manager.PicoManager` process. Mirrors the role of
-:class:`eigsep_observing.motor_scanner.MotorScanner` for the motor pico.
+:class:`eigsep_observing.motor_client.MotorClient` for the motor pico.
 """
 
 import logging

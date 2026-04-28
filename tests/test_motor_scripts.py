@@ -201,7 +201,7 @@ def test_no_switch_observation_pins_rfant_during_scan(
             scan_done.set()
 
     # Defer the patch until after _build_client (so we have the real
-    # scan reference). monkeypatch the MotorScanner.scan on the
+    # scan reference). monkeypatch the MotorClient.scan on the
     # captured client when capture fires.
     args = Namespace(cfg_file=cfg_path, dummy=True)
 
@@ -209,8 +209,8 @@ def test_no_switch_observation_pins_rfant_during_scan(
         nonlocal real_scan
         client = real_build(transport_arg, cfg, dummy)
         captured["client"] = client
-        real_scan = type(client.motor_scanner).scan
-        monkeypatch.setattr(type(client.motor_scanner), "scan", patched_scan)
+        real_scan = type(client.motor_client).scan
+        monkeypatch.setattr(type(client.motor_client), "scan", patched_scan)
         watcher = threading.Thread(
             target=_watcher, args=(client,), daemon=True
         )
