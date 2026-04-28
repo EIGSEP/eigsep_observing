@@ -10,7 +10,7 @@ NETWORK
 STARTUP ORDER
   1. SSH into panda:     ssh eigsep@10.10.10.11
   2. Start panda client: python scripts/panda_observe.py
-  3. On ground RPi:  python scripts/observe.py
+  3. On ground RPi:  eigsep-observe
 
 STOP
   Ctrl-C on either script. Threads shut down gracefully.
@@ -31,23 +31,23 @@ LOGS
 ```bash
 # Normal startup
 python scripts/panda_observe.py          # on panda
-python scripts/observe.py                # on ground
+eigsep-observe                # on ground
 
 # Observer only (no panda connection, SNAP correlator only)
-python scripts/observe.py --no-panda
+eigsep-observe --no-panda
 
 # Panda only (no SNAP)
-python scripts/observe.py --no-snap
+eigsep-observe --no-snap
 
 # Dry run with fake hardware
 python scripts/panda_observe.py --dummy  # terminal 1
-python scripts/observe.py --dummy        # terminal 2
+eigsep-observe --dummy        # terminal 2
 
 # Custom observing config (switch schedule / VNA / motor) — panda side
 python scripts/panda_observe.py --cfg_file /path/to/my_config.yaml
 
 # Override host-local knobs — observer side (no yaml, CLI flags only)
-python scripts/observe.py --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
+eigsep-observe --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
     --corr-save-dir /mnt/data --corr-ntimes 120
 ```
 
@@ -55,7 +55,7 @@ python scripts/observe.py --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
 
 | What crashed | What to do |
 |---|---|
-| Observer only | Restart `observe.py`. Panda keeps running. You may lose some data that overflowed the Redis stream buffer. |
+| Observer only | Restart `eigsep-observe`. Panda keeps running. You may lose some data that overflowed the Redis stream buffer. |
 | Panda only | SSH into panda, restart `panda_observe.py`. It reads config from Redis automatically. Observer keeps writing SNAP data (without metadata) until panda reconnects. |
 | Both | Start panda first, then observer. |
 | Redis | Everything stops. Restart Redis, then panda, then observer. |
@@ -66,8 +66,9 @@ python scripts/observe.py --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
 2. Edit `obs_config.yaml` (or pass `--cfg_file` at launch)
 3. Ctrl-C on `panda_observe.py`
 4. Restart `panda_observe.py` (reads new yaml, uploads to Redis)
-5. Optionally restart `observe.py` (it will read the new config from Redis
-   for VNA save dir and `use_vna` gating; host-local knobs stay as CLI flags)
+5. Optionally restart `eigsep-observe` (it will read the new config from
+   Redis for VNA save dir and `use_vna` gating; host-local knobs stay as
+   CLI flags)
 
 ---
 
@@ -271,7 +272,7 @@ To change config:
   1. Edit obs_config.yaml on panda (or pass --cfg_file PATH)
   2. Restart panda_observe.py
      └─ uploads YAML to Redis, discovers picos, re-uploads with pico info
-  3. Restart observe.py if host-local knobs changed
+  3. Restart eigsep-observe if host-local knobs changed
      (--corr-save-dir, --corr-ntimes, --rpi-ip, --panda-ip)
      └─ observer reads the observing config from Redis automatically
 ```
@@ -279,11 +280,11 @@ To change config:
 ### Network Addresses
 
 Panda-side defaults live in `obs_config.yaml`. Ground-side defaults are
-baked into `observe.py` as CLI flag defaults (`--rpi-ip`, `--panda-ip`).
+baked into `eigsep-observe` as CLI flag defaults (`--rpi-ip`, `--panda-ip`).
 Actual IPs may differ per deployment — pass them explicitly if so.
 
 ```
-Ground computer:  user machine (runs observe.py)
+Ground computer:  user machine (runs eigsep-observe)
 RPi + SNAP:       10.10.10.10 (Redis port 6379)
 LattePanda:       10.10.10.11 (Redis port 6379)
 VNA:              127.0.0.1:5025 (local to panda)

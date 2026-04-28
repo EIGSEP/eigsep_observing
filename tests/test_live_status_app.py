@@ -232,7 +232,7 @@ def test_health_route(client):
 
 
 def test_health_route_surfaces_snap_reinit_count(agg_primed):
-    """When fpga_init.py has bumped the counter, the /api/health
+    """When eigsep-fpga-init has bumped the counter, the /api/health
     payload must surface the count and a fresh seconds_since_reinit
     derived against ``now`` (not the drain-tick time)."""
     from eigsep_observing.snap_reinit import publish as publish_reinit

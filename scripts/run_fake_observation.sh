@@ -38,8 +38,8 @@ else
 fi
 
 # --- Process launches ----------------------------------------------------
-# Order matters: panda uploads obs_config that observe.py waits on,
-# then fpga_init uploads corr_config + header, then observe.py attaches.
+# Order matters: panda uploads obs_config that observe waits on,
+# then fpga_init uploads corr_config + header, then observe attaches.
 
 PANDA_LOG="${LOG_DIR}/panda_observe.log"
 FPGA_LOG="${LOG_DIR}/fpga_init.log"
@@ -79,14 +79,17 @@ PANDA_PID=$!
 sleep 2
 
 echo "Launching fpga_init --dummy --reinit -> ${FPGA_LOG}"
-python "${SCRIPT_DIR}/fpga_init.py" --dummy --reinit \
+# fpga_init.py and observe.py moved into the package (src/eigsep_observing/
+# scripts/) so they install as console scripts. Run via -m so the harness
+# works in a source checkout (no `pip install -e .` required).
+python -m eigsep_observing.scripts.fpga_init --dummy --reinit \
     >"${FPGA_LOG}" 2>&1 &
 FPGA_PID=$!
 
 sleep 2
 
 echo "Launching observe --dummy -> ${OBS_LOG}"
-python "${SCRIPT_DIR}/observe.py" --dummy \
+python -m eigsep_observing.scripts.observe --dummy \
     >"${OBS_LOG}" 2>&1 &
 OBS_PID=$!
 
@@ -94,8 +97,8 @@ echo ""
 echo "================================================================"
 echo "  Fake observation pipeline running:"
 echo "    panda_observe.py    PID ${PANDA_PID}"
-echo "    fpga_init.py        PID ${FPGA_PID}"
-echo "    observe.py          PID ${OBS_PID}"
+echo "    fpga_init           PID ${FPGA_PID}"
+echo "    observe             PID ${OBS_PID}"
 echo "  Logs in ${LOG_DIR}/"
 echo "  Press Ctrl-C to stop (observer is flushed first)."
 echo "================================================================"

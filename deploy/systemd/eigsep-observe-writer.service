@@ -7,12 +7,12 @@ Wants=network-online.target redis-server.service eigsep-observe.service
 StartLimitIntervalSec=0
 
 [Service]
-# Edit these three paths via `systemctl edit eigsep-observe-writer.service`
-# (drop-in override) for your deployment.
+# Edit User/Group/ExecStart via `systemctl edit eigsep-observe-writer.service`
+# (drop-in override) for your deployment. ExecStart resolves to the
+# `eigsep-observe` console script installed by the wheel.
 User=eigsep
 Group=eigsep
-WorkingDirectory=/home/eigsep/eigsep_observing
-ExecStart=/home/eigsep/eigsep_observing/.venv/bin/python scripts/observe.py
+ExecStart=/home/eigsep/eigsep_observing/.venv/bin/eigsep-observe
 
 # --- Recovery policy --------------------------------------------------
 # observe.py no longer suicides on SNAP producer silence — the

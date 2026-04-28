@@ -2,16 +2,21 @@
 
 Two units for the ground-PC side of an EIGSEP deployment:
 
-- `eigsep-observe.service` — runs `scripts/fpga_init.py --reinit -p`,
-  the SNAP supervisor. Restarts on hardware failure (e.g. heat-induced
-  casperfpga register-read timeout); each restart performs a full
-  `--reinit -p` so the SNAP comes back with a fresh `sync_time` and a
-  re-uploaded bitstream.
-- `eigsep-observe-writer.service` — runs `scripts/observe.py`, the
-  corr-data HDF5 file writer. Restarts only on genuine crashes; the
-  consumer-side liveness watchdog now logs persistent SNAP silence
-  instead of suiciding, so the writer survives ordinary supervisor
-  restarts of the SNAP unit.
+- `eigsep-observe.service` — runs the `eigsep-fpga-init --reinit -p`
+  console script, the SNAP supervisor. Restarts on hardware failure
+  (e.g. heat-induced casperfpga register-read timeout); each restart
+  performs a full `--reinit -p` so the SNAP comes back with a fresh
+  `sync_time` and a re-uploaded bitstream.
+- `eigsep-observe-writer.service` — runs the `eigsep-observe` console
+  script, the corr-data HDF5 file writer. Restarts only on genuine
+  crashes; the consumer-side liveness watchdog now logs persistent
+  SNAP silence instead of suiciding, so the writer survives ordinary
+  supervisor restarts of the SNAP unit.
+
+Both console scripts are installed by the `eigsep_observing` wheel
+(`[project.scripts]`), so they resolve to `<venv>/bin/eigsep-fpga-init`
+and `<venv>/bin/eigsep-observe` on any host that pip-installed the
+package — no source checkout required.
 
 The panda-side processes (motors, tempctrl, VNA, RF switch) run on a
 different machine and are out of scope for these units.
@@ -37,9 +42,8 @@ and supply only the keys you need to change, e.g.:
 
 ```ini
 [Service]
-WorkingDirectory=/srv/eigsep_observing
 ExecStart=
-ExecStart=/srv/eigsep_observing/.venv/bin/python scripts/fpga_init.py --reinit -p
+ExecStart=/srv/eigsep_observing/.venv/bin/eigsep-fpga-init --reinit -p
 ```
 
 (The empty `ExecStart=` resets the inherited value before the new one;
@@ -64,7 +68,7 @@ sudo systemd-analyze verify deploy/systemd/eigsep-observe.service
 sudo systemd-analyze verify deploy/systemd/eigsep-observe-writer.service
 ```
 
-On a dev box where `/home/eigsep/eigsep_observing/.venv/bin/python`
+On a dev box where `/home/eigsep/eigsep_observing/.venv/bin/eigsep-fpga-init`
 does not exist, `systemd-analyze` will report
 `Command ... is not executable` and exit non-zero. That is expected —
 the syntax of the unit is fine, the path just resolves on the target
@@ -89,8 +93,8 @@ sudo systemctl restart eigsep-observe.service
 The supervisor passes `--reinit -p` on every start, so a manual
 restart cuts the current observing block and starts a fresh one. For
 non-destructive interventions (header-only fixes, config tweaks),
-stop the unit and run `scripts/fpga_init.py` (no flag) by hand from
-the venv to attach without re-syncing.
+stop the unit and run `eigsep-fpga-init` (no flag) by hand from the
+venv to attach without re-syncing.
 
 ### Disable while debugging
 

@@ -9,22 +9,23 @@ headers see a fresh publication time.
 
 Effect on running processes:
 
-- ``fpga_init.py``: unaffected; this script does not change any state
-  the SNAP-setup script reads.
-- ``observe.py``: the in-flight corr file keeps its file-start header
-  snapshot (by design); the next file opened by
+- ``eigsep-fpga-init``: unaffected; this script does not change any
+  state the SNAP-setup script reads.
+- ``eigsep-observe``: the in-flight corr file keeps its file-start
+  header snapshot (by design); the next file opened by
   ``EigObserver.record_corr_data`` picks up the corrected wiring via
   ``CorrConfigStore.get_header()``.
 - ``panda_observe.py`` (motors, tempctrl, VNA, RF switch): does not
   read the corr header at all — zero impact.
 
 Refuses:
-- No corr header in Redis → cold boot. Run ``fpga_init.py --reinit``.
+- No corr header in Redis → cold boot. Run
+  ``eigsep-fpga-init --reinit``.
 
 Does NOT check:
 - Whether ``corr_config.yaml`` on disk matches cfg in Redis. If the
   operator also edited that, this script will not apply it; run
-  ``fpga_init.py --reinit`` when ready.
+  ``eigsep-fpga-init --reinit`` when ready.
 - Whether the wiring declares PAMs that aren't actually initialized.
   ``EigsepFpga.header`` emits a throttled warning for that case when
   a process attaches.
@@ -94,7 +95,7 @@ def main(argv=None, transport=None):
     except ValueError:
         sys.exit(
             "No corr header in Redis; cannot republish. Run "
-            "fpga_init.py --reinit first."
+            "eigsep-fpga-init --reinit first."
         )
 
     old_wiring = header.get("wiring")
