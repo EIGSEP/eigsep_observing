@@ -24,6 +24,7 @@ want full timestream observing files. Output is the standard
 
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 import logging
+import sys
 
 import numpy as np
 
@@ -93,7 +94,13 @@ corr_reader = CorrReader(transport_snap)
 corr_store = CorrConfigStore(transport_snap)
 logger.info(f"Connected to SNAP Redis at {args.redis_host}:{args.redis_port}")
 
-header = corr_store.get_header()
+try:
+    header = corr_store.get_header()
+except ValueError:
+    sys.exit(
+        "No corr header found in Redis. Run fpga_init.py --reinit to "
+        "initialize the SNAP and publish the header first."
+    )
 avg_even_odd = header["avg_even_odd"]
 
 snapshot_reader = None
