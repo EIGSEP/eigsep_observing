@@ -127,10 +127,17 @@ for i in range(args.num_spec):
     for k, v in data.items():
         all_data.setdefault(k, []).append(v)
     if snapshot_reader is not None:
-        snap = snapshot_reader.get()
-        for k, v in snap.items():
+        try:
+            snap = snapshot_reader.get()
+        except Exception as e:
+            logger.error(
+                f"Failed to get metadata snapshot for spectrum {i}: {e}."
+            )
+            snap = {}
+        for k in snap.keys() | metadata_lists.keys():
             if k.endswith("_ts"):
                 continue
+            v = snap.get(k, None)
             metadata_lists.setdefault(k, []).append(v)
 
 all_data = reshape_data(
