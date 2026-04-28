@@ -98,26 +98,26 @@ def main(transport, args):
     grid = _grid(sweep_cfg)
     settle_s = float(sweep_cfg.get("settle_s", 0.0))
 
-    client = _build_client(transport, cfg, args.dummy)
     status = StatusWriter(transport)
-
-    if client.motor_client is None:
-        raise RuntimeError(
-            "Motor client not initialized; check motor pico registration."
-        )
-    if client.vna is None:
-        raise RuntimeError("VNA not initialized; check vna config block.")
-
-    status.send(
-        f"vna_position_sweep started ({len(grid)} grid points, "
-        f"settle_s={settle_s})"
-    )
-    logger.info(
-        f"vna_position_sweep started ({len(grid)} grid points, "
-        f"settle_s={settle_s})"
-    )
-
+    client = None
     try:
+        client = _build_client(transport, cfg, args.dummy)
+        if client.motor_client is None:
+            raise RuntimeError(
+                "Motor client not initialized; check motor pico registration."
+            )
+        if client.vna is None:
+            raise RuntimeError("VNA not initialized; check vna config block.")
+
+        status.send(
+            f"vna_position_sweep started ({len(grid)} grid points, "
+            f"settle_s={settle_s})"
+        )
+        logger.info(
+            f"vna_position_sweep started ({len(grid)} grid points, "
+            f"settle_s={settle_s})"
+        )
+
         client.motor_client.set_delay()
         client.motor_client.halt()
         client.motor_client.home()
@@ -145,10 +145,12 @@ def main(transport, args):
             level=logging.ERROR,
         )
     finally:
-        client.motor_client.halt()
+        if client is not None:
+            if client.motor_client is not None:
+                client.motor_client.halt()
+            client.stop()
         status.send("vna_position_sweep ended")
         logger.info("vna_position_sweep ended")
-        client.stop()
 
 
 def _parse_args():

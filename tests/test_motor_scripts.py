@@ -225,3 +225,75 @@ def test_no_switch_observation_pins_rfant_during_scan(
     assert scan_observed_modes, "watcher saw no rfswitch state during scan"
     deviations = [m for m in scan_observed_modes if m != "RFANT"]
     assert not deviations, f"rfswitch left RFANT during scan: {deviations[:5]}"
+
+
+# ---------------------------------------------------------------------
+# Cleanup-on-precondition-failure path
+# ---------------------------------------------------------------------
+#
+# Both scripts validate ``client.motor_client``/``client.vna`` after
+# building the client. If the validation fires, the heartbeat thread
+# spun up in ``PandaClient.__init__`` must still be told to exit via
+# ``client.stop()`` so the ground observer sees the ``alive=False``
+# farewell. Regression guard against the resource-cleanup gap fixed
+# alongside this test.
+
+
+def _force_motor_none(real_build):
+    """Wrap _build_client so the returned client has motor_client=None."""
+
+    captured = {}
+
+    def wrapper(transport_arg, cfg, dummy):
+        client = real_build(transport_arg, cfg, dummy)
+        client.motor_client = None
+        captured["client"] = client
+        return client
+
+    return wrapper, captured
+
+
+def test_vna_position_sweep_calls_stop_when_motor_missing(
+    transport, dummy_cfg, tmp_path, monkeypatch
+):
+    cfg_path = _write_cfg(
+        tmp_path,
+        dummy_cfg,
+        vna_position_sweep={
+            "az_grid_deg": [0.0],
+            "el_grid_deg": [0.0],
+            "settle_s": 0.0,
+        },
+    )
+    vps = _load("vna_position_sweep")
+    wrapper, captured = _force_motor_none(vps._build_client)
+    monkeypatch.setattr(vps, "_build_client", wrapper)
+    args = Namespace(cfg_file=cfg_path, dummy=True)
+    vps.main(transport, args)
+    client = captured["client"]
+    assert client.stop_client.is_set()
+    assert not client.heartbeat_thd.is_alive()
+
+
+def test_no_switch_observation_calls_stop_when_motor_missing(
+    transport, dummy_cfg, tmp_path, monkeypatch
+):
+    cfg_path = _write_cfg(
+        tmp_path,
+        dummy_cfg,
+        switch_schedule={"RFANT": 0.0},
+        motor_scan={
+            "az_range_deg": [-1.0, 1.0],
+            "el_range_deg": [-1.0, 1.0],
+            "repeat_count": 1,
+            "pause_s": 0.0,
+        },
+    )
+    nso = _load("no_switch_observation")
+    wrapper, captured = _force_motor_none(nso._build_client)
+    monkeypatch.setattr(nso, "_build_client", wrapper)
+    args = Namespace(cfg_file=cfg_path, dummy=True)
+    nso.main(transport, args)
+    client = captured["client"]
+    assert client.stop_client.is_set()
+    assert not client.heartbeat_thd.is_alive()
