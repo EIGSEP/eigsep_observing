@@ -11,12 +11,15 @@ time and polls the metadata snapshot for completion client-side.
 """
 
 import logging
+import threading
 import time
 
 import numpy as np
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
+
+from .motion_switch import MotionSwitchCoordinator
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,12 @@ class MotorScanner:
         :meth:`_wait_for_stop` raises :class:`TimeoutError`.
     source : str
         Identifier stamped on proxy command stream entries.
+    coord : MotionSwitchCoordinator or None
+        Optional coordinator. When ``None``, the scanner builds an
+        internal coordinator with ``serialize=False`` so standalone use
+        (e.g. ``scripts/motor_control.py``) is unchanged.
+        :class:`PandaClient` passes its own coordinator so the panda's
+        ``serialize_motion_and_switching`` flag flows through.
     """
 
     def __init__(
@@ -50,6 +59,7 @@ class MotorScanner:
         poll_interval_s=0.1,
         stall_timeout_s=30.0,
         source="motor_scanner",
+        coord=None,
     ):
         self.transport = transport
         self._proxy = PicoProxy("motor", transport, source=source)
@@ -63,10 +73,19 @@ class MotorScanner:
         self.poll_interval_s = poll_interval_s
         self.stall_timeout_s = stall_timeout_s
         self.logger = logger
+        if coord is None:
+            coord = MotionSwitchCoordinator(
+                threading.RLock(), serialize=False, logger=self.logger
+            )
+        self._coord = coord
 
     @property
     def is_available(self):
         return self._proxy.is_available
+
+    @property
+    def coord(self):
+        return self._coord
 
     def set_delay(self, **overrides):
         """Push the current delay config to firmware, optionally overriding fields."""
@@ -147,6 +166,64 @@ class MotorScanner:
             "is PicoManager running and the motor pico registered?"
         )
 
+    def _send_and_wait(self, action, *, label, timeout=None, **kwargs):
+        """Send a single move command and block until the motor stops.
+
+        The whole send-then-wait window is wrapped in
+        ``coord.motion_section`` so per-move serialization (when
+        enabled) is enforced at the lowest level — every public mover
+        on this class composes from this helper, so neither callers
+        nor subclasses have to remember to take the lock.
+        """
+        with self._coord.motion_section(label=label):
+            self._proxy.send_command(action, **kwargs)
+            self._wait_for_stop(timeout=timeout)
+
+    def move_to(
+        self,
+        *,
+        az_deg=None,
+        el_deg=None,
+        axis_order=("az", "el"),
+        timeout=None,
+    ):
+        """Move to an absolute ``(az, el)`` position in degrees.
+
+        Either or both axes may be supplied. Axes move sequentially in
+        ``axis_order`` (default az then el — matches the mechanical
+        safety constraint that only one motor moves at a time, see
+        :meth:`home`). Each per-axis send is wrapped in a fresh
+        ``motion_section`` so the lock releases between axes when
+        serialization is enabled.
+
+        Parameters
+        ----------
+        az_deg, el_deg : float or None
+            Target position in degrees. ``None`` skips that axis.
+        axis_order : tuple of str
+            Order in which the supplied axes are driven. Entries that
+            don't correspond to a supplied target are skipped silently
+            (so passing only ``az_deg`` does just the az move).
+        timeout : float or None
+            Per-move stall timeout override.
+        """
+        moves = []
+        for axis in axis_order:
+            if axis == "az" and az_deg is not None:
+                moves.append(("az_target_deg", float(az_deg), "move_to az"))
+            elif axis == "el" and el_deg is not None:
+                moves.append(("el_target_deg", float(el_deg), "move_to el"))
+        if not moves:
+            return
+        self._await_initial_status()
+        for action, target_deg, label in moves:
+            self._send_and_wait(
+                action,
+                label=label,
+                timeout=timeout,
+                target_deg=target_deg,
+            )
+
     def home(self):
         """Drive both axes to step position 0, one at a time.
 
@@ -155,10 +232,8 @@ class MotorScanner:
         and matches the historical ``picohost`` script behavior.
         """
         self._await_initial_status()
-        self._proxy.send_command("az_target_steps", target_steps=0)
-        self._wait_for_stop()
-        self._proxy.send_command("el_target_steps", target_steps=0)
-        self._wait_for_stop()
+        self._send_and_wait("az_target_steps", label="home az", target_steps=0)
+        self._send_and_wait("el_target_steps", label="home el", target_steps=0)
 
     def scan(
         self,
@@ -214,11 +289,15 @@ class MotorScanner:
         if el_first:
             mv_axis1_action = "az_target_deg"
             mv_axis2_action = "el_target_deg"
+            axis1_label = "scan az (outer)"
+            axis2_label = "scan el (inner)"
             axis1_rng = np.asarray(az_range_deg).copy()
             axis2_rng = np.asarray(el_range_deg).copy()
         else:
             mv_axis1_action = "el_target_deg"
             mv_axis2_action = "az_target_deg"
+            axis1_label = "scan el (outer)"
+            axis2_label = "scan az (inner)"
             axis1_rng = np.asarray(el_range_deg).copy()
             axis2_rng = np.asarray(az_range_deg).copy()
 
@@ -238,10 +317,11 @@ class MotorScanner:
                     if _cancelled():
                         break
                     self.logger.info("MOVE AXIS 1 TO %s", val1)
-                    self._proxy.send_command(
-                        mv_axis1_action, target_deg=float(val1)
+                    self._send_and_wait(
+                        mv_axis1_action,
+                        label=axis1_label,
+                        target_deg=float(val1),
                     )
-                    self._wait_for_stop()
                     if _cancelled():
                         break
                     if pause_s is None:
@@ -250,24 +330,27 @@ class MotorScanner:
                             axis2_rng[0],
                             axis2_rng[-1],
                         )
-                        self._proxy.send_command(
-                            mv_axis2_action, target_deg=float(axis2_rng[0])
+                        self._send_and_wait(
+                            mv_axis2_action,
+                            label=axis2_label,
+                            target_deg=float(axis2_rng[0]),
                         )
-                        self._wait_for_stop()
                         if _cancelled():
                             break
-                        self._proxy.send_command(
-                            mv_axis2_action, target_deg=float(axis2_rng[-1])
+                        self._send_and_wait(
+                            mv_axis2_action,
+                            label=axis2_label,
+                            target_deg=float(axis2_rng[-1]),
                         )
-                        self._wait_for_stop()
                     else:
                         for val2 in axis2_rng:
                             if _cancelled():
                                 break
-                            self._proxy.send_command(
-                                mv_axis2_action, target_deg=float(val2)
+                            self._send_and_wait(
+                                mv_axis2_action,
+                                label=axis2_label,
+                                target_deg=float(val2),
                             )
-                            self._wait_for_stop()
                             if stop_event is not None:
                                 if stop_event.wait(pause_s):
                                     break

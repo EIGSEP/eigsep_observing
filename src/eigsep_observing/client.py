@@ -16,6 +16,7 @@ from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
+from .motion_switch import MotionSwitchCoordinator
 from .motor_scanner import MotorScanner
 from .tempctrl_client import TempCtrlClient
 from .utils import get_config_path
@@ -77,7 +78,18 @@ class PandaClient:
         self.sw_proxy = PicoProxy(
             "rfswitch", self.transport, source="panda_client"
         )
-        self.switch_lock = threading.Lock()
+        # ``RLock`` (not plain ``Lock``) so the no-switch-observation
+        # script can hold an outer ``switch_session`` while inner
+        # ``MotorScanner.scan`` re-acquires per move via
+        # ``coord.motion_section`` from the same thread.
+        self.switch_lock = threading.RLock()
+        self.coord = MotionSwitchCoordinator(
+            self.switch_lock,
+            serialize=bool(
+                self.cfg.get("serialize_motion_and_switching", False)
+            ),
+            logger=self.logger,
+        )
         available = self.transport.r.smembers("picos")
         if available:
             names = sorted(
@@ -273,7 +285,7 @@ class PandaClient:
         ...     take_measurement()
         # rfswitch auto-restored to the mode that was active on entry
         """
-        with self.switch_lock:
+        with self.coord.switch_section():
             prev_mode = self._read_switch_mode_from_redis()
             switched = False
 
@@ -387,7 +399,9 @@ class PandaClient:
             )
             return
         try:
-            self.motor_scanner = MotorScanner(self.transport, **kwargs)
+            self.motor_scanner = MotorScanner(
+                self.transport, coord=self.coord, **kwargs
+            )
         except TypeError as err:
             self.logger.warning(
                 "Invalid motor_scanner_kwargs for MotorScanner: "
@@ -488,7 +502,7 @@ class PandaClient:
                 # so an S11 measurement can interrupt; other modes
                 # (load, noise) hold the lock for the full wait.
                 hold_lock_during_wait = mode != "RFANT"
-                with self.switch_lock:
+                with self.coord.switch_section():
                     self.logger.info(f"Switching to {mode} measurements")
                     if not self._safe_switch(mode):
                         self._warn_with_status(f"Failed to switch to {mode}")
@@ -576,6 +590,107 @@ class PandaClient:
         self.vna_writer.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
 
+    def run_calibration_sequence(
+        self, *, vna_modes=("ant", "rec"), schedule=None
+    ):
+        """Run one calibration cycle: VNA sweep + non-RFANT switch dwells.
+
+        Used by ``scripts/no_switch_observation.py`` to bracket a clean
+        motor scan with calibration solutions on either side. Order:
+
+        1. VNA first — ``measure_s11`` for each mode in ``vna_modes``,
+           held under one ``coord.switch_section()`` so no other
+           thread can interleave a state change with the OSL +
+           DUT sequence (mirrors :meth:`vna_loop`).
+        2. Then iterate the configured ``switch_schedule`` minus any
+           RFANT entries, dwelling on each calibration mode for its
+           configured ``wait_time``. RFANT is filtered because RFANT
+           is the science target, not a calibration source. Reuses
+           the existing ``switch_schedule`` values rather than
+           duplicating a calibration-specific config block.
+
+        Parameters
+        ----------
+        vna_modes : tuple of str
+            Modes to sweep with the VNA, in order. Defaults to the
+            ``vna_loop`` pair ``("ant", "rec")``.
+        schedule : dict or None
+            Override for the switch_schedule. ``None`` reads
+            ``self.cfg["switch_schedule"]``.
+
+        Returns
+        -------
+        bool
+            True if the sequence ran to completion; False if
+            ``stop_client`` fired mid-sequence so the caller can
+            unwind cleanly.
+
+        Raises
+        ------
+        ValueError
+            If the resolved ``switch_schedule`` is neither ``None`` nor
+            a dict.
+        """
+        if self.vna is None:
+            self._warn_with_status(
+                "VNA not initialized; skipping VNA portion of calibration."
+            )
+        else:
+            with self.coord.switch_section():
+                try:
+                    for mode in vna_modes:
+                        if self.stop_client.is_set():
+                            return False
+                        self.logger.info(
+                            f"Calibration: measuring S11 of {mode} with VNA"
+                        )
+                        self.measure_s11(mode)
+                except Exception as exc:
+                    # Match vna_loop's recovery posture: log loudly
+                    # and continue to the dwell phase rather than
+                    # aborting calibration outright.
+                    self._error_with_status(
+                        f"Calibration VNA cycle aborted "
+                        f"({type(exc).__name__}: {exc})."
+                    )
+
+        if self.stop_client.is_set():
+            return False
+
+        raw = self.cfg.get("switch_schedule") if schedule is None else schedule
+        if raw is None:
+            schedule = {}
+        elif not isinstance(raw, dict):
+            raise ValueError(
+                f"switch_schedule must be a dict; got {type(raw).__name__}."
+            )
+        else:
+            schedule = raw
+        for mode, wait_time in schedule.items():
+            if mode == "RFANT":
+                continue
+            if mode not in VALID_SWITCH_STATES:
+                self._warn_with_status(
+                    f"Calibration: invalid switch mode {mode!r}; skipping."
+                )
+                continue
+            if not isinstance(wait_time, (int, float)) or wait_time <= 0:
+                self.logger.info(
+                    "Calibration: skipping mode %s (wait_time=%r).",
+                    mode,
+                    wait_time,
+                )
+                continue
+            with self.coord.switch_section():
+                self.logger.info(f"Calibration dwell: {mode} for {wait_time}s")
+                if not self._safe_switch(mode):
+                    self._warn_with_status(
+                        f"Calibration: failed to switch to {mode}"
+                    )
+                if self._wait_or_stop(wait_time):
+                    return False
+        return True
+
     def vna_loop(self):
         """
         Observe with VNA and write data to files.
@@ -586,7 +701,7 @@ class PandaClient:
             )
             return
         while not self.stop_client.is_set():
-            with self.switch_lock:
+            with self.coord.switch_section():
                 prev_mode = self._read_switch_mode_from_redis()
                 if prev_mode is None:
                     self._warn_with_status(

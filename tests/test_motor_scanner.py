@@ -13,18 +13,19 @@ import time
 import numpy as np
 import pytest
 
-from eigsep_observing import MotorScanner
+from eigsep_observing import MotionSwitchCoordinator, MotorScanner
 
 
 SMALL_RANGE = np.array([-1.0, 0.0, 1.0])
 LONG_TIMEOUT = 5.0
 
 
-def _scanner(transport):
+def _scanner(transport, *, coord=None):
     return MotorScanner(
         transport,
         poll_interval_s=0.02,
         stall_timeout_s=LONG_TIMEOUT,
+        coord=coord,
     )
 
 
@@ -211,3 +212,179 @@ def test_scan_el_first_swaps_axes(client):
             saw_az_plateau = True
             break
     assert saw_az_plateau
+
+
+def test_default_coord_is_serialize_off(client):
+    """Standalone ``MotorScanner`` (no ``coord=`` kwarg) must build an
+    internal coordinator with ``serialize=False``. Otherwise existing
+    callers (``scripts/motor_control.py``, the ``motor_loop`` path
+    when ``serialize_motion_and_switching`` is unset) would silently
+    start serializing against switching.
+    """
+    scanner = _scanner(client.transport)
+    assert scanner.coord.serialize is False
+
+
+def test_move_to_az_only(client):
+    """``move_to(az_deg=...)`` issues only the az command and waits."""
+    scanner = _scanner(client.transport)
+    motor = client._manager.picos["motor"]
+    expected = motor.deg_to_steps(1.0)
+    scanner.move_to(az_deg=1.0)
+    assert motor._emulator.azimuth.target_pos == expected
+    assert motor._emulator.elevation.target_pos == 0
+
+
+def test_move_to_az_and_el(client):
+    """Both axes drive sequentially; final positions match targets."""
+    scanner = _scanner(client.transport)
+    motor = client._manager.picos["motor"]
+    az_expected = motor.deg_to_steps(1.0)
+    el_expected = motor.deg_to_steps(-1.0)
+    scanner.move_to(az_deg=1.0, el_deg=-1.0)
+    assert motor._emulator.azimuth.target_pos == az_expected
+    assert motor._emulator.elevation.target_pos == el_expected
+
+
+def test_move_to_no_args_is_noop(client):
+    """``move_to()`` with neither axis supplied does nothing."""
+    scanner = _scanner(client.transport)
+    motor = client._manager.picos["motor"]
+    scanner.move_to()
+    assert motor._emulator.azimuth.target_pos == 0
+    assert motor._emulator.elevation.target_pos == 0
+
+
+def test_move_to_axis_order_drives_el_first(client):
+    """``axis_order=("el","az")`` drives el before az. The target
+    plateau pattern proves the order: while el is still settling, az
+    has not yet been issued."""
+    scanner = _scanner(client.transport)
+    seen_targets = []
+    real_send = scanner._proxy.send_command
+
+    def recording_send(action, **kwargs):
+        seen_targets.append(action)
+        return real_send(action, **kwargs)
+
+    scanner._proxy.send_command = recording_send
+    scanner.move_to(az_deg=1.0, el_deg=-1.0, axis_order=("el", "az"))
+    moves = [a for a in seen_targets if "_target_deg" in a]
+    assert moves == ["el_target_deg", "az_target_deg"]
+
+
+def test_move_to_acquires_coord_when_serialized(client):
+    """With ``serialize=True`` a competing switch_section blocks while
+    a ``move_to`` is in flight. With ``serialize=False`` it does not.
+    Drives the move from a worker thread so the test thread can probe
+    the lock without re-entering it.
+    """
+    coord = MotionSwitchCoordinator(threading.RLock(), serialize=True)
+    scanner = _scanner(client.transport, coord=coord)
+    motor = client._manager.picos["motor"]
+
+    move_started = threading.Event()
+    move_done = threading.Event()
+    real_wait = scanner._wait_for_stop
+    release_wait = threading.Event()
+
+    def gated_wait(*args, **kwargs):
+        # Hold inside the motion_section so the test can attempt a
+        # switch_section acquire while the move is "in flight".
+        move_started.set()
+        release_wait.wait(timeout=2.0)
+        return real_wait(*args, **kwargs)
+
+    scanner._wait_for_stop = gated_wait
+
+    def runner():
+        scanner.move_to(az_deg=1.0)
+        move_done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    assert move_started.wait(timeout=1.0)
+
+    acquired = threading.Event()
+
+    def probe():
+        with coord.switch_section():
+            acquired.set()
+
+    p = threading.Thread(target=probe, daemon=True)
+    p.start()
+    assert not acquired.wait(timeout=0.2), (
+        "switch_section acquired during a serialized move_to"
+    )
+    release_wait.set()
+    assert acquired.wait(timeout=2.0)
+    assert move_done.wait(timeout=2.0)
+    t.join(timeout=1.0)
+    p.join(timeout=1.0)
+    assert motor._emulator.azimuth.target_pos == motor.deg_to_steps(1.0)
+
+
+def test_move_to_does_not_block_switch_when_serialize_off(client):
+    """With ``serialize=False``, a switch_section acquires immediately
+    while a move is in flight — the byte-for-byte preserved
+    pre-coordinator behavior of ``motor_loop``.
+    """
+    coord = MotionSwitchCoordinator(threading.RLock(), serialize=False)
+    scanner = _scanner(client.transport, coord=coord)
+
+    move_started = threading.Event()
+    move_done = threading.Event()
+    real_wait = scanner._wait_for_stop
+    release_wait = threading.Event()
+
+    def gated_wait(*args, **kwargs):
+        move_started.set()
+        release_wait.wait(timeout=2.0)
+        return real_wait(*args, **kwargs)
+
+    scanner._wait_for_stop = gated_wait
+
+    def runner():
+        scanner.move_to(az_deg=1.0)
+        move_done.set()
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    assert move_started.wait(timeout=1.0)
+
+    with coord.switch_section():
+        # Acquired immediately even though a "move" is mid-wait.
+        pass
+
+    release_wait.set()
+    assert move_done.wait(timeout=2.0)
+    t.join(timeout=1.0)
+
+
+def test_scan_uses_send_and_wait_helper(client):
+    """Sanity-check the refactor: scan() calls ``_send_and_wait``
+    rather than the inline send + wait pattern. A regression that
+    drops the helper would silently bypass per-move serialization.
+    """
+    scanner = _scanner(client.transport)
+    calls = []
+    real = scanner._send_and_wait
+
+    def recording(action, *, label, timeout=None, **kwargs):
+        calls.append((action, label))
+        return real(action, label=label, timeout=timeout, **kwargs)
+
+    scanner._send_and_wait = recording
+    scanner.scan(
+        az_range_deg=SMALL_RANGE,
+        el_range_deg=SMALL_RANGE,
+        repeat_count=1,
+        pause_s=0.0,
+    )
+    actions = {a for a, _ in calls}
+    assert "az_target_deg" in actions
+    assert "el_target_deg" in actions
+    # home() also routes through _send_and_wait (via az_target_steps /
+    # el_target_steps), so per-move serialization covers the home calls.
+    assert any(a == "az_target_steps" for a, _ in calls)
+    assert any(a == "el_target_steps" for a, _ in calls)
