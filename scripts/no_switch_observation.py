@@ -90,8 +90,7 @@ def main(transport, args):
         client = _build_client(transport, cfg, args.dummy)
         if client.motor_client is None:
             raise RuntimeError(
-                "Motor client not initialized; check motor pico "
-                "registration."
+                "Motor client not initialized; check motor pico registration."
             )
         if client.vna is None:
             raise RuntimeError("VNA not initialized; check vna config block.")
