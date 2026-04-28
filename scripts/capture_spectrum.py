@@ -48,6 +48,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "out_filename",
+    nargs="?",
     type=str,
     help="Output filename to save the spectrum data.",
     default="spectrum.h5",
@@ -122,7 +123,6 @@ metadata_lists = {} if snapshot_reader is not None else None
 logger.info(f"Capturing {args.num_spec} spectra for pairs: {pairs}")
 for i in range(args.num_spec):
     acc_cnt, data = corr_reader.read(pairs=pairs, timeout=10)
-    data = reshape_data(data, avg_even_odd=avg_even_odd)
     acc_cnts.append(acc_cnt)
     for k, v in data.items():
         all_data.setdefault(k, []).append(v)
@@ -133,7 +133,10 @@ for i in range(args.num_spec):
                 continue
             metadata_lists.setdefault(k, []).append(v)
 
-all_data = {k: np.array(v) for k, v in all_data.items()}
+all_data = reshape_data(
+    {k: np.array(v) for k, v in all_data.items()},
+    avg_even_odd=avg_even_odd,
+)
 header = append_corr_header(
     header, np.array(acc_cnts), header["sync_time"]
 )
