@@ -144,9 +144,7 @@ all_data = reshape_data(
     {k: np.array(v) for k, v in all_data.items()},
     avg_even_odd=avg_even_odd,
 )
-header = append_corr_header(
-    header, np.array(acc_cnts), header["sync_time"]
-)
+header = append_corr_header(header, np.array(acc_cnts), header["sync_time"])
 
 write_hdf5(args.out_filename, all_data, header, metadata=metadata_lists)
 logger.info(f"Saved captured spectra to {args.out_filename}")
