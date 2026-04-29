@@ -432,6 +432,33 @@ def test_panda_tick_sees_heartbeat(agg, seeded):
     assert state.panda_heartbeat_last_check_unix is not None
 
 
+def test_panda_tick_reads_run_tag_from_redis(agg, seeded):
+    """The active panda script publishes its name to a panda-side Redis
+    key on startup; the aggregator must surface it so the dashboard's
+    Run tile shows what's currently driving the run."""
+    from eigsep_observing.run_tag import publish as publish_run_tag
+
+    _, panda = seeded
+    publish_run_tag(panda, "panda_observe", started_unix=1_713_200_000.0)
+
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert state.run_tag == "panda_observe"
+    assert state.run_started_at_unix == 1_713_200_000.0
+
+
+def test_panda_tick_run_tag_absent_returns_none(agg):
+    """Before any panda script publishes (or after one cleared on
+    exit), the aggregator carries ``None`` so the dashboard renders an
+    'idle' tile rather than a stale tag."""
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert state.run_tag is None
+    assert state.run_started_at_unix is None
+
+
 def test_snap_tick_reads_file_heartbeat_from_redis(agg, seeded):
     """The dashboard and the writer run on different hosts — the
     aggregator must get the last-write info from Redis, not from a
