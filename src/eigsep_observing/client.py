@@ -82,9 +82,9 @@ class PandaClient:
         # script can hold an outer ``switch_session`` while inner
         # ``MotorClient.scan`` re-acquires per move via
         # ``coord.motion_section`` from the same thread.
-        self.switch_lock = threading.RLock()
+        self._switch_lock = threading.RLock()
         self.coord = MotionSwitchCoordinator(
-            self.switch_lock,
+            self._switch_lock,
             serialize=bool(
                 self.cfg.get("serialize_motion_and_switching", False)
             ),
@@ -258,8 +258,9 @@ class PandaClient:
     def switch_session(self):
         """Context manager for interactive / scripted RF switch use.
 
-        Acquires :attr:`switch_lock` (pausing ``switch_loop`` and
-        ``vna_loop`` for the duration of the block), yields a callable
+        Acquires the switch lock via :meth:`coord.switch_section`
+        (pausing ``switch_loop`` and ``vna_loop`` for the duration of
+        the block), yields a callable
         ``sw(mode) -> bool`` that routes through :meth:`_safe_switch`, and
         restores the mode that was active on entry when the block
         exits. Matches the common "switch, measure, switch back" REPL
@@ -747,7 +748,8 @@ class PandaClient:
         seconds with ``motor_scan`` kwargs (``az_range_deg``,
         ``el_range_deg``, ``el_first``, ``repeat_count``, ``pause_s``,
         ``sleep_between``). Runs concurrently with ``switch_loop`` and
-        ``vna_loop``; does **not** acquire ``switch_lock``. This is the
+        ``vna_loop``; does **not** acquire ``coord.switch_section``.
+        This is the
         steady-state "do a pointing survey every N hours" mode, and it
         deliberately lets switching/VNA continue uninterrupted while
         the motors move.
@@ -784,7 +786,8 @@ class PandaClient:
         what we want):
 
         * Beam mapping: scan with rfswitch pinned to RFANT for clean
-          per-position corr (needs ``switch_lock`` + switch-loop pause).
+          per-position corr (needs ``coord.switch_section`` + switch-
+          loop pause).
         * VNA-at-positions: lockstep motor move / VNA measure for S11
           vs pointing comparisons.
         * Motion/switch sync: suppress switching while motors are

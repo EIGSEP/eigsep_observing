@@ -507,8 +507,8 @@ def test_switch_session_warns_on_failed_restore(client, caplog):
         for r in caplog.records
     ), [r.getMessage() for r in caplog.records]
     # Lock must be released post-exit.
-    assert client.switch_lock.acquire(blocking=False)
-    client.switch_lock.release()
+    assert client.coord.lock.acquire(blocking=False)
+    client.coord.lock.release()
 
 
 def test_switch_session_sw_warns_and_returns_false_on_failure(client, caplog):
@@ -558,12 +558,12 @@ def test_switch_session_restores_even_on_exception(client):
         f"exception inside block must still trigger restore; "
         f"got {switch_calls}"
     )
-    assert client.switch_lock.acquire(blocking=False)
-    client.switch_lock.release()
+    assert client.coord.lock.acquire(blocking=False)
+    client.coord.lock.release()
 
 
 def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
-    """The session holds ``switch_lock`` for the whole block, so a
+    """The session holds the switch lock for the whole block, so a
     concurrent ``switch_loop`` thread must block on the lock — its
     first ``_safe_switch`` call fires only *after* the session exits.
     Distinguishes switch_loop's calls from the session's own by
@@ -1007,9 +1007,9 @@ def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
 
 def test_switch_session_restore_survives_timeout(client, caplog):
     """Regression: a TimeoutError on the auto-restore used to escape
-    switch_session's finally block, leaving switch_lock held. After
-    the fix, the warning logs, the session exits, and the lock is
-    released."""
+    switch_session's finally block, leaving the switch lock held.
+    After the fix, the warning logs, the session exits, and the lock
+    is released."""
     assert client._safe_switch("RFANT")
     _wait_for_published_mode(client, "RFANT")
 
@@ -1039,8 +1039,8 @@ def test_switch_session_restore_survives_timeout(client, caplog):
         r.getMessage() for r in caplog.records
     ]
 
-    assert client.switch_lock.acquire(blocking=False)
-    client.switch_lock.release()
+    assert client.coord.lock.acquire(blocking=False)
+    client.coord.lock.release()
 
 
 def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
@@ -2200,10 +2200,10 @@ def test_panda_client_builds_coord_with_default_off(client):
     """
     assert client.coord is not None
     assert client.coord.serialize is False
-    # The lock the coord wraps is the same one ``switch_lock`` exposes,
-    # so existing tests probing ``client.switch_lock.acquire`` keep
-    # working regardless of which surface the lock is grabbed through.
-    assert client.coord.lock is client.switch_lock
+    # ``coord.lock`` is the public handle on the panda's underlying
+    # ``_switch_lock``; tests probe it through the coord rather than
+    # reaching into the private attribute.
+    assert client.coord.lock is client._switch_lock
 
 
 def test_panda_client_builds_coord_serialize_on_when_flag_set(
@@ -2219,17 +2219,18 @@ def test_panda_client_builds_coord_serialize_on_when_flag_set(
         client.stop()
 
 
-def test_switch_lock_is_rlock(client):
-    """``switch_lock`` must be an RLock so the no-switch-observation
-    script's outer ``switch_session`` can host an inner per-move
-    ``motion_section`` from the same thread without deadlocking.
+def test_coord_lock_is_rlock(client):
+    """The panda's switch lock must be an RLock so the no-switch-
+    observation script's outer ``switch_session`` can host an inner
+    per-move ``motion_section`` from the same thread without
+    deadlocking.
     """
-    assert client.switch_lock.acquire(blocking=False)
+    assert client.coord.lock.acquire(blocking=False)
     # Re-entry from the same thread succeeds for an RLock; would
     # block forever for a plain Lock.
-    assert client.switch_lock.acquire(blocking=False)
-    client.switch_lock.release()
-    client.switch_lock.release()
+    assert client.coord.lock.acquire(blocking=False)
+    client.coord.lock.release()
+    client.coord.lock.release()
 
 
 def test_run_calibration_sequence_skips_vna_when_uninitialized(client, caplog):
