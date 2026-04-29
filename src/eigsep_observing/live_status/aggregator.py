@@ -54,6 +54,7 @@ from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
 from ..file_heartbeat import read as read_file_heartbeat
 from ..io import reshape_data
+from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
 from .signals import SIGNAL_REGISTRY
@@ -120,6 +121,12 @@ class StateSnapshot:
     # Panda heartbeat.
     panda_heartbeat: bool = False
     panda_heartbeat_last_check_unix: Optional[float] = None
+
+    # Active panda script tag (panda_observe / no_switch_observation /
+    # vna_position_sweep). ``None`` means no script is currently
+    # running (cleared on clean exit, or never published).
+    run_tag: Optional[str] = None
+    run_started_at_unix: Optional[float] = None
 
     # File-writing heartbeat.
     file_heartbeat: dict = field(
@@ -586,6 +593,18 @@ class LiveStatusAggregator:
         status_entries, ok = self._drain_status()
         any_ok = any_ok or ok
 
+        # Active panda-script run_tag (raw K/V, published by the
+        # panda entry-points on startup, cleared on clean exit). The
+        # empty-sentinel dict is the steady-state for "no script
+        # running"; a transport error is treated like the other
+        # benign-missing K/V reads on this loop.
+        rt, ok = self._read_benign_missing(
+            "run_tag.read",
+            lambda: read_run_tag(self.transport_panda),
+            errors,
+        )
+        any_ok = any_ok or ok
+
         with self._lock:
             s = self.state
             s.panda_last_tick_unix = now
@@ -642,6 +661,10 @@ class LiveStatusAggregator:
                 s.status_log.append(
                     {"level": level, "msg": msg, "ts_unix": now}
                 )
+
+            if rt is not None:
+                s.run_tag = rt.get("run_tag")
+                s.run_started_at_unix = rt.get("run_started_at_unix")
 
     def _drain_status(self) -> tuple[list[tuple[int, str]], bool]:
         """Drain StatusReader until the next call times out.

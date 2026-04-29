@@ -40,6 +40,21 @@ function fmt(v, digits = 2) {
   return String(v);
 }
 
+// Human-friendly duration for a non-negative number of seconds.
+// Picks the two largest non-zero units so steady-state observing
+// (which can run for days) doesn't render as a six-digit second count.
+function fmtDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "—";
+  const s = Math.max(0, Math.floor(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ${m % 60}m`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
+
 // Build a span via DOM construction. Values go through textContent so
 // strings that reach the dashboard from Redis (sensor names, status
 // log messages, switch state names, etc.) cannot inject markup.
@@ -170,6 +185,21 @@ function updateHealth(h, fileData) {
       fileData.seconds_since_write !== null
         ? `Last file: ${fmt(fileData.seconds_since_write, 0)}s ago`
         : "Last file: —";
+  }
+
+  const runTile = document.getElementById("tile-run");
+  if (h.run_tag === null || h.run_tag === undefined) {
+    runTile.className = "tile unknown";
+    runTile.textContent = "Run: idle";
+  } else if (h.run_tag === "UNKNOWN") {
+    // Sentinel value from a malformed/partial publish; treat as a
+    // misconfiguration signal rather than steady state.
+    runTile.className = "tile warn";
+    runTile.textContent = "Run: unknown";
+  } else {
+    runTile.className = "tile ok";
+    const ageStr = fmtDuration(h.run_age_s);
+    runTile.textContent = `Run: ${h.run_tag} (${ageStr})`;
   }
 
   const reinitTile = document.getElementById("tile-reinit");

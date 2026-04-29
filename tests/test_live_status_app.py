@@ -231,6 +231,37 @@ def test_health_route(client):
     assert data["snap_reinit"]["count"] is None
 
 
+def test_health_route_surfaces_run_tag(agg_primed):
+    """When a panda script has published its tag, /api/health must
+    expose it (with the start time and a derived seconds-since-start
+    computed against ``now`` so the tile counts up between drains)."""
+    from eigsep_observing.run_tag import publish as publish_run_tag
+
+    started = time.time() - 5.0
+    publish_run_tag(agg_primed.transport_panda, "panda_observe", started)
+    agg_primed._panda_tick()
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client = app.test_client()
+    body = client.get("/api/health").get_json()
+    data = body["data"]
+    assert data["run_tag"] == "panda_observe"
+    assert data["run_started_at_unix"] == pytest.approx(started)
+    assert data["run_age_s"] is not None
+    assert data["run_age_s"] >= 5.0
+
+
+def test_health_route_run_tag_absent_returns_none(client):
+    """No publish: /api/health carries explicit nulls so the dashboard
+    renders an 'idle' tile rather than a stale tag."""
+    body = client.get("/api/health").get_json()
+    data = body["data"]
+    assert data["run_tag"] is None
+    assert data["run_started_at_unix"] is None
+    assert data["run_age_s"] is None
+
+
 def test_health_route_surfaces_snap_reinit_count(agg_primed):
     """When eigsep-fpga-init has bumped the counter, the /api/health
     payload must surface the count and a fresh seconds_since_reinit

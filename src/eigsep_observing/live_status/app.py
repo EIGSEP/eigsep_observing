@@ -266,6 +266,12 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
     reinit["seconds_since_reinit"] = (
         max(0.0, now - last_unix) if last_unix is not None else None
     )
+    # ``run_age_s`` is derived against ``now`` (not the drain-tick
+    # time) so the dashboard tile counts up between panda drains, the
+    # same pattern the reinit and file tiles use.
+    run_age_s = None
+    if state.run_started_at_unix is not None:
+        run_age_s = max(0.0, now - state.run_started_at_unix)
     return {
         "snap_connected": state.snap_connected,
         "panda_connected": state.panda_connected,
@@ -277,6 +283,9 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "snap_error": state.snap_error,
         "panda_error": state.panda_error,
         "snap_reinit": reinit,
+        "run_tag": state.run_tag,
+        "run_started_at_unix": state.run_started_at_unix,
+        "run_age_s": run_age_s,
     }
 
 
