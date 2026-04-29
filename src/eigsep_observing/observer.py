@@ -9,7 +9,7 @@ from eigsep_redis import (
     StatusReader,
 )
 
-from . import io
+from . import io, run_tag
 from .corr import CorrConfigStore, CorrReader
 from .file_heartbeat import publish as publish_file_heartbeat
 from .vna import VnaReader
@@ -162,6 +162,46 @@ class EigObserver:
             if status is not None:
                 self.logger.log(level, status)
 
+    def _with_header_overlays(self, header):
+        """Return a copy of ``header`` with panda-side overlay fields merged in.
+
+        Adds ``run_tag`` / ``run_started_at_unix`` (from
+        :mod:`eigsep_observing.run_tag`) and ``obs_config`` (from
+        :class:`eigsep_redis.ConfigStore`) so each corr file records the
+        active panda script and the panda-side config snapshot at
+        file-open time.
+
+        All overlay reads are defensive: a missing or malformed
+        run_tag, a missing obs_config, or a transient transport
+        failure all resolve to ``"UNKNOWN"`` / ``0.0`` / ``{}`` rather
+        than raising. Corr data is sacred — overlay enrichment must
+        never block a corr file from being written. Sentinel values
+        (rather than dropping the keys) guarantee every post-PR file
+        carries the field and let downstream distinguish
+        "no producer info" from "old file without this field."
+        """
+        out = dict(header)
+        if self.transport_panda is not None:
+            tag = run_tag.read(self.transport_panda)
+            try:
+                obs_cfg = self.config.get()
+            except Exception as exc:
+                self.logger.error("obs_config overlay read failed: %s", exc)
+                obs_cfg = {}
+        else:
+            tag = {"run_tag": None, "run_started_at_unix": None}
+            obs_cfg = {}
+        out["run_tag"] = (
+            tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
+        )
+        out["run_started_at_unix"] = (
+            tag["run_started_at_unix"]
+            if tag["run_started_at_unix"] is not None
+            else 0.0
+        )
+        out["obs_config"] = obs_cfg
+        return out
+
     def record_corr_data(
         self, save_dir, ntimes=240, timeout=20, liveness_timeout=300
     ):
@@ -255,7 +295,11 @@ class EigObserver:
                                 f"Error reading header from SNAP: {e}. "
                                 "Using cached corr header."
                             )
-                            file.set_header(header=cached_header)
+                            file.set_header(
+                                header=self._with_header_overlays(
+                                    cached_header
+                                )
+                            )
                         else:
                             last_write_deadline = _tick_liveness_deadline(
                                 last_write_deadline,
@@ -304,7 +348,9 @@ class EigObserver:
                             )
                         cached_header = header
                         cached_sync_time = new_sync_time
-                        file.set_header(header=header)
+                        file.set_header(
+                            header=self._with_header_overlays(header)
+                        )
                 try:
                     acc_cnt, data = self.corr_reader.read(
                         pairs=pairs, timeout=timeout, unpack=True

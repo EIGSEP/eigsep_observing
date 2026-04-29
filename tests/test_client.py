@@ -14,7 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing import MotorClient, TempCtrlClient
+from eigsep_observing import MotorClient, TempCtrlClient, run_tag
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -1057,6 +1057,44 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
         client.measure_s11("ant")
         expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
         assert client.vna.power_dBm == expected_ant
+    finally:
+        client.stop()
+
+
+def test_measure_s11_injects_overlay_sentinels(transport, dummy_cfg):
+    """No run_tag published → ``UNKNOWN`` / ``0.0`` sentinels +
+    ``obs_config`` snapshot from ``self.cfg``."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        with patch.object(client.vna_writer, "add") as mock_add:
+            client.measure_s11("ant")
+        assert mock_add.called
+        header = mock_add.call_args.kwargs["header"]
+        assert header["run_tag"] == "UNKNOWN"
+        assert header["run_started_at_unix"] == 0.0
+        assert header["obs_config"]["use_vna"] is True
+        # Sanity: the existing fields are still present.
+        assert header["mode"] == "ant"
+        assert "metadata_snapshot_unix" in header
+    finally:
+        client.stop()
+
+
+def test_measure_s11_injects_published_run_tag(transport, dummy_cfg):
+    """Publishing a run_tag flows into the VNA header on next
+    measure_s11 call."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        run_tag.publish(transport, "vna_position_sweep", started_unix=12345.0)
+        with patch.object(client.vna_writer, "add") as mock_add:
+            client.measure_s11("rec")
+        header = mock_add.call_args.kwargs["header"]
+        assert header["run_tag"] == "vna_position_sweep"
+        assert header["run_started_at_unix"] == 12345.0
     finally:
         client.stop()
 
