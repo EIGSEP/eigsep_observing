@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 from cmt_vna.testing import DummyVNA
 from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
 from eigsep_redis.testing import DummyTransport
-from eigsep_observing import EigObserver
+from eigsep_observing import EigObserver, run_tag
 from eigsep_observing.corr import CorrConfigStore
 from eigsep_observing.testing.utils import generate_data
 from eigsep_observing.vna import VnaWriter
@@ -291,8 +291,17 @@ def test_record_corr_data_transient_header_blip_uses_cache(
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
 
     # set_header called twice: once with fetched, once with cached.
+    # Both calls now carry the panda-side overlay fields injected by
+    # _with_header_overlays — the snap-only fixture has no
+    # transport_panda, so overlays resolve to sentinels.
     assert mock_file.set_header.call_count == 2
-    mock_file.set_header.assert_any_call(header=good_header)
+    expected_header = {
+        **good_header,
+        "run_tag": "UNKNOWN",
+        "run_started_at_unix": 0.0,
+        "obs_config": {},
+    }
+    mock_file.set_header.assert_any_call(header=expected_header)
     # add_data called on both iterations — corr data is sacred, the
     # blip must not have blocked writes.
     assert mock_file.add_data.call_count >= 2
@@ -793,3 +802,113 @@ def test_record_vna_data_stop_event(observer_panda_only, transport_panda):
 
     observer.record_vna_data("/tmp/test_vna", timeout=1)
     stop_thread.join()
+
+
+# ---------------------------------------------------------------------------
+# Header overlay tests (run_tag + obs_config)
+# ---------------------------------------------------------------------------
+
+
+def test_with_header_overlays_no_panda_uses_sentinels(observer_snap_only):
+    """No transport_panda → run_tag sentinels + empty obs_config."""
+    observer = observer_snap_only
+    out = observer._with_header_overlays({"sync_time": 12345.0})
+    assert out["sync_time"] == 12345.0
+    assert out["run_tag"] == "UNKNOWN"
+    assert out["run_started_at_unix"] == 0.0
+    assert out["obs_config"] == {}
+
+
+def test_with_header_overlays_panda_published(observer_both, transport_panda):
+    """run_tag.publish on panda transport flows into the overlay."""
+    run_tag.publish(transport_panda, "panda_observe", started_unix=42.0)
+    out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["run_tag"] == "panda_observe"
+    assert out["run_started_at_unix"] == 42.0
+    # obs_config carries the panda fixture config (plus the
+    # ConfigStore.upload_dict-injected ``upload_time`` field).
+    assert out["obs_config"]["vna_save_dir"] == "/tmp/test_vna"
+    assert "vna_settings" in out["obs_config"]
+
+
+def test_with_header_overlays_panda_no_tag_published(
+    observer_both,
+):
+    """Panda transport present but no run_tag published → sentinels."""
+    out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["run_tag"] == "UNKNOWN"
+    assert out["run_started_at_unix"] == 0.0
+    # obs_config is still populated — the fixture uploaded one.
+    assert "vna_settings" in out["obs_config"]
+
+
+def test_with_header_overlays_obs_config_failure_errors(observer_both, caplog):
+    """ConfigStore.get raising → log ERROR, set obs_config={}.
+
+    Per CLAUDE.md, narrow safety nets around non-corr processing must
+    log loudly at ERROR level so the upstream contract violation is
+    visible and actionable. obs_config-overlay failure is one such
+    contract violation: corr data still gets written (the safety net),
+    but the producer/transport problem must surface to operators.
+    """
+    with patch.object(
+        observer_both.config, "get", side_effect=RuntimeError("redis down")
+    ):
+        with caplog.at_level(logging.ERROR):
+            out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["obs_config"] == {}
+    matching = [
+        rec
+        for rec in caplog.records
+        if "obs_config overlay read failed" in rec.message
+    ]
+    assert matching, "expected obs_config overlay failure log"
+    assert all(rec.levelno == logging.ERROR for rec in matching)
+
+
+def test_with_header_overlays_does_not_mutate_input(observer_snap_only):
+    """Helper returns a new dict — caller's cached header is preserved."""
+    cached = {"sync_time": 999.0}
+    out = observer_snap_only._with_header_overlays(cached)
+    assert "run_tag" not in cached
+    assert "obs_config" not in cached
+    assert out is not cached
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_writes_overlays_into_header(
+    mock_file_class, observer_both, transport_panda, transport_snap
+):
+    """End-to-end: record_corr_data merges overlays into set_header arg."""
+    run_tag.publish(
+        transport_panda, "no_switch_observation", started_unix=100.0
+    )
+    sync_time = 1713200000.0
+    CorrConfigStore(transport_snap).upload_header({"sync_time": sync_time})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 1:
+            observer_both.stop_event.set()
+        return (read_count[0], mock_data)
+
+    with patch.object(
+        observer_both.corr_reader, "read", side_effect=read_side_effect
+    ):
+        observer_both.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    assert mock_file.set_header.called
+    (call_kwargs,) = (c.kwargs for c in mock_file.set_header.call_args_list)
+    written = call_kwargs["header"]
+    assert written["sync_time"] == sync_time
+    assert written["run_tag"] == "no_switch_observation"
+    assert written["run_started_at_unix"] == 100.0
+    assert written["obs_config"]["vna_save_dir"] == "/tmp/test_vna"

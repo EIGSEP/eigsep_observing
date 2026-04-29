@@ -15,6 +15,7 @@ from eigsep_redis import (
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from . import run_tag
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient
@@ -572,6 +573,19 @@ class PandaClient:
         header = self.vna.header
         header["mode"] = mode
         header["metadata_snapshot_unix"] = time.time()
+        # Provenance overlays — same shape and sentinel convention as
+        # EigObserver._with_header_overlays. self.cfg is canonical
+        # here because PandaClient owns the obs_config upload.
+        tag = run_tag.read(self.transport)
+        header["run_tag"] = (
+            tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
+        )
+        header["run_started_at_unix"] = (
+            tag["run_started_at_unix"]
+            if tag["run_started_at_unix"] is not None
+            else 0.0
+        )
+        header["obs_config"] = dict(self.cfg)
         metadata = self.metadata_snapshot.get()
 
         # Producer self-check against the VNA S11 contract (see

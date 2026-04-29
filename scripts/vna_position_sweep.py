@@ -31,6 +31,8 @@ import yaml
 from eigsep_redis import ConfigStore, StatusWriter, Transport
 
 from eigsep_observing import PandaClient
+from eigsep_observing.run_tag import clear as clear_run_tag
+from eigsep_observing.run_tag import publish as publish_run_tag
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
@@ -109,6 +111,7 @@ def main(transport, args):
         if client.vna is None:
             raise RuntimeError("VNA not initialized; check vna config block.")
 
+        publish_run_tag(transport, "vna_position_sweep")
         status.send(
             f"vna_position_sweep started ({len(grid)} grid points, "
             f"settle_s={settle_s})"
@@ -149,6 +152,7 @@ def main(transport, args):
             if client.motor_client is not None:
                 client.motor_client.halt()
             client.stop()
+        clear_run_tag(transport)
         status.send("vna_position_sweep ended")
         logger.info("vna_position_sweep ended")
 

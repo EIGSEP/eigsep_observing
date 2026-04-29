@@ -6,6 +6,7 @@ callable against the dummy transport used everywhere else.
 """
 
 import importlib.util
+import json
 import threading
 import time
 from argparse import Namespace
@@ -14,6 +15,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
+from eigsep_observing import run_tag
 from eigsep_observing.keys import VNA_STREAM
 
 
@@ -297,3 +299,79 @@ def test_no_switch_observation_calls_stop_when_motor_missing(
     client = captured["client"]
     assert client.stop_client.is_set()
     assert not client.heartbeat_thd.is_alive()
+
+
+# ---------------------------------------------------------------------
+# run_tag publish/clear lifecycle
+# ---------------------------------------------------------------------
+
+
+def _vna_stream_run_tags(transport):
+    """Decode every VNA stream entry's header and return its run_tag."""
+    tags = []
+    for _entry_id, fields in transport.r.xrange(VNA_STREAM, "-", "+"):
+        hdr_raw = fields.get(b"header") or fields.get("header")
+        if hdr_raw is None:
+            continue
+        if isinstance(hdr_raw, (bytes, bytearray)):
+            hdr_raw = hdr_raw.decode()
+        hdr = json.loads(hdr_raw)
+        tags.append(hdr.get("run_tag"))
+    return tags
+
+
+def test_no_switch_observation_tags_vna_entries_and_clears_on_exit(
+    transport, dummy_cfg, tmp_path
+):
+    """Every VNA entry written during the script carries
+    ``run_tag == "no_switch_observation"``, and the tag is cleared back
+    to the empty sentinel by the time main returns.
+    """
+    cfg_path = _write_cfg(
+        tmp_path,
+        dummy_cfg,
+        switch_schedule={"RFANT": 0.0, "RFNOFF": 0.05, "RFNON": 0.05},
+        motor_scan={
+            "az_range_deg": [-1.0, 1.0],
+            "el_range_deg": [-1.0, 1.0],
+            "repeat_count": 1,
+            "pause_s": 0.0,
+        },
+    )
+    nso = _load("no_switch_observation")
+    args = Namespace(cfg_file=cfg_path, dummy=True)
+    nso.main(transport, args)
+
+    tags = _vna_stream_run_tags(transport)
+    assert tags, "expected at least one VNA entry with a header"
+    assert all(t == "no_switch_observation" for t in tags), tags
+    # finally-block cleared the tag.
+    assert run_tag.read(transport) == {
+        "run_tag": None,
+        "run_started_at_unix": None,
+    }
+
+
+def test_vna_position_sweep_tags_vna_entries_and_clears_on_exit(
+    transport, dummy_cfg, tmp_path
+):
+    cfg_path = _write_cfg(
+        tmp_path,
+        dummy_cfg,
+        vna_position_sweep={
+            "az_grid_deg": [0.0],
+            "el_grid_deg": [0.0],
+            "settle_s": 0.0,
+        },
+    )
+    vps = _load("vna_position_sweep")
+    args = Namespace(cfg_file=cfg_path, dummy=True)
+    vps.main(transport, args)
+
+    tags = _vna_stream_run_tags(transport)
+    assert tags
+    assert all(t == "vna_position_sweep" for t in tags), tags
+    assert run_tag.read(transport) == {
+        "run_tag": None,
+        "run_started_at_unix": None,
+    }

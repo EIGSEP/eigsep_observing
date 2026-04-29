@@ -26,6 +26,8 @@ import yaml
 from eigsep_redis import ConfigStore, StatusWriter, Transport
 
 from eigsep_observing import PandaClient
+from eigsep_observing.run_tag import clear as clear_run_tag
+from eigsep_observing.run_tag import publish as publish_run_tag
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
@@ -95,6 +97,7 @@ def main(transport, args):
         if client.vna is None:
             raise RuntimeError("VNA not initialized; check vna config block.")
 
+        publish_run_tag(transport, "no_switch_observation")
         status.send("no_switch_observation started")
         logger.info("no_switch_observation started")
 
@@ -142,6 +145,7 @@ def main(transport, args):
             if client.motor_client is not None:
                 client.motor_client.halt()
             client.stop()
+        clear_run_tag(transport)
         status.send("no_switch_observation ended")
         logger.info("no_switch_observation ended")
 

@@ -23,6 +23,8 @@ import yaml
 from eigsep_redis import ConfigStore, Transport
 
 from eigsep_observing import PandaClient
+from eigsep_observing.run_tag import clear as clear_run_tag
+from eigsep_observing.run_tag import publish as publish_run_tag
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
@@ -70,35 +72,37 @@ else:
 
 logger.info(f"Client configuration: {client.cfg}")
 thds = {}
-# switches
-if client.cfg["use_switches"]:
-    switch_thd = Thread(target=client.switch_loop)
-    thds["switch"] = switch_thd
-    logger.info("Starting switch thread")
-    switch_thd.start()
-
-# VNA
-if client.cfg["use_vna"]:
-    vna_thd = Thread(target=client.vna_loop)
-    thds["vna"] = vna_thd
-    logger.info("Starting VNA thread")
-    vna_thd.start()
-
-# motor (periodic az/el scans)
-if client.cfg.get("use_motor", False):
-    motor_thd = Thread(target=client.motor_loop)
-    thds["motor"] = motor_thd
-    logger.info("Starting motor thread")
-    motor_thd.start()
-
-# tempctrl
-if client.cfg.get("use_tempctrl", False):
-    tempctrl_thd = Thread(target=client.tempctrl_loop)
-    thds["tempctrl"] = tempctrl_thd
-    logger.info("Starting tempctrl thread")
-    tempctrl_thd.start()
-
 try:
+    publish_run_tag(transport, "panda_observe")
+
+    # switches
+    if client.cfg["use_switches"]:
+        switch_thd = Thread(target=client.switch_loop)
+        thds["switch"] = switch_thd
+        logger.info("Starting switch thread")
+        switch_thd.start()
+
+    # VNA
+    if client.cfg["use_vna"]:
+        vna_thd = Thread(target=client.vna_loop)
+        thds["vna"] = vna_thd
+        logger.info("Starting VNA thread")
+        vna_thd.start()
+
+    # motor (periodic az/el scans)
+    if client.cfg.get("use_motor", False):
+        motor_thd = Thread(target=client.motor_loop)
+        thds["motor"] = motor_thd
+        logger.info("Starting motor thread")
+        motor_thd.start()
+
+    # tempctrl
+    if client.cfg.get("use_tempctrl", False):
+        tempctrl_thd = Thread(target=client.tempctrl_loop)
+        thds["tempctrl"] = tempctrl_thd
+        logger.info("Starting tempctrl thread")
+        tempctrl_thd.start()
+
     client.stop_client.wait()  # wait until stop signal is set
 except KeyboardInterrupt:
     logger.info("Keyboard interrupt received, stopping threads")
@@ -108,4 +112,5 @@ finally:
         logger.info(f"Joining thread {name}")
         t.join()
         logger.info(f"Thread {name} joined")
+    clear_run_tag(transport)
     logger.info("All threads joined, exiting.")
