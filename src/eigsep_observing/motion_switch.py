@@ -1,8 +1,9 @@
 """Coordinate RF switching with motor motion via a shared lock.
 
 The panda runs two independent command paths today: ``switch_loop`` /
-``vna_loop`` serialize against each other through ``switch_lock``, while
-``motor_loop`` deliberately stays out of that mutual exclusion. If
+``vna_loop`` serialize against each other through the panda's switch
+lock, while ``motor_loop`` deliberately stays out of that mutual
+exclusion. If
 motor stepping pulses turn out to bleed RF interference into VNA or
 correlator data, we want to be able to opt into "no switching while
 motors move" without rewriting either subsystem.
@@ -10,7 +11,8 @@ motors move" without rewriting either subsystem.
 This module provides the coordinator that mediates that decision. One
 ``RLock`` underlies both flows so:
 
-* ``switch_section`` always acquires (replaces ``with switch_lock``).
+* ``switch_section`` always acquires (the canonical way to take the
+  switch lock — direct ``with self._switch_lock`` is not used).
 * ``motion_section`` acquires only when ``serialize`` is True.
 * The same thread can re-enter from a wrapped context — required by
   the no-switch-observation script, which hosts a ``MotorClient.scan``

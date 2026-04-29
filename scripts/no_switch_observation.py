@@ -12,9 +12,9 @@ Flow:
 
 The scan-phase pin is implemented by holding ``client.switch_session``
 for the entire ``MotorClient.scan`` call. With per-move
-``coord.motion_section`` re-acquiring the same ``RLock``, this only
-works because :attr:`PandaClient.switch_lock` is an ``RLock``. A plain
-``Lock`` would deadlock on the first move.
+``coord.motion_section`` re-acquiring the same lock, this only works
+because the panda's switch lock is an ``RLock``. A plain ``Lock`` would
+deadlock on the first move.
 """
 
 from argparse import ArgumentParser
@@ -105,11 +105,11 @@ def main(transport, args):
         if not _calibration(client, status, "pre-scan"):
             return
 
-        # Pin RFANT for the duration of the scan. switch_session holds
-        # coord.switch_section() across the whole block; per-move
-        # motion_section calls re-acquire the same RLock from this
-        # thread, which is the load-bearing reason switch_lock is an
-        # RLock and not a plain Lock.
+        # Pin RFANT for the duration of the scan. switch_session
+        # holds coord.switch_section() across the whole block;
+        # per-move motion_section calls re-acquire the same RLock
+        # from this thread, which is the load-bearing reason the
+        # underlying lock is an RLock and not a plain Lock.
         with client.switch_session() as sw:
             if not sw("RFANT"):
                 raise RuntimeError("Failed to pin rfswitch to RFANT for scan.")
