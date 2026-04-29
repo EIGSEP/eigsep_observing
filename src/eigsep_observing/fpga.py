@@ -166,6 +166,14 @@ class EigsepFpga:
         self.pams_initialized = False
         self.is_synchronized = False
 
+        # ADC diagnostic publishers are best-effort and degrade
+        # gracefully: a bitstream that lacks ``input_rms_*`` (adc_stats)
+        # or has an incompatible snapshot BRAM (adc_snapshot) flips the
+        # corresponding flag off on first failure so the per-integration
+        # ERROR spam doesn't drown the journal. Restart to retry.
+        self._adc_stats_enabled = True
+        self._adc_snapshot_enabled = True
+
     def _make_fpga(self):
         """
         Construct the underlying CasperFpga object. Hookable so tests
@@ -952,9 +960,13 @@ class EigsepFpga:
         publish them on the metadata bus.
 
         Called from ``_read_integrations`` on every corr integration.
-        Failures are logged at ERROR and swallowed — corr data is
-        sacred, and a missing ADC stats row is strictly diagnostic.
+        First failure flips ``_adc_stats_enabled`` off and emits a
+        single WARNING; subsequent calls no-op until restart. Corr
+        data is sacred, and a missing ADC stats row is strictly
+        diagnostic.
         """
+        if not self._adc_stats_enabled:
+            return
         try:
             means, powers, rmss = self.inp.get_stats(sum_cores=False)
             payload = {"sensor_name": "adc", "status": "update"}
@@ -968,7 +980,13 @@ class EigsepFpga:
                 payload[f"input{n}_core{c}_rms"] = float(rmss[i])
             self.adc_metadata_writer.add("adc_stats", payload)
         except Exception as e:
-            self.logger.error(f"Failed to publish adc_stats: {e}")
+            self._adc_stats_enabled = False
+            self.logger.warning(
+                "Disabling adc_stats publisher for this run after "
+                "failure: %s. Restart eigsep-observe to retry. "
+                "(Likely cause: bitstream lacks input_rms_* registers.)",
+                e,
+            )
 
     def _publish_adc_snapshot(self):
         """
@@ -976,8 +994,11 @@ class EigsepFpga:
         frame on the diagnostic stream.
 
         Called from ``_publish_snapshots_loop`` at the configured
-        cadence. Failures are logged at ERROR and swallowed.
+        cadence. First failure flips ``_adc_snapshot_enabled`` off and
+        emits a single WARNING; subsequent calls no-op until restart.
         """
+        if not self._adc_snapshot_enabled:
+            return
         try:
             ant_ids = list(self.wiring["ants"].keys())
             n_snap_inputs = self.inp.nstreams // 2
@@ -1010,15 +1031,26 @@ class EigsepFpga:
                 wiring={"ants": {k: self.wiring["ants"][k] for k in ant_ids}},
             )
         except Exception as e:
-            self.logger.error(f"Failed to publish adc_snapshot: {e}")
+            self._adc_snapshot_enabled = False
+            self.logger.warning(
+                "Disabling adc_snapshot publisher for this run after "
+                "failure: %s. Restart eigsep-observe to retry. "
+                "(Likely cause: bitstream's snapshot BRAM is "
+                "incompatible with the consumer.)",
+                e,
+            )
 
     def _publish_snapshots_loop(self, period):
         """Background thread: publish one ADC snapshot every
         ``period`` seconds until ``self.event`` is set. Gated on
-        ``is_synchronized`` so pre-sync noise doesn't fill the stream."""
+        ``is_synchronized`` so pre-sync noise doesn't fill the stream.
+        Exits early once ``_adc_snapshot_enabled`` flips off so a
+        broken bitstream doesn't keep waking the thread for a no-op."""
         while not self.event.wait(period):
             if not self.is_synchronized:
                 continue
+            if not self._adc_snapshot_enabled:
+                return
             self._publish_adc_snapshot()
 
     def _read_integrations(self, pairs, timeout=10):

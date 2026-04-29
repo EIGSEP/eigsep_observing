@@ -164,14 +164,38 @@ class TestPublishAdcStats:
             )
             assert payload[f"input{n}_core{c}_rms"] == pytest.approx(rmss[i])
 
-    def test_publish_failure_is_logged_not_raised(self, fpga, caplog):
-        caplog.set_level(logging.ERROR)
+    def test_publish_failure_disables_publisher_with_warning(
+        self, fpga, caplog
+    ):
+        caplog.set_level(logging.WARNING)
         with patch.object(
             fpga.inp, "get_stats", side_effect=RuntimeError("FPGA dead")
         ):
             # Must not raise — corr data is sacred.
             fpga._publish_adc_stats()
-        assert "Failed to publish adc_stats" in caplog.text
+        assert fpga._adc_stats_enabled is False
+        assert "Disabling adc_stats publisher" in caplog.text
+        assert "FPGA dead" in caplog.text
+
+    def test_publish_after_disable_is_no_op(self, fpga, caplog):
+        caplog.set_level(logging.WARNING)
+        with patch.object(
+            fpga.inp, "get_stats", side_effect=RuntimeError("FPGA dead")
+        ) as get_stats:
+            fpga._publish_adc_stats()  # first call: fails, disables
+            assert get_stats.call_count == 1
+            assert fpga._adc_stats_enabled is False
+            # Subsequent calls must not touch the FPGA again.
+            fpga._publish_adc_stats()
+            fpga._publish_adc_stats()
+            assert get_stats.call_count == 1
+        # Only one WARNING line for the whole run.
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "adc_stats" in r.getMessage()
+        ]
+        assert len(warnings) == 1
 
 
 class TestPublishAdcSnapshot:
@@ -191,15 +215,40 @@ class TestPublishAdcSnapshot:
         assert sidecar["wiring"]["ants"]  # non-empty
         assert "unix_ts" in sidecar
 
-    def test_publish_snapshot_failure_logged_not_raised(self, fpga, caplog):
-        caplog.set_level(logging.ERROR)
+    def test_publish_snapshot_failure_disables_publisher_with_warning(
+        self, fpga, caplog
+    ):
+        caplog.set_level(logging.WARNING)
         with patch.object(
             fpga.inp,
             "get_adc_snapshot",
             side_effect=RuntimeError("snapshot bram misaligned"),
         ):
             fpga._publish_adc_snapshot()
-        assert "Failed to publish adc_snapshot" in caplog.text
+        assert fpga._adc_snapshot_enabled is False
+        assert "Disabling adc_snapshot publisher" in caplog.text
+        assert "snapshot bram misaligned" in caplog.text
+
+    def test_publish_snapshot_after_disable_is_no_op(self, fpga, caplog):
+        caplog.set_level(logging.WARNING)
+        with patch.object(
+            fpga.inp,
+            "get_adc_snapshot",
+            side_effect=RuntimeError("snapshot bram misaligned"),
+        ) as snap:
+            fpga._publish_adc_snapshot()  # first call: fails, disables
+            assert snap.call_count == 1
+            assert fpga._adc_snapshot_enabled is False
+            fpga._publish_adc_snapshot()
+            fpga._publish_adc_snapshot()
+            assert snap.call_count == 1
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "adc_snapshot" in r.getMessage()
+        ]
+        assert len(warnings) == 1
 
 
 class TestReadIntegrationsPublishesStats:
@@ -337,6 +386,23 @@ class TestPublishSnapshotsLoopShutdown:
         # True immediately and the function returns.
         fpga.event.set()
         fpga._publish_snapshots_loop(0.01)  # returns cleanly
+
+    def test_loop_exits_when_publisher_disabled(self, fpga):
+        """Once ``_adc_snapshot_enabled`` flips off the loop must
+        return rather than spin forever calling a no-op publisher."""
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        fpga._adc_snapshot_enabled = False
+        from threading import Thread as RealThread
+
+        t = RealThread(
+            target=fpga._publish_snapshots_loop,
+            args=(0.01,),
+            daemon=True,
+        )
+        t.start()
+        t.join(timeout=1)
+        assert not t.is_alive()
 
     def test_loop_skips_publish_when_unsynced(self, fpga):
         fpga.event = Event()
