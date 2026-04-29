@@ -189,9 +189,19 @@ def test_no_switch_observation_pins_rfant_during_scan(
 
     def _watcher(client):
         scan_started.wait(timeout=5.0)
+        # The script's sw("RFANT") ack precedes the rfswitch's
+        # periodic redis publication, so the metadata hash may
+        # briefly still hold the pre-scan state. Wait for the
+        # producer to confirm RFANT before sampling, else a stale
+        # read of the prior mode falsely fails the assertion.
+        deadline = time.monotonic() + 2.0
+        while not scan_done.is_set() and time.monotonic() < deadline:
+            if client._read_switch_mode_from_redis() == "RFANT":
+                break
+            time.sleep(0.005)
         while not scan_done.is_set():
             mode = client._read_switch_mode_from_redis()
-            if mode is not None:
+            if mode is not None and not scan_done.is_set():
                 scan_observed_modes.append(mode)
             time.sleep(0.02)
 
