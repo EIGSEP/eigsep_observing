@@ -25,17 +25,24 @@ default_cfg_file = (
 # ``APP_IMU_AZ`` = 6, see picohost 1.0.0). We work around this in
 # eigsep_observing by subclassing ``DummyPicoIMU`` and rebinding
 # ``EMULATOR_CLASS`` to a ``partial`` that pins the desired ``app_id``.
-# ``partial`` is used (rather than a plain function) to avoid the
-# descriptor binding that would otherwise turn ``self.EMULATOR_CLASS``
-# into a bound method and inject ``self`` as the first arg to
-# ``ImuEmulator``. If picohost later grows native ``DummyPicoImuEl`` /
-# ``DummyPicoImuAz`` classes, this shim can be deleted.
+# The ``partial`` is wrapped in ``staticmethod`` because Python 3.14 made
+# ``functools.partial`` a method descriptor: without ``staticmethod``,
+# accessing ``self.EMULATOR_CLASS`` would auto-bind ``self`` as the first
+# positional arg to ``ImuEmulator``, colliding with the pinned ``app_id``
+# keyword and raising ``TypeError: got multiple values for argument
+# 'app_id'``. ``staticmethod.__get__`` returns the wrapped object unbound,
+# restoring pre-3.14 behaviour. If picohost later grows native
+# ``DummyPicoImuEl`` / ``DummyPicoImuAz`` classes, this shim can be deleted.
 class _DummyPicoImuEl(picohost.testing.DummyPicoIMU):
-    EMULATOR_CLASS = partial(picohost.testing.ImuEmulator, app_id=3)
+    EMULATOR_CLASS = staticmethod(
+        partial(picohost.testing.ImuEmulator, app_id=3)
+    )
 
 
 class _DummyPicoImuAz(picohost.testing.DummyPicoIMU):
-    EMULATOR_CLASS = partial(picohost.testing.ImuEmulator, app_id=6)
+    EMULATOR_CLASS = staticmethod(
+        partial(picohost.testing.ImuEmulator, app_id=6)
+    )
 
 
 # Map device names to dummy picohost classes for the embedded manager.
