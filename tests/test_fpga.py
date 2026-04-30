@@ -1,4 +1,6 @@
 import logging
+import threading
+import time
 from contextlib import contextmanager
 from queue import Queue
 from threading import Event
@@ -7,6 +9,7 @@ import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing import corr as corr_mod
+from eigsep_observing.fpga import _FpgaLockProxy
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing import DummyEigsepFpga, utils
 
@@ -848,3 +851,109 @@ class TestEigsepFpga:
         # the stream.
         r = fpga_instance.transport.r
         assert r.xlen(CORR_STREAM) == 0
+
+
+class TestFpgaLockProxy:
+    """``EigsepFpga.fpga`` is wrapped in ``_FpgaLockProxy`` so the corr
+    poll thread, the snapshot loop, and ``_publish_adc_stats`` cannot
+    interleave TAPCP transactions on the casperfpga transport (which
+    is not thread-safe). Without serialization, two concurrent threads
+    can corrupt each other's responses and surface as ``RuntimeError(
+    "Failed to read ... from register X")`` even when the register
+    exists. These tests guard the structural contract and the
+    serialization invariant."""
+
+    def test_self_fpga_is_lock_proxy(self, fpga_instance):
+        """``self.fpga`` is the proxy, not the raw casperfpga/DummyFpga."""
+        assert isinstance(fpga_instance.fpga, _FpgaLockProxy)
+
+    def test_blocks_share_the_proxied_fpga(self, fpga_instance):
+        """Every block routes through the same proxied object so they
+        all serialize on the same lock. If a block held a reference to
+        the unwrapped fpga, its calls would bypass the lock entirely."""
+        assert fpga_instance.sync.host is fpga_instance.fpga
+        assert fpga_instance.noise.host is fpga_instance.fpga
+        assert fpga_instance.inp.host is fpga_instance.fpga
+        assert fpga_instance.pfb.host is fpga_instance.fpga
+
+    def test_concurrent_calls_do_not_overlap(self, fpga_instance):
+        """Two threads hammering the proxy never enter the underlying
+        DummyFpga method concurrently. We slow the underlying call
+        down so a missing lock would produce overlapping (enter, exit)
+        intervals; with the lock all intervals must be sequential.
+        """
+        intervals = []
+        intervals_lock = threading.Lock()
+
+        def slow_read_int(reg, **kw):
+            t_enter = time.perf_counter()
+            time.sleep(0.005)  # widen the contention window
+            t_exit = time.perf_counter()
+            with intervals_lock:
+                intervals.append((t_enter, t_exit))
+            return 0
+
+        # Patch the underlying DummyFpga's read_int — the proxy's
+        # __getattr__ resolves this every call, so the patched version
+        # is what runs inside the lock.
+        with patch.object(
+            fpga_instance.fpga._fpga, "read_int", side_effect=slow_read_int
+        ):
+            threads = [
+                threading.Thread(
+                    target=lambda: fpga_instance.fpga.read_int("foo")
+                )
+                for _ in range(8)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+
+        assert len(intervals) == 8
+        intervals.sort()
+        # Each interval must end before the next begins. A small
+        # epsilon avoids spurious failures from clock-resolution jitter
+        # on heavily-loaded CI runners.
+        eps = 1e-6
+        for (e1, x1), (e2, x2) in zip(intervals, intervals[1:]):
+            assert e2 + eps >= x1, (
+                f"overlapping intervals: ({e1:.6f},{x1:.6f}) "
+                f"and ({e2:.6f},{x2:.6f})"
+            )
+
+    def test_proxy_passes_non_callable_attributes_through(self, fpga_instance):
+        """State-only attributes don't hit the lock — they're plain
+        lookups on the underlying object."""
+        # DummyFpga sets ``snap_ip`` as a plain attribute.
+        assert fpga_instance.fpga.snap_ip == fpga_instance.fpga._fpga.snap_ip
+
+
+class TestInputSnapSelCache:
+    """``Input.get_adc_snapshot`` caches the ``snap_sel`` listdev
+    dispatch instead of probing the FPGA on every call. Saves one UDP
+    roundtrip per antenna per snapshot tick (six per tick at standard
+    wiring)."""
+
+    def test_listdev_called_once_across_many_snapshots(self, fpga_instance):
+        """Calling ``get_adc_snapshot`` repeatedly hits ``listdev``
+        exactly once."""
+        # The Dummy doesn't seed snapshot_bram, but ``get_adc_snapshot``
+        # works regardless because DummyFpga.read returns a fixed-fill
+        # bytestring of the requested size.
+        with patch.object(
+            fpga_instance.inp,
+            "listdev",
+            wraps=fpga_instance.inp.listdev,
+        ) as listdev_spy:
+            for ant in range(3):
+                fpga_instance.inp.get_adc_snapshot(ant)
+
+        assert listdev_spy.call_count == 1
+
+    def test_cache_initially_unset(self, fpga_instance):
+        """The cache is lazy — fresh ``Input`` has no decision yet."""
+        # Build a fresh fpga so we can inspect the cache before any
+        # ``get_adc_snapshot`` runs.
+        fresh = DummyEigsepFpga(program=False)
+        assert fresh.inp._has_snap_sel is None

@@ -16,7 +16,7 @@ import logging
 import time
 from pathlib import Path
 from queue import Queue
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 
 import numpy as np
 import yaml
@@ -79,6 +79,43 @@ def _cfg_diff_summary(disk_cfg, redis_cfg):
 
     _walk(disk_cfg, redis_cfg, "")
     return "\n".join(lines) if lines else "  <identical>"
+
+
+class _FpgaLockProxy:
+    """
+    Serialize every call into a casperfpga (or DummyFpga) instance
+    behind a shared ``threading.Lock``.
+
+    The casperfpga TAPCP transport is built on a single tftpy context
+    with no internal locking. Two threads issuing reads/writes against
+    the same instance can interleave UDP packets and corrupt each
+    other's responses, which surfaces as ``RuntimeError("Failed to
+    read … from register X …")`` even when the register exists. The
+    EIGSEP correlator runs the corr-acc-cnt poll on one thread and the
+    ADC snapshot publisher on another; this proxy lets blocks and
+    direct ``self.fpga.*`` callers share one lock without each site
+    having to wrap itself in a context manager.
+
+    Non-callable attributes are returned without locking — they're
+    pure state lookups (``host``, ``snap_ip``, etc.) that don't touch
+    the transport.
+    """
+
+    def __init__(self, fpga, lock):
+        self._fpga = fpga
+        self._lock = lock
+
+    def __getattr__(self, name):
+        attr = getattr(self._fpga, name)
+        if not callable(attr):
+            return attr
+        lock = self._lock
+
+        def wrapped(*args, **kwargs):
+            with lock:
+                return attr(*args, **kwargs)
+
+        return wrapped
 
 
 class EigsepFpga:
@@ -144,7 +181,14 @@ class EigsepFpga:
             self.fpg_file = str(fpg_file.resolve())
         self.cfg["fpg_file"] = self.fpg_file
 
-        self.fpga = self._make_fpga()
+        # Single lock guards every TAPCP transaction. Wrapping
+        # ``_make_fpga``'s result in ``_FpgaLockProxy`` means every
+        # block and every direct ``self.fpga.*`` call serializes on
+        # the same lock — required because casperfpga's transport is
+        # not thread-safe and the corr loop, the snapshot loop, and
+        # ``_publish_adc_stats`` all share one connection.
+        self._fpga_lock = Lock()
+        self.fpga = self._wrap_fpga(self._make_fpga())
         if program:
             force = program == "force"
             self.fpga.upload_to_ram_and_program(self.fpg_file, force=force)
@@ -183,6 +227,15 @@ class EigsepFpga:
         return casperfpga.CasperFpga(
             self.cfg["snap_ip"], transport=TapcpTransport
         )
+
+    def _wrap_fpga(self, raw):
+        """
+        Wrap the raw casperfpga (or DummyFpga) in the lock proxy.
+        Hookable so the ADC bench in ``scripts/adc_snapshot_bench.py``
+        can subclass with a timing-instrumented proxy without
+        re-pointing every block's ``host`` attribute after the fact.
+        """
+        return _FpgaLockProxy(raw, self._fpga_lock)
 
     def _make_adc(self, ref):
         """
