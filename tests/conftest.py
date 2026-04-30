@@ -17,11 +17,9 @@ are not useful outside a test run.
 """
 
 import pytest
-import yaml
 
 from eigsep_redis.testing import DummyTransport
 
-import eigsep_observing
 from eigsep_observing._test_fixtures import (  # noqa: F401 (re-exported)
     CORR_METADATA,
     ERROR_INTEGRATION_INDEX,
@@ -53,11 +51,49 @@ def module_tmpdir(tmp_path_factory):
 
 @pytest.fixture()
 def dummy_cfg(module_tmpdir):
-    path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-    cfg["vna_save_dir"] = str(module_tmpdir)
-    return cfg
+    return {
+        "rpi_ip": "localhost",
+        "panda_ip": "localhost",
+        "corr_save_dir": str(module_tmpdir),
+        "corr_ntimes": NTIMES,
+        "use_switches": True,
+        "switch_schedule": {"RFANT": 0, "RFNOFF": 20, "RFNON": 20},
+        "use_vna": False,
+        "vna_interval": 10,
+        "vna_ip": "127.0.0.1",
+        "vna_port": 5025,
+        "vna_timeout": 1,
+        "vna_settings": {
+            "fstart": 1e6,
+            "fstop": 250e6,
+            "npoints": 1000,
+            "ifbw": 100.0,
+            "power_dBm": {"ant": 0.0, "rec": -40.0},
+        },
+        "vna_save_dir": str(module_tmpdir),
+        "use_motor": False,
+        "motor_interval": 1,
+        "motor_failure_retry_s": 0.5,
+        "motor_scan": {},
+        "serialize_motion_and_switching": False,
+        "use_tempctrl": True,
+        "tempctrl_interval": 1,
+        "tempctrl_settings": {
+            "watchdog_timeout_ms": 30000,
+            "LNA": {
+                "enable": True,
+                "target_C": 25.0,
+                "hysteresis_C": 0.5,
+                "clamp": 0.6,
+            },
+            "LOAD": {
+                "enable": True,
+                "target_C": 25.0,
+                "hysteresis_C": 0.5,
+                "clamp": 0.6,
+            },
+        },
+    }
 
 
 @pytest.fixture

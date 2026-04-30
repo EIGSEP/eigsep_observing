@@ -129,7 +129,7 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     ignored stop_client. Also asserts the warning rides both channels
     (local + status stream) so the ground observer sees the failure."""
     caplog.set_level("WARNING")
-    assert client.vna is None  # dummy_config has use_vna: false
+    assert client.vna is None
     _arm_status_reader(client)
     t0 = time.monotonic()
     client.vna_loop()
