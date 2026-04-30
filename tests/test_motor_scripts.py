@@ -190,13 +190,32 @@ def test_no_switch_observation_pins_rfant_during_scan(
     def _watcher(client):
         scan_started.wait(timeout=5.0)
         # The script's sw("RFANT") ack precedes the rfswitch's
-        # periodic redis publication, so the metadata hash may
-        # briefly still hold the pre-scan state. Wait for the
-        # producer to confirm RFANT before sampling, else a stale
-        # read of the prior mode falsely fails the assertion.
+        # periodic redis publication: the manager-side cmd returns
+        # as soon as the cmd is delivered to firmware, but the
+        # firmware then enters a settle window before its next
+        # status broadcast. During pre-scan calibration we just
+        # burst-sent 11 switch cmds (VNAO..VNARF), which can stall
+        # the firmware's broadcaster long enough that the metadata
+        # hash still holds a *pre-cmd* RFANT (the boot publication
+        # before the VNA cycle). Gating the break on `rfswitch_ts`
+        # crossing a post-`sw("RFANT")` baseline guarantees we wait
+        # for an actual post-cmd publication before deciding the
+        # switch has settled to RFANT — otherwise the stale RFANT
+        # would let us through, and the firmware's still-pending
+        # UNKNOWN settle window would leak into the sample loop and
+        # falsely fail the deviation assertion.
+        sample_floor_ts = time.time()
         deadline = time.monotonic() + 2.0
         while not scan_done.is_set() and time.monotonic() < deadline:
-            if client._read_switch_mode_from_redis() == "RFANT":
+            try:
+                ts = client.metadata_snapshot.get("rfswitch_ts")
+            except KeyError:
+                ts = 0.0
+            if (
+                isinstance(ts, (int, float))
+                and ts > sample_floor_ts
+                and client._read_switch_mode_from_redis() == "RFANT"
+            ):
                 break
             time.sleep(0.005)
         while not scan_done.is_set():
