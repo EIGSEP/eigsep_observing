@@ -1022,7 +1022,7 @@ class EigsepFpga:
             return
         try:
             means, powers, rmss = self.inp.get_stats(sum_cores=False)
-            payload = {"sensor_name": "adc", "status": "update"}
+            payload = {"sensor_name": "adc_stats", "status": "update"}
             # get_stats returns 12 values where indices 2N and 2N+1 are
             # the interleaved ADC cores of snap input N. Label with the
             # same input index the corr file uses for autos.
