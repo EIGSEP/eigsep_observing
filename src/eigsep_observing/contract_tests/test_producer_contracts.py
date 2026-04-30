@@ -226,6 +226,17 @@ def test_every_schema_has_conforming_emulator(sensor_name):
         f"in this sensor is caught by CI."
     )
     reading = SENSOR_EMULATORS[sensor_name]()
+    # Consumer dispatch in `avg_metadata` keys SENSOR_SCHEMAS by the
+    # producer-emitted ``sensor_name`` field, not by the stream name.
+    # If the producer drifts away from the schema key, validation is
+    # silently skipped — surfacing only as the "No schema for sensor X"
+    # warning at runtime. Pin the convention here so the mismatch
+    # fails CI loudly instead.
+    assert reading.get("sensor_name") == sensor_name, (
+        f"Producer for '{sensor_name}' emits sensor_name="
+        f"{reading.get('sensor_name')!r}; consumer dispatch keys on "
+        f"this value, so a mismatch causes silent validation skip."
+    )
     violations = io._validate_metadata(reading, io.SENSOR_SCHEMAS[sensor_name])
     assert violations == [], f"{sensor_name} producer drift: {violations}"
 

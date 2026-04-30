@@ -107,7 +107,7 @@ class TestAdcStatsSchemaReduction:
     mirror what ``EigsepFpga._publish_adc_stats`` actually emits."""
 
     def _sample(self, rms_offset=0.0, status="update"):
-        out = {"sensor_name": "adc", "status": status}
+        out = {"sensor_name": "adc_stats", "status": status}
         for i in range(12):
             n, c = i // 2, i % 2
             out[f"input{n}_core{c}_mean"] = 0.01 + 0.001 * i
@@ -120,7 +120,7 @@ class TestAdcStatsSchemaReduction:
         samples = [self._sample(rms_offset=o) for o in (0.0, 2.0, 4.0)]
         avg = io._avg_sensor_values(samples, schema=schema)
         assert avg["status"] == "update"
-        assert avg["sensor_name"] == "adc"
+        assert avg["sensor_name"] == "adc_stats"
         for i in range(12):
             n, c = i // 2, i % 2
             # power mean over (10+i, 12+i, 14+i) is 12+i
@@ -154,7 +154,7 @@ class TestPublishAdcStats:
         raw = fpga.transport.r.hget("metadata", "adc_stats")
         assert raw is not None
         payload = json.loads(raw)
-        assert payload["sensor_name"] == "adc"
+        assert payload["sensor_name"] == "adc_stats"
         assert payload["status"] == "update"
         for i in range(12):
             n, c = i // 2, i % 2
