@@ -276,6 +276,11 @@ class Input(Block):
         self.USE_ZERO = 2
         self.INT_TIME = 2**20 / 250.0e6
         self._SNAPSHOT_SAMPLES_PER_POL = 2048
+        # Cached result of ``"snap_sel" in self.listdev()``. The
+        # bitstream's register map is fixed for the run, so dispatch
+        # only needs to check once. Lazy-evaluated on first use to
+        # keep ``__init__`` from hitting the FPGA.
+        self._has_snap_sel = None
 
     def get_status(self):
         """Return dict of current status."""
@@ -303,7 +308,9 @@ class Input(Block):
         Get a block of samples from both pols of `antenna`
         returns samples_x, samples_y
         """
-        if "snap_sel" in self.listdev():
+        if self._has_snap_sel is None:
+            self._has_snap_sel = "snap_sel" in self.listdev()
+        if self._has_snap_sel:
             return self._get_adc_snapshot_single_ant(antenna)
         else:
             return self._get_adc_snapshot_all_ants(antenna)

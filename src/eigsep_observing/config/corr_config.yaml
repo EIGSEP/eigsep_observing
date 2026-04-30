@@ -27,6 +27,15 @@ pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
 # ADC core) publish every integration regardless and land in the
 # corr file via the metadata-averaging path — this period only
 # controls the raw-samples stream, which is diagnostic-only.
-adc_snapshot_period_s: 1.0
+#
+# Default off: the snapshot publisher shares one casperfpga TAPCP
+# transport with the corr loop, so enabling it puts the corr poll
+# in contention with the snapshot reads. The transport is
+# serialized via ``_FpgaLockProxy``, but the loaded path has not
+# been validated on the deployment hardware — run
+# ``scripts/adc_snapshot_bench.py`` against the target SNAP and
+# confirm corr-poll latency stays inside the acceptance bar before
+# flipping a nonzero value here.
+adc_snapshot_period_s: 0
 # Hardware wiring (antenna → FEM → PAM → SNAP input mapping) lives in
 # `wiring.yaml`, not here. This file is software-only.
