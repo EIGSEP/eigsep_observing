@@ -34,9 +34,11 @@ import pytest
 import yaml
 from picohost import PicoPotentiometer
 from picohost.base import PicoRFSwitch
+from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
     LidarEmulator,
+    MotorEmulator,
     PotMonEmulator,
     RFSwitchEmulator,
     TempCtrlEmulator,
@@ -84,6 +86,38 @@ def _potmon_post_handler_reading():
     pot._base_redis_handler = lambda d: captured.update(d)
     raw = PotMonEmulator().get_status()
     pot._pot_redis_handler(raw)
+    return captured
+
+
+def _motor_post_handler_reading():
+    """Return a motor reading after _motor_redis_handler.
+
+    The actual ``motor`` producer is the composition
+    ``MotorEmulator.get_status()`` + ``PicoMotor._motor_redis_handler``
+    — the emulator (and the C firmware) emit position fields as
+    ``int`` (raw step counts), and the device handler is where they
+    are coerced to ``float`` so the consumer-side reduction picks the
+    float→mean policy rather than int→min. The contract this test
+    enforces is the *post-handler* shape (what reaches Redis), so the
+    fixture has to compose the two. Mirrors
+    ``_potmon_post_handler_reading``.
+    """
+    motor = PicoMotor.__new__(PicoMotor)
+    captured = {}
+    motor._base_redis_handler = lambda d: captured.update(d)
+    motor._motor_redis_handler(MotorEmulator().get_status())
+
+    for field in (
+        "az_pos",
+        "az_target_pos",
+        "el_pos",
+        "el_target_pos",
+    ):
+        value = captured.get(field)
+        assert value is None or isinstance(value, float), (
+            f"{field} must be float or None after "
+            f"_motor_redis_handler, got {type(value).__name__}"
+        )
     return captured
 
 
@@ -148,6 +182,7 @@ SENSOR_EMULATORS = {
     "tempctrl": lambda: TempCtrlEmulator().get_status(),
     "lidar": lambda: LidarEmulator().get_status(),
     "potmon": _potmon_post_handler_reading,
+    "motor": _motor_post_handler_reading,
     "adc_stats": _adc_stats_post_publish_reading,
 }
 

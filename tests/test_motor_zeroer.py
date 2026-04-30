@@ -93,8 +93,9 @@ def test_status_text_reflects_live_metadata(client):
         ),
         timeout=3.0,
     )
+    expected_az = zeroer._reader.get("motor")["az_pos"]
     az, _, connected = zeroer.status_text()
-    assert az == str(motor._emulator.azimuth.target_pos)
+    assert az == str(expected_az)
     assert connected is True
 
 

@@ -683,6 +683,22 @@ SENSOR_SCHEMAS = {
         "app_id": int,
         "distance_m": float,
     },
+    # Motor positions are stepper counts. The C firmware emits them
+    # as ints, but `PicoMotor._motor_redis_handler` coerces to float
+    # at the Redis-publish boundary so they go through the float→mean
+    # reduction rather than the int→min "invariant" reduction —
+    # positions legitimately change within an integration during a
+    # scan, so the integration row should record the mean position.
+    # See picohost's _motor_redis_handler for the producer-side cast.
+    "motor": {
+        "sensor_name": str,
+        "status": str,
+        "app_id": int,
+        "az_pos": float,
+        "az_target_pos": float,
+        "el_pos": float,
+        "el_target_pos": float,
+    },
     # `adc_stats` is produced by the SNAP-side correlator (not a pico),
     # published on the SNAP transport via a second ``MetadataWriter``
     # that lives in ``EigsepFpga``. One entry is emitted per corr
