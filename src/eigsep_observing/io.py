@@ -764,7 +764,14 @@ def _validate_metadata(entry, schema):
             continue
         expected = schema[key]
         if expected is float:
-            ok = isinstance(val, (int, float)) and not isinstance(val, bool)
+            # Strict float check matches `_avg_sensor_values`, which
+            # rejects ints at reduction time. If the validator were
+            # lenient (`isinstance(val, (int, float))`) an int-emitting
+            # producer would pass validation silently and then be
+            # dropped to None by the float reducer — silent data loss.
+            # Keep them aligned so contract drift surfaces as a
+            # WARNING here, not a None at write time.
+            ok = isinstance(val, float) and not isinstance(val, bool)
         elif expected is int:
             ok = isinstance(val, int) and not isinstance(val, bool)
         else:
