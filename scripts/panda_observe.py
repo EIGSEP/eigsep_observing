@@ -25,7 +25,13 @@ from eigsep_redis import ConfigStore, Transport
 from eigsep_observing import PandaClient
 from eigsep_observing.run_tag import clear as clear_run_tag
 from eigsep_observing.run_tag import publish as publish_run_tag
-from eigsep_observing.testing import DummyPandaClient
+
+try:
+    from eigsep_observing.testing import DummyPandaClient
+except ImportError:
+    _HAS_DUMMY = False
+else:
+    _HAS_DUMMY = True
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 # logger with rotating file handler
@@ -60,6 +66,11 @@ with open(args.cfg_file, "r") as f:
     cfg = yaml.safe_load(f)
 
 if args.dummy:
+    if not _HAS_DUMMY:
+        parser.error(
+            "Running in dummy mode, but testing module is not available. "
+            "Do pip install .[dev] to get required dependencies."
+        )
     logger.warning("Running in DUMMY mode, no hardware will be used.")
     transport = Transport(host="localhost", port=6380)
     transport.reset()  # reset test redis database

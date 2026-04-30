@@ -18,7 +18,13 @@ from eigsep_redis import Transport
 
 from eigsep_observing import EigsepFpga
 from eigsep_observing.snap_reinit import publish as publish_snap_reinit
-from eigsep_observing.testing import DummyEigsepFpga
+
+try:
+    from eigsep_observing.testing import DummyEigsepFpga
+except ImportError:
+    _HAS_DUMMY = False
+else:
+    _HAS_DUMMY = True
 from eigsep_observing.utils import (
     configure_eig_logger,
     get_config_path,
@@ -116,6 +122,11 @@ def main() -> None:
         program = args.program
 
     if args.dummy_mode:
+        if not _HAS_DUMMY:
+            parser.error(
+                "Dummy mode requires the eigsep_observing.testing module, which "
+                "is not installed. Install with `pip install eigsep-observing[dev]"
+            )
         logger.warning("Running in DUMMY mode.")
         transport = Transport(host="localhost", port=6380)
         fpga = DummyEigsepFpga(

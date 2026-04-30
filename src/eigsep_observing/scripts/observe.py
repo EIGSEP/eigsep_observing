@@ -19,7 +19,13 @@ import time
 from eigsep_redis import ConfigStore, Transport
 
 from eigsep_observing import EigObserver
-from eigsep_observing.testing import DummyEigObserver
+
+try:
+    from eigsep_observing.testing import DummyEigObserver
+except ImportError:
+    _HAVE_DUMMY = False
+else:
+    _HAVE_DUMMY = True
 from eigsep_observing.utils import configure_eig_logger
 
 
@@ -80,8 +86,14 @@ def main() -> int:
     configure_eig_logger(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
     if args.dummy:
+        if not _HAVE_DUMMY:
+            parser.error(
+                "Dummy mode requires eigsep_observing.testing. "
+                "Please install with `pip install eigsep-observing[dev]`."
+            )
         logger.warning(
             "Running in DUMMY mode, using mock Redis instances. "
             "No actual data will be recorded."
