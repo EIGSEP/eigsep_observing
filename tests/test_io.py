@@ -1737,9 +1737,15 @@ def test_validate_metadata():
     none_entry = {**valid, "distance_m": None}
     assert io._validate_metadata(none_entry, schema) == []
 
-    # int accepted for float field
+    # int rejected for float field — the validator's strictness mirrors
+    # `_avg_sensor_values`, which drops ints to None at reduction time.
+    # Flagging here surfaces producer drift as a WARNING in
+    # `avg_metadata` instead of silent data loss in the file.
     int_entry = {**valid, "distance_m": 2}
-    assert io._validate_metadata(int_entry, schema) == []
+    violations = io._validate_metadata(int_entry, schema)
+    assert len(violations) == 1
+    assert "expected float" in violations[0]
+    assert "got int" in violations[0]
 
     # missing key
     missing = {k: v for k, v in valid.items() if k != "distance_m"}
