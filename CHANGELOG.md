@@ -1,5 +1,75 @@
 # Changelog
 
+## [2.0.0](https://github.com/EIGSEP/eigsep_observing/compare/v1.0.0...v2.0.0) (2026-05-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **capture-spectrum:** write HDF5 with full header and optional panda metadata ([#83](https://github.com/EIGSEP/eigsep_observing/issues/83))
+* split EigsepRedis into Transport + writer/reader classes
+* callers using corr/VNA methods must switch from EigsepRedis to EigsepObsRedis. eigsep_observing.EigsepRedis now resolves to the base bus class (no corr/VNA methods).
+
+### Features
+
+* **capture-spectrum:** write HDF5 with full header and optional panda metadata ([#83](https://github.com/EIGSEP/eigsep_observing/issues/83)) ([5b6e5da](https://github.com/EIGSEP/eigsep_observing/commit/5b6e5da6791c4f9abd3b06c3326da42bcf39d051))
+* **corr:** gate CorrWriter.add on sync_time ([#47](https://github.com/EIGSEP/eigsep_observing/issues/47)) ([a189f0e](https://github.com/EIGSEP/eigsep_observing/commit/a189f0edc31599cecd4ddbac537997a8c3353ca7))
+* **corr:** stamp header_upload_unix, publish on every state change ([#51](https://github.com/EIGSEP/eigsep_observing/issues/51)) ([757b541](https://github.com/EIGSEP/eigsep_observing/commit/757b5416c99ca794ff0af27d1b0089f503735742))
+* **dev:** local fake-observation harness sharing one Redis ([#79](https://github.com/EIGSEP/eigsep_observing/issues/79)) ([11b2307](https://github.com/EIGSEP/eigsep_observing/commit/11b23073af310d22b6ef08e9cb6413e36867d1ef))
+* **fpga-init:** close attach-path validation gap via Redis-as-truth ([e95d89a](https://github.com/EIGSEP/eigsep_observing/commit/e95d89a7bc063263aaea806569c0de4d3280915b))
+* **fpga-init:** collapse init flags into --reinit, rehydrate sync_time on attach ([17a0bef](https://github.com/EIGSEP/eigsep_observing/commit/17a0befad2c4fcbf7e64b0fa05b191314230867e))
+* **fpga:** publish ADC diagnostics to Redis ([b8fe8ec](https://github.com/EIGSEP/eigsep_observing/commit/b8fe8ec773c9e7c348d9cec27a3495f853fd8b68))
+* **live-status:** add local Flask dashboard for field deployments ([83eb3e5](https://github.com/EIGSEP/eigsep_observing/commit/83eb3e5a13b8577237bcb44cd6f4ac30c65dc6c6))
+* **live-status:** surface active panda run_tag in dashboard header ([5ac96e0](https://github.com/EIGSEP/eigsep_observing/commit/5ac96e0f7b99a110bc45540404c90ee453b2c978))
+* **motor:** migrate scan + manual scripts from picohost via PicoProxy ([#71](https://github.com/EIGSEP/eigsep_observing/issues/71)) ([287919f](https://github.com/EIGSEP/eigsep_observing/commit/287919fdeb9ce33234d5079ba935e8b1ef43c6d5))
+* **observer:** split corr header-fetch failure modes with watchdog ([#48](https://github.com/EIGSEP/eigsep_observing/issues/48)) ([b17ae4d](https://github.com/EIGSEP/eigsep_observing/commit/b17ae4d9882b2ba527ba859fb0e6688bbd94f6c6))
+* **observer:** unify SNAP liveness under a single deadline in record_corr_data ([8924a99](https://github.com/EIGSEP/eigsep_observing/commit/8924a999d9b8656ba0334b02dae548f15da4b528))
+* **observing:** record run_tag + obs_config on every saved file ([f1dda9f](https://github.com/EIGSEP/eigsep_observing/commit/f1dda9f118ef401e0e835a6882656feeb518c1c6))
+* **panda-client:** add switch_session context manager ([#59](https://github.com/EIGSEP/eigsep_observing/issues/59)) ([bddbb32](https://github.com/EIGSEP/eigsep_observing/commit/bddbb32553addbe974a801d46c9e34231cc218fc))
+* **panda-client:** bump status stream maxlen 5 → 100 ([51aafcb](https://github.com/EIGSEP/eigsep_observing/commit/51aafcb10114256c9bc1d72c53ef97776a283e62))
+* **panda-client:** route panda warnings to ground via status stream; fix logger setup ([ccae27b](https://github.com/EIGSEP/eigsep_observing/commit/ccae27bad8fea604e96b707a2a5661a434f3a06a))
+* **panda-client:** self-validate VNA S11 payload; emit violations to ground via status stream ([75e129a](https://github.com/EIGSEP/eigsep_observing/commit/75e129ad89532e55efc5086cc39506afe14c11f7))
+* **panda:** add motor_loop + use_motor gating to PandaClient ([#72](https://github.com/EIGSEP/eigsep_observing/issues/72)) ([b03c54c](https://github.com/EIGSEP/eigsep_observing/commit/b03c54c16a4b5935c19a97dff0594aa4afb66871))
+* **panda:** add tempctrl_loop + use_tempctrl gating to PandaClient ([#74](https://github.com/EIGSEP/eigsep_observing/issues/74)) ([58cad56](https://github.com/EIGSEP/eigsep_observing/commit/58cad5685d0d7634fae16125165b969b1ed25249))
+* **panda:** enforce boot-time RFANT + vna_loop exception recovery ([#70](https://github.com/EIGSEP/eigsep_observing/issues/70)) ([154cf8b](https://github.com/EIGSEP/eigsep_observing/commit/154cf8ba94614c851974e800c6e3b6218fc5f679))
+* **panda:** motion-switch coordinator + VNA-position-sweep / no-switch-observation scripts ([0b49a34](https://github.com/EIGSEP/eigsep_observing/commit/0b49a34e773692f52a5210960c14e25c00630046))
+* **recovery:** systemd supervisor + non-suicidal liveness watchdog ([815a5cf](https://github.com/EIGSEP/eigsep_observing/commit/815a5cfd56a16b9a22c2b32888446b345f37756a))
+* **redis:** warn on corr stream gaps via acc_cnt monotonicity ([2b8279d](https://github.com/EIGSEP/eigsep_observing/commit/2b8279d79e4fb7792e129ec199a50e72a9ddb496))
+* **redis:** warn on stale metadata snapshot reads ([#62](https://github.com/EIGSEP/eigsep_observing/issues/62)) ([91b855c](https://github.com/EIGSEP/eigsep_observing/commit/91b855cea228bb8e9ebe3f3666b2cd541e73a03a))
+* **redis:** warn on stale metadata stream drains ([87da4d1](https://github.com/EIGSEP/eigsep_observing/commit/87da4d1067c8fa5f8abe24e11338f0d3b9aff22e))
+
+
+### Bug Fixes
+
+* change config ownership to Panda ([38bee1e](https://github.com/EIGSEP/eigsep_observing/commit/38bee1e44a106f65a5e7f82b9294c23ef9a518ae))
+* **fpga:** align adc_stats sensor_name with schema key ([d95dd5a](https://github.com/EIGSEP/eigsep_observing/commit/d95dd5a37ecc46264eaa1b847f1ffc86d03beabb))
+* **fpga:** disable ADC diag publishers on first failure ([f177dff](https://github.com/EIGSEP/eigsep_observing/commit/f177dfff66fdaa61157d77f57542207c64f7356f))
+* **fpga:** serialize TAPCP transactions via lock proxy ([896b0f0](https://github.com/EIGSEP/eigsep_observing/commit/896b0f00b246576b311601afb6177373a3791ac2))
+* **io:** add motor sensor schema, validate producer contract ([d3e7b26](https://github.com/EIGSEP/eigsep_observing/commit/d3e7b2611e0c26a25ad18a044018e63e9e294b24))
+* **io:** strict float check in _validate_metadata ([ff5c223](https://github.com/EIGSEP/eigsep_observing/commit/ff5c2231ed9c55c591e87fdd4f3809f18dc45781))
+* **live-status:** tolerate bus-down at startup via lazy Transport ([596e04e](https://github.com/EIGSEP/eigsep_observing/commit/596e04eef625989359cdbb9dcd69d10184e3197e))
+* **live-status:** unstall the plotter, pin axes, label by wiring ([a2433cd](https://github.com/EIGSEP/eigsep_observing/commit/a2433cdd7e264c74b01db2a01753544a66fb8608))
+* **panda-client:** drop dead VNA poll, stop mutating cfg, add stop() ([1e6fd56](https://github.com/EIGSEP/eigsep_observing/commit/1e6fd5646a002eee91a2973aa835af32334f9cf4))
+* **panda-client:** warn on failed VNA switch-back ([b7f98a4](https://github.com/EIGSEP/eigsep_observing/commit/b7f98a4588ce94ab8bb761aae7cece66de8ad331))
+* **panda:** survive proxy errors in RF switch observing loops ([0530d79](https://github.com/EIGSEP/eigsep_observing/commit/0530d7962deb93aa5197520308813ead57820780))
+* restrict add_metadata to json serializable objects only ([52d488b](https://github.com/EIGSEP/eigsep_observing/commit/52d488bd3a36e6b2c4aa8d861d71575279bb255b))
+* **scripts:** clean up panda client when validation guards fail ([cacd0f5](https://github.com/EIGSEP/eigsep_observing/commit/cacd0f5225568524a9d9be998e6edffc0c0fb41c))
+* seperate metadata streams from data streams in EigRedis class ([b8cc1ed](https://github.com/EIGSEP/eigsep_observing/commit/b8cc1ed575a500f057fa1cc653beee1a3d45d1d3))
+* skip testing import if missing test dependencies ([1cee97a](https://github.com/EIGSEP/eigsep_observing/commit/1cee97a6f317e5747ed08e27d73c8a90f8d1e0ba))
+* **testing:** wrap dummy IMU partial in staticmethod for Python 3.14 ([2b50238](https://github.com/EIGSEP/eigsep_observing/commit/2b5023802eccef5f03f8285e83ca81274e2ae9ab))
+* wrap testing imports in try/except and fail fast if not available when running in dummy mode ([0d7d259](https://github.com/EIGSEP/eigsep_observing/commit/0d7d259529cdca2886233c0d9e0da245ec644563))
+
+
+### Documentation
+
+* make inline comment about corr watchdog less verbose ([67a037d](https://github.com/EIGSEP/eigsep_observing/commit/67a037d6f1dff3b64656ca594be0592385e0c0c9))
+* **observe:** clarify panda start-order is not required ([22fa533](https://github.com/EIGSEP/eigsep_observing/commit/22fa533eeee93ab2b808e4f956bddec94dc68ffd))
+
+
+### Code Refactoring
+
+* split bus primitives into shared eigsep_redis package ([d898ef6](https://github.com/EIGSEP/eigsep_observing/commit/d898ef6013f6037d4ffd4235a55332488f711557))
+* split EigsepRedis into Transport + writer/reader classes ([693d73d](https://github.com/EIGSEP/eigsep_observing/commit/693d73db9d83e7bf8b3a7002241d4ed9704651c9))
+
 ## [1.0.0](https://github.com/EIGSEP/eigsep_observing/compare/v0.0.1...v1.0.0) (2026-04-14)
 
 
