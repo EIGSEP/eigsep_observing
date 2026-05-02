@@ -83,7 +83,6 @@ class DummyAdc:
     ):
         self.fpga = fpga
         self.name = device_name
-        self.device_info = device_info
         self.resolution = int(device_info["adc_resolution"])
         self.sample_rate = float(device_info["sample_rate"])
         self.num_channel = int(device_info["snap_inputs"])
