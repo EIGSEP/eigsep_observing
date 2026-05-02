@@ -73,21 +73,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install .[dev]
           python -m pip install -r hardware-requirements.txt
-      - name: Verify casperfpga and eigsep_observing lazy imports resolve
+      - name: Verify USE_CASPERFPGA is True with the fork installed
         run: |
           python -c "
-          import casperfpga
-          from casperfpga.transport_tapcp import TapcpTransport
-          from casperfpga import i2c, i2c_gpio, i2c_volt, i2c_eeprom
-          from casperfpga import i2c_sn, i2c_bar, i2c_motion, i2c_temp
-          from casperfpga import snapadc
-          import eigsep_observing.blocks
           import eigsep_observing.fpga
           assert eigsep_observing.fpga.USE_CASPERFPGA, (
               'USE_CASPERFPGA is False despite casperfpga being installed'
           )
-          print('All casperfpga and eigsep_observing imports OK')
           "
       - name: Test with pytest
+        # tests/test_casperfpga_api.py is a consumer-contract test that
+        # asserts the exact casperfpga symbols and methods this repo
+        # uses. It runs here (real fork installed) and is auto-skipped
+        # in the dummy-mode test job above.
         run: |
           pytest -n auto
