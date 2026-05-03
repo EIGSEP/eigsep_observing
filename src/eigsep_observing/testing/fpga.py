@@ -78,11 +78,15 @@ class DummyAdc:
     the SnapAdc interface that ``EigsepFpga.initialize_adc`` exercises.
     """
 
-    def __init__(self, fpga, num_chans=2, resolution=8, ref=None):
+    def __init__(
+        self, fpga, device_name, device_info, initialize=False, **kwargs
+    ):
         self.fpga = fpga
-        self.num_chans = num_chans
-        self.resolution = resolution
-        self.ref = ref
+        self.name = device_name
+        self.resolution = int(device_info["adc_resolution"])
+        self.sample_rate = float(device_info["sample_rate"])
+        self.num_channel = int(device_info["snap_inputs"])
+        self.ref = kwargs.pop("ref", 10)
 
     def init(self, sample_rate=500):
         self.adc = DummyAdcAdc()
@@ -182,7 +186,12 @@ class DummyEigsepFpga(EigsepFpga):
         )
 
     def _make_adc(self, ref):
-        return DummyAdc(self.fpga, ref=ref)
+        device_info = {
+            "adc_resolution": 8,
+            "sample_rate": self.cfg["sample_rate"],
+            "snap_inputs": 2,
+        }
+        return DummyAdc(self.fpga, "snap_adc", device_info, ref=ref)
 
     def _make_pam(self, num):
         return DummyPam(self.fpga, f"i2c_ant{num}")

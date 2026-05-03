@@ -242,8 +242,17 @@ class EigsepFpga:
         Construct the SNAP ADC wrapper. Hookable for tests; see
         `_make_fpga`.
         """
+        # casperfpga >=0.6.1 reads resolution / sample_rate /
+        # num_channel from a device_info dict. Values are
+        # placeholders; ``initialize_adc`` overwrites
+        # ``self.adc.sample_rate`` (in Hz) once the LMX is configured.
+        device_info = {
+            "adc_resolution": 8,
+            "sample_rate": self.cfg["sample_rate"],
+            "snap_inputs": 2,
+        }
         return casperfpga.snapadc.SnapAdc(
-            self.fpga, num_chans=2, resolution=8, ref=ref
+            self.fpga, "snap_adc", device_info, ref=ref
         )
 
     def _make_pam(self, num):
