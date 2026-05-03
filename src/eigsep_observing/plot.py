@@ -7,40 +7,6 @@ from .io import reshape_data
 from .utils import calc_freqs_dfreq
 
 
-def pairs_to_labels(pairs, wiring):
-    """
-    Map correlation pairs to antenna labels.
-
-    Parameters
-    ----------
-    pairs : list of str
-        List of correlation pairs (e.g., ['0', '1', '02', '13'])
-    wiring : dict
-        Hardware wiring manifest (see ``config/wiring.yaml``), typically
-        fetched via ``CorrConfigStore.get_header()["wiring"]``.
-
-    Returns
-    -------
-    labels : dict
-        Dictionary mapping pairs to antenna labels.
-
-    """
-    labels = {}
-    for ant, spec in wiring["ants"].items():
-        inp = str(spec["snap"]["input"])
-        if inp in pairs:
-            labels[inp] = ant
-
-    for pair in pairs:
-        if len(pair) == 2:
-            a1, a2 = pair[0], pair[1]
-            l0 = labels[a1]
-            l1 = labels[a2]
-            labels[pair] = f"{l0} / {l1}"
-
-    return labels
-
-
 class LivePlotter:
     """Real-time plotter for correlation spectra from Redis streams."""
 
@@ -98,9 +64,6 @@ class LivePlotter:
         self.corr_cfg = self.corr_config.get()
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
-
-        self.plot_labels = self.pairs  # XXX
-        # pairs_to_labels(self.pairs, self.corr_config.get_header()["wiring"])
 
         # Frequency axis
         freqs, _ = calc_freqs_dfreq(self.sample_rate, self.nchan)
@@ -183,7 +146,6 @@ class LivePlotter:
         for p in self.pairs:
             line_kwargs = {
                 "color": self.colors[p],
-                # "label": self.plot_labels[p],
                 "label": p,
                 "linewidth": 1.5,
             }

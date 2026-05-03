@@ -51,10 +51,9 @@ def _input_to_ant(wiring: Optional[dict]) -> dict[str, str]:
 def _pair_label(pair: str, input_to_ant: dict[str, str]) -> Optional[str]:
     """Antenna-friendly label for a corr pair, or ``None`` if unmappable.
 
-    Crosses follow the ``"{a} / {b}"`` convention from
-    ``plot.pairs_to_labels``. A pair with any input not in the map
-    yields ``None`` so the front-end can fall back to the raw key
-    rather than rendering a half-mapped label.
+    Crosses use the ``"{a} / {b}"`` convention. A pair with any input
+    not in the map yields ``None`` so the front-end can fall back to
+    the raw key rather than rendering a half-mapped label.
     """
     if len(pair) == 1:
         return input_to_ant.get(pair)
