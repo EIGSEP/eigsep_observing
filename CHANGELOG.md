@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/EIGSEP/eigsep_observing/compare/v2.0.0...v2.0.1) (2026-05-03)
+
+
+### Bug Fixes
+
+* migrate SnapAdc construction to casperfpga 0.7.1 device_info API ([#92](https://github.com/EIGSEP/eigsep_observing/issues/92)) ([404ce17](https://github.com/EIGSEP/eigsep_observing/commit/404ce17ef4dcc7527b09b387fde326ad47614552))
+
 ## [2.0.0](https://github.com/EIGSEP/eigsep_observing/compare/v1.0.0...v2.0.0) (2026-05-01)
 
 
