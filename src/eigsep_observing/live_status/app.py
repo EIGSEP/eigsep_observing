@@ -12,6 +12,7 @@ Flask-Login problem.
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any, Optional
 
@@ -30,6 +31,7 @@ from .thresholds import Thresholds
 
 
 CELSIUS_TO_KELVIN = 273.15
+T_REF_K = 290.0  # IEEE ENR reference temperature
 
 
 def _envelope(data: Any, warnings: Optional[list] = None) -> dict:
@@ -85,29 +87,33 @@ def _solve_calibration(
     plus a short ``reason`` so the frontend can render a warning.
     """
     cal_cfg = obs_cfg.get("calibration") or {}
-    raw_t_enr_k = cal_cfg.get("noise_diode_t_enr_k")
     raw_max_age_s = cal_cfg.get("max_onoff_age_s", 300.0)
+
+    raw_enr_db = cal_cfg.get("noise_diode_enr_db")
+    try:
+        enr_db = float(raw_enr_db) if raw_enr_db is not None else None
+    except (TypeError, ValueError):
+        enr_db = None
+    if enr_db is not None and not math.isfinite(enr_db):
+        enr_db = None
+
+    t_enr_k = T_REF_K * 10.0 ** (enr_db / 10.0) if enr_db is not None else None
 
     meta: dict = {
         "stale": True,
         "reason": None,
         "t_load_k": None,
-        "t_enr_k": raw_t_enr_k,
+        "noise_diode_enr_db": enr_db,
+        "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
         "last_rfnon_age_s": None,
         "max_onoff_age_s": raw_max_age_s,
         "gain_median": None,
     }
 
-    try:
-        t_enr_k = float(raw_t_enr_k)
-    except (TypeError, ValueError):
-        meta["reason"] = "noise_diode_t_enr_k invalid"
+    if enr_db is None:
+        meta["reason"] = "noise_diode_enr_db missing or non-numeric"
         return None, meta
-    if not np.isfinite(t_enr_k) or t_enr_k <= 0:
-        meta["reason"] = "noise_diode_t_enr_k missing or non-positive"
-        return None, meta
-    meta["t_enr_k"] = float(t_enr_k)
 
     try:
         max_age_s = float(raw_max_age_s)

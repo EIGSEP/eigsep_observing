@@ -8,6 +8,7 @@ are deterministic.
 
 from __future__ import annotations
 
+import math
 import time
 
 import numpy as np
@@ -25,6 +26,7 @@ from eigsep_observing.live_status import (
     LiveStatusAggregator,
     create_app,
 )
+from eigsep_observing.live_status.app import _solve_calibration
 
 
 NCHAN = 1024
@@ -42,7 +44,7 @@ OBS_CFG = {
     "switch_schedule": {"RFANT": 3600, "RFNOFF": 60, "RFNON": 60},
     "use_switches": True,
     "calibration": {
-        "noise_diode_t_enr_k": 1500.0,
+        "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
         "max_onoff_age_s": 300.0,
     },
 }
@@ -602,7 +604,10 @@ def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
     meta = data["calibration_meta"]
     assert meta["stale"] is False
     assert meta["t_load_k"] == pytest.approx(expected_k, rel=1e-6)
-    assert meta["t_enr_k"] == 1500.0
+    assert meta["t_enr_k"] == pytest.approx(1500.0, rel=1e-9)
+    assert meta["noise_diode_enr_db"] == pytest.approx(
+        10.0 * math.log10(1500.0 / 290.0), rel=1e-12
+    )
     assert meta["last_rfnoff_age_s"] is not None
     assert meta["last_rfnon_age_s"] is not None
     # Gain summary present and finite.
@@ -685,6 +690,71 @@ def test_corr_route_calibrated_scales_cross_magnitudes_by_gain(
     assert cal_mag0 == pytest.approx(raw_mag0 / 0.1, rel=1e-6)
     # Phase array is preserved on calibrated path.
     assert cal["pairs"]["02"]["phase"] == raw["pairs"]["02"]["phase"]
+
+
+def test_solve_calibration_bails_on_missing_enr_db(agg_primed):
+    """Cal block without noise_diode_enr_db disables cal with a clear reason."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {"calibration": {"max_onoff_age_s": 300}}
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "noise_diode_enr_db" in meta["reason"]
+    assert "missing or non-numeric" in meta["reason"]
+
+
+@pytest.mark.parametrize("bad_value", ["oops", [1, 2], {"x": 1}])
+def test_solve_calibration_bails_on_non_numeric_enr_db(bad_value, agg_primed):
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": bad_value,
+            "max_onoff_age_s": 300,
+        }
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "noise_diode_enr_db" in meta["reason"]
+
+
+@pytest.mark.parametrize(
+    "bad_value", [float("nan"), float("inf"), float("-inf")]
+)
+def test_solve_calibration_bails_on_non_finite_enr_db(bad_value, agg_primed):
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": bad_value,
+            "max_onoff_age_s": 300,
+        }
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "noise_diode_enr_db" in meta["reason"]
+
+
+def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
+    """Meta carries both configured dB and derived K."""
+    _seed_onoff_cache(agg_primed)
+    enr_db = 6.5
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": enr_db,
+            "max_onoff_age_s": 300,
+        }
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    assert meta["noise_diode_enr_db"] == pytest.approx(enr_db, rel=1e-12)
+    expected_k = 290.0 * 10.0 ** (enr_db / 10.0)
+    assert meta["t_enr_k"] == pytest.approx(expected_k, rel=1e-9)
 
 
 def test_index_renders_with_aggregator_cfg(client):

@@ -55,9 +55,14 @@ vna_position_sweep:
 # power to Kelvin using the most recent RFNON / RFNOFF integrations.
 # This is intentionally not the science-grade cal — that lives in a
 # separate offline pipeline.
+#
+# Y-factor: G = (P_on − P_off) / T_ns
+#           T_in = T_ns · (P − P_off) / (P_on − P_off) + T_LOAD
+# T_ns is the diode's excess noise temperature (post-attenuator), derived
+# from the IEEE-standard ENR convention: T_ns = 290 K · 10^(ENR_dB / 10).
 calibration:
-  noise_diode_t_enr_k: 1500.0  # noise-diode equivalent temperature, K
-  max_onoff_age_s: 300         # fall back to raw if cached on/off older than this
+  noise_diode_enr_db: 11.0   # post-attenuator ENR (dB), referenced to 290 K
+  max_onoff_age_s: 300       # fall back to raw if cached on/off older than this
 
 # tempctrl
 use_tempctrl: false
