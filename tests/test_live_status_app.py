@@ -757,6 +757,117 @@ def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
     assert meta["t_enr_k"] == pytest.approx(expected_k, rel=1e-9)
 
 
+def test_solve_calibration_logs_error_on_non_numeric_enr_db(
+    agg_primed, caplog
+):
+    """Non-coercible noise_diode_enr_db is a config contract violation;
+    CLAUDE.md requires it surface at ERROR, not just in meta.reason."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": "not-a-number",
+            "max_onoff_age_s": 300,
+        }
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "noise_diode_enr_db" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
+def test_solve_calibration_logs_error_on_non_finite_enr_db(agg_primed, caplog):
+    """NaN/inf ENR is not a usable config value — log loudly."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": float("nan"),
+            "max_onoff_age_s": 300,
+        }
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "noise_diode_enr_db" in r.message
+        and "not finite" in r.message
+        and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
+def test_solve_calibration_logs_error_on_non_numeric_max_age(
+    agg_primed, caplog
+):
+    """Non-coercible max_onoff_age_s is a config contract violation."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "max_onoff_age_s": "soon-ish",
+        }
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "max_onoff_age_s" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
+def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
+    agg_primed, caplog
+):
+    """A non-numeric tempctrl.LOAD_T_now is a producer/schema contract
+    violation; CLAUDE.md requires ERROR-level logging on top of the
+    dashboard-level reason."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot["tempctrl"] = {
+            "LOAD_T_now": "warm-ish",
+        }
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "max_onoff_age_s": 300,
+        }
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "LOAD_T_now" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
+def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
+    agg_primed, caplog, monkeypatch
+):
+    """The ``compute_gain_trx`` ValueError arm is unreachable in normal
+    operation (the outer guard forces ``t_enr_k`` finite/positive), so
+    this guards a regression of those guards. Force the path with a
+    monkeypatched solver."""
+    from eigsep_observing.live_status import app as app_mod
+
+    def boom(*_a, **_kw):
+        raise ValueError("synthetic regression")
+
+    monkeypatch.setattr(app_mod, "compute_gain_trx", boom)
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "max_onoff_age_s": 300,
+        }
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "compute_gain_trx failed" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
 def test_index_renders_with_aggregator_cfg(client):
     r = client.get("/")
     assert r.status_code == 200
