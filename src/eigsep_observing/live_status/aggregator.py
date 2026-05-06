@@ -53,7 +53,7 @@ from eigsep_redis.status import StatusReader
 from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
 from ..file_heartbeat import read as read_file_heartbeat
-from ..io import reshape_data
+from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
 from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
@@ -112,6 +112,19 @@ class StateSnapshot:
     # advances when the state actually changes, so dashboard dwell-time
     # and on-schedule checks reflect physical dwell, not push cadence.
     rfswitch_state_entered_unix: Optional[float] = None
+
+    # Most recent integration captured while the switch was settled in
+    # RFNOFF / RFNON (dwell past ``RFSWITCH_TRANSITION_WINDOW_S``). The
+    # live-status first-order Y-factor calibration reads from these.
+    # ``RFANT`` and ``UNKNOWN`` integrations never evict the caches, so
+    # the operator's "calibrated" toggle keeps painting across long
+    # antenna dwells and short transition windows.
+    last_rfnoff_pairs: Optional[dict[str, np.ndarray]] = None
+    last_rfnoff_unix: Optional[float] = None
+    last_rfnoff_acc_cnt: Optional[int] = None
+    last_rfnon_pairs: Optional[dict[str, np.ndarray]] = None
+    last_rfnon_unix: Optional[float] = None
+    last_rfnon_acc_cnt: Optional[int] = None
 
     # Panda status log (ring buffer).
     status_log: deque = field(
@@ -303,6 +316,16 @@ class LiveStatusAggregator:
                 status_log=deque(s.status_log, maxlen=s.status_log.maxlen),
                 file_heartbeat=dict(s.file_heartbeat),
                 snap_reinit=dict(s.snap_reinit),
+                last_rfnoff_pairs=(
+                    dict(s.last_rfnoff_pairs)
+                    if s.last_rfnoff_pairs is not None
+                    else None
+                ),
+                last_rfnon_pairs=(
+                    dict(s.last_rfnon_pairs)
+                    if s.last_rfnon_pairs is not None
+                    else None
+                ),
             )
 
     # -- SNAP drain loop -------------------------------------------
@@ -425,6 +448,7 @@ class LiveStatusAggregator:
                     s.corr_acc_cnt = acc_cnt
                     s.corr_last_unix = now
                     s.corr_pairs = pairs_data
+                    self._maybe_cache_onoff(s, pairs_data, acc_cnt, now)
 
             if adc_snap is not None:
                 data, sidecar = adc_snap
@@ -543,6 +567,37 @@ class LiveStatusAggregator:
         for inp_idx, frac in enumerate(fractions):
             out[str(inp_idx)] = float(frac)
         return out
+
+    @staticmethod
+    def _maybe_cache_onoff(
+        s: StateSnapshot,
+        pairs_data: dict[str, np.ndarray],
+        acc_cnt: int,
+        now: float,
+    ) -> None:
+        """Cache the freshly-received integration as an RFNOFF or RFNON
+        reference if the switch has been settled in that state past the
+        physical transition window.
+
+        ``RFANT`` and ``UNKNOWN`` (and any state still inside the
+        transition window) are no-ops so the operator's first-order
+        cal keeps using the most recent valid on/off pair.
+        """
+        rf = s.metadata_latest.get("rfswitch") or {}
+        name = rf.get("sw_state_name") if isinstance(rf, dict) else None
+        if name not in ("RFNOFF", "RFNON"):
+            return
+        entered = s.rfswitch_state_entered_unix
+        if entered is None or (now - entered) < RFSWITCH_TRANSITION_WINDOW_S:
+            return
+        if name == "RFNOFF":
+            s.last_rfnoff_pairs = pairs_data
+            s.last_rfnoff_unix = now
+            s.last_rfnoff_acc_cnt = acc_cnt
+        else:
+            s.last_rfnon_pairs = pairs_data
+            s.last_rfnon_unix = now
+            s.last_rfnon_acc_cnt = acc_cnt
 
     def _maybe_recompute_thresholds(self, header: dict) -> None:
         """Rebuild self.thresholds when integration_time changes."""

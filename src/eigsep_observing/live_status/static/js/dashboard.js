@@ -2,6 +2,7 @@
 
 const POLL_MS = 1000;
 const WIRING_TOGGLE_KEY = "eigsep.useWiringLabels";
+const CALIBRATED_TOGGLE_KEY = "eigsep.useCalibrated";
 
 // Wiring-labels toggle. Persisted in localStorage so the user's
 // choice survives reloads; gracefully no-ops when no labels are
@@ -19,6 +20,24 @@ function setUseWiringLabels(on) {
     localStorage.setItem(WIRING_TOGGLE_KEY, on ? "1" : "0");
   } catch (e) {
     // localStorage unavailable (e.g. private mode); checkbox state still works.
+  }
+}
+
+// Calibrated-spectra toggle. Default off — operators flip it on when
+// they want spectra in Kelvin via the first-order Y-factor cal.
+function getUseCalibrated() {
+  try {
+    return localStorage.getItem(CALIBRATED_TOGGLE_KEY) === "1";
+  } catch (e) {
+    return false;
+  }
+}
+
+function setUseCalibrated(on) {
+  try {
+    localStorage.setItem(CALIBRATED_TOGGLE_KEY, on ? "1" : "0");
+  } catch (e) {
+    // see setUseWiringLabels
   }
 }
 
@@ -76,7 +95,10 @@ async function fetchJson(path) {
 
 // Plotly log axes take ranges in log10. [-2, 9] mirrors the legacy
 // live_plotter ylim of (1e-2, 1e9); fixed range avoids autoscale jitter.
-const magLayout = {
+// Calibrated mode swaps to a linear y-axis in Kelvin and lets plotly
+// autorange — sky / load / on temperatures span ~1.5 orders of
+// magnitude, well within plotly's autorange comfort zone.
+const magLayoutRaw = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
   paper_bgcolor: "#1a1a1a",
   plot_bgcolor: "#111",
@@ -90,6 +112,15 @@ const magLayout = {
   },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
+};
+const magLayoutCal = {
+  ...magLayoutRaw,
+  yaxis: {
+    title: "Temperature [K]",
+    type: "linear",
+    autorange: true,
+    gridcolor: "#333",
+  },
 };
 
 const phaseLayout = {
@@ -111,6 +142,20 @@ const RAD_TO_DEG = 180 / Math.PI;
 
 let magPlotInitialized = false;
 let phasePlotInitialized = false;
+
+// Render the cal-warning bar above the plots. Empty/falsy reason hides
+// it; a present reason shows it with the operator-actionable text.
+function renderCalibrationWarning(meta) {
+  const el = document.getElementById("calibration-warning");
+  if (!el) return;
+  if (!meta || !meta.stale || !getUseCalibrated()) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = `Calibration unavailable — showing raw. Reason: ${meta.reason || "unknown"}`;
+}
 
 function updateCorr(corr) {
   if (!corr || !corr.pairs || !corr.freq_mhz) return;
@@ -142,11 +187,18 @@ function updateCorr(corr) {
       });
     }
   }
+  // Pick the y-axis layout based on whether the response is actually
+  // calibrated. The server sets ``calibration_meta.stale=true`` and
+  // returns raw values in the fallback case, so we look at meta + the
+  // toggle to decide which axis to render.
+  const isCalibrated =
+    getUseCalibrated() && corr.calibration_meta && !corr.calibration_meta.stale;
+  const layout = isCalibrated ? magLayoutCal : magLayoutRaw;
   if (!magPlotInitialized) {
-    Plotly.newPlot("plot-mag", magTraces, magLayout, { displayModeBar: false });
+    Plotly.newPlot("plot-mag", magTraces, layout, { displayModeBar: false });
     magPlotInitialized = true;
   } else {
-    Plotly.react("plot-mag", magTraces, magLayout, { displayModeBar: false });
+    Plotly.react("plot-mag", magTraces, layout, { displayModeBar: false });
   }
 
   if (phaseTraces.length > 0) {
@@ -157,6 +209,7 @@ function updateCorr(corr) {
       Plotly.react("plot-phase", phaseTraces, phaseLayout, { displayModeBar: false });
     }
   }
+  renderCalibrationWarning(corr.calibration_meta);
 }
 
 // ---- health --------------------------------------------------------
@@ -355,9 +408,10 @@ let lastAdc = null;
 
 async function tick() {
   try {
+    const corrPath = getUseCalibrated() ? "/api/corr?calibrated=1" : "/api/corr";
     const [health, corr, metadata, adc, rfswitch, file, status] = await Promise.all([
       fetchJson("/api/health"),
-      fetchJson("/api/corr"),
+      fetchJson(corrPath),
       fetchJson("/api/metadata"),
       fetchJson("/api/adc"),
       fetchJson("/api/rfswitch"),
@@ -389,6 +443,19 @@ function initWiringToggle() {
   });
 }
 
+function initCalibratedToggle() {
+  const cb = document.getElementById("toggle-calibrated");
+  if (!cb) return;
+  cb.checked = getUseCalibrated();
+  // On change, fire an immediate refetch — the cal math runs server-side
+  // so we need a fresh /api/corr response with the right query param.
+  cb.addEventListener("change", () => {
+    setUseCalibrated(cb.checked);
+    tick();
+  });
+}
+
 initWiringToggle();
+initCalibratedToggle();
 tick();
 setInterval(tick, POLL_MS);
