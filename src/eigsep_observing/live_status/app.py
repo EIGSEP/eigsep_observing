@@ -12,6 +12,7 @@ Flask-Login problem.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from typing import Any, Optional
@@ -28,6 +29,9 @@ from .calibration import (
 )
 from .signals import enabled_signals
 from .thresholds import Thresholds
+
+
+logger = logging.getLogger(__name__)
 
 
 CELSIUS_TO_KELVIN = 273.15
@@ -93,8 +97,18 @@ def _solve_calibration(
     try:
         enr_db = float(raw_enr_db) if raw_enr_db is not None else None
     except (TypeError, ValueError):
+        logger.error(
+            "Live-status cal: noise_diode_enr_db=%r is not coercible to "
+            "float; calibration disabled until obs_config is fixed.",
+            raw_enr_db,
+        )
         enr_db = None
     if enr_db is not None and not math.isfinite(enr_db):
+        logger.error(
+            "Live-status cal: noise_diode_enr_db=%r is not finite; "
+            "calibration disabled until obs_config is fixed.",
+            raw_enr_db,
+        )
         enr_db = None
 
     t_enr_k = T_REF_K * 10.0 ** (enr_db / 10.0) if enr_db is not None else None
@@ -118,6 +132,11 @@ def _solve_calibration(
     try:
         max_age_s = float(raw_max_age_s)
     except (TypeError, ValueError):
+        logger.error(
+            "Live-status cal: max_onoff_age_s=%r is not coercible to "
+            "float; calibration disabled until obs_config is fixed.",
+            raw_max_age_s,
+        )
         meta["reason"] = "max_onoff_age_s invalid"
         return None, meta
     if not np.isfinite(max_age_s) or max_age_s <= 0:
@@ -147,6 +166,12 @@ def _solve_calibration(
     try:
         load_t_now_f = float(load_t_now) if load_t_now is not None else None
     except (TypeError, ValueError):
+        logger.error(
+            "Live-status cal: tempctrl.LOAD_T_now=%r is not coercible to "
+            "float; producer/schema contract violation (LOAD_T_now must be "
+            "float per SENSOR_SCHEMAS).",
+            load_t_now,
+        )
         load_t_now_f = None
     if load_t_now_f is None:
         meta["reason"] = "tempctrl.LOAD_T_now missing or non-numeric"
@@ -167,7 +192,17 @@ def _solve_calibration(
             p_on = on_arr[0].astype(np.float64)
             try:
                 gain, t_rx = compute_gain_trx(p_on, p_off, t_load_k, t_enr_k)
-            except ValueError:
+            except ValueError as exc:
+                # Outer guards force `t_enr_k` finite and positive, so this
+                # path is only reachable via a logic regression — log loudly.
+                logger.error(
+                    "Live-status cal: compute_gain_trx failed for pair %r "
+                    "(t_load_k=%r, t_enr_k=%r): %s",
+                    pair,
+                    t_load_k,
+                    t_enr_k,
+                    exc,
+                )
                 continue
             coeffs[pair] = (gain, t_rx)
 
