@@ -113,19 +113,25 @@ def agg(seeded):
     a.stop(timeout=1.0)
 
 
-def _make_corr_row(pairs=("0", "1", "02")):
+def _make_corr_row(pairs=("0", "1", "02"), auto_value=100, cross_value=5):
     """Build a dict of ``{pair: bytes}`` matching the corr wire format.
 
     Autos: shape ``(nchan, acc_bins)`` int32 big-endian (raw, un-averaged).
     Cross "02": same shape but 2x length for real/imag interleave.
+
+    Uses ``np.full(..., dtype=DTYPE)`` rather than ``np.ones(...) * value``
+    because the latter upcasts to native int32 in numpy's broadcasting,
+    losing the big-endian byte order — production SNAP output is
+    big-endian, so the fixture must be too or ``np.frombuffer`` reads
+    back byteswapped values.
     """
     out = {}
     for p in pairs:
         if len(p) == 1:
-            arr = np.ones((NCHAN, 2), dtype=np.dtype(DTYPE)) * 100
+            arr = np.full((NCHAN, 2), auto_value, dtype=np.dtype(DTYPE))
         else:
             # Cross: real/imag interleaved; shape (nchan, 2, 2).
-            arr = np.ones((NCHAN, 2, 2), dtype=np.dtype(DTYPE)) * 5
+            arr = np.full((NCHAN, 2, 2), cross_value, dtype=np.dtype(DTYPE))
         out[p] = arr.tobytes()
     return out
 
@@ -650,6 +656,154 @@ def test_start_stop_under_continuous_publishing(agg, seeded):
         agg.stop(timeout=2.0)
         # Shutdown should complete within a few ticks.
         assert time.time() - t0 < 3.0
+
+
+# ---------------------------------------------------------------------
+# RFNOFF / RFNON spectrum cache (first-order calibration on the live
+# dashboard reads from these — see live_status/calibration.py).
+# ---------------------------------------------------------------------
+
+
+def _publish_rfswitch(panda, state_name: str, sw_state: int = 1) -> None:
+    MetadataWriter(panda).add(
+        "rfswitch",
+        {
+            "sensor_name": "rfswitch",
+            "app_id": 7,
+            "status": "update",
+            "sw_state": sw_state,
+            "sw_state_name": state_name,
+        },
+    )
+
+
+def test_rfnoff_spectrum_caches_when_dwell_past_transition_window(agg, seeded):
+    """A corr tick that arrives while the switch has been in RFNOFF
+    for longer than the transition window must populate
+    ``state.last_rfnoff_pairs`` and the matching unix/acc_cnt fields."""
+    snap, panda = seeded
+    _publish_rfswitch(panda, "RFNOFF")
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    # Backdate the transition timestamp so the dwell exceeds the
+    # 0.5 s transition window without sleeping.
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=200, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfnoff_pairs is not None
+    assert "0" in state.last_rfnoff_pairs
+    assert state.last_rfnoff_acc_cnt == 200
+    assert state.last_rfnoff_unix is not None
+    # The RFNON cache is independent and stays empty until RFNON dwells.
+    assert state.last_rfnon_pairs is None
+
+
+def test_rfnon_spectrum_caches_independently_of_rfnoff(agg, seeded):
+    snap, panda = seeded
+    _publish_rfswitch(panda, "RFNON", sw_state=3)
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=300, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfnon_pairs is not None
+    assert state.last_rfnon_acc_cnt == 300
+    assert state.last_rfnoff_pairs is None  # RFNOFF was never observed
+
+
+def test_corr_during_transition_window_is_not_cached(agg, seeded):
+    """Spectra captured while the physical switch is mid-actuation
+    (i.e. less than ``RFSWITCH_TRANSITION_WINDOW_S`` since the state
+    name flipped) are contaminated and must be skipped — same policy
+    as the on-disk file writer."""
+    snap, panda = seeded
+    _publish_rfswitch(panda, "RFNOFF")
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    # Pretend the state just changed: dwell well below the 0.5 s window.
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 0.05
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=400, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfnoff_pairs is None
+
+
+def test_corr_in_rfant_does_not_evict_cache(agg, seeded):
+    """RFANT is the science state — the cache must hold the most recent
+    on/off pair across many RFANT integrations, not get blown away
+    every time we land on the antenna."""
+    snap, panda = seeded
+    # First: observe an RFNOFF integration that gets cached.
+    _publish_rfswitch(panda, "RFNOFF")
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=500, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+    agg._snap_tick()
+    cached_acc_cnt = agg.snapshot().last_rfnoff_acc_cnt
+    assert cached_acc_cnt == 500
+
+    # Then switch to RFANT and tick several times — the RFNOFF cache
+    # must survive untouched.
+    _publish_rfswitch(panda, "RFANT")
+    agg._panda_tick()
+    for cnt in (501, 502, 503):
+        CorrWriter(snap).add(
+            _make_corr_row(), cnt=cnt, sync_time=1000.0, dtype=DTYPE
+        )
+        agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfnoff_acc_cnt == 500
+    assert state.last_rfnoff_pairs is not None
+
+
+def test_unknown_state_does_not_cache(agg, seeded):
+    """The file writer marks transition windows as ``"UNKNOWN"``; that
+    sentinel must never end up tagged as either RFNOFF or RFNON in
+    the cache."""
+    snap, panda = seeded
+    _publish_rfswitch(panda, "UNKNOWN")
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=600, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfnoff_pairs is None
+    assert state.last_rfnon_pairs is None
 
 
 def test_thresholds_from_constructor_override():

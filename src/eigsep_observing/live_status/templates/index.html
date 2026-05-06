@@ -20,7 +20,12 @@
       <input type="checkbox" id="toggle-wiring">
       <span>Wiring labels</span>
     </label>
+    <label class="toggle" title="Convert spectra to Kelvin using the most recent RFNON / RFNOFF integrations (first-order Y-factor cal). Falls back to raw with a warning if the on/off cache is missing or stale.">
+      <input type="checkbox" id="toggle-calibrated">
+      <span>Calibrated (T_sky)</span>
+    </label>
   </div>
+  <div id="calibration-warning" class="cal-warn" hidden></div>
 </header>
 
 <main class="grid">

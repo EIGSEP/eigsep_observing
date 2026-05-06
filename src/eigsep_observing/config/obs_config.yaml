@@ -50,6 +50,15 @@ vna_position_sweep:
   el_grid_deg: [0, 90, 180, 270]
   settle_s: 2.0  # post-move dwell before VNA fires
 
+# live-status first-order Y-factor calibration (display-only).
+# The dashboard's "Calibrated" toggle reads these to convert raw corr
+# power to Kelvin using the most recent RFNON / RFNOFF integrations.
+# This is intentionally not the science-grade cal — that lives in a
+# separate offline pipeline.
+calibration:
+  noise_diode_t_enr_k: 1500.0  # noise-diode equivalent temperature, K
+  max_onoff_age_s: 300         # fall back to raw if cached on/off older than this
+
 # tempctrl
 use_tempctrl: false
 tempctrl_interval: 60  # seconds between setpoint re-apply + health check

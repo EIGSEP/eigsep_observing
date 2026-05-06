@@ -16,12 +16,20 @@ import time
 from typing import Any, Optional
 
 import numpy as np
-from flask import Flask, Response, jsonify, render_template
+from flask import Flask, Response, jsonify, render_template, request
 from plotly.offline import get_plotlyjs
 
 from .aggregator import LiveStatusAggregator, StateSnapshot
+from .calibration import (
+    apply_calibration_auto,
+    apply_calibration_cross_mag,
+    compute_gain_trx,
+)
 from .signals import enabled_signals
 from .thresholds import Thresholds
+
+
+CELSIUS_TO_KELVIN = 273.15
 
 
 def _envelope(data: Any, warnings: Optional[list] = None) -> dict:
@@ -66,10 +74,157 @@ def _pair_label(pair: str, input_to_ant: dict[str, str]) -> Optional[str]:
     return None
 
 
-def _corr_payload(state: StateSnapshot) -> dict:
+def _solve_calibration(
+    state: StateSnapshot, obs_cfg: dict, now: float
+) -> tuple[Optional[dict], dict]:
+    """Build per-channel ``(gain, t_rx)`` for the dashboard cal toggle.
+
+    Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
+    can't run (missing cache, stale cache, missing T_LOAD, missing
+    config); the ``meta`` dict is always returned and includes ``stale``
+    plus a short ``reason`` so the frontend can render a warning.
+    """
+    cal_cfg = obs_cfg.get("calibration") or {}
+    raw_t_enr_k = cal_cfg.get("noise_diode_t_enr_k")
+    raw_max_age_s = cal_cfg.get("max_onoff_age_s", 300.0)
+
+    meta: dict = {
+        "stale": True,
+        "reason": None,
+        "t_load_k": None,
+        "t_enr_k": raw_t_enr_k,
+        "last_rfnoff_age_s": None,
+        "last_rfnon_age_s": None,
+        "max_onoff_age_s": raw_max_age_s,
+        "gain_median": None,
+    }
+
+    try:
+        t_enr_k = float(raw_t_enr_k)
+    except (TypeError, ValueError):
+        meta["reason"] = "noise_diode_t_enr_k invalid"
+        return None, meta
+    if not np.isfinite(t_enr_k) or t_enr_k <= 0:
+        meta["reason"] = "noise_diode_t_enr_k missing or non-positive"
+        return None, meta
+    meta["t_enr_k"] = float(t_enr_k)
+
+    try:
+        max_age_s = float(raw_max_age_s)
+    except (TypeError, ValueError):
+        meta["reason"] = "max_onoff_age_s invalid"
+        return None, meta
+    if not np.isfinite(max_age_s) or max_age_s <= 0:
+        meta["reason"] = "max_onoff_age_s missing or non-positive"
+        return None, meta
+    meta["max_onoff_age_s"] = float(max_age_s)
+
+    rfnoff = state.last_rfnoff_pairs
+    rfnon = state.last_rfnon_pairs
+    if rfnoff is None or rfnon is None:
+        meta["reason"] = "no on/off pair cached yet"
+        return None, meta
+
+    if state.last_rfnoff_unix is not None:
+        meta["last_rfnoff_age_s"] = max(0.0, now - state.last_rfnoff_unix)
+    if state.last_rfnon_unix is not None:
+        meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
+    for age in (meta["last_rfnoff_age_s"], meta["last_rfnon_age_s"]):
+        if age is None or age > max_age_s:
+            meta["reason"] = "on/off cache older than max_onoff_age_s"
+            return None, meta
+
+    tempctrl = state.metadata_snapshot.get("tempctrl")
+    load_t_now = (
+        tempctrl.get("LOAD_T_now") if isinstance(tempctrl, dict) else None
+    )
+    try:
+        load_t_now_f = float(load_t_now) if load_t_now is not None else None
+    except (TypeError, ValueError):
+        load_t_now_f = None
+    if load_t_now_f is None:
+        meta["reason"] = "tempctrl.LOAD_T_now missing or non-numeric"
+        return None, meta
+    t_load_k = load_t_now_f + CELSIUS_TO_KELVIN
+    meta["t_load_k"] = t_load_k
+
+    coeffs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    for pair, off_arr in rfnoff.items():
+        on_arr = rfnon.get(pair)
+        if on_arr is None or off_arr.shape != on_arr.shape:
+            continue
+        # Autos are ``(1, NCHAN)`` int32 power; gain is solved per-channel
+        # against the auto power. Cross pairs (``(1, NCHAN, 2)``) reuse
+        # the same per-channel gain at apply time.
+        if off_arr.ndim == 2:
+            p_off = off_arr[0].astype(np.float64)
+            p_on = on_arr[0].astype(np.float64)
+            try:
+                gain, t_rx = compute_gain_trx(p_on, p_off, t_load_k, t_enr_k)
+            except ValueError:
+                continue
+            coeffs[pair] = (gain, t_rx)
+
+    if not coeffs:
+        meta["reason"] = "no auto pair available to solve gain"
+        return None, meta
+
+    medians = [
+        float(np.nanmedian(g))
+        for g, _ in coeffs.values()
+        if np.any(np.isfinite(g))
+    ]
+    if not medians:
+        meta["reason"] = "computed gain contains no finite values"
+        return None, meta
+
+    meta["gain_median"] = float(np.median(medians))
+    meta["stale"] = False
+    meta["reason"] = None
+    return coeffs, meta
+
+
+def _pick_pair_coeffs(
+    pair: str, coeffs: dict[str, tuple[np.ndarray, np.ndarray]]
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Map a corr pair to the gain/T_rx solved on its underlying inputs.
+
+    Auto: ``coeffs[pair]`` directly. Cross ``"ab"``: prefer the geometric
+    mean of inputs ``a`` and ``b``'s gains (single-receiver assumption);
+    fall back to either input's gain if only one is solved.
+    """
+    if pair in coeffs:
+        return coeffs[pair]
+    if len(pair) == 2:
+        a = coeffs.get(pair[0])
+        b = coeffs.get(pair[1])
+        if a is not None and b is not None:
+            gain = np.sqrt(a[0] * b[0])
+            return gain, a[1]
+        if a is not None:
+            return a
+        if b is not None:
+            return b
+    return None
+
+
+def _corr_payload(
+    state: StateSnapshot,
+    *,
+    calibrated: bool = False,
+    obs_cfg: Optional[dict] = None,
+) -> dict:
     pairs_out: dict[str, dict] = {}
     freqs = state.corr_freqs
     input_to_ant = _input_to_ant((state.corr_header or {}).get("wiring"))
+    coeffs: Optional[dict] = None
+    cal_meta: Optional[dict] = None
+    if calibrated:
+        coeffs, cal_meta = _solve_calibration(
+            state, obs_cfg or {}, time.time()
+        )
+        if coeffs is None:
+            calibrated = False  # fall back to raw, keep cal_meta for the UI
     if state.corr_pairs and freqs is not None:
         for pair, arr in state.corr_pairs.items():
             if arr is None or arr.size == 0:
@@ -86,6 +241,11 @@ def _corr_payload(state: StateSnapshot) -> dict:
                 )
                 mag = np.abs(complex_vals)
                 phase = np.angle(complex_vals)
+                if calibrated and coeffs is not None:
+                    pair_coeffs = _pick_pair_coeffs(pair, coeffs)
+                    if pair_coeffs is not None:
+                        gain, _ = pair_coeffs
+                        mag = apply_calibration_cross_mag(mag, gain)
                 pairs_out[pair] = {
                     "mag": mag.tolist(),
                     "phase": phase.tolist(),
@@ -93,17 +253,26 @@ def _corr_payload(state: StateSnapshot) -> dict:
                 }
             else:
                 row = arr[0] if arr.ndim == 2 else arr
+                row = np.asarray(row, dtype=np.float64)
+                if calibrated and coeffs is not None:
+                    pair_coeffs = _pick_pair_coeffs(pair, coeffs)
+                    if pair_coeffs is not None:
+                        gain, t_rx = pair_coeffs
+                        row = apply_calibration_auto(row, gain, t_rx)
                 pairs_out[pair] = {
-                    "mag": np.asarray(row, dtype=np.float64).tolist(),
+                    "mag": row.tolist(),
                     "phase": None,
                     "label": label,
                 }
-    return {
+    payload = {
         "acc_cnt": state.corr_acc_cnt,
         "acc_cadence_s": state.corr_cadence_s,
         "freq_mhz": ((freqs * 1e-6).tolist() if freqs is not None else None),
         "pairs": pairs_out,
     }
+    if cal_meta is not None:
+        payload["calibration_meta"] = cal_meta
+    return payload
 
 
 def _metadata_payload(
@@ -332,7 +501,14 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     @app.route("/api/corr")
     def api_corr():
         state = aggregator.snapshot()
-        return jsonify(_envelope(_corr_payload(state)))
+        calibrated = request.args.get("calibrated") == "1"
+        return jsonify(
+            _envelope(
+                _corr_payload(
+                    state, calibrated=calibrated, obs_cfg=aggregator.obs_cfg
+                )
+            )
+        )
 
     @app.route("/api/metadata")
     def api_metadata():

@@ -41,6 +41,10 @@ OBS_CFG = {
     },
     "switch_schedule": {"RFANT": 3600, "RFNOFF": 60, "RFNON": 60},
     "use_switches": True,
+    "calibration": {
+        "noise_diode_t_enr_k": 1500.0,
+        "max_onoff_age_s": 300.0,
+    },
 }
 
 
@@ -66,12 +70,16 @@ def _rewind(transport, names):
         transport._set_last_read_id(n, "0")
 
 
-def _auto_bytes():
-    return (np.ones((NCHAN, 2), dtype=np.dtype(DTYPE)) * 100).tobytes()
+def _auto_bytes(value=100):
+    # ``np.full`` keeps the big-endian dtype that ``np.ones * scalar``
+    # would silently upcast to native int32 — production SNAP output is
+    # big-endian, so the fixture must round-trip through ``np.frombuffer``
+    # at the right byte order.
+    return np.full((NCHAN, 2), value, dtype=np.dtype(DTYPE)).tobytes()
 
 
-def _cross_bytes():
-    return (np.ones((NCHAN, 2, 2), dtype=np.dtype(DTYPE)) * 5).tobytes()
+def _cross_bytes(value=5):
+    return np.full((NCHAN, 2, 2), value, dtype=np.dtype(DTYPE)).tobytes()
 
 
 @pytest.fixture
@@ -530,6 +538,153 @@ def test_envelope_shape(client):
         body = client.get(path).get_json()
         assert set(body.keys()) == {"ok", "data", "warnings"}, path
         assert body["ok"] is True
+
+
+# ---------------------------------------------------------------------
+# /api/corr?calibrated=1 — first-order Y-factor cal toggle
+# ---------------------------------------------------------------------
+
+
+def _seed_onoff_cache(
+    agg, *, p_off_value: int = 100, p_on_value: int = 250
+) -> None:
+    """Inject a fresh on/off pair into the aggregator state.
+
+    Uses the post-``reshape_data`` shape (``(1, NCHAN)`` int32 autos,
+    ``(1, NCHAN, 2)`` int32 crosses) so the live-status calibration
+    sees exactly what the SNAP drain would produce.
+    """
+    auto_off = np.full((1, NCHAN), p_off_value, dtype=np.int32)
+    auto_on = np.full((1, NCHAN), p_on_value, dtype=np.int32)
+    cross_off = np.full((1, NCHAN, 2), p_off_value // 20, dtype=np.int32)
+    cross_on = np.full((1, NCHAN, 2), p_on_value // 20, dtype=np.int32)
+    now = time.time()
+    with agg._lock:
+        agg.state.last_rfnoff_pairs = {"0": auto_off, "02": cross_off}
+        agg.state.last_rfnoff_unix = now
+        agg.state.last_rfnoff_acc_cnt = 90
+        agg.state.last_rfnon_pairs = {"0": auto_on, "02": cross_on}
+        agg.state.last_rfnon_unix = now
+        agg.state.last_rfnon_acc_cnt = 95
+
+
+def test_corr_route_default_returns_raw_with_no_calibration_meta(client):
+    """Without ``?calibrated=1`` the response is unchanged from the
+    pre-feature shape: raw int32 magnitude, no cal block."""
+    body = client.get("/api/corr").get_json()
+    data = body["data"]
+    # Auto pair "0" was published with raw value 100 per channel.
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
+    # No cal block on the raw path — keeps the wire identical to the
+    # pre-feature contract for the default toggle-off case.
+    assert data.get("calibration_meta") is None
+
+
+def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
+    agg_primed,
+):
+    """End-to-end: with a fresh on/off cache and a known T_LOAD, an
+    RFANT integration whose power happens to equal ``P_off`` calibrates
+    out to ``T_LOAD`` (in Kelvin). This is the operator-visible sanity
+    check baked into the cal path.
+    """
+    _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client_ = app.test_client()
+
+    body = client_.get("/api/corr?calibrated=1").get_json()
+    data = body["data"]
+    # tempctrl LOAD_T_now is 25.0 C → 298.15 K. P_ant=P_off=100 in the
+    # fixture; T_in collapses to T_LOAD in Kelvin.
+    expected_k = 25.0 + 273.15
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(expected_k, rel=1e-6)
+    meta = data["calibration_meta"]
+    assert meta["stale"] is False
+    assert meta["t_load_k"] == pytest.approx(expected_k, rel=1e-6)
+    assert meta["t_enr_k"] == 1500.0
+    assert meta["last_rfnoff_age_s"] is not None
+    assert meta["last_rfnon_age_s"] is not None
+    # Gain summary present and finite.
+    assert meta["gain_median"] == pytest.approx(0.1, rel=1e-6)
+
+
+def test_corr_route_calibrated_with_no_cache_returns_raw_and_stale_true(
+    client,
+):
+    """With ``?calibrated=1`` but no on/off cache populated, the route
+    must fall back to raw and flag the cal block as stale so the
+    dashboard renders a warning rather than a hole."""
+    body = client.get("/api/corr?calibrated=1").get_json()
+    data = body["data"]
+    # Raw values pass through unchanged.
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
+    meta = data["calibration_meta"]
+    assert meta["stale"] is True
+    assert meta["reason"]
+
+
+def test_corr_route_calibrated_with_aged_cache_returns_raw_and_stale_true(
+    agg_primed,
+):
+    """An on/off cache older than ``max_onoff_age_s`` is presumed stale
+    (switch may be stuck, panda may have rebooted) and must trip the
+    raw fallback."""
+    _seed_onoff_cache(agg_primed)
+    # Backdate the cache past the configured 300 s window.
+    with agg_primed._lock:
+        agg_primed.state.last_rfnoff_unix -= 600.0
+        agg_primed.state.last_rfnon_unix -= 600.0
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client_ = app.test_client()
+    body = client_.get("/api/corr?calibrated=1").get_json()
+    data = body["data"]
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
+    assert data["calibration_meta"]["stale"] is True
+
+
+def test_corr_route_calibrated_without_t_load_returns_raw_and_stale_true(
+    agg_primed,
+):
+    """If LOAD_T_now is missing from the snapshot (sensor offline,
+    pico booted but tempctrl never reported), the cal can't proceed.
+    Fall back to raw and keep the dashboard painting."""
+    _seed_onoff_cache(agg_primed)
+    # Drop tempctrl from the snapshot to simulate a missing producer.
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot.pop("tempctrl", None)
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client_ = app.test_client()
+    body = client_.get("/api/corr?calibrated=1").get_json()
+    data = body["data"]
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
+    assert data["calibration_meta"]["stale"] is True
+
+
+def test_corr_route_calibrated_scales_cross_magnitudes_by_gain(
+    agg_primed,
+):
+    """Cross-correlation magnitudes are scaled by 1/G; phase is left
+    untouched (the JSON's separate field). The dashboard renders
+    crosses in the same K-equivalent units as the autos when the
+    toggle is on."""
+    _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client_ = app.test_client()
+
+    raw = client_.get("/api/corr").get_json()["data"]
+    cal = client_.get("/api/corr?calibrated=1").get_json()["data"]
+    raw_mag0 = raw["pairs"]["02"]["mag"][0]
+    cal_mag0 = cal["pairs"]["02"]["mag"][0]
+    # Gain solved above is 0.1 → cal mag = raw mag / 0.1.
+    assert cal_mag0 == pytest.approx(raw_mag0 / 0.1, rel=1e-6)
+    # Phase array is preserved on calibrated path.
+    assert cal["pairs"]["02"]["phase"] == raw["pairs"]["02"]["phase"]
 
 
 def test_index_renders_with_aggregator_cfg(client):
