@@ -35,6 +35,18 @@
     <div id="plot-phase" class="plot"></div>
   </section>
 
+  <section class="card wide">
+    <div class="card-header">
+      <h2>VNA S11 (ideal-OSL calibrated)</h2>
+      <div class="vna-mode-toggle" role="group" aria-label="VNA mode">
+        <button type="button" class="vna-mode-btn active" data-vna-mode="ant" aria-pressed="true">Antenna</button>
+        <button type="button" class="vna-mode-btn" data-vna-mode="rec" aria-pressed="false">Receiver</button>
+      </div>
+    </div>
+    <div id="vna-status" class="vna-status">No measurement yet.</div>
+    <div id="plot-vna" class="plot"></div>
+  </section>
+
   <section class="card">
     <h2>RF switch</h2>
     <div id="rfswitch"></div>

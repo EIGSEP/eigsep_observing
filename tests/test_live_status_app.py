@@ -27,6 +27,7 @@ from eigsep_observing.live_status import (
     create_app,
 )
 from eigsep_observing.live_status.app import _solve_calibration
+from eigsep_observing.vna import VnaWriter
 
 
 NCHAN = 1024
@@ -819,6 +820,197 @@ def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
         "compute_gain_trx failed" in r.message and r.levelname == "ERROR"
         for r in caplog.records
     )
+
+
+# ---- VNA pane -------------------------------------------------------
+
+
+# Smaller than the production sweep (npoints=1000 in
+# config/dummy_config.yaml) to keep these route tests fast — the
+# calibration math is shape-agnostic and tested independently in
+# test_live_status_vna_calibration.py.
+_VNA_NFREQ = 32
+
+
+def _publish_vna(
+    transport,
+    mode,
+    *,
+    raw_s11=None,
+    cal_o=None,
+    cal_s=None,
+    cal_l=None,
+    metadata_snapshot_unix=None,
+):
+    """Publish one synthetic VNA entry to the given transport.
+
+    Defaults model a no-error VNA: ideal OSL standards (+1, -1, 0) and
+    a constant raw S11 of 0.3+0j across the band. With those, the
+    calibrated output equals the input — which is what the route's
+    s11_db assertion exploits.
+    """
+    if raw_s11 is None:
+        raw_s11 = np.full(_VNA_NFREQ, 0.3 + 0.0j, dtype=complex)
+    if cal_o is None:
+        cal_o = np.ones(_VNA_NFREQ, dtype=complex)
+    if cal_s is None:
+        cal_s = -np.ones(_VNA_NFREQ, dtype=complex)
+    if cal_l is None:
+        cal_l = np.zeros(_VNA_NFREQ, dtype=complex)
+    if metadata_snapshot_unix is None:
+        metadata_snapshot_unix = time.time()
+
+    data = {
+        mode: raw_s11,
+        "cal:VNAO": cal_o,
+        "cal:VNAS": cal_s,
+        "cal:VNAL": cal_l,
+    }
+    header = {
+        "mode": mode,
+        "freqs": np.linspace(50e6, 250e6, _VNA_NFREQ).tolist(),
+        "metadata_snapshot_unix": metadata_snapshot_unix,
+    }
+    VnaWriter(transport).add(data, header=header)
+
+
+def test_vna_route_returns_unavailable_before_first_measurement(client):
+    """No VNA writes yet: the pane should render an explicit unavailable
+    payload, not a 500 or a stale trace."""
+    body = client.get("/api/vna?mode=ant").get_json()
+    assert body["ok"] is True
+    assert body["data"]["available"] is False
+    assert body["data"]["mode"] == "ant"
+
+
+def test_vna_route_ant_calibrated_with_ideal_osl(agg_primed):
+    """Publish an ant payload with ideal OSL standards; the route must
+    return calibrated |S11| in dB, computed from the cached entry.
+
+    With the ideal-OSL standards baked into the helper, calibrated
+    output equals the raw DUT, so a flat 0.3 raw S11 must come back as
+    a flat 20*log10(0.3) ≈ -10.46 dB trace.
+    """
+    panda = agg_primed.transport_panda
+    _publish_vna(panda, "ant")
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+
+    body = client_for(agg_primed).get("/api/vna?mode=ant").get_json()
+    data = body["data"]
+    assert data["available"] is True
+    assert data["mode"] == "ant"
+    assert len(data["s11_db"]) == _VNA_NFREQ
+    assert len(data["freqs_mhz"]) == _VNA_NFREQ
+    expected_db = 20.0 * math.log10(0.3)
+    for v in data["s11_db"]:
+        assert v == pytest.approx(expected_db, rel=1e-9)
+    # Frequency axis converted Hz → MHz.
+    assert data["freqs_mhz"][0] == pytest.approx(50.0)
+    assert data["freqs_mhz"][-1] == pytest.approx(250.0)
+    # Just-published, so not stale.
+    assert data["stale"] is False
+    assert data["age_s"] >= 0.0
+
+
+def test_vna_route_rec_independent_of_ant(agg_primed):
+    """ant and rec caches evict independently. Publishing one mode must
+    not surface the other; publishing both leaves both queryable."""
+    panda = agg_primed.transport_panda
+    _publish_vna(
+        panda,
+        "rec",
+        raw_s11=np.full(_VNA_NFREQ, 0.5 + 0.0j, dtype=complex),
+    )
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+
+    client = client_for(agg_primed)
+    rec = client.get("/api/vna?mode=rec").get_json()["data"]
+    assert rec["available"] is True
+    assert rec["s11_db"][0] == pytest.approx(20.0 * math.log10(0.5), rel=1e-9)
+
+    ant = client.get("/api/vna?mode=ant").get_json()["data"]
+    assert ant["available"] is False  # ant never published
+
+
+def test_vna_route_unknown_mode_returns_unavailable(client):
+    """Mode is a query param; an unknown value must be a clean
+    'available=false' response, not a 500 or a leaked default."""
+    body = client.get("/api/vna?mode=bogus").get_json()
+    assert body["ok"] is True
+    assert body["data"]["available"] is False
+    assert "unknown mode" in body["data"]["reason"]
+
+
+def test_vna_payload_stale_flag_fires_past_threshold(agg_primed):
+    """Drive _vna_payload directly with a synthetic now far in the
+    future; the stale flag must flip past _VNA_STALE_AGE_S without
+    mutating the underlying cache."""
+    from eigsep_observing.live_status.app import _VNA_STALE_AGE_S, _vna_payload
+
+    panda = agg_primed.transport_panda
+    _publish_vna(panda, "ant")
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+
+    state = agg_primed.snapshot()
+    received = state.last_vna_ant.received_unix
+    fresh = _vna_payload(state, "ant", now=received + 10.0)
+    assert fresh["stale"] is False
+    stale = _vna_payload(state, "ant", now=received + _VNA_STALE_AGE_S + 60.0)
+    assert stale["stale"] is True
+    assert stale["age_s"] >= _VNA_STALE_AGE_S
+
+
+def test_vna_drain_drops_payload_with_unknown_mode(agg_primed, caplog):
+    """The producer contract pins header['mode'] to 'ant' or 'rec'. An
+    out-of-contract value must log at ERROR and leave the cache empty
+    rather than poisoning either slot with a guessed assignment."""
+    panda = agg_primed.transport_panda
+    _publish_vna(
+        panda,
+        "ant",  # data uses the 'ant' DUT key
+    )
+    # Drain the well-formed entry first so it doesn't satisfy the test.
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+    # Confirm the well-formed one landed.
+    assert agg_primed.state.last_vna_ant is not None
+    agg_primed.state.last_vna_ant = None  # reset for the violation test
+
+    raw = np.full(_VNA_NFREQ, 0.3 + 0.0j, dtype=complex)
+    bad_data = {
+        "ant": raw,
+        "cal:VNAO": np.ones(_VNA_NFREQ, dtype=complex),
+        "cal:VNAS": -np.ones(_VNA_NFREQ, dtype=complex),
+        "cal:VNAL": np.zeros(_VNA_NFREQ, dtype=complex),
+    }
+    bad_header = {
+        "mode": "WAT",  # contract violation
+        "freqs": np.linspace(50e6, 250e6, _VNA_NFREQ).tolist(),
+        "metadata_snapshot_unix": time.time(),
+    }
+    VnaWriter(panda).add(bad_data, header=bad_header)
+
+    with caplog.at_level(
+        "ERROR", logger="eigsep_observing.live_status.aggregator"
+    ):
+        agg_primed._vna_tick()
+
+    assert agg_primed.state.last_vna_ant is None
+    assert agg_primed.state.last_vna_rec is None
+    assert any(
+        "unexpected mode" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
+def client_for(agg):
+    """Helper: build a Flask test_client for a primed aggregator."""
+    app = create_app(agg)
+    app.config.update(TESTING=True)
+    return app.test_client()
 
 
 def test_index_renders_with_aggregator_cfg(client):

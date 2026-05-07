@@ -127,3 +127,41 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
 
 #status-log li.level-30 { color: var(--warn); }
 #status-log li.level-40 { color: var(--danger); }
+
+/* VNA pane: card-header lays out the title and the mode toggle on
+   one row so the toggle doesn't push the plot down. */
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.card-header h2 { margin: 0; }
+
+.vna-mode-toggle { display: inline-flex; gap: 4px; }
+
+.vna-mode-btn {
+  background: var(--card);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.vna-mode-btn.active {
+  background: var(--ok);
+  color: #fff;
+  border-color: var(--ok);
+}
+
+.vna-status {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.vna-status.stale { color: var(--warn); }
+.vna-status.error { color: var(--danger); }

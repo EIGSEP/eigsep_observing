@@ -3,6 +3,7 @@
 const POLL_MS = 1000;
 const WIRING_TOGGLE_KEY = "eigsep.useWiringLabels";
 const CALIBRATED_TOGGLE_KEY = "eigsep.useCalibrated";
+const VNA_MODE_KEY = "eigsep.vnaMode";
 
 // Wiring-labels toggle. Persisted in localStorage so the user's
 // choice survives reloads; gracefully no-ops when no labels are
@@ -36,6 +37,26 @@ function getUseCalibrated() {
 function setUseCalibrated(on) {
   try {
     localStorage.setItem(CALIBRATED_TOGGLE_KEY, on ? "1" : "0");
+  } catch (e) {
+    // see setUseWiringLabels
+  }
+}
+
+// VNA pane mode (antenna or receiver). Persisted so the operator's
+// choice survives reloads. Defaults to "ant" — that's the
+// science-interesting one.
+function getVnaMode() {
+  try {
+    const v = localStorage.getItem(VNA_MODE_KEY);
+    return v === "rec" ? "rec" : "ant";
+  } catch (e) {
+    return "ant";
+  }
+}
+
+function setVnaMode(mode) {
+  try {
+    localStorage.setItem(VNA_MODE_KEY, mode === "rec" ? "rec" : "ant");
   } catch (e) {
     // see setUseWiringLabels
   }
@@ -232,6 +253,85 @@ function updateCorr(corr) {
     }
   }
   renderCalibrationBar(corr.calibration_meta);
+}
+
+// ---- vna ------------------------------------------------------------
+
+const vnaLayout = {
+  margin: { l: 50, r: 20, t: 10, b: 40 },
+  paper_bgcolor: "#1a1a1a",
+  plot_bgcolor: "#111",
+  font: { color: "#eee" },
+  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  yaxis: {
+    title: "|S11| [dB]",
+    autorange: true,
+    gridcolor: "#333",
+  },
+  showlegend: false,
+};
+
+let vnaPlotInitialized = false;
+
+function renderVnaStatus(vna) {
+  const el = document.getElementById("vna-status");
+  if (!el) return;
+  if (!vna) {
+    el.className = "vna-status error";
+    el.textContent = "VNA pane unavailable.";
+    return;
+  }
+  if (!vna.available) {
+    el.className = "vna-status";
+    if (vna.reason === "calibration_failed") {
+      el.className = "vna-status error";
+      el.textContent =
+        `Calibration failed for ${vna.mode}. Check server logs and ` +
+        "OSL standards.";
+    } else if (vna.reason === "no measurement received yet") {
+      el.textContent = `No ${vna.mode} measurement received yet.`;
+    } else {
+      el.textContent = `No data: ${vna.reason || "unknown"}.`;
+    }
+    return;
+  }
+  const ageStr = fmtDuration(vna.age_s);
+  const modeLabel = vna.mode === "ant" ? "Antenna" : "Receiver";
+  if (vna.stale) {
+    el.className = "vna-status stale";
+    el.textContent =
+      `${modeLabel} S11 — ${ageStr} old (stale; producer cadence is ~1/hour).`;
+  } else {
+    el.className = "vna-status";
+    el.textContent = `${modeLabel} S11 — ${ageStr} old.`;
+  }
+}
+
+function updateVna(vna) {
+  renderVnaStatus(vna);
+  if (!vna || !vna.available) {
+    // Clear the plot so the operator doesn't see a stale trace under
+    // an "unavailable" status banner.
+    if (vnaPlotInitialized) {
+      Plotly.react("plot-vna", [], vnaLayout, { displayModeBar: false });
+    }
+    return;
+  }
+  const traces = [
+    {
+      x: vna.freqs_mhz,
+      y: vna.s11_db,
+      type: "scatter",
+      mode: "lines",
+      line: { width: 1.5 },
+    },
+  ];
+  if (!vnaPlotInitialized) {
+    Plotly.newPlot("plot-vna", traces, vnaLayout, { displayModeBar: false });
+    vnaPlotInitialized = true;
+  } else {
+    Plotly.react("plot-vna", traces, vnaLayout, { displayModeBar: false });
+  }
 }
 
 // ---- health --------------------------------------------------------
@@ -431,7 +531,8 @@ let lastAdc = null;
 async function tick() {
   try {
     const corrPath = getUseCalibrated() ? "/api/corr?calibrated=1" : "/api/corr";
-    const [health, corr, metadata, adc, rfswitch, file, status] = await Promise.all([
+    const vnaPath = `/api/vna?mode=${encodeURIComponent(getVnaMode())}`;
+    const [health, corr, metadata, adc, rfswitch, file, status, vna] = await Promise.all([
       fetchJson("/api/health"),
       fetchJson(corrPath),
       fetchJson("/api/metadata"),
@@ -439,6 +540,7 @@ async function tick() {
       fetchJson("/api/rfswitch"),
       fetchJson("/api/file"),
       fetchJson("/api/status"),
+      fetchJson(vnaPath),
     ]);
     lastCorr = corr.data;
     lastAdc = adc.data;
@@ -449,6 +551,7 @@ async function tick() {
     renderAdcTiles(adc.data);
     renderRfswitch(rfswitch.data);
     renderStatusLog(status.data);
+    updateVna(vna.data);
   } catch (e) {
     console.error("poll failed:", e);
   }
@@ -477,7 +580,28 @@ function initCalibratedToggle() {
   });
 }
 
+function initVnaModeToggle() {
+  const buttons = document.querySelectorAll(".vna-mode-btn");
+  if (!buttons.length) return;
+  const apply = (mode) => {
+    for (const btn of buttons) {
+      btn.classList.toggle("active", btn.dataset.vnaMode === mode);
+    }
+  };
+  apply(getVnaMode());
+  for (const btn of buttons) {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.vnaMode === "rec" ? "rec" : "ant";
+      setVnaMode(mode);
+      apply(mode);
+      // Refetch immediately so the swap doesn't wait for the next poll.
+      tick();
+    });
+  }
+}
+
 initWiringToggle();
 initCalibratedToggle();
+initVnaModeToggle();
 tick();
 setInterval(tick, POLL_MS);
