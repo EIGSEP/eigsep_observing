@@ -86,12 +86,16 @@ def _solve_calibration(
     """Build per-channel ``(gain, t_rx)`` for the dashboard cal toggle.
 
     Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
-    can't run (missing cache, stale cache, missing T_LOAD, missing
-    config); the ``meta`` dict is always returned and includes ``stale``
-    plus a short ``reason`` so the frontend can render a warning.
+    can't run (missing cache, missing T_LOAD, missing config); the
+    ``meta`` dict is always returned and exposes the cached on/off ages
+    so the frontend can render a "cal is N seconds old" indicator. We
+    intentionally do not gate on cache age: the ``RFANT`` dwell is an
+    hour, so any fixed threshold either rejects nearly every antenna
+    integration or is so loose it adds nothing. The "switch has stopped
+    cycling" failure mode is already covered by ``on_schedule`` in the
+    rfswitch payload.
     """
     cal_cfg = obs_cfg.get("calibration") or {}
-    raw_max_age_s = cal_cfg.get("max_onoff_age_s", 300.0)
 
     raw_enr_db = cal_cfg.get("noise_diode_enr_db")
     try:
@@ -121,28 +125,12 @@ def _solve_calibration(
         "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
         "last_rfnon_age_s": None,
-        "max_onoff_age_s": raw_max_age_s,
         "gain_median": None,
     }
 
     if enr_db is None:
         meta["reason"] = "noise_diode_enr_db missing or non-numeric"
         return None, meta
-
-    try:
-        max_age_s = float(raw_max_age_s)
-    except (TypeError, ValueError):
-        logger.error(
-            "Live-status cal: max_onoff_age_s=%r is not coercible to "
-            "float; calibration disabled until obs_config is fixed.",
-            raw_max_age_s,
-        )
-        meta["reason"] = "max_onoff_age_s invalid"
-        return None, meta
-    if not np.isfinite(max_age_s) or max_age_s <= 0:
-        meta["reason"] = "max_onoff_age_s missing or non-positive"
-        return None, meta
-    meta["max_onoff_age_s"] = float(max_age_s)
 
     rfnoff = state.last_rfnoff_pairs
     rfnon = state.last_rfnon_pairs
@@ -154,10 +142,6 @@ def _solve_calibration(
         meta["last_rfnoff_age_s"] = max(0.0, now - state.last_rfnoff_unix)
     if state.last_rfnon_unix is not None:
         meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
-    for age in (meta["last_rfnoff_age_s"], meta["last_rfnon_age_s"]):
-        if age is None or age > max_age_s:
-            meta["reason"] = "on/off cache older than max_onoff_age_s"
-            return None, meta
 
     tempctrl = state.metadata_snapshot.get("tempctrl")
     load_t_now = (

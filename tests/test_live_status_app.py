@@ -45,7 +45,6 @@ OBS_CFG = {
     "use_switches": True,
     "calibration": {
         "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
-        "max_onoff_age_s": 300.0,
     },
 }
 
@@ -629,25 +628,33 @@ def test_corr_route_calibrated_with_no_cache_returns_raw_and_stale_true(
     assert meta["reason"]
 
 
-def test_corr_route_calibrated_with_aged_cache_returns_raw_and_stale_true(
+def test_corr_route_calibrated_with_aged_cache_still_calibrates_and_exposes_age(
     agg_primed,
 ):
-    """An on/off cache older than ``max_onoff_age_s`` is presumed stale
-    (switch may be stuck, panda may have rebooted) and must trip the
-    raw fallback."""
-    _seed_onoff_cache(agg_primed)
-    # Backdate the cache past the configured 300 s window.
+    """An on/off cache older than the previous 300 s threshold is no
+    longer treated as stale: the ``RFANT`` dwell is an hour, so any
+    fixed threshold either rejects nearly every antenna integration or
+    is so loose it adds nothing. The "switch has stopped cycling"
+    failure mode is covered separately by ``on_schedule`` on the
+    rfswitch tile. Cache age is exposed in meta so the dashboard can
+    render a "cal is N seconds old" indicator."""
+    _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    # Backdate the cache well past the old 300 s window.
     with agg_primed._lock:
-        agg_primed.state.last_rfnoff_unix -= 600.0
-        agg_primed.state.last_rfnon_unix -= 600.0
+        agg_primed.state.last_rfnoff_unix -= 1800.0
+        agg_primed.state.last_rfnon_unix -= 1800.0
 
     app = create_app(agg_primed)
     app.config.update(TESTING=True)
     client_ = app.test_client()
     body = client_.get("/api/corr?calibrated=1").get_json()
     data = body["data"]
-    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
-    assert data["calibration_meta"]["stale"] is True
+    expected_k = 25.0 + 273.15
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(expected_k, rel=1e-6)
+    meta = data["calibration_meta"]
+    assert meta["stale"] is False
+    assert meta["last_rfnoff_age_s"] >= 1800.0
+    assert meta["last_rfnon_age_s"] >= 1800.0
 
 
 def test_corr_route_calibrated_without_t_load_returns_raw_and_stale_true(
@@ -695,7 +702,7 @@ def test_corr_route_calibrated_scales_cross_magnitudes_by_gain(
 def test_solve_calibration_bails_on_missing_enr_db(agg_primed):
     """Cal block without noise_diode_enr_db disables cal with a clear reason."""
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {"calibration": {"max_onoff_age_s": 300}}
+    obs_cfg = {"calibration": {}}
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
@@ -707,12 +714,7 @@ def test_solve_calibration_bails_on_missing_enr_db(agg_primed):
 @pytest.mark.parametrize("bad_value", ["oops", [1, 2], {"x": 1}])
 def test_solve_calibration_bails_on_non_numeric_enr_db(bad_value, agg_primed):
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": bad_value,
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": bad_value}}
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
@@ -725,12 +727,7 @@ def test_solve_calibration_bails_on_non_numeric_enr_db(bad_value, agg_primed):
 )
 def test_solve_calibration_bails_on_non_finite_enr_db(bad_value, agg_primed):
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": bad_value,
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": bad_value}}
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
@@ -742,12 +739,7 @@ def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
     """Meta carries both configured dB and derived K."""
     _seed_onoff_cache(agg_primed)
     enr_db = 6.5
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": enr_db,
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": enr_db}}
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
@@ -763,12 +755,7 @@ def test_solve_calibration_logs_error_on_non_numeric_enr_db(
     """Non-coercible noise_diode_enr_db is a config contract violation;
     CLAUDE.md requires it surface at ERROR, not just in meta.reason."""
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": "not-a-number",
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": "not-a-number"}}
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
@@ -780,37 +767,13 @@ def test_solve_calibration_logs_error_on_non_numeric_enr_db(
 def test_solve_calibration_logs_error_on_non_finite_enr_db(agg_primed, caplog):
     """NaN/inf ENR is not a usable config value — log loudly."""
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": float("nan"),
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": float("nan")}}
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
         "noise_diode_enr_db" in r.message
         and "not finite" in r.message
         and r.levelname == "ERROR"
-        for r in caplog.records
-    )
-
-
-def test_solve_calibration_logs_error_on_non_numeric_max_age(
-    agg_primed, caplog
-):
-    """Non-coercible max_onoff_age_s is a config contract violation."""
-    _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": 6.5,
-            "max_onoff_age_s": "soon-ish",
-        }
-    }
-    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
-        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
-    assert any(
-        "max_onoff_age_s" in r.message and r.levelname == "ERROR"
         for r in caplog.records
     )
 
@@ -826,12 +789,7 @@ def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
         agg_primed.state.metadata_snapshot["tempctrl"] = {
             "LOAD_T_now": "warm-ish",
         }
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": 6.5,
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
@@ -854,12 +812,7 @@ def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
 
     monkeypatch.setattr(app_mod, "compute_gain_trx", boom)
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": 6.5,
-            "max_onoff_age_s": 300,
-        }
-    }
+    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
