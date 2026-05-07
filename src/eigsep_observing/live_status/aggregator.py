@@ -57,8 +57,10 @@ from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
 from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
+from ..vna import VnaReader
 from .signals import SIGNAL_REGISTRY
 from .thresholds import Thresholds
+from .vna_calibration import VnaCache
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,13 @@ STATUS_LOG_MAXLEN = 500
 # full name.
 _ADC_STATS_KEY = "adc_stats"
 _ADC_STATS_STREAM = f"stream:{_ADC_STATS_KEY}"
+
+# VnaReader.read blocks inside Redis xread for at most this long per
+# call. Longer = lower CPU between sweeps, but stop_event observation
+# slows correspondingly (the drain wakes for the stop check at most
+# every _VNA_BLOCK_S). 1.0 s is a comfortable middle ground for a
+# ~1/hour producer.
+_VNA_BLOCK_S = 1.0
 
 
 @dataclass
@@ -125,6 +134,14 @@ class StateSnapshot:
     last_rfnon_pairs: Optional[dict[str, np.ndarray]] = None
     last_rfnon_unix: Optional[float] = None
     last_rfnon_acc_cnt: Optional[int] = None
+
+    # Most recent VNA payload, cached per-mode. The route handler
+    # calibrates lazily off these (see live_status/vna_calibration.py)
+    # so the drain thread doesn't pay the calkit cost when nobody's
+    # rendering the pane. ``ant`` and ``rec`` evict independently, so
+    # the operator can flip between them without losing the other view.
+    last_vna_ant: Optional[VnaCache] = None
+    last_vna_rec: Optional[VnaCache] = None
 
     # Panda status log (ring buffer).
     status_log: deque = field(
@@ -232,6 +249,7 @@ class LiveStatusAggregator:
         self.metadata_snapshot = MetadataSnapshotReader(transport_panda)
         self.status_reader = StatusReader(transport_panda)
         self.heartbeat_reader = HeartbeatReader(transport_panda)
+        self.vna_reader = VnaReader(transport_panda)
 
         self.state = StateSnapshot()
         self._lock = threading.Lock()
@@ -251,12 +269,17 @@ class LiveStatusAggregator:
 
         self._snap_thread: Optional[threading.Thread] = None
         self._panda_thread: Optional[threading.Thread] = None
+        self._vna_thread: Optional[threading.Thread] = None
 
     # -- lifecycle -------------------------------------------------
 
     def start(self) -> None:
-        """Start both drain threads."""
-        if self._snap_thread is not None or self._panda_thread is not None:
+        """Start the drain threads."""
+        if (
+            self._snap_thread is not None
+            or self._panda_thread is not None
+            or self._vna_thread is not None
+        ):
             raise RuntimeError("LiveStatusAggregator already started")
         self._snap_thread = threading.Thread(
             target=self._snap_loop,
@@ -268,8 +291,18 @@ class LiveStatusAggregator:
             name="live-status-panda-drain",
             daemon=True,
         )
+        # VNA writes are ~1/hour. A dedicated thread blocks inside
+        # Redis xread for ``_VNA_BLOCK_S`` between checks of the stop
+        # event, so a triggered measurement surfaces in the dashboard
+        # within ~1 s of arrival without polling cost between sweeps.
+        self._vna_thread = threading.Thread(
+            target=self._vna_loop,
+            name="live-status-vna-drain",
+            daemon=True,
+        )
         self._snap_thread.start()
         self._panda_thread.start()
+        self._vna_thread.start()
 
     def stop(self, timeout: float = 2.0) -> None:
         """Signal both threads to exit and join with a finite timeout.
@@ -280,7 +313,7 @@ class LiveStatusAggregator:
         subsequent ``stop()`` will re-attempt the join.
         """
         self._stop_event.set()
-        for attr in ("_snap_thread", "_panda_thread"):
+        for attr in ("_snap_thread", "_panda_thread", "_vna_thread"):
             thread = getattr(self, attr)
             if thread is None:
                 continue
@@ -746,6 +779,128 @@ class LiveStatusAggregator:
             out.append((level, msg))
         return out, True
 
+    # -- VNA drain loop --------------------------------------------
+
+    def _vna_loop(self) -> None:
+        """Block on the VNA stream; cache by mode when an entry arrives.
+
+        VNA cadence is ~1/hour, so this thread spends almost all its
+        wallclock parked inside ``VnaReader.read`` and only does work
+        when ``PandaClient.measure_s11`` actually publishes.
+        """
+        while not self._stop_event.is_set():
+            try:
+                self._vna_tick()
+            except Exception as exc:  # pragma: no cover - diagnostic
+                logger.error("VNA drain tick failed: %s", exc)
+                # No connectivity flag for VNA: it shares the panda
+                # transport, so panda_connected already covers the
+                # underlying bus. Sleep on the stop event to avoid a
+                # tight retry loop on a persistent error.
+                self._stop_event.wait(self._panda_tick_s)
+
+    def _vna_tick(self) -> None:
+        """Single drain step: one blocking read, one cache write."""
+        try:
+            data, header, _metadata = self.vna_reader.read(
+                timeout=_VNA_BLOCK_S
+            )
+        except TimeoutError:
+            return
+        except RedisError as exc:
+            logger.error("vna_reader.read transport failure: %s", exc)
+            self._stop_event.wait(self._panda_tick_s)
+            return
+        if data is None:
+            # VnaReader.read returns (None, None, None) when the stream
+            # hasn't been registered yet (no producer has written).
+            # That's normal startup; back off briefly to avoid spinning.
+            self._stop_event.wait(self._panda_tick_s)
+            return
+
+        # The producer's contract pins ``header['mode']`` to exactly
+        # "ant" or "rec" (PandaClient.measure_s11). Anything else is a
+        # producer bug or a stream cross-talk; log loudly and drop the
+        # entry rather than caching it under a guessed slot.
+        mode = (header or {}).get("mode")
+        if mode not in ("ant", "rec"):
+            logger.error(
+                "VNA payload arrived with unexpected mode=%r; "
+                "dropping. Producer contract: header['mode'] must be "
+                "'ant' or 'rec'.",
+                mode,
+            )
+            return
+
+        cache = self._build_vna_cache(data, header)
+        if cache is None:
+            return
+        with self._lock:
+            if mode == "ant":
+                self.state.last_vna_ant = cache
+            else:
+                self.state.last_vna_rec = cache
+
+    @staticmethod
+    def _build_vna_cache(
+        data: dict[str, np.ndarray], header: dict
+    ) -> Optional[VnaCache]:
+        """Project a raw VNA stream entry into a :class:`VnaCache`.
+
+        Caller must have already validated ``header['mode']`` is
+        ``"ant"`` or ``"rec"``. Returns ``None`` (and logs at ERROR)
+        on any further contract violation — missing data keys, missing
+        ``freqs`` — so the corr / metadata panes keep painting even
+        when the VNA producer publishes garbage.
+        """
+        dut_key = header["mode"]
+        try:
+            raw_s11 = data[dut_key]
+            cal_o = data["cal:VNAO"]
+            cal_s = data["cal:VNAS"]
+            cal_l = data["cal:VNAL"]
+        except KeyError as exc:
+            logger.error(
+                "VNA payload missing required key %s; dropping entry. "
+                "Producer contract: data must include %r and "
+                "cal:VNAO/VNAS/VNAL.",
+                exc,
+                dut_key,
+            )
+            return None
+        freqs_raw = header.get("freqs")
+        if freqs_raw is None:
+            logger.error(
+                "VNA header missing 'freqs'; dropping entry. Producer "
+                "contract: header must include the frequency axis."
+            )
+            return None
+        freqs = np.asarray(freqs_raw, dtype=float)
+        try:
+            metadata_snapshot_unix = (
+                float(header["metadata_snapshot_unix"])
+                if "metadata_snapshot_unix" in header
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            logger.error(
+                "VNA header has unparseable metadata_snapshot_unix=%r "
+                "(%s); dropping field. Producer contract: when present, "
+                "the value must be a float-castable wallclock seconds.",
+                header.get("metadata_snapshot_unix"),
+                exc,
+            )
+            metadata_snapshot_unix = None
+        return VnaCache(
+            freqs=freqs,
+            raw_s11=np.asarray(raw_s11),
+            cal_o=np.asarray(cal_o),
+            cal_s=np.asarray(cal_s),
+            cal_l=np.asarray(cal_l),
+            received_unix=time.time(),
+            metadata_snapshot_unix=metadata_snapshot_unix,
+        )
+
     # -- error-swallowing helpers ----------------------------------
 
     @staticmethod
@@ -800,6 +955,7 @@ class LiveStatusAggregator:
             "metadata_snapshot",
             "status_reader",
             "heartbeat_reader",
+            "vna_reader",
             "thresholds",
             "state",
         }

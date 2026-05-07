@@ -29,6 +29,7 @@ from .calibration import (
 )
 from .signals import enabled_signals
 from .thresholds import Thresholds
+from .vna_calibration import VnaCache, calibrate_s11
 
 
 logger = logging.getLogger(__name__)
@@ -417,6 +418,79 @@ def _status_payload(state: StateSnapshot) -> list:
     return list(state.status_log)
 
 
+# A VNA measurement that's older than this is flagged ``stale`` in the
+# /api/vna response. The producer cadence is ~1/hour; 1.5× gives one
+# missed sweep of slack before the dashboard turns the bar red.
+_VNA_STALE_AGE_S = 5400.0
+
+
+def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
+    """Calibrated VNA pane payload for ``mode in {"ant", "rec"}``.
+
+    Calibration is computed lazily here so the drain thread never pays
+    the calkit cost when the pane isn't visible. A failure of the cal
+    math (NaN OSL, unequal shapes, cmt_vna raising) logs at ERROR and
+    surfaces ``available=false`` to the front-end — corr / metadata
+    panes stay unaffected.
+    """
+    if mode not in ("ant", "rec"):
+        return {
+            "available": False,
+            "mode": mode,
+            "reason": f"unknown mode {mode!r}",
+        }
+    cache: Optional[VnaCache] = (
+        state.last_vna_ant if mode == "ant" else state.last_vna_rec
+    )
+    if cache is None:
+        return {
+            "available": False,
+            "mode": mode,
+            "reason": "no measurement received yet",
+        }
+    age_s = max(0.0, now - cache.received_unix)
+    try:
+        cal = calibrate_s11(
+            cache.raw_s11, cache.cal_o, cache.cal_s, cache.cal_l
+        )
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        logger.error(
+            "Live-status VNA cal failed for mode=%r (received_unix=%s): "
+            "%s. Producer-side payload likely violated the cmt_vna "
+            "calibration contract; check cal:VNAO/VNAS/VNAL shapes "
+            "and finiteness.",
+            mode,
+            cache.received_unix,
+            exc,
+        )
+        return {
+            "available": False,
+            "mode": mode,
+            "reason": "calibration_failed",
+            "age_s": age_s,
+        }
+    mag = np.abs(cal)
+    # Replace zeros with NaN so log10 returns NaN (a hole in the plot)
+    # rather than -inf (which Plotly renders as a spike to the bottom
+    # of the axis).
+    with np.errstate(divide="ignore", invalid="ignore"):
+        mag_safe = np.where(mag > 0, mag, np.nan)
+        s11_db = 20.0 * np.log10(mag_safe)
+    # Drop non-finite values to None so JSON encodes them as null —
+    # plotly draws a gap rather than crashing on NaN/Inf.
+    s11_db_list = [float(v) if np.isfinite(v) else None for v in s11_db]
+    freqs_mhz = (cache.freqs * 1e-6).tolist()
+    return {
+        "available": True,
+        "mode": mode,
+        "freqs_mhz": freqs_mhz,
+        "s11_db": s11_db_list,
+        "age_s": age_s,
+        "stale": age_s > _VNA_STALE_AGE_S,
+        "metadata_snapshot_unix": cache.metadata_snapshot_unix,
+    }
+
+
 def _corr_observing_timeout_s(state: StateSnapshot) -> float:
     """Infer a reasonable observing-idle timeout from corr cadence.
 
@@ -563,6 +637,12 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     def api_status():
         state = aggregator.snapshot()
         return jsonify(_envelope(_status_payload(state)))
+
+    @app.route("/api/vna")
+    def api_vna():
+        state = aggregator.snapshot()
+        mode = request.args.get("mode", "ant")
+        return jsonify(_envelope(_vna_payload(state, mode, time.time())))
 
     @app.route("/api/config")
     def api_config():
