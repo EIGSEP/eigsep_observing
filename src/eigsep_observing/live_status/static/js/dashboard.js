@@ -143,18 +143,40 @@ const RAD_TO_DEG = 180 / Math.PI;
 let magPlotInitialized = false;
 let phasePlotInitialized = false;
 
-// Render the cal-warning bar above the plots. Empty/falsy reason hides
-// it; a present reason shows it with the operator-actionable text.
-function renderCalibrationWarning(meta) {
-  const el = document.getElementById("calibration-warning");
+// Render the cal status bar above the plots. Three states:
+//   - toggle off → hidden
+//   - toggle on, cal unavailable → red "Calibration unavailable" warn bar
+//   - toggle on, cal applied → green info bar with on/off cache age
+// We deliberately show the cache age unconditionally rather than gating
+// on a freshness threshold: ``RFANT`` dwells for an hour, so any threshold
+// either rejects nearly every antenna integration or is so loose it adds
+// nothing. The "switch has stopped cycling" failure mode is surfaced
+// separately by the rfswitch ``on_schedule`` tile.
+function renderCalibrationBar(meta) {
+  const el = document.getElementById("calibration-bar");
   if (!el) return;
-  if (!meta || !meta.stale || !getUseCalibrated()) {
+  if (!getUseCalibrated() || !meta) {
     el.hidden = true;
+    el.className = "cal-bar";
     el.textContent = "";
     return;
   }
   el.hidden = false;
-  el.textContent = `Calibration unavailable — showing raw. Reason: ${meta.reason || "unknown"}`;
+  if (meta.stale) {
+    el.className = "cal-bar warn";
+    el.textContent = `Calibration unavailable — showing raw. Reason: ${meta.reason || "unknown"}`;
+    return;
+  }
+  const ages = [meta.last_rfnoff_age_s, meta.last_rfnon_age_s].filter(
+    (v) => v !== null && v !== undefined
+  );
+  const ageStr = ages.length ? fmtDuration(Math.max(...ages)) : "—";
+  const gainStr =
+    meta.gain_median !== null && meta.gain_median !== undefined
+      ? fmt(meta.gain_median, 3)
+      : "—";
+  el.className = "cal-bar info";
+  el.textContent = `Calibrated — on/off cache ${ageStr} old, gain median ${gainStr}`;
 }
 
 function updateCorr(corr) {
@@ -209,7 +231,7 @@ function updateCorr(corr) {
       Plotly.react("plot-phase", phaseTraces, phaseLayout, { displayModeBar: false });
     }
   }
-  renderCalibrationWarning(corr.calibration_meta);
+  renderCalibrationBar(corr.calibration_meta);
 }
 
 // ---- health --------------------------------------------------------

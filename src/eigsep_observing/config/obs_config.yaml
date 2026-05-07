@@ -62,7 +62,6 @@ vna_position_sweep:
 # from the IEEE-standard ENR convention: T_ns = 290 K · 10^(ENR_dB / 10).
 calibration:
   noise_diode_enr_db: 11.0   # post-attenuator ENR (dB), referenced to 290 K
-  max_onoff_age_s: 300       # fall back to raw if cached on/off older than this
 
 # tempctrl
 use_tempctrl: false
