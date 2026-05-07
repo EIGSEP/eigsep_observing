@@ -105,7 +105,7 @@ def test_calibrate_s11_rejects_shape_mismatch():
     cal_s = np.zeros(NFREQ, dtype=complex)
     cal_l = np.zeros(NFREQ - 1, dtype=complex)  # wrong length
 
-    with pytest.raises(ValueError, match="must all be 1-D"):
+    with pytest.raises(ValueError, match="must share length"):
         calibrate_s11(raw, cal_o, cal_s, cal_l)
 
 
