@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.1.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.0.1...v2.1.0) (2026-05-12)
+
+
+### Features
+
+* **live-status:** add first-order Y-factor calibration toggle ([2c6712a](https://github.com/EIGSEP/eigsep_observing/commit/2c6712a6935501adc7410628f57155f0a28c9d98))
+* **live-status:** add VNA S11 pane with ideal-OSL calibration ([#101](https://github.com/EIGSEP/eigsep_observing/issues/101)) ([dae4592](https://github.com/EIGSEP/eigsep_observing/commit/dae45923a0ff5037ed5371fae71793d26fa6a99c))
+* **live-status:** take noise diode ENR in dB at YAML boundary ([0a7d5fb](https://github.com/EIGSEP/eigsep_observing/commit/0a7d5fb30f6dad783238e374c52548c8313c987e))
+
+
+### Bug Fixes
+
+* **fpga:** propagate producer-thread failures so systemd restarts ([#102](https://github.com/EIGSEP/eigsep_observing/issues/102)) ([f0e744a](https://github.com/EIGSEP/eigsep_observing/commit/f0e744a305881b080d4f376e86da68b94fda171e))
+* **live-status:** log ERROR on cal contract violations ([c140ff7](https://github.com/EIGSEP/eigsep_observing/commit/c140ff7712519eb956fa588302244735f514c632))
+
 ## [2.0.1](https://github.com/EIGSEP/eigsep_observing/compare/v2.0.0...v2.0.1) (2026-05-03)
 
 
