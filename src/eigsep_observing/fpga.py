@@ -1124,34 +1124,64 @@ class EigsepFpga:
         pairs : list
             List of pairs to read.
         timeout : float
-            Number of seconds to wait for a new integration before
-            timing out.
+            No-progress window: the producer exits if it sees no new
+            ``corr_acc_cnt`` for this many seconds.
 
+        Notes
+        -----
+        The finally block always wakes the consumer (sets
+        ``self.event``, puts ``None`` on ``self.queue``) so a producer
+        exit — clean stop, no-progress timeout, or unhandled hardware
+        exception — never leaves ``observe()`` blocked on
+        ``queue.get()``. Exceptions are captured into
+        ``self._producer_exc`` and an internal no-progress timeout
+        flips ``self._producer_timeout`` so ``observe()`` can
+        distinguish those from an external stop (``end_observing``)
+        and re-raise.
         """
-        cnt = self.fpga.read_int("corr_acc_cnt")
-        t = time.time()
-
-        while time.time() < t + timeout and not self.event.is_set():
-            new_cnt = self.fpga.read_int("corr_acc_cnt")
-            if new_cnt == cnt:
-                time.sleep(0.01)
-                continue
-            if new_cnt > cnt + 1:
-                self.logger.warning(
-                    f"Missed {new_cnt - cnt - 1} integration(s)."
-                )
-            cnt = new_cnt
-            self.logger.info(f"Reading acc_cnt={cnt}")
-            data = self.read_data(pairs=pairs, unpack=False)
-            if cnt != self.fpga.read_int("corr_acc_cnt"):
-                self.logger.error(
-                    f"Read of acc_cnt={cnt} FAILED to complete before "
-                    "next integration."
-                )
-            self.queue.put({"data": data, "cnt": cnt})
-            if self.is_synchronized:
-                self._publish_adc_stats()
+        try:
+            cnt = self.fpga.read_int("corr_acc_cnt")
             t = time.time()
+
+            while time.time() < t + timeout and not self.event.is_set():
+                new_cnt = self.fpga.read_int("corr_acc_cnt")
+                if new_cnt == cnt:
+                    time.sleep(0.01)
+                    continue
+                if new_cnt > cnt + 1:
+                    self.logger.warning(
+                        f"Missed {new_cnt - cnt - 1} integration(s)."
+                    )
+                cnt = new_cnt
+                self.logger.info(f"Reading acc_cnt={cnt}")
+                data = self.read_data(pairs=pairs, unpack=False)
+                if cnt != self.fpga.read_int("corr_acc_cnt"):
+                    self.logger.error(
+                        f"Read of acc_cnt={cnt} FAILED to complete "
+                        "before next integration."
+                    )
+                self.queue.put({"data": data, "cnt": cnt})
+                if self.is_synchronized:
+                    self._publish_adc_stats()
+                t = time.time()
+            # No external stop → loop exited because the no-progress
+            # window elapsed; flag so observe() raises TimeoutError.
+            if not self.event.is_set():
+                self._producer_timeout = True
+        except Exception as exc:
+            # Capture for observe() to re-raise from the main thread.
+            # Not re-raising here keeps journalctl to one continuous
+            # traceback (the exception's __traceback__ rides with the
+            # object) instead of doubling up via threading.excepthook.
+            self._producer_exc = exc
+            self.logger.exception("Producer thread caught exception")
+        finally:
+            self.event.set()
+            try:
+                self.queue.put(None)
+            except AttributeError:
+                # queue may not exist if observe() never built it.
+                pass
 
     def end_observing(self):
         try:
@@ -1170,16 +1200,26 @@ class EigsepFpga:
             List of correlation pairs to read. If None, all pairs are
             read and streamed.
         timeout : int
-            Timeout in seconds for reading data from the correlator.
+            Per-integration no-progress window passed to
+            ``_read_integrations`` (seconds).
 
         Raises
-        -------
+        ------
         TimeoutError
-            If the read operation times out.
-
+            The producer thread saw no new ``corr_acc_cnt`` within
+            ``timeout`` seconds. Re-raising here lets the supervisor
+            (``eigsep-observe.service``) restart with a fresh
+            ``--reinit`` rather than silently stalling.
+        Exception
+            Any unhandled exception from the producer thread is
+            re-raised (typically a casperfpga register-read
+            ``RuntimeError`` when the SNAP becomes unreachable).
+            Same recovery path as ``TimeoutError``.
         """
         self.queue = Queue(maxsize=0)
         self.event = Event()
+        self._producer_exc = None
+        self._producer_timeout = False
         self.upload_config(validate=True)
         t_int = self.header["integration_time"]
         self.logger.info(f"Integration time is {t_int} seconds.")
@@ -1211,15 +1251,30 @@ class EigsepFpga:
         )
         thd.start()
 
-        while not self.event.is_set() or not self.queue.empty():
-            d = self.queue.get()
-            if d is None:
-                if self.event.is_set():
-                    self.logger.info("End of queue, processing finished.")
-                    break
-                else:
-                    continue
-            data = d["data"]
-            cnt = d["cnt"]
-            sync_time = self.sync_time if self.is_synchronized else 0
-            self.corr.add(data, cnt, sync_time, dtype=self.cfg["dtype"])
+        try:
+            while not self.event.is_set() or not self.queue.empty():
+                d = self.queue.get()
+                if d is None:
+                    if self.event.is_set():
+                        self.logger.info("End of queue, processing finished.")
+                        break
+                    else:
+                        continue
+                data = d["data"]
+                cnt = d["cnt"]
+                sync_time = self.sync_time if self.is_synchronized else 0
+                self.corr.add(data, cnt, sync_time, dtype=self.cfg["dtype"])
+        finally:
+            # Set event so the producer's while-condition exits on its
+            # next iteration even when the consumer is unwinding from
+            # an exception (e.g. SIGINT-driven KeyboardInterrupt).
+            self.event.set()
+            thd.join(timeout=5)
+
+        if self._producer_exc is not None:
+            raise self._producer_exc
+        if self._producer_timeout:
+            raise TimeoutError(
+                f"Producer saw no new corr_acc_cnt within {timeout}s; "
+                "SNAP appears unresponsive."
+            )
