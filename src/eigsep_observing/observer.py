@@ -7,7 +7,6 @@ from eigsep_redis import (
     HeartbeatReader,
     MetadataStreamReader,
     StatusReader,
-    StatusWriter,
 )
 
 from . import io, run_tag
@@ -129,16 +128,17 @@ class EigObserver:
             # live-status dashboard (no Slack/email fallback in the
             # field). Mirror them onto the panda status stream that
             # the aggregator already drains. The handler stays
-            # installed for the lifetime of this process.
-            self.status_writer = StatusWriter(transport_panda)
-            self._status_log_handler = StatusStreamHandler(self.status_writer)
+            # installed for the lifetime of this process. The
+            # ``StatusWriter`` lives inside the handler — keeping it
+            # off ``EigObserver.__dict__`` preserves the consumer-role
+            # invariant (no writer surfaces on the observer).
+            self._status_log_handler = StatusStreamHandler(transport_panda)
             ground_logger.addHandler(self._status_log_handler)
             # Dedicated child logger for re-emitting panda status
             # messages so the StatusStreamHandler can skip them; see
             # status_log_handler.PANDA_RELAY_LOGGER.
             self._panda_relay_logger = logging.getLogger(PANDA_RELAY_LOGGER)
         else:
-            self.status_writer = None
             self._status_log_handler = None
             self._panda_relay_logger = None
 
