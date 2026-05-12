@@ -7,11 +7,13 @@ from eigsep_redis import (
     HeartbeatReader,
     MetadataStreamReader,
     StatusReader,
+    StatusWriter,
 )
 
 from . import io, run_tag
 from .corr import CorrConfigStore, CorrReader
 from .file_heartbeat import publish as publish_file_heartbeat
+from .status_log_handler import PANDA_RELAY_LOGGER, StatusStreamHandler
 from .vna import VnaReader
 
 logger = logging.getLogger(__name__)
@@ -105,13 +107,40 @@ class EigObserver:
             # every corr integration and feeds the file via the same
             # averaging path as panda sensors.
             self.adc_metadata_stream = MetadataStreamReader(transport_snap)
+        ground_logger = logging.getLogger("eigsep_observing")
+
         if transport_panda is not None:
+            # Prune any StatusStreamHandler from prior EigObserver
+            # instances bound to stale transports. Production has one
+            # observer per process, but tests construct many; without
+            # this, the second test would mirror records to the first
+            # test's transport too.
+            for h in list(ground_logger.handlers):
+                if isinstance(h, StatusStreamHandler):
+                    ground_logger.removeHandler(h)
+                    h.close()
             self.config = ConfigStore(transport_panda)
             self.metadata_stream = MetadataStreamReader(transport_panda)
             self.status_reader = StatusReader(transport_panda)
             self.heartbeat_reader = HeartbeatReader(transport_panda)
             self.vna_reader = VnaReader(transport_panda)
             self.cfg = self.config.get()
+            # Ground-side ERRORs are otherwise invisible to the
+            # live-status dashboard (no Slack/email fallback in the
+            # field). Mirror them onto the panda status stream that
+            # the aggregator already drains. The handler stays
+            # installed for the lifetime of this process.
+            self.status_writer = StatusWriter(transport_panda)
+            self._status_log_handler = StatusStreamHandler(self.status_writer)
+            ground_logger.addHandler(self._status_log_handler)
+            # Dedicated child logger for re-emitting panda status
+            # messages so the StatusStreamHandler can skip them; see
+            # status_log_handler.PANDA_RELAY_LOGGER.
+            self._panda_relay_logger = logging.getLogger(PANDA_RELAY_LOGGER)
+        else:
+            self.status_writer = None
+            self._status_log_handler = None
+            self._panda_relay_logger = None
 
         self.stop_event = threading.Event()  # main stop event
 
@@ -160,7 +189,7 @@ class EigObserver:
             self.logger.debug("Panda connected.")
             level, status = self.status_reader.read(timeout=0.1)
             if status is not None:
-                self.logger.log(level, status)
+                self._panda_relay_logger.log(level, status)
 
     def _with_header_overlays(self, header):
         """Return a copy of ``header`` with panda-side overlay fields merged in.

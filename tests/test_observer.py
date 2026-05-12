@@ -6,9 +6,11 @@ from unittest.mock import Mock, patch
 
 from cmt_vna.testing import DummyVNA
 from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
+from eigsep_redis.status import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
 from eigsep_observing import EigObserver, run_tag
 from eigsep_observing.corr import CorrConfigStore
+from eigsep_observing.status_log_handler import PANDA_RELAY_LOGGER
 from eigsep_observing.testing.utils import generate_data
 from eigsep_observing.vna import VnaWriter
 
@@ -912,3 +914,76 @@ def test_record_corr_data_writes_overlays_into_header(
     assert written["run_tag"] == "no_switch_observation"
     assert written["run_started_at_unix"] == 100.0
     assert written["obs_config"]["vna_save_dir"] == "/tmp/test_vna"
+
+
+def _read_status_entries(transport):
+    """Return the status stream as a list of ``(level, message)``.
+
+    Reads via ``xrange`` so it doesn't contend with the observer's
+    background ``status_thread`` for the per-transport last-read-id.
+    """
+    raw = transport.r.xrange(STATUS_STREAM)
+    out = []
+    for _id, fields in raw:
+        status = fields[b"status"].decode("utf-8")
+        level = int(fields[b"level"].decode("utf-8"))
+        out.append((level, status))
+    return out
+
+
+def test_status_handler_forwards_observer_error(
+    observer_panda_only, transport_panda
+):
+    """Ground-side ERROR records are mirrored to the panda status
+    stream with a logger-name prefix the dashboard can render."""
+    before = len(_read_status_entries(transport_panda))
+    logging.getLogger("eigsep_observing.observer").error("test-error-foo")
+    new_entries = _read_status_entries(transport_panda)[before:]
+    assert any(
+        level == logging.ERROR
+        and msg == "[eigsep_observing.observer] test-error-foo"
+        for level, msg in new_entries
+    ), new_entries
+
+
+def test_status_handler_skips_aggregator_and_relay(
+    observer_panda_only, transport_panda
+):
+    """Aggregator-owned and panda-relay loggers are excluded.
+
+    Aggregator errors are visible in the operator's live_status
+    terminal already. Re-emitting panda status messages via the relay
+    logger must not loop back through the handler.
+    """
+    before = len(_read_status_entries(transport_panda))
+    logging.getLogger("eigsep_observing.live_status.aggregator").error(
+        "agg-error-should-not-mirror"
+    )
+    logging.getLogger(PANDA_RELAY_LOGGER).error(
+        "relay-error-should-not-mirror"
+    )
+    new_entries = _read_status_entries(transport_panda)[before:]
+    assert not any(
+        "agg-error-should-not-mirror" in msg for _, msg in new_entries
+    ), new_entries
+    assert not any(
+        "relay-error-should-not-mirror" in msg for _, msg in new_entries
+    ), new_entries
+
+
+def test_status_handler_skips_warning_and_info(
+    observer_panda_only, transport_panda
+):
+    """Sub-ERROR levels are dropped — some WARNING sites fire at corr
+    cadence and would blow ``StatusWriter.maxlen``."""
+    before = len(_read_status_entries(transport_panda))
+    io_logger = logging.getLogger("eigsep_observing.io")
+    io_logger.warning("io-warning-should-not-mirror")
+    io_logger.info("io-info-should-not-mirror")
+    new_entries = _read_status_entries(transport_panda)[before:]
+    assert not any(
+        "io-warning-should-not-mirror" in msg for _, msg in new_entries
+    ), new_entries
+    assert not any(
+        "io-info-should-not-mirror" in msg for _, msg in new_entries
+    ), new_entries
