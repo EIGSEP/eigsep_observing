@@ -1185,9 +1185,14 @@ class EigsepFpga:
                 pass
 
     def end_observing(self):
+        # Setting the event is enough: the producer's while-condition
+        # picks it up at its next iteration top, runs its finally, and
+        # the finally's queue.put(None) is the single wake-up that
+        # unblocks the consumer's queue.get(). Enqueuing a None here
+        # too would race the producer's mid-iteration put and cause
+        # the consumer to exit before the last integration lands.
         try:
             self.event.set()
-            self.queue.put(None)  # signals end of observing
         except AttributeError:
             self.logger.error("Observation not started or already ended.")
 
@@ -1254,11 +1259,12 @@ class EigsepFpga:
         thd.start()
 
         try:
-            # Drain until the event is set AND the queue is empty: the
-            # producer (and end_observing) may enqueue None *before*
-            # the last real integration lands, so an early break on
-            # None would silently drop it. Sentinels are skipped; the
-            # while-condition is the only exit path.
+            # The producer's finally is the sole source of the None
+            # sentinel and it always fires after the producer's last
+            # queue.put — so the None can never precede a real
+            # integration. We skip it (it's only a wake-up for the
+            # blocking queue.get) and let the while-condition exit
+            # the loop once event is set AND queue is empty.
             while not self.event.is_set() or not self.queue.empty():
                 d = self.queue.get()
                 if d is None:

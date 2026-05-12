@@ -857,36 +857,20 @@ class TestEigsepFpga:
         r = fpga_instance.transport.r
         assert r.xlen(CORR_STREAM) == 0
 
-    def test_observe_drains_queue_when_sentinel_precedes_late_data(
-        self, fpga_instance
-    ):
-        """Race regression: ``end_observing`` can enqueue ``None``
-        between a producer's ``read_data`` and its ``queue.put`` of
-        the resulting integration. Pre-fix, the consumer broke on
-        the first sentinel and silently dropped any data queued
-        after it. Post-fix, the consumer drains until the queue is
-        empty.
+    def test_end_observing_does_not_enqueue_sentinel(self, fpga_instance):
+        """``end_observing`` only sets the event — the producer's
+        ``finally`` is the sole source of the ``None`` sentinel. A
+        second sentinel from ``end_observing`` would race the
+        producer's mid-iteration ``queue.put`` and let the consumer
+        exit before the last integration lands.
         """
-        expected_dtype = fpga_instance.cfg["dtype"]
-        # data1, then end_observing's None, then a late integration,
-        # then producer's finally None.
-        items = [
-            {"data": "early", "cnt": 1},
-            None,
-            {"data": "late", "cnt": 2},
-            None,
-        ]
-        with (
-            patch.object(fpga_instance.corr, "add") as mock_add,
-            _patch_observe_thread(fpga_instance, items),
-        ):
-            fpga_instance.observe(pairs=["0"], timeout=10)
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
 
-        assert mock_add.call_count == 2
-        assert mock_add.call_args_list[0].args == ("early", 1, 0)
-        assert mock_add.call_args_list[1].args == ("late", 2, 0)
-        for call in mock_add.call_args_list:
-            assert call.kwargs == {"dtype": expected_dtype}
+        fpga_instance.end_observing()
+
+        assert fpga_instance.event.is_set()
+        assert fpga_instance.queue.empty()
 
     def test_read_integrations_finally_signals_consumer_on_exception(
         self, fpga_instance
