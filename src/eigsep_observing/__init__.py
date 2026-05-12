@@ -7,6 +7,7 @@ from .observer import EigObserver
 from .fpga import EigsepFpga
 from .motor_client import MotorClient
 from .motor_zeroer import MotorZeroer
+from .status_log_handler import StatusStreamHandler
 from .tempctrl_client import TempCtrlClient
 
 try:
