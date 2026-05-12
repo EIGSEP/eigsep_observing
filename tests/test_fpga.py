@@ -538,9 +538,13 @@ class TestEigsepFpga:
         spy.assert_called_once()
 
     def test_read_integrations_no_new_data(self, fpga_instance):
-        """No new cnt → loop exits via pre-set event, queue stays empty."""
+        """No new cnt + event pre-set → loop exits via the external-
+        stop branch (``_producer_timeout`` stays False). Finally
+        wakes the consumer with a single ``None`` sentinel."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
+        fpga_instance._producer_exc = None
+        fpga_instance._producer_timeout = False
         # Pre-set so the loop's while-condition fails after the first
         # read_int, before it has a chance to enter the iteration body.
         fpga_instance.event.set()
@@ -550,7 +554,10 @@ class TestEigsepFpga:
         ) as mock_read_int:
             fpga_instance._read_integrations(["0", "1"], timeout=0.1)
 
-        assert fpga_instance.queue.empty()
+        assert fpga_instance.queue.get_nowait() is None
+        assert fpga_instance.queue.empty()  # only the sentinel
+        assert fpga_instance._producer_exc is None
+        assert fpga_instance._producer_timeout is False
         mock_read_int.assert_called_with("corr_acc_cnt")
 
     def test_read_integrations_new_data(self, fpga_instance, caplog):
@@ -766,7 +773,6 @@ class TestEigsepFpga:
             fpga_instance.observe(pairs=["0"], timeout=1)
 
         mock_add.assert_not_called()
-        assert "End of queue, processing finished." in caplog.text
 
     def test_observe_logging(self, fpga_instance, caplog):
         """observe() emits the expected info log lines."""
@@ -784,7 +790,6 @@ class TestEigsepFpga:
 
         assert f"Integration time is {expected_t_int} seconds." in caplog.text
         assert "Starting observation for pairs: ['0']." in caplog.text
-        assert "End of queue, processing finished." in caplog.text
 
     def test_observe_integration_loop(self, fpga_instance):
         """
@@ -851,6 +856,127 @@ class TestEigsepFpga:
         # the stream.
         r = fpga_instance.transport.r
         assert r.xlen(CORR_STREAM) == 0
+
+    def test_end_observing_does_not_enqueue_sentinel(self, fpga_instance):
+        """``end_observing`` only sets the event — the producer's
+        ``finally`` is the sole source of the ``None`` sentinel. A
+        second sentinel from ``end_observing`` would race the
+        producer's mid-iteration ``queue.put`` and let the consumer
+        exit before the last integration lands.
+        """
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+
+        fpga_instance.end_observing()
+
+        assert fpga_instance.event.is_set()
+        assert fpga_instance.queue.empty()
+
+    def test_read_integrations_finally_signals_consumer_on_exception(
+        self, fpga_instance
+    ):
+        """A hardware exception in the producer body (the SNAP-power-
+        cut failure mode: casperfpga RuntimeError) must capture the
+        exception, wake the consumer, and not propagate out of the
+        thread. Pre-fix, the bare exception killed the thread and the
+        consumer hung forever on ``queue.get()``.
+        """
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+        fpga_instance._producer_exc = None
+        fpga_instance._producer_timeout = False
+
+        boom = RuntimeError("Failed to read corr_cross_15_dout")
+        with patch.object(fpga_instance.fpga, "read_int", side_effect=boom):
+            # Captured, not propagated — observe() re-raises from the
+            # main thread so journalctl sees one clean traceback.
+            fpga_instance._read_integrations(["0"], timeout=1)
+
+        assert fpga_instance.event.is_set()
+        assert fpga_instance.queue.get_nowait() is None
+        assert fpga_instance._producer_exc is boom
+        assert fpga_instance._producer_timeout is False
+
+    def test_read_integrations_no_progress_flags_producer_timeout(
+        self, fpga_instance
+    ):
+        """``corr_acc_cnt`` frozen for >timeout → loop exits, finally
+        wakes the consumer, and ``_producer_timeout`` flips True (the
+        external-stop branch — event-set-by-end_observing — leaves
+        it False; see test_read_integrations_no_new_data)."""
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+        fpga_instance._producer_exc = None
+        fpga_instance._producer_timeout = False
+
+        with patch.object(fpga_instance.fpga, "read_int", return_value=42):
+            fpga_instance._read_integrations(["0"], timeout=0.05)
+
+        assert fpga_instance.event.is_set()
+        assert fpga_instance.queue.get_nowait() is None
+        assert fpga_instance._producer_exc is None
+        assert fpga_instance._producer_timeout is True
+
+    def test_observe_re_raises_producer_exception(self, fpga_instance):
+        """End-to-end with a real producer thread: a casperfpga
+        ``RuntimeError`` propagates out of ``observe()`` so the
+        supervisor (``eigsep-observe.service``) sees a non-zero exit
+        and restarts with ``--reinit``.
+        """
+        boom = RuntimeError("Failed to read corr_cross_15_dout")
+
+        with (
+            patch.object(fpga_instance, "upload_config"),
+            patch.object(fpga_instance.fpga, "read_int", side_effect=boom),
+            patch.object(fpga_instance.corr, "add"),
+            pytest.raises(RuntimeError, match="corr_cross_15_dout"),
+        ):
+            fpga_instance.observe(pairs=["0"], timeout=1)
+
+    def test_observe_raises_timeouterror_on_producer_silence(
+        self, fpga_instance
+    ):
+        """``corr_acc_cnt`` never advances → producer's no-progress
+        window elapses → ``observe()`` raises ``TimeoutError`` so the
+        supervisor restarts rather than hanging silently.
+        """
+        with (
+            patch.object(fpga_instance, "upload_config"),
+            patch.object(fpga_instance.fpga, "read_int", return_value=42),
+            patch.object(fpga_instance.corr, "add"),
+            pytest.raises(TimeoutError, match="SNAP appears unresponsive"),
+        ):
+            fpga_instance.observe(pairs=["0"], timeout=0.05)
+
+    def test_observe_clean_stop_via_end_observing_does_not_raise(
+        self, fpga_instance
+    ):
+        """External stop via ``end_observing`` (interactive shell
+        exit, or SIGINT path in fpga_init.py) must remain a clean
+        return — only producer-side failures should raise.
+        """
+
+        def stop_after_delay():
+            time.sleep(0.05)
+            fpga_instance.end_observing()
+
+        stopper = threading.Thread(target=stop_after_delay, daemon=True)
+
+        with (
+            patch.object(fpga_instance, "upload_config"),
+            patch.object(fpga_instance.fpga, "read_int", return_value=42),
+            patch.object(fpga_instance.corr, "add"),
+        ):
+            stopper.start()
+            # timeout=5 is the producer's no-progress window; if the
+            # external stop is missed the test hangs ~5s and then
+            # fails on TimeoutError, which is a louder symptom than
+            # any silent skip.
+            fpga_instance.observe(pairs=["0"], timeout=5)
+
+        stopper.join(timeout=1)
+        assert fpga_instance._producer_exc is None
+        assert fpga_instance._producer_timeout is False
 
 
 class TestFpgaLockProxy:
