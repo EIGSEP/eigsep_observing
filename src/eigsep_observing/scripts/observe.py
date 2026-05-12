@@ -187,8 +187,11 @@ def main() -> int:
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, stopping observer.")
     finally:
-        observer.stop_event.set()
+        observer.close()
+        # close() joined the status thread; join the rest.
         for name in thds:
+            if name == "status":
+                continue
             logger.info(f"Stopping thread: {name}")
             thds[name].join()
             logger.info(f"Thread {name} stopped.")

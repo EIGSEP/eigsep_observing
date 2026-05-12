@@ -658,8 +658,7 @@ def test_consumer_role_surfaces_are_structural():
     try:
         _assert_only_permitted_bus_surfaces(obs, obs_permitted)
     finally:
-        obs.stop_event.set()
-        obs.status_thread.join(timeout=1)
+        obs.close()
 
     # --- EigsepFpga: SNAP-side producer + corr config store.
     fpga_permitted = (

@@ -106,18 +106,8 @@ class EigObserver:
             # every corr integration and feeds the file via the same
             # averaging path as panda sensors.
             self.adc_metadata_stream = MetadataStreamReader(transport_snap)
-        ground_logger = logging.getLogger("eigsep_observing")
 
         if transport_panda is not None:
-            # Prune any StatusStreamHandler from prior EigObserver
-            # instances bound to stale transports. Production has one
-            # observer per process, but tests construct many; without
-            # this, the second test would mirror records to the first
-            # test's transport too.
-            for h in list(ground_logger.handlers):
-                if isinstance(h, StatusStreamHandler):
-                    ground_logger.removeHandler(h)
-                    h.close()
             self.config = ConfigStore(transport_panda)
             self.metadata_stream = MetadataStreamReader(transport_panda)
             self.status_reader = StatusReader(transport_panda)
@@ -127,13 +117,17 @@ class EigObserver:
             # Ground-side ERRORs are otherwise invisible to the
             # live-status dashboard (no Slack/email fallback in the
             # field). Mirror them onto the panda status stream that
-            # the aggregator already drains. The handler stays
-            # installed for the lifetime of this process. The
-            # ``StatusWriter`` lives inside the handler — keeping it
-            # off ``EigObserver.__dict__`` preserves the consumer-role
-            # invariant (no writer surfaces on the observer).
+            # the aggregator already drains. Production has one
+            # observer per process; tests construct many and must call
+            # ``close()`` on teardown to remove this handler from the
+            # module-level logger. The ``StatusWriter`` lives inside
+            # the handler — keeping it off ``EigObserver.__dict__``
+            # preserves the consumer-role invariant (no writer
+            # surfaces on the observer).
             self._status_log_handler = StatusStreamHandler(transport_panda)
-            ground_logger.addHandler(self._status_log_handler)
+            logging.getLogger("eigsep_observing").addHandler(
+                self._status_log_handler
+            )
             # Dedicated child logger for re-emitting panda status
             # messages so the StatusStreamHandler can skip them; see
             # status_log_handler.PANDA_RELAY_LOGGER.
@@ -150,6 +144,24 @@ class EigObserver:
             target=self.status_logger, daemon=True
         )
         self.status_thread.start()
+
+    def close(self):
+        """Stop background threads and detach the status-stream handler.
+
+        Production has one observer per process and shuts down via
+        ``scripts/observe.py``'s finally block. Tests build many
+        observers and must call ``close()`` on teardown so the
+        ``StatusStreamHandler`` does not leak across tests and mirror
+        the next test's errors into a stale transport.
+        """
+        self.stop_event.set()
+        self.status_thread.join(timeout=1)
+        if self._status_log_handler is not None:
+            logging.getLogger("eigsep_observing").removeHandler(
+                self._status_log_handler
+            )
+            self._status_log_handler.close()
+            self._status_log_handler = None
 
     @property
     def snap_connected(self):
