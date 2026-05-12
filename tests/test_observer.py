@@ -1,5 +1,6 @@
 import logging
 import pytest
+import queue
 import threading
 import time
 from unittest.mock import Mock, patch
@@ -10,7 +11,10 @@ from eigsep_redis.status import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
 from eigsep_observing import EigObserver, run_tag
 from eigsep_observing.corr import CorrConfigStore
-from eigsep_observing.status_log_handler import PANDA_RELAY_LOGGER
+from eigsep_observing.status_log_handler import (
+    PANDA_RELAY_LOGGER,
+    StatusStreamHandler,
+)
 from eigsep_observing.testing.utils import generate_data
 from eigsep_observing.vna import VnaWriter
 
@@ -59,8 +63,7 @@ def observer_snap_only(transport_snap):
     """EigObserver with only SNAP connection."""
     obs = EigObserver(transport_snap=transport_snap)
     yield obs
-    obs.stop_event.set()  # ensure any threads are stopped after test
-    obs.status_thread.join(timeout=1)
+    obs.close()
 
 
 @pytest.fixture
@@ -68,8 +71,7 @@ def observer_panda_only(transport_panda):
     """EigObserver with only LattePanda connection."""
     obs = EigObserver(transport_panda=transport_panda)
     yield obs
-    obs.stop_event.set()
-    obs.status_thread.join(timeout=1)
+    obs.close()
 
 
 @pytest.fixture
@@ -79,8 +81,7 @@ def observer_both(transport_snap, transport_panda):
         transport_snap=transport_snap, transport_panda=transport_panda
     )
     yield obs
-    obs.stop_event.set()
-    obs.status_thread.join(timeout=1)
+    obs.close()
 
 
 def test_observer_init_snap_only(observer_snap_only, transport_snap):
@@ -110,8 +111,130 @@ def test_observer_init_none():
     observer = EigObserver()
     assert observer.transport_snap is None
     assert observer.transport_panda is None
-    observer.stop_event.set()
-    observer.status_thread.join(timeout=1)
+    observer.close()
+
+
+def test_status_handler_does_not_block_caller_on_slow_xadd(
+    observer_panda_only, transport_panda
+):
+    """A hung ``StatusWriter.send`` must not stall the caller (corr)
+    thread — the queue → listener split is the guarantee.
+
+    Patch the listener's emitter to sleep on every ``send``; verify
+    that ``logger.error`` on the caller thread returns essentially
+    immediately. CLAUDE.md priority-1: corr writes must not be blocked
+    by panda mirroring.
+    """
+    handler = observer_panda_only._status_log_handler
+    block = threading.Event()
+    original_send = handler._emitter._status.send
+
+    def hanging_send(*args, **kwargs):
+        block.wait(timeout=5.0)
+        return original_send(*args, **kwargs)
+
+    with patch.object(
+        handler._emitter._status, "send", side_effect=hanging_send
+    ):
+        t0 = time.monotonic()
+        logging.getLogger("eigsep_observing.observer").error("blocking-test")
+        elapsed = time.monotonic() - t0
+        # Listener is blocked, but the caller's emit is a queue put —
+        # well under 100ms even on slow CI. Pre-refactor (sync XADD)
+        # this would have been ~5s.
+        assert elapsed < 0.5, elapsed
+        block.set()
+    handler.flush()
+
+
+def test_status_handler_logs_loudly_on_send_failure(
+    observer_panda_only, caplog
+):
+    """Listener-side ``StatusWriter.send`` failure must surface as an
+    ERROR on a logger outside the ``eigsep_observing`` hierarchy.
+
+    CLAUDE.md priority-2: safety nets are acceptable only if they log
+    loudly at ERROR so the upstream contract violation is visible.
+    Using a non-``eigsep_observing`` logger avoids re-queueing through
+    the handler's own filter.
+    """
+    handler = observer_panda_only._status_log_handler
+    caplog.set_level(logging.ERROR, logger="eigsep_status_handler_errors")
+
+    with patch.object(
+        handler._emitter._status,
+        "send",
+        side_effect=RuntimeError("xadd boom"),
+    ):
+        logging.getLogger("eigsep_observing.observer").error("payload-foo")
+        handler.flush()
+
+    matching = [
+        rec
+        for rec in caplog.records
+        if rec.name == "eigsep_status_handler_errors"
+        and rec.levelno == logging.ERROR
+        and "failed to publish" in rec.getMessage()
+        and "payload-foo" in rec.getMessage()
+    ]
+    assert matching, caplog.records
+
+
+def test_status_handler_logs_loudly_on_queue_full(observer_panda_only, caplog):
+    """Caller-side ``queue.Full`` (listener parked on a hung XADD)
+    must also surface as an ERROR on the same out-of-hierarchy logger.
+    """
+    handler = observer_panda_only._status_log_handler
+    caplog.set_level(logging.ERROR, logger="eigsep_status_handler_errors")
+
+    with patch.object(handler.queue, "put_nowait", side_effect=queue.Full):
+        logging.getLogger("eigsep_observing.observer").error("drop-me")
+
+    matching = [
+        rec
+        for rec in caplog.records
+        if rec.name == "eigsep_status_handler_errors"
+        and rec.levelno == logging.ERROR
+        and "failed to enqueue" in rec.getMessage()
+    ]
+    assert matching, caplog.records
+
+
+def test_status_handler_filter_rejects_sibling_root(
+    observer_panda_only, transport_panda
+):
+    """``eigsep_observing_foo`` is a sibling root, not a descendant of
+    ``eigsep_observing`` — must not be mirrored. Guards against a bare
+    ``startswith`` regression in the filter.
+    """
+    before = len(_read_status_entries(transport_panda))
+    logging.getLogger("eigsep_observing_foo").error("sibling-not-mirrored")
+    observer_panda_only._status_log_handler.flush()
+    new_entries = _read_status_entries(transport_panda)[before:]
+    assert not any("sibling-not-mirrored" in msg for _, msg in new_entries), (
+        new_entries
+    )
+
+
+def test_close_detaches_status_stream_handler(transport_panda):
+    """``close()`` must remove the StatusStreamHandler from the
+    module-level logger so a subsequent observer in the same process
+    (notably the next test) does not mirror records into the stale
+    transport.
+    """
+    ground = logging.getLogger("eigsep_observing")
+    before = [h for h in ground.handlers if isinstance(h, StatusStreamHandler)]
+
+    obs = EigObserver(transport_panda=transport_panda)
+    installed = [
+        h for h in ground.handlers if isinstance(h, StatusStreamHandler)
+    ]
+    assert len(installed) == len(before) + 1
+
+    obs.close()
+    after = [h for h in ground.handlers if isinstance(h, StatusStreamHandler)]
+    assert after == before
+    assert obs._status_log_handler is None
 
 
 def test_snap_connected_property(observer_snap_only, observer_panda_only):
@@ -136,8 +259,7 @@ def test_panda_connected_property(
     assert observer_panda_only.panda_connected is False
 
     # clean up
-    observer_none.stop_event.set()
-    observer_none.status_thread.join(timeout=1)
+    observer_none.close()
 
 
 @patch("eigsep_observing.io.File")
@@ -607,8 +729,11 @@ def test_record_corr_data_panda_connected_drains_metadata(
 def test_record_corr_data_no_snap():
     """Test record_corr_data without snap connection raises AttributeError."""
     observer = EigObserver()
-    with pytest.raises(AttributeError):
-        observer.record_corr_data("/tmp")
+    try:
+        with pytest.raises(AttributeError):
+            observer.record_corr_data("/tmp")
+    finally:
+        observer.close()
 
 
 def test_status_logger(observer_panda_only, caplog):
@@ -938,6 +1063,8 @@ def test_status_handler_forwards_observer_error(
     stream with a logger-name prefix the dashboard can render."""
     before = len(_read_status_entries(transport_panda))
     logging.getLogger("eigsep_observing.observer").error("test-error-foo")
+    # XADD happens on the QueueListener thread; drain it before read.
+    observer_panda_only._status_log_handler.flush()
     new_entries = _read_status_entries(transport_panda)[before:]
     assert any(
         level == logging.ERROR
@@ -962,6 +1089,7 @@ def test_status_handler_skips_aggregator_and_relay(
     logging.getLogger(PANDA_RELAY_LOGGER).error(
         "relay-error-should-not-mirror"
     )
+    observer_panda_only._status_log_handler.flush()
     new_entries = _read_status_entries(transport_panda)[before:]
     assert not any(
         "agg-error-should-not-mirror" in msg for _, msg in new_entries
@@ -980,6 +1108,7 @@ def test_status_handler_skips_warning_and_info(
     io_logger = logging.getLogger("eigsep_observing.io")
     io_logger.warning("io-warning-should-not-mirror")
     io_logger.info("io-info-should-not-mirror")
+    observer_panda_only._status_log_handler.flush()
     new_entries = _read_status_entries(transport_panda)[before:]
     assert not any(
         "io-warning-should-not-mirror" in msg for _, msg in new_entries
