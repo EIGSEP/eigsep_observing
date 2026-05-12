@@ -563,18 +563,59 @@ def test_bus_classes_have_no_cross_bus_methods():
             )
 
 
+_ALL_BUS_TYPES = (
+    CorrConfigStore,
+    CorrReader,
+    CorrWriter,
+    VnaReader,
+    VnaWriter,
+    MetadataStreamReader,
+    MetadataSnapshotReader,
+    MetadataWriter,
+    StatusReader,
+    StatusWriter,
+    HeartbeatReader,
+    HeartbeatWriter,
+    ConfigStore,
+    AdcSnapshotReader,
+    AdcSnapshotWriter,
+)
+
+
+def _assert_only_permitted_bus_surfaces(obj, permitted):
+    """Every bus-surface attribute on ``obj`` must be an instance of
+    one of ``permitted``. Bus surfaces are recognised by isinstance
+    against the closed set ``_ALL_BUS_TYPES``; non-bus attributes
+    (transport, cfg, threads, sub-objects, ...) are skipped.
+
+    Permitted-list, not forbidden-list: if a new bus surface is
+    introduced and someone attaches it to the wrong consumer (or to
+    the right one but forgets to update the permitted set), this
+    fails closed. The previous forbidden-list shape had to be
+    extended every time a new surface landed and silently passed any
+    surface no one thought to forbid.
+    """
+    for name, value in vars(obj).items():
+        if not isinstance(value, _ALL_BUS_TYPES):
+            continue
+        assert isinstance(value, permitted), (
+            f"{type(obj).__name__} holds disallowed bus surface "
+            f"{type(value).__name__} on attribute {name!r}; "
+            f"permitted: {tuple(t.__name__ for t in permitted)}"
+        )
+
+
 def test_consumer_role_surfaces_are_structural():
     """Structural guard: each top-level consumer (PandaClient,
-    EigObserver, EigsepFpga) builds only the per-bus surfaces its
-    role actually uses. Wrong-role access is now ``AttributeError``
-    at the *instance* level, not just a missing method on a reader.
+    EigObserver, EigsepFpga, LiveStatusAggregator) builds only the
+    per-bus surfaces its role actually uses. Wrong-role access is
+    ``AttributeError`` at the *instance* level, not just a missing
+    method on a reader.
 
-    This is the division-of-responsibility guard that step 6 of the
-    writer/reader-per-bus refactor adds on top of the already-shipped
-    wrong-stream-write guard: a ``PandaClient`` cannot hold a
-    ``CorrReader`` by accident, an ``EigObserver`` cannot hold a
-    ``CorrWriter``, etc. Introspects a live instance's ``__dict__``
-    (not the class) because the surfaces are assigned in ``__init__``.
+    Guard is permitted-list-by-type — every bus-surface attribute is
+    checked against the role's allowed set. Failing closed on new
+    surfaces was the goal of the refactor tracked in
+    [project_role_surfaces_permitted_list]; this is that flip.
     """
     from eigsep_observing import EigsepFpga
     from eigsep_observing.testing import (
@@ -583,110 +624,82 @@ def test_consumer_role_surfaces_are_structural():
         DummyPandaClient,
     )
 
-    # --- PandaClient: writers only (+ metadata_snapshot for rfswitch
-    # reads, + config for cfg reads). Must not hold any stream reader.
+    # --- PandaClient: panda-side producer + rfswitch snapshot reader.
+    panda_permitted = (
+        ConfigStore,
+        MetadataSnapshotReader,
+        StatusWriter,
+        HeartbeatWriter,
+        VnaWriter,
+    )
     panda = DummyPandaClient()
     try:
-        panda_attrs = set(vars(panda))
-        for forbidden in (
-            "corr",  # CorrWriter — FPGA scope
-            "corr_reader",  # observer scope
-            "corr_config",  # observer/FPGA scope
-            "vna_reader",  # observer scope
-            "metadata_stream",  # observer scope
-            "status_reader",  # observer scope
-            "heartbeat_reader",  # observer scope
-            "adc_metadata_writer",  # MetadataWriter — FPGA scope
-            "adc_snapshot_writer",  # AdcSnapshotWriter — FPGA scope
-            "adc_metadata_stream",  # observer scope
-            "adc_snapshot_reader",  # observer/live-status scope
-        ):
-            assert forbidden not in panda_attrs, (
-                f"PandaClient instance must not hold {forbidden!r}"
-            )
+        _assert_only_permitted_bus_surfaces(panda, panda_permitted)
     finally:
         panda.stop()
 
-    # --- EigObserver: readers only. Must not hold any stream writer.
+    # --- EigObserver: pure consumer of both transports. No writer
+    # surfaces — the ground-side status-log bridge keeps its
+    # ``StatusWriter`` encapsulated inside ``StatusStreamHandler``
+    # (not on ``vars(obs)``), preserving this invariant.
+    obs_permitted = (
+        CorrConfigStore,
+        CorrReader,
+        ConfigStore,
+        MetadataStreamReader,
+        StatusReader,
+        HeartbeatReader,
+        VnaReader,
+    )
     obs = DummyEigObserver(
         transport_snap=DummyTransport(),
         transport_panda=DummyTransport(),
     )
     try:
-        obs_attrs = set(vars(obs))
-        for forbidden in (
-            "corr",  # CorrWriter — FPGA scope
-            "vna",  # VnaWriter — PandaClient scope
-            "metadata",  # MetadataWriter — picohost scope
-            "status",  # StatusWriter — PandaClient scope
-            "heartbeat",  # HeartbeatWriter — PandaClient scope
-            "adc_metadata_writer",  # MetadataWriter — FPGA scope
-            "adc_snapshot_writer",  # AdcSnapshotWriter — FPGA scope
-        ):
-            assert forbidden not in obs_attrs, (
-                f"EigObserver instance must not hold {forbidden!r}"
-            )
+        _assert_only_permitted_bus_surfaces(obs, obs_permitted)
     finally:
         obs.stop_event.set()
         obs.status_thread.join(timeout=1)
 
-    # --- EigsepFpga: producer-side writers + corr_config only (corr
-    # writer, adc_metadata_writer, adc_snapshot_writer). Must not
-    # hold any consumer surface.
+    # --- EigsepFpga: SNAP-side producer + corr config store.
+    fpga_permitted = (
+        CorrConfigStore,
+        CorrWriter,
+        MetadataWriter,
+        AdcSnapshotWriter,
+    )
     fpga = DummyEigsepFpga(program=False)
-    fpga_attrs = set(vars(fpga))
-    for forbidden in (
-        "corr_reader",
-        "vna_reader",
-        "metadata_stream",
-        "metadata_snapshot",
-        "status_reader",
-        "heartbeat_reader",
-        "adc_snapshot_reader",
-    ):
-        assert forbidden not in fpga_attrs, (
-            f"EigsepFpga instance must not hold {forbidden!r}"
-        )
+    _assert_only_permitted_bus_surfaces(fpga, fpga_permitted)
 
     # Production ``EigsepFpga`` class (not the dummy) obviously has
     # the same guarantee — reference it to keep the import meaningful.
     assert EigsepFpga is not None
 
-    # --- LiveStatusAggregator: pure reader/store consumer role. Must
-    # not hold any writer. Runs in a separate process from
+    # --- LiveStatusAggregator: pure reader/store consumer role on
+    # both transports. Runs in a separate process from
     # ``EigObserver`` but consumes from the same two Redis servers
     # with its own ``Transport`` instances — see the module docstring
     # in ``eigsep_observing.live_status.aggregator`` for why.
-    #
-    # Guard is type-based (isinstance over vars().values()) rather
-    # than name-based so a writer attached under any unexpected
-    # attribute name still fails closed. The other three roles above
-    # still use the name-based form; flipping them would be the
-    # permitted-list refactor tracked in the project memory, not this
-    # PR's scope.
     from eigsep_observing.live_status import LiveStatusAggregator
 
-    forbidden_writer_types = (
-        CorrWriter,
-        VnaWriter,
-        MetadataWriter,
-        StatusWriter,
-        HeartbeatWriter,
-        AdcSnapshotWriter,
+    agg_permitted = (
+        CorrConfigStore,
+        CorrReader,
+        ConfigStore,
+        MetadataStreamReader,
+        MetadataSnapshotReader,
+        StatusReader,
+        HeartbeatReader,
+        VnaReader,
+        AdcSnapshotReader,
     )
-
     agg = LiveStatusAggregator(
         transport_snap=DummyTransport(),
         transport_panda=DummyTransport(),
         obs_cfg={"use_tempctrl": False, "corr_ntimes": 240},
     )
     try:
-        for attr_name, attr_value in vars(agg).items():
-            assert not isinstance(attr_value, forbidden_writer_types), (
-                "LiveStatusAggregator instance must not hold writer "
-                f"objects; found {type(attr_value).__name__} on "
-                f"attribute {attr_name!r}"
-            )
+        _assert_only_permitted_bus_surfaces(agg, agg_permitted)
     finally:
         agg.stop(timeout=1.0)
 

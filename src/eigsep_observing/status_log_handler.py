@@ -40,11 +40,19 @@ class StatusStreamHandler(logging.Handler):
     ``transport_panda`` outage delegates to ``self.handleError`` —
     stderr trace, no propagation — so a dead panda cannot break
     observer logging or stall corr writes.
+
+    The ``StatusWriter`` is constructed and held *inside* the handler
+    rather than being passed in. This keeps the writer encapsulated
+    behind the log-handler subsystem so it never lands on
+    ``EigObserver.__dict__``, preserving the consumer-role invariant
+    documented in ``CLAUDE.md`` (``EigObserver`` has no writer
+    surfaces). The only path from observer code to the panda status
+    stream is ``logger.error(...)`` → handler.
     """
 
-    def __init__(self, status_writer: StatusWriter):
+    def __init__(self, transport_panda):
         super().__init__(level=logging.ERROR)
-        self._status = status_writer
+        self._status = StatusWriter(transport_panda)
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
