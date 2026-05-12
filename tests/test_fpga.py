@@ -773,7 +773,6 @@ class TestEigsepFpga:
             fpga_instance.observe(pairs=["0"], timeout=1)
 
         mock_add.assert_not_called()
-        assert "End of queue, processing finished." in caplog.text
 
     def test_observe_logging(self, fpga_instance, caplog):
         """observe() emits the expected info log lines."""
@@ -791,7 +790,6 @@ class TestEigsepFpga:
 
         assert f"Integration time is {expected_t_int} seconds." in caplog.text
         assert "Starting observation for pairs: ['0']." in caplog.text
-        assert "End of queue, processing finished." in caplog.text
 
     def test_observe_integration_loop(self, fpga_instance):
         """
@@ -859,6 +857,37 @@ class TestEigsepFpga:
         r = fpga_instance.transport.r
         assert r.xlen(CORR_STREAM) == 0
 
+    def test_observe_drains_queue_when_sentinel_precedes_late_data(
+        self, fpga_instance
+    ):
+        """Race regression: ``end_observing`` can enqueue ``None``
+        between a producer's ``read_data`` and its ``queue.put`` of
+        the resulting integration. Pre-fix, the consumer broke on
+        the first sentinel and silently dropped any data queued
+        after it. Post-fix, the consumer drains until the queue is
+        empty.
+        """
+        expected_dtype = fpga_instance.cfg["dtype"]
+        # data1, then end_observing's None, then a late integration,
+        # then producer's finally None.
+        items = [
+            {"data": "early", "cnt": 1},
+            None,
+            {"data": "late", "cnt": 2},
+            None,
+        ]
+        with (
+            patch.object(fpga_instance.corr, "add") as mock_add,
+            _patch_observe_thread(fpga_instance, items),
+        ):
+            fpga_instance.observe(pairs=["0"], timeout=10)
+
+        assert mock_add.call_count == 2
+        assert mock_add.call_args_list[0].args == ("early", 1, 0)
+        assert mock_add.call_args_list[1].args == ("late", 2, 0)
+        for call in mock_add.call_args_list:
+            assert call.kwargs == {"dtype": expected_dtype}
+
     def test_read_integrations_finally_signals_consumer_on_exception(
         self, fpga_instance
     ):
@@ -910,10 +939,10 @@ class TestEigsepFpga:
         supervisor (``eigsep-observe.service``) sees a non-zero exit
         and restarts with ``--reinit``.
         """
-        fpga_instance.upload_config = Mock()
         boom = RuntimeError("Failed to read corr_cross_15_dout")
 
         with (
+            patch.object(fpga_instance, "upload_config"),
             patch.object(fpga_instance.fpga, "read_int", side_effect=boom),
             patch.object(fpga_instance.corr, "add"),
             pytest.raises(RuntimeError, match="corr_cross_15_dout"),
@@ -927,9 +956,8 @@ class TestEigsepFpga:
         window elapses → ``observe()`` raises ``TimeoutError`` so the
         supervisor restarts rather than hanging silently.
         """
-        fpga_instance.upload_config = Mock()
-
         with (
+            patch.object(fpga_instance, "upload_config"),
             patch.object(fpga_instance.fpga, "read_int", return_value=42),
             patch.object(fpga_instance.corr, "add"),
             pytest.raises(TimeoutError, match="SNAP appears unresponsive"),
@@ -943,7 +971,6 @@ class TestEigsepFpga:
         exit, or SIGINT path in fpga_init.py) must remain a clean
         return — only producer-side failures should raise.
         """
-        fpga_instance.upload_config = Mock()
 
         def stop_after_delay():
             time.sleep(0.05)
@@ -952,6 +979,7 @@ class TestEigsepFpga:
         stopper = threading.Thread(target=stop_after_delay, daemon=True)
 
         with (
+            patch.object(fpga_instance, "upload_config"),
             patch.object(fpga_instance.fpga, "read_int", return_value=42),
             patch.object(fpga_instance.corr, "add"),
         ):

@@ -1169,12 +1169,13 @@ class EigsepFpga:
             if not self.event.is_set():
                 self._producer_timeout = True
         except Exception as exc:
-            # Capture for observe() to re-raise from the main thread.
-            # Not re-raising here keeps journalctl to one continuous
-            # traceback (the exception's __traceback__ rides with the
-            # object) instead of doubling up via threading.excepthook.
+            # Capture for observe() to re-raise from the main thread —
+            # the exception's __traceback__ rides with the object, so
+            # systemd gets one clean traceback. Logging here with
+            # logger.error (no exc_info) instead of logger.exception
+            # avoids printing the traceback twice in journalctl.
             self._producer_exc = exc
-            self.logger.exception("Producer thread caught exception")
+            self.logger.error("Producer thread caught exception: %s", exc)
         finally:
             self.event.set()
             try:
@@ -1248,18 +1249,20 @@ class EigsepFpga:
             target=self._read_integrations,
             args=(pairs,),
             kwargs={"timeout": timeout},
+            daemon=True,
         )
         thd.start()
 
         try:
+            # Drain until the event is set AND the queue is empty: the
+            # producer (and end_observing) may enqueue None *before*
+            # the last real integration lands, so an early break on
+            # None would silently drop it. Sentinels are skipped; the
+            # while-condition is the only exit path.
             while not self.event.is_set() or not self.queue.empty():
                 d = self.queue.get()
                 if d is None:
-                    if self.event.is_set():
-                        self.logger.info("End of queue, processing finished.")
-                        break
-                    else:
-                        continue
+                    continue
                 data = d["data"]
                 cnt = d["cnt"]
                 sync_time = self.sync_time if self.is_synchronized else 0
