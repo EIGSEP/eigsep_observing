@@ -114,16 +114,6 @@ class EigObserver:
             self.heartbeat_reader = HeartbeatReader(transport_panda)
             self.vna_reader = VnaReader(transport_panda)
             self.cfg = self.config.get()
-            # Ground-side ERRORs are otherwise invisible to the
-            # live-status dashboard (no Slack/email fallback in the
-            # field). Mirror them onto the panda status stream that
-            # the aggregator already drains. Production has one
-            # observer per process; tests construct many and must call
-            # ``close()`` on teardown to remove this handler from the
-            # module-level logger. The ``StatusWriter`` lives inside
-            # the handler — keeping it off ``EigObserver.__dict__``
-            # preserves the consumer-role invariant (no writer
-            # surfaces on the observer).
             self._status_log_handler = StatusStreamHandler(transport_panda)
             logging.getLogger("eigsep_observing").addHandler(
                 self._status_log_handler
@@ -157,11 +147,13 @@ class EigObserver:
         self.stop_event.set()
         self.status_thread.join(timeout=1)
         if self._status_log_handler is not None:
-            logging.getLogger("eigsep_observing").removeHandler(
-                self._status_log_handler
-            )
-            self._status_log_handler.close()
-            self._status_log_handler = None
+            try:
+                self._status_log_handler.close()
+            finally:
+                logging.getLogger("eigsep_observing").removeHandler(
+                    self._status_log_handler
+                )
+                self._status_log_handler = None
 
     @property
     def snap_connected(self):

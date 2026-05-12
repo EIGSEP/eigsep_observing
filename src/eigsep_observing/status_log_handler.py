@@ -200,7 +200,10 @@ class StatusStreamHandler(logging.handlers.QueueHandler):
         durable record.
         """
         try:
-            self._listener.enqueue_sentinel()
+            try:
+                self._listener.enqueue_sentinel()
+            except queue.Full:
+                pass
             thread = self._listener._thread
             if thread is not None:
                 thread.join(timeout=_SHUTDOWN_TIMEOUT_S)
