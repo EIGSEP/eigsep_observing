@@ -1,5 +1,5 @@
 __author__ = "Christian Hellum Bye"
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 from .client import PandaClient
 from .motion_switch import MotionSwitchCoordinator
