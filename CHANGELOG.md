@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.1.0...v2.2.0) (2026-05-13)
+
+
+### Features
+
+* **live-status:** mirror ground-side ERRORs to dashboard event log ([b409439](https://github.com/EIGSEP/eigsep_observing/commit/b409439cd0d909b73677083bbce567717703f520))
+
+
+### Bug Fixes
+
+* wrap status_log_handler.close and sentinel enqueue in try/except/finally ([8227ed5](https://github.com/EIGSEP/eigsep_observing/commit/8227ed5838c198c658e49d7b39da55a68c4935e6))
+
 ## [2.1.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.0.1...v2.1.0) (2026-05-12)
 
 
