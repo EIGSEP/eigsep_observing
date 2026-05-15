@@ -1,8 +1,18 @@
 [Unit]
 Description=EIGSEP SNAP supervisor (fpga_init.py --reinit -p)
 Documentation=https://github.com/EIGSEP/eigsep_observing/blob/main/deploy/systemd/README.md
-After=network-online.target redis-server.service
-Wants=network-online.target redis-server.service
+# chrony-wait.service blocks until chronyd has disciplined the kernel
+# clock to within 0.1s (or its 3 min timeout fires). Required because
+# fpga_init captures `sync_time = time.time()` once at startup and
+# stamps it into the corr header — every integration's UTC timestamp
+# is anchored to that value, so a clock step after sync_time was read
+# would silently corrupt every file until the next --reinit.
+# chrony-wait ships with the Debian chrony package and is a
+# Type=oneshot RemainAfterExit=yes unit, so it costs nothing on
+# subsequent restarts. `After=` on a missing unit is a no-op for
+# non-field consumers without chrony installed.
+After=network-online.target redis-server.service chrony-wait.service
+Wants=network-online.target redis-server.service chrony-wait.service
 # Unbounded retries: the field deployment has no wifi, prime
 # observing is overnight, and a SNAP that thermal-cycles overnight
 # will self-heal as it cools. The operator-visible signal lives on
