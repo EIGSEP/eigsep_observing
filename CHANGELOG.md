@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.3.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.2.0...v2.3.0) (2026-05-15)
+
+
+### Features
+
+* **scripts:** add pico_preflight for pre-observation pico status ([e022f4c](https://github.com/EIGSEP/eigsep_observing/commit/e022f4cdf374872b0cb86e537dd7eecefec1e76e))
+
+
+### Bug Fixes
+
+* ship panda_observe as eigsep-panda console script ([01dc314](https://github.com/EIGSEP/eigsep_observing/commit/01dc314f3024c2d333556bb14fa3a6f8bbd3cbab))
+* stamp auto-generated h5 filenames in UTC with Z suffix ([c4ef1ee](https://github.com/EIGSEP/eigsep_observing/commit/c4ef1ee5d8bdc59a3be4c99be1fbebc23413b30a))
+* **systemd:** gate observe + writer on chrony-wait.service ([bc700a4](https://github.com/EIGSEP/eigsep_observing/commit/bc700a49da04194917b3df43711c57eb302c0ce2))
+
 ## [2.2.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.1.0...v2.2.0) (2026-05-13)
 
 
