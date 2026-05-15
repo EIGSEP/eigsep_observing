@@ -765,69 +765,88 @@ def test_avg_metadata():
     sw_data[1] = dict(sw_data[0], status="error")
     assert io.avg_metadata(sw_data) == "UNKNOWN"
 
-    # tempctrl: LNA/LOAD channels (channel-split path)
-    tc_data = [
+    # tempctrl_lna and tempctrl_load are independent streams that each
+    # flow through the generic _avg_sensor_values path; no special-case
+    # dispatch. Per-channel "status" collapses to "error" on any errored
+    # sample, just like every other sensor.
+    lna_data = [
         {
-            "sensor_name": "tempctrl",
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
             "app_id": 1,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 5000,
-            "LNA_status": "update",
-            "LNA_T_now": 30.0,
-            "LNA_timestamp": 1.0,
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.5,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.1,
-            "LNA_clamp": 1.0,
-            "LOAD_status": "update",
-            "LOAD_T_now": 25.0,
-            "LOAD_timestamp": 2.0,
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.5,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.1,
-            "LOAD_clamp": 1.0,
+            "T_now": 30.0,
+            "timestamp": 1.0,
+            "T_target": 25.0,
+            "drive_level": 0.5,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.1,
+            "clamp": 1.0,
         },
         {
-            "sensor_name": "tempctrl",
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
             "app_id": 1,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 5000,
-            "LNA_status": "update",
-            "LNA_T_now": 32.0,
-            "LNA_timestamp": 3.0,
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.5,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.1,
-            "LNA_clamp": 1.0,
-            "LOAD_status": "error",
-            "LOAD_T_now": 0.0,
-            "LOAD_timestamp": 4.0,
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.5,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.1,
-            "LOAD_clamp": 1.0,
+            "T_now": 32.0,
+            "timestamp": 3.0,
+            "T_target": 25.0,
+            "drive_level": 0.5,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.1,
+            "clamp": 1.0,
         },
     ]
-    result = io.avg_metadata(tc_data)
-    assert result["sensor_name"] == "tempctrl"
-    assert result["LNA"]["T_now"] == 31.0  # average of 30 and 32
-    # LOAD has one error entry, so only non-error value used
-    assert result["LOAD"]["T_now"] == 25.0
-    # status averages: LNA has no errors → "update"; LOAD has one → "error"
-    assert result["LNA"]["status"] == "update"
-    assert result["LOAD"]["status"] == "error"
+    result = io.avg_metadata(lna_data)
+    assert result["sensor_name"] == "tempctrl_lna"
+    assert result["T_now"] == pytest.approx(31.0)  # average of 30 and 32
+    assert result["status"] == "update"
+
+    load_data = [
+        {
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "app_id": 1,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "T_now": 25.0,
+            "timestamp": 2.0,
+            "T_target": 25.0,
+            "drive_level": 0.5,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.1,
+            "clamp": 1.0,
+        },
+        {
+            "sensor_name": "tempctrl_load",
+            "status": "error",
+            "app_id": 1,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 5000,
+            "T_now": 0.0,
+            "timestamp": 4.0,
+            "T_target": 25.0,
+            "drive_level": 0.5,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.1,
+            "clamp": 1.0,
+        },
+    ]
+    result = io.avg_metadata(load_data)
+    # one error sample → float reduction filters it; only 25.0 survives.
+    assert result["T_now"] == pytest.approx(25.0)
+    # status collapses to "error" if any sample errored.
+    assert result["status"] == "error"
 
     # generic sensor (IMU) — full schema-conformant data
     imu_data = [
@@ -843,80 +862,49 @@ def test_avg_metadata():
     assert isinstance(result["app_id"], int)
 
 
-def test_avg_metadata_tempctrl_forwards_top_level_fields():
-    """tempctrl has top-level (non A_/B_-prefixed) fields like
-    watchdog_tripped (bool) and watchdog_timeout_ms (int) that earlier
-    versions of _avg_temp_metadata silently dropped because the helper
-    only enumerated A_/B_ keys. Lock in the fix: top-level fields must
-    survive into the averaged output, with types preserved per schema.
+def test_avg_metadata_tempctrl_watchdog_fields_survive_split():
+    """Each split tempctrl stream carries the device-wide watchdog
+    fields (``watchdog_tripped``, ``watchdog_timeout_ms``) duplicated
+    in by the picohost producer. Lock in that the generic
+    ``_avg_sensor_values`` path preserves them with types intact —
+    before the LNA/LOAD split, an earlier ``_avg_temp_metadata``
+    silently dropped these because the helper only enumerated channel
+    keys.
     """
-    tc_data = [
-        {
-            "sensor_name": "tempctrl",
+
+    def _make(stream, t_now):
+        return {
+            "sensor_name": stream,
+            "status": "update",
             "app_id": 1,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 5000,
-            "LNA_status": "update",
-            "LNA_T_now": 30.0,
-            "LNA_timestamp": 1.0,
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.5,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.1,
-            "LNA_clamp": 1.0,
-            "LOAD_status": "update",
-            "LOAD_T_now": 32.0,
-            "LOAD_timestamp": 2.0,
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.6,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.1,
-            "LOAD_clamp": 1.0,
-        },
-        {
-            "sensor_name": "tempctrl",
-            "app_id": 1,
-            "watchdog_tripped": False,
-            "watchdog_timeout_ms": 5000,
-            "LNA_status": "update",
-            "LNA_T_now": 32.0,  # average with 30.0 → 31.0
-            "LNA_timestamp": 3.0,
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.5,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.1,
-            "LNA_clamp": 1.0,
-            "LOAD_status": "update",
-            "LOAD_T_now": 32.0,
-            "LOAD_timestamp": 4.0,
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.6,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.1,
-            "LOAD_clamp": 1.0,
-        },
-    ]
-    result = io.avg_metadata(tc_data)
+            "T_now": t_now,
+            "timestamp": 1.0,
+            "T_target": 25.0,
+            "drive_level": 0.5,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.1,
+            "clamp": 1.0,
+        }
 
-    # Top-level fields are forwarded with types preserved.
-    assert result["sensor_name"] == "tempctrl"
-    assert result["app_id"] == 1
-    assert isinstance(result["app_id"], int)
-    assert result["watchdog_tripped"] is False
-    assert result["watchdog_timeout_ms"] == 5000
-    assert isinstance(result["watchdog_timeout_ms"], int)
+    lna = io.avg_metadata(
+        [_make("tempctrl_lna", 30.0), _make("tempctrl_lna", 32.0)]
+    )
+    assert lna["sensor_name"] == "tempctrl_lna"
+    assert lna["app_id"] == 1
+    assert isinstance(lna["app_id"], int)
+    assert lna["watchdog_tripped"] is False
+    assert lna["watchdog_timeout_ms"] == 5000
+    assert isinstance(lna["watchdog_timeout_ms"], int)
+    assert lna["T_now"] == pytest.approx(31.0)
 
-    # LNA/LOAD sub-dicts still produced and floats still averaged.
-    assert result["LNA"]["T_now"] == pytest.approx(31.0)
-    assert result["LOAD"]["T_now"] == pytest.approx(32.0)
+    load = io.avg_metadata([_make("tempctrl_load", 32.0)])
+    assert load["sensor_name"] == "tempctrl_load"
+    assert load["watchdog_timeout_ms"] == 5000
+    assert load["T_now"] == pytest.approx(32.0)
 
 
 # ----------------------------------------------------------------------
@@ -968,29 +956,19 @@ def test_avg_metadata_bool_any_on_disagreement():
     integration whose watchdog tripped at any point in the integration
     must record watchdog_tripped=True."""
     base = {
-        "sensor_name": "tempctrl",
+        "sensor_name": "tempctrl_lna",
+        "status": "update",
         "app_id": 1,
         "watchdog_timeout_ms": 5000,
-        "LNA_status": "update",
-        "LNA_T_now": 30.0,
-        "LNA_timestamp": 1.0,
-        "LNA_T_target": 25.0,
-        "LNA_drive_level": 0.5,
-        "LNA_enabled": True,
-        "LNA_active": True,
-        "LNA_int_disabled": False,
-        "LNA_hysteresis": 0.1,
-        "LNA_clamp": 1.0,
-        "LOAD_status": "update",
-        "LOAD_T_now": 30.0,
-        "LOAD_timestamp": 1.0,
-        "LOAD_T_target": 25.0,
-        "LOAD_drive_level": 0.5,
-        "LOAD_enabled": True,
-        "LOAD_active": True,
-        "LOAD_int_disabled": False,
-        "LOAD_hysteresis": 0.1,
-        "LOAD_clamp": 1.0,
+        "T_now": 30.0,
+        "timestamp": 1.0,
+        "T_target": 25.0,
+        "drive_level": 0.5,
+        "enabled": True,
+        "active": True,
+        "int_disabled": False,
+        "hysteresis": 0.1,
+        "clamp": 1.0,
     }
     data = [
         {**base, "watchdog_tripped": False},
@@ -1225,8 +1203,11 @@ def test_stream_metadata_averaging():
         f.close()
 
 
-def test_temp_metadata_split():
-    """Verify tempctrl LNA/LOAD channels split into separate entries."""
+def test_temp_metadata_streams_land_in_file():
+    """tempctrl_lna and tempctrl_load are independent streams; each
+    lands as a flat per-channel entry in the file. (Producer-side
+    fan-out lives in picohost's PicoPeltier._peltier_redis_handler.)
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         save_dir = Path(tmpdir)
         pairs = ["0"]
@@ -1237,44 +1218,39 @@ def test_temp_metadata_split():
         spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
         d = {"0": np.ones(spec_len, dtype=dtype)}
 
+        def _entry(stream, t_now, timestamp):
+            return {
+                "sensor_name": stream,
+                "status": "update",
+                "app_id": 1,
+                "watchdog_tripped": False,
+                "watchdog_timeout_ms": 5000,
+                "T_now": t_now,
+                "timestamp": timestamp,
+                "T_target": 25.0,
+                "drive_level": 0.5,
+                "enabled": True,
+                "active": True,
+                "int_disabled": False,
+                "hysteresis": 0.1,
+                "clamp": 1.0,
+            }
+
         md = {
-            "stream:tempctrl": [
-                {
-                    "sensor_name": "tempctrl",
-                    "app_id": 1,
-                    "watchdog_tripped": False,
-                    "watchdog_timeout_ms": 5000,
-                    "LNA_status": "update",
-                    "LNA_T_now": 30.0,
-                    "LNA_timestamp": 1.0,
-                    "LNA_T_target": 25.0,
-                    "LNA_drive_level": 0.5,
-                    "LNA_enabled": True,
-                    "LNA_active": True,
-                    "LNA_int_disabled": False,
-                    "LNA_hysteresis": 0.1,
-                    "LNA_clamp": 1.0,
-                    "LOAD_status": "update",
-                    "LOAD_T_now": 25.0,
-                    "LOAD_timestamp": 2.0,
-                    "LOAD_T_target": 25.0,
-                    "LOAD_drive_level": 0.5,
-                    "LOAD_enabled": True,
-                    "LOAD_active": True,
-                    "LOAD_int_disabled": False,
-                    "LOAD_hysteresis": 0.1,
-                    "LOAD_clamp": 1.0,
-                },
-            ],
+            "stream:tempctrl_lna": [_entry("tempctrl_lna", 30.0, 1.0)],
+            "stream:tempctrl_load": [_entry("tempctrl_load", 25.0, 2.0)],
         }
         f.add_data(1, 0.0, d, metadata=md)
 
-        # LNA and LOAD should be separate flat entries, not nested
         assert "tempctrl" not in f.metadata
         assert "tempctrl_lna" in f.metadata
         assert "tempctrl_load" in f.metadata
         assert f.metadata["tempctrl_lna"][0]["T_now"] == 30.0
         assert f.metadata["tempctrl_load"][0]["T_now"] == 25.0
+        # Device-wide watchdog fields survive into the file (the old
+        # _avg_temp_metadata split dropped them).
+        assert f.metadata["tempctrl_lna"][0]["watchdog_timeout_ms"] == 5000
+        assert f.metadata["tempctrl_load"][0]["watchdog_timeout_ms"] == 5000
 
         f.close()
 
@@ -1339,32 +1315,40 @@ def test_metadata_end_to_end_round_trip():
                     "pot_az_angle": 200.0 * 1.5 - 100.0,
                 },
             ],
-            "stream:tempctrl": [
+            "stream:tempctrl_lna": [
                 {
-                    "sensor_name": "tempctrl",
+                    "sensor_name": "tempctrl_lna",
+                    "status": "update",
                     "app_id": 1,
                     "watchdog_tripped": False,
                     "watchdog_timeout_ms": 5000,
-                    "LNA_status": "update",
-                    "LNA_T_now": 30.0 + 0.01 * i,
-                    "LNA_timestamp": 1.0 + i,
-                    "LNA_T_target": 25.0,
-                    "LNA_drive_level": 0.0,
-                    "LNA_enabled": True,
-                    "LNA_active": True,
-                    "LNA_int_disabled": False,
-                    "LNA_hysteresis": 0.5,
-                    "LNA_clamp": 100.0,
-                    "LOAD_status": "update",
-                    "LOAD_T_now": 25.0 + 0.01 * i,
-                    "LOAD_timestamp": 1.0 + i,
-                    "LOAD_T_target": 25.0,
-                    "LOAD_drive_level": 0.0,
-                    "LOAD_enabled": True,
-                    "LOAD_active": True,
-                    "LOAD_int_disabled": False,
-                    "LOAD_hysteresis": 0.5,
-                    "LOAD_clamp": 100.0,
+                    "T_now": 30.0 + 0.01 * i,
+                    "timestamp": 1.0 + i,
+                    "T_target": 25.0,
+                    "drive_level": 0.0,
+                    "enabled": True,
+                    "active": True,
+                    "int_disabled": False,
+                    "hysteresis": 0.5,
+                    "clamp": 100.0,
+                },
+            ],
+            "stream:tempctrl_load": [
+                {
+                    "sensor_name": "tempctrl_load",
+                    "status": "update",
+                    "app_id": 1,
+                    "watchdog_tripped": False,
+                    "watchdog_timeout_ms": 5000,
+                    "T_now": 25.0 + 0.01 * i,
+                    "timestamp": 1.0 + i,
+                    "T_target": 25.0,
+                    "drive_level": 0.0,
+                    "enabled": True,
+                    "active": True,
+                    "int_disabled": False,
+                    "hysteresis": 0.5,
+                    "clamp": 100.0,
                 },
             ],
         }
@@ -1709,17 +1693,6 @@ def test_avg_rfswitch_metadata_raises_on_non_dict_entry():
     ]
     with pytest.raises(AttributeError):
         io._avg_rfswitch_metadata(value)
-
-
-def test_avg_temp_metadata_raises_on_non_dict_first_entry():
-    """A non-dict first entry trips value[0].get('app_id') →
-    AttributeError. Must propagate."""
-    with pytest.raises(AttributeError):
-        io._avg_temp_metadata(
-            ["not a dict"],
-            "tempctrl",
-            io.SENSOR_SCHEMAS["tempctrl"],
-        )
 
 
 def test_validate_metadata():

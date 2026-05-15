@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoRFSwitch
+from picohost.base import PicoPeltier, PicoRFSwitch
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -121,6 +121,30 @@ def _motor_post_handler_reading():
     return captured
 
 
+def _peltier_post_handler_reading(stream_name):
+    """Return one per-channel tempctrl reading after _peltier_redis_handler.
+
+    The firmware/emulator emits one combined ``sensor_name="tempctrl"``
+    dict per status tick; ``PicoPeltier._peltier_redis_handler`` fans
+    that into two ``writer.add(...)`` calls — one per channel — and is
+    the boundary that produces the actual Redis-stream shapes. The
+    contract this test enforces is the *post-handler* per-stream shape,
+    so the fixture has to compose the emulator + the handler. Mirrors
+    ``_potmon_post_handler_reading``.
+    """
+    pel = PicoPeltier.__new__(PicoPeltier)
+    captured = []
+    pel._base_redis_handler = lambda d: captured.append(dict(d))
+    pel._peltier_redis_handler(TempCtrlEmulator().get_status())
+    for entry in captured:
+        if entry.get("sensor_name") == stream_name:
+            return entry
+    raise AssertionError(
+        f"_peltier_redis_handler did not emit a {stream_name!r} entry; "
+        f"got sensor_names={[e.get('sensor_name') for e in captured]}"
+    )
+
+
 def _rfswitch_post_handler_reading():
     """Return an rfswitch reading after _rfswitch_redis_handler.
 
@@ -179,7 +203,8 @@ SENSOR_EMULATORS = {
     "imu_el": lambda: ImuEmulator(app_id=3).get_status(),
     "imu_az": lambda: ImuEmulator(app_id=6).get_status(),
     "rfswitch": _rfswitch_post_handler_reading,
-    "tempctrl": lambda: TempCtrlEmulator().get_status(),
+    "tempctrl_lna": lambda: _peltier_post_handler_reading("tempctrl_lna"),
+    "tempctrl_load": lambda: _peltier_post_handler_reading("tempctrl_load"),
     "lidar": lambda: LidarEmulator().get_status(),
     "potmon": _potmon_post_handler_reading,
     "motor": _motor_post_handler_reading,

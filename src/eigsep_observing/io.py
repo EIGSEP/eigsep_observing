@@ -620,6 +620,31 @@ _IMU_SCHEMA = {
     "accel_z": float,
 }
 
+# tempctrl publishes two flat streams (one per Peltier channel), each
+# matching this schema. The producer is
+# `picohost.base.PicoPeltier._peltier_redis_handler`, which fans the
+# firmware's combined tick into two `writer.add(...)` calls, stripping
+# the `LNA_`/`LOAD_` prefix and duplicating the device-wide
+# `watchdog_tripped` / `watchdog_timeout_ms` fields into both streams.
+# With per-stream `status`, both streams flow through the generic
+# `_avg_sensor_values` reduction like every other sensor.
+_PELTIER_SCHEMA = {
+    "sensor_name": str,
+    "status": str,
+    "app_id": int,
+    "watchdog_tripped": bool,
+    "watchdog_timeout_ms": int,
+    "T_now": float,
+    "timestamp": float,
+    "T_target": float,
+    "drive_level": float,
+    "enabled": bool,
+    "active": bool,
+    "int_disabled": bool,
+    "hysteresis": float,
+    "clamp": float,
+}
+
 # `potmon` (potentiometer monitor): the producer is `PotMonEmulator` +
 # `PicoPotentiometer._pot_redis_handler`, which augments the raw
 # voltages with calibration slope/intercept and the derived angle.
@@ -633,32 +658,8 @@ _IMU_SCHEMA = {
 SENSOR_SCHEMAS = {
     "imu_el": _IMU_SCHEMA,
     "imu_az": _IMU_SCHEMA,
-    "tempctrl": {
-        "sensor_name": str,
-        "app_id": int,
-        "watchdog_tripped": bool,
-        "watchdog_timeout_ms": int,
-        "LNA_status": str,
-        "LNA_T_now": float,
-        "LNA_timestamp": float,
-        "LNA_T_target": float,
-        "LNA_drive_level": float,
-        "LNA_enabled": bool,
-        "LNA_active": bool,
-        "LNA_int_disabled": bool,
-        "LNA_hysteresis": float,
-        "LNA_clamp": float,
-        "LOAD_status": str,
-        "LOAD_T_now": float,
-        "LOAD_timestamp": float,
-        "LOAD_T_target": float,
-        "LOAD_drive_level": float,
-        "LOAD_enabled": bool,
-        "LOAD_active": bool,
-        "LOAD_int_disabled": bool,
-        "LOAD_hysteresis": float,
-        "LOAD_clamp": float,
-    },
+    "tempctrl_lna": _PELTIER_SCHEMA,
+    "tempctrl_load": _PELTIER_SCHEMA,
     "potmon": {
         "sensor_name": str,
         "status": str,
@@ -985,84 +986,11 @@ def avg_metadata(value):
             f"No schema for sensor '{app_name}'; skipping validation"
         )
 
-    if app_name == "tempctrl":
-        return _avg_temp_metadata(value, app_name, schema)
-
     if app_name == "rfswitch":
         return _avg_rfswitch_metadata(value)
 
-    # generic sensor (e.g. IMU, lidar)
+    # generic sensor (e.g. IMU, lidar, tempctrl_lna, tempctrl_load)
     return _avg_sensor_values(value, schema, app_name=app_name)
-
-
-def _avg_temp_metadata(value, app_name, schema):
-    """
-    Average tempctrl metadata, handling LNA/LOAD channels.
-
-    Three classes of fields:
-      - Top-level non-prefixed fields (``sensor_name``, ``app_id``,
-        ``watchdog_tripped``, ``watchdog_timeout_ms``). Run through
-        ``_avg_sensor_values`` against the top-level subset of *schema*
-        so they appear in the output dict.
-      - ``LNA_``/``LOAD_``-prefixed fields. The prefix is stripped and
-        each channel becomes its own sub-dict under key ``"LNA"`` /
-        ``"LOAD"``.
-      - ``sensor_name`` is always normalized to ``app_name`` (the schema
-        lookup key) rather than whatever the producer wrote.
-
-    Earlier versions of this function only forwarded ``sensor_name`` and
-    ``app_id`` and silently dropped any other top-level field — which
-    quietly lost tempctrl's watchdog state. Fixed by enumerating the
-    top-level schema keys explicitly.
-    """
-    avgs = {}
-
-    if schema is not None:
-        top_keys = [
-            k
-            for k in schema
-            if not k.startswith("LNA_") and not k.startswith("LOAD_")
-        ]
-        if top_keys:
-            top_sub_schema = {k: schema[k] for k in top_keys}
-            top_avgs = _avg_sensor_values(
-                value, top_sub_schema, app_name=app_name
-            )
-            if top_avgs:
-                avgs.update(top_avgs)
-    else:
-        # Schemaless fallback: not exercised in production today (every
-        # temp_* sensor has a schema), but preserves the historical
-        # "carry forward app_id" behavior so this branch is safe.
-        avgs["app_id"] = value[0].get("app_id")
-
-    avgs["sensor_name"] = app_name
-
-    # Per-channel LNA/LOAD extraction.
-    for subkey in ("LNA", "LOAD"):
-        prefix = f"{subkey}_"
-        if schema is not None:
-            keys = [k for k in schema if k.startswith(prefix)]
-            sub_schema = {k[len(prefix) :]: schema[k] for k in keys}
-        else:
-            keys = [k for k in value[0] if k.startswith(prefix)]
-            sub_schema = None
-        if not keys:
-            continue
-        subvals = []
-        for v in value:
-            sub = {}
-            for k in keys:
-                if k in v:
-                    sub[k[len(prefix) :]] = v[k]
-            if sub:
-                sub.setdefault("status", v.get(f"{subkey}_status"))
-                subvals.append(sub)
-        if subvals:
-            avgs[subkey] = _avg_sensor_values(
-                subvals, sub_schema, app_name=app_name
-            )
-    return avgs
 
 
 def _avg_rfswitch_metadata(value):
@@ -1498,14 +1426,7 @@ class File:
             try:
                 # strip stream prefix
                 name = key.removeprefix("stream:")
-                averaged = avg_metadata(value)
-                if isinstance(averaged, dict) and "LNA" in averaged:
-                    # tempctrl: split LNA/LOAD into separate flat entries
-                    for ch in ("LNA", "LOAD"):
-                        if ch in averaged:
-                            processed_md[f"{name}_{ch.lower()}"] = averaged[ch]
-                else:
-                    processed_md[name] = averaged
+                processed_md[name] = avg_metadata(value)
             except Exception as e:
                 self.logger.error(
                     f"Metadata contract violation processing stream "

@@ -558,44 +558,54 @@ def test_snap_tick_swallows_reader_exception(agg, monkeypatch, caplog):
 
 
 def test_thresholds_classify_uses_live_tempctrl_band(agg, seeded):
-    """End-to-end: a panda tick that publishes tempctrl metadata
-    flows into the aggregator state, and the thresholds classifier
+    """End-to-end: panda ticks that publish each tempctrl channel's
+    stream flow into the aggregator state, and the thresholds classifier
     correctly reports 'ok' for the in-band value."""
     _, panda = seeded
     writer = MetadataWriter(panda)
-    # tempctrl schema (abbreviated) — only the fields the classifier
+    now = time.time()
+    # Per-channel schema (abbreviated) — only the fields the classifier
     # will read. Schema is not enforced by MetadataWriter; the
     # producer-contract suite handles that separately.
     writer.add(
-        "tempctrl",
+        "tempctrl_lna",
         {
-            "sensor_name": "tempctrl",
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
             "app_id": 4,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 30000,
-            "LNA_status": "update",
-            "LNA_T_now": 25.2,
-            "LNA_timestamp": time.time(),
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.3,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.5,
-            "LNA_clamp": 0.6,
-            "LOAD_status": "update",
-            "LOAD_T_now": 25.0,
-            "LOAD_timestamp": time.time(),
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.3,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.5,
-            "LOAD_clamp": 0.6,
+            "T_now": 25.2,
+            "timestamp": now,
+            "T_target": 25.0,
+            "drive_level": 0.3,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.5,
+            "clamp": 0.6,
         },
     )
-    _rewind_streams(panda, ["stream:tempctrl"])
+    writer.add(
+        "tempctrl_load",
+        {
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "app_id": 4,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 30000,
+            "T_now": 25.0,
+            "timestamp": now,
+            "T_target": 25.0,
+            "drive_level": 0.3,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.5,
+            "clamp": 0.6,
+        },
+    )
+    _rewind_streams(panda, ["stream:tempctrl_lna", "stream:tempctrl_load"])
     agg._panda_tick()
 
     # Simulate the SNAP side having surfaced the header so derived
@@ -603,13 +613,12 @@ def test_thresholds_classify_uses_live_tempctrl_band(agg, seeded):
     agg._snap_tick()
 
     state = agg.snapshot()
-    latest = state.metadata_latest["tempctrl"]
+    latest = state.metadata_latest["tempctrl_lna"]
     assert (
-        agg.thresholds.classify("tempctrl.LNA_T_now", latest["LNA_T_now"])
-        == "ok"
+        agg.thresholds.classify("tempctrl_lna.T_now", latest["T_now"]) == "ok"
     )
     # 40 C would be outside the derived danger band (25 +/- 10).
-    assert agg.thresholds.classify("tempctrl.LNA_T_now", 40.0) == "danger"
+    assert agg.thresholds.classify("tempctrl_lna.T_now", 40.0) == "danger"
 
 
 # ---------------------------------------------------------------------

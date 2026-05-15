@@ -425,25 +425,29 @@ function renderMetadataTiles(meta) {
 function renderTempctrlTiles(meta, classifiers) {
   const container = document.getElementById("tempctrl-tiles");
   container.replaceChildren();
-  const tc = meta.tempctrl;
-  if (!tc) {
-    container.textContent = "no tempctrl data";
-    return;
-  }
-  const value = tc.value || {};
-  for (const chan of ["LNA", "LOAD"]) {
-    const temp = value[`${chan}_T_now`];
-    const drive = value[`${chan}_drive_level`];
-    const tClass = (tc.classify || {})[`tempctrl.${chan}_T_now`] || "unknown";
-    const dClass = (tc.classify || {})[`tempctrl.${chan}_drive_level`] || "unknown";
+  const channels = [
+    { label: "LNA", stream: "tempctrl_lna" },
+    { label: "LOAD", stream: "tempctrl_load" },
+  ];
+  let any = false;
+  for (const { label, stream } of channels) {
+    const entry = meta[stream];
+    if (!entry) continue;
+    any = true;
+    const value = entry.value || {};
+    const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
+    const dClass = (entry.classify || {})[`${stream}.drive_level`] || "unknown";
     const row = document.createElement("div");
     row.className = "tempctrl-row";
     row.append(
-      makeSpan("label", chan),
-      makeSpan(tileClass(tClass), `${fmt(temp, 2)} C`),
-      makeSpan(tileClass(dClass), `drive ${fmt(drive, 2)}`)
+      makeSpan("label", label),
+      makeSpan(tileClass(tClass), `${fmt(value.T_now, 2)} C`),
+      makeSpan(tileClass(dClass), `drive ${fmt(value.drive_level, 2)}`)
     );
     container.appendChild(row);
+  }
+  if (!any) {
+    container.textContent = "no tempctrl data";
   }
 }
 

@@ -144,22 +144,22 @@ def _solve_calibration(
     if state.last_rfnon_unix is not None:
         meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
 
-    tempctrl = state.metadata_snapshot.get("tempctrl")
+    tempctrl_load = state.metadata_snapshot.get("tempctrl_load")
     load_t_now = (
-        tempctrl.get("LOAD_T_now") if isinstance(tempctrl, dict) else None
+        tempctrl_load.get("T_now") if isinstance(tempctrl_load, dict) else None
     )
     try:
         load_t_now_f = float(load_t_now) if load_t_now is not None else None
     except (TypeError, ValueError):
         logger.error(
-            "Live-status cal: tempctrl.LOAD_T_now=%r is not coercible to "
-            "float; producer/schema contract violation (LOAD_T_now must be "
+            "Live-status cal: tempctrl_load.T_now=%r is not coercible to "
+            "float; producer/schema contract violation (T_now must be "
             "float per SENSOR_SCHEMAS).",
             load_t_now,
         )
         load_t_now_f = None
     if load_t_now_f is None:
-        meta["reason"] = "tempctrl.LOAD_T_now missing or non-numeric"
+        meta["reason"] = "tempctrl_load.T_now missing or non-numeric"
         return None, meta
     t_load_k = load_t_now_f + CELSIUS_TO_KELVIN
     meta["t_load_k"] = t_load_k

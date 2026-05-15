@@ -2,8 +2,8 @@
 #
 # Signals whose bands follow from obs_config / corr_header are
 # computed in eigsep_observing.live_status.signals.default_thresholds
-# and do NOT need to appear here. Examples: tempctrl.LNA_T_now,
-# tempctrl.LNA_drive_level, corr.acc_cadence_s,
+# and do NOT need to appear here. Examples: tempctrl_lna.T_now,
+# tempctrl_lna.drive_level, corr.acc_cadence_s,
 # file.seconds_since_write.
 #
 # This file holds:
@@ -47,6 +47,6 @@ potmon.pot_az_angle:
 
 # Escape hatch: any entry here overrides the derived default for that
 # signal. Example:
-# tempctrl.LNA_T_now:
+# tempctrl_lna.T_now:
 #   healthy: [22.0, 28.0]
 #   danger:  [18.0, 32.0]

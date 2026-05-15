@@ -165,33 +165,43 @@ def agg_primed():
             "sw_state_name": "RFNOFF",
         },
     )
+    now = time.time()
     panda_md.add(
-        "tempctrl",
+        "tempctrl_lna",
         {
-            "sensor_name": "tempctrl",
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
             "app_id": 4,
             "watchdog_tripped": False,
             "watchdog_timeout_ms": 30000,
-            "LNA_status": "update",
-            "LNA_T_now": 25.1,
-            "LNA_timestamp": time.time(),
-            "LNA_T_target": 25.0,
-            "LNA_drive_level": 0.25,
-            "LNA_enabled": True,
-            "LNA_active": True,
-            "LNA_int_disabled": False,
-            "LNA_hysteresis": 0.5,
-            "LNA_clamp": 0.6,
-            "LOAD_status": "update",
-            "LOAD_T_now": 25.0,
-            "LOAD_timestamp": time.time(),
-            "LOAD_T_target": 25.0,
-            "LOAD_drive_level": 0.3,
-            "LOAD_enabled": True,
-            "LOAD_active": True,
-            "LOAD_int_disabled": False,
-            "LOAD_hysteresis": 0.5,
-            "LOAD_clamp": 0.6,
+            "T_now": 25.1,
+            "timestamp": now,
+            "T_target": 25.0,
+            "drive_level": 0.25,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.5,
+            "clamp": 0.6,
+        },
+    )
+    panda_md.add(
+        "tempctrl_load",
+        {
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "app_id": 4,
+            "watchdog_tripped": False,
+            "watchdog_timeout_ms": 30000,
+            "T_now": 25.0,
+            "timestamp": now,
+            "T_target": 25.0,
+            "drive_level": 0.3,
+            "enabled": True,
+            "active": True,
+            "int_disabled": False,
+            "hysteresis": 0.5,
+            "clamp": 0.6,
         },
     )
 
@@ -211,7 +221,8 @@ def agg_primed():
         [
             "stream:lidar",
             "stream:rfswitch",
-            "stream:tempctrl",
+            "stream:tempctrl_lna",
+            "stream:tempctrl_load",
             "stream:status",
         ],
     )
@@ -410,10 +421,11 @@ def test_metadata_route_includes_classify(client):
     body = client.get("/api/metadata").get_json()
     data = body["data"]
     assert "lidar" in data
-    assert "tempctrl" in data
-    tc = data["tempctrl"]
-    # tempctrl.LNA_T_now = 25.1 is inside healthy (24.0, 26.0).
-    assert tc["classify"]["tempctrl.LNA_T_now"] == "ok"
+    assert "tempctrl_lna" in data
+    assert "tempctrl_load" in data
+    lna = data["tempctrl_lna"]
+    # tempctrl_lna.T_now = 25.1 is inside healthy (24.0, 26.0).
+    assert lna["classify"]["tempctrl_lna.T_now"] == "ok"
 
 
 def test_adc_route_lists_per_input_with_clip_frac(client):
@@ -732,8 +744,8 @@ def test_config_route_exposes_thresholds_with_provenance(client):
     thresh = data["thresholds"]
     # adc.rms is YAML-override per bundled live_status_thresholds.yaml.
     assert thresh["adc.rms"]["source"] == "yaml_override"
-    # tempctrl.LNA_T_now is derived from obs_config.
-    assert thresh["tempctrl.LNA_T_now"]["source"] == "derived"
+    # tempctrl_lna.T_now is derived from obs_config.
+    assert thresh["tempctrl_lna.T_now"]["source"] == "derived"
 
 
 def test_envelope_shape(client):
@@ -808,7 +820,7 @@ def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
 
     body = client_.get("/api/corr?calibrated=1").get_json()
     data = body["data"]
-    # tempctrl LOAD_T_now is 25.0 C → 298.15 K. P_ant=P_off=100 in the
+    # tempctrl_load T_now is 25.0 C → 298.15 K. P_ant=P_off=100 in the
     # fixture; T_in collapses to T_LOAD in Kelvin.
     expected_k = 25.0 + 273.15
     assert data["pairs"]["0"]["mag"][0] == pytest.approx(expected_k, rel=1e-6)
@@ -872,13 +884,13 @@ def test_corr_route_calibrated_with_aged_cache_still_calibrates_and_exposes_age(
 def test_corr_route_calibrated_without_t_load_returns_raw_and_stale_true(
     agg_primed,
 ):
-    """If LOAD_T_now is missing from the snapshot (sensor offline,
-    pico booted but tempctrl never reported), the cal can't proceed.
+    """If T_now is missing from the snapshot (sensor offline, pico
+    booted but tempctrl_load never reported), the cal can't proceed.
     Fall back to raw and keep the dashboard painting."""
     _seed_onoff_cache(agg_primed)
-    # Drop tempctrl from the snapshot to simulate a missing producer.
+    # Drop tempctrl_load from the snapshot to simulate a missing producer.
     with agg_primed._lock:
-        agg_primed.state.metadata_snapshot.pop("tempctrl", None)
+        agg_primed.state.metadata_snapshot.pop("tempctrl_load", None)
 
     app = create_app(agg_primed)
     app.config.update(TESTING=True)
@@ -993,20 +1005,19 @@ def test_solve_calibration_logs_error_on_non_finite_enr_db(agg_primed, caplog):
 def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
     agg_primed, caplog
 ):
-    """A non-numeric tempctrl.LOAD_T_now is a producer/schema contract
+    """A non-numeric tempctrl_load.T_now is a producer/schema contract
     violation; CLAUDE.md requires ERROR-level logging on top of the
     dashboard-level reason."""
     _seed_onoff_cache(agg_primed)
     with agg_primed._lock:
-        agg_primed.state.metadata_snapshot["tempctrl"] = {
-            "LOAD_T_now": "warm-ish",
+        agg_primed.state.metadata_snapshot["tempctrl_load"] = {
+            "T_now": "warm-ish",
         }
     obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
-        "LOAD_T_now" in r.message and r.levelname == "ERROR"
-        for r in caplog.records
+        "T_now" in r.message and r.levelname == "ERROR" for r in caplog.records
     )
 
 

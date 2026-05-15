@@ -29,7 +29,7 @@ class Signal:
     Attributes
     ----------
     name
-        Dotted signal identifier (e.g. ``tempctrl.LNA_T_now``).
+        Dotted signal identifier (e.g. ``tempctrl_lna.T_now``).
     description
         Short human-readable label for the tile.
     unit
@@ -82,26 +82,29 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         unit="s",
         max_age_s=None,
     ),
-    # Tempctrl — derived from target_C / hysteresis_C / clamp.
-    "tempctrl.LNA_T_now": Signal(
-        "tempctrl.LNA_T_now",
+    # Tempctrl — derived from target_C / hysteresis_C / clamp. Each
+    # Peltier channel publishes its own Redis stream (tempctrl_lna,
+    # tempctrl_load), so signal names route through the standard
+    # `<domain>.<field>` form per channel.
+    "tempctrl_lna.T_now": Signal(
+        "tempctrl_lna.T_now",
         "LNA temperature",
         unit="C",
         enabled_by="use_tempctrl",
     ),
-    "tempctrl.LOAD_T_now": Signal(
-        "tempctrl.LOAD_T_now",
+    "tempctrl_load.T_now": Signal(
+        "tempctrl_load.T_now",
         "LOAD temperature",
         unit="C",
         enabled_by="use_tempctrl",
     ),
-    "tempctrl.LNA_drive_level": Signal(
-        "tempctrl.LNA_drive_level",
+    "tempctrl_lna.drive_level": Signal(
+        "tempctrl_lna.drive_level",
         "LNA drive level",
         enabled_by="use_tempctrl",
     ),
-    "tempctrl.LOAD_drive_level": Signal(
-        "tempctrl.LOAD_drive_level",
+    "tempctrl_load.drive_level": Signal(
+        "tempctrl_load.drive_level",
         "LOAD drive level",
         enabled_by="use_tempctrl",
     ),
@@ -196,13 +199,19 @@ def default_thresholds(
 
     if obs_cfg.get("use_tempctrl"):
         settings = obs_cfg.get("tempctrl_settings", {}) or {}
-        for channel in ("LNA", "LOAD"):
+        # YAML config still groups per-channel settings under {LNA, LOAD}
+        # — that's user-facing. Internal signal names follow the split
+        # stream model: tempctrl_lna.T_now etc.
+        for channel, stream in (
+            ("LNA", "tempctrl_lna"),
+            ("LOAD", "tempctrl_load"),
+        ):
             ch_cfg = settings.get(channel, {}) or {}
             target = ch_cfg.get("target_C")
             hyst = ch_cfg.get("hysteresis_C")
             clamp = ch_cfg.get("clamp")
             if target is not None and hyst is not None:
-                out[f"tempctrl.{channel}_T_now"] = {
+                out[f"{stream}.T_now"] = {
                     "healthy": [target - 2 * hyst, target + 2 * hyst],
                     # danger band filled in by Thresholds using
                     # tempctrl.danger_k_C from the YAML override
@@ -211,7 +220,7 @@ def default_thresholds(
                     "_target_C": target,
                 }
             if clamp is not None:
-                out[f"tempctrl.{channel}_drive_level"] = {
+                out[f"{stream}.drive_level"] = {
                     "healthy": [0.0, float(clamp)],
                     "danger": None,
                 }
