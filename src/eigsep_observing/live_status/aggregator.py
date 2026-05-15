@@ -43,6 +43,7 @@ from typing import Any, Optional
 import numpy as np
 from redis.exceptions import RedisError
 
+from eigsep_redis.config import ConfigStore
 from eigsep_redis.heartbeat import HeartbeatReader
 from eigsep_redis.metadata import (
     MetadataSnapshotReader,
@@ -152,6 +153,17 @@ class StateSnapshot:
     panda_heartbeat: bool = False
     panda_heartbeat_last_check_unix: Optional[float] = None
 
+    # Latest obs_config dict read from the panda's Redis ``ConfigStore``
+    # (key ``"config"``). ``None`` when no panda script has ever uploaded
+    # its config to this Redis. The dashboard reads ``switch_schedule``
+    # from here rather than from the on-disk YAML, so a parked switch
+    # with no panda running shows no countdown.
+    # ``panda_config_upload_unix`` carries the ``upload_time`` field that
+    # ``Transport.upload_dict`` stamps on every upload, so the dashboard
+    # can show operators how old the published config is.
+    panda_config_latest: Optional[dict] = None
+    panda_config_upload_unix: Optional[float] = None
+
     # Active panda script tag (panda_observe / no_switch_observation /
     # vna_position_sweep). ``None`` means no script is currently
     # running (cleared on clean exit, or never published).
@@ -199,8 +211,11 @@ class LiveStatusAggregator:
         Must not be shared with any other consumer.
     obs_cfg
         Loaded ``obs_config.yaml``. Read for ``corr_save_dir``,
-        ``corr_ntimes``, ``use_tempctrl``, ``switch_schedule``,
-        ``tempctrl_settings``.
+        ``corr_ntimes``, ``use_tempctrl``, ``tempctrl_settings``
+        — Thresholds/signal-enablement plumbing. The active
+        ``switch_schedule`` comes from the panda's ``ConfigStore``
+        (Redis), not from this dict, so the dashboard's "next change"
+        countdown reflects what panda is actually running.
     thresholds
         Optional pre-built :class:`Thresholds`. If ``None``, one is
         built from the bundled YAML and the first corr header seen.
@@ -250,6 +265,7 @@ class LiveStatusAggregator:
         self.status_reader = StatusReader(transport_panda)
         self.heartbeat_reader = HeartbeatReader(transport_panda)
         self.vna_reader = VnaReader(transport_panda)
+        self.panda_config_store = ConfigStore(transport_panda)
 
         self.state = StateSnapshot()
         self._lock = threading.Lock()
@@ -693,6 +709,16 @@ class LiveStatusAggregator:
         )
         any_ok = any_ok or ok
 
+        # Panda-side obs_config (key ``"config"``). ConfigStore.get
+        # raises ValueError when the key is missing — handled as a
+        # benign no-data result by _read_benign_missing.
+        panda_cfg, ok = self._read_benign_missing(
+            "panda_config_store.get",
+            self.panda_config_store.get,
+            errors,
+        )
+        any_ok = any_ok or ok
+
         with self._lock:
             s = self.state
             s.panda_last_tick_unix = now
@@ -730,10 +756,16 @@ class LiveStatusAggregator:
                             if isinstance(new_value, dict)
                             else None
                         )
-                        if (
-                            s.rfswitch_state_entered_unix is None
-                            or prev_name != new_name
-                        ):
+                        # Only latch on a real observed transition. On
+                        # the first metadata arrival (``prev_name is
+                        # None``) we have no idea when the switch
+                        # actually entered its current state — could be
+                        # seconds ago, could be hours. Leaving
+                        # ``entered_unix`` at None propagates that
+                        # "we don't know" to the dashboard, which then
+                        # shows N/A for dwell + countdown instead of
+                        # claiming a freshly-entered state.
+                        if prev_name is not None and prev_name != new_name:
                             s.rfswitch_state_entered_unix = now
                     s.metadata_latest[name] = new_value
                     s.metadata_last_stream_unix[name] = now
@@ -753,6 +785,15 @@ class LiveStatusAggregator:
             if rt is not None:
                 s.run_tag = rt.get("run_tag")
                 s.run_started_at_unix = rt.get("run_started_at_unix")
+
+            if panda_cfg is not None:
+                s.panda_config_latest = panda_cfg
+                upload_time = panda_cfg.get("upload_time")
+                s.panda_config_upload_unix = (
+                    float(upload_time)
+                    if isinstance(upload_time, (int, float))
+                    else None
+                )
 
     def _drain_status(self) -> tuple[list[tuple[int, str]], bool]:
         """Drain StatusReader until the next call times out.
@@ -956,6 +997,7 @@ class LiveStatusAggregator:
             "status_reader",
             "heartbeat_reader",
             "vna_reader",
+            "panda_config_store",
             "thresholds",
             "state",
         }

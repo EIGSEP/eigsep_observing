@@ -382,22 +382,42 @@ def _adc_payload(state: StateSnapshot) -> dict:
     }
 
 
-def _rfswitch_payload(state: StateSnapshot, obs_cfg: dict) -> dict:
+def _rfswitch_payload(state: StateSnapshot) -> dict:
+    """Project the current RF-switch state for the dashboard.
+
+    ``state`` (the current sw_state_name from the pico) is reported
+    unconditionally — it's a fact the pico publishes whether or not
+    panda_observe is running. ``time_in_state_s`` and
+    ``next_expected_change_s`` are gated on whether we actually know
+    them: dwell requires an observed transition (so we know when this
+    state was entered, not just when we first saw it), and the
+    countdown additionally requires both a schedule published to Redis
+    and a live panda heartbeat. Any missing input returns ``None``,
+    which the dashboard renders as N/A rather than a misleading
+    projection of an idle schedule.
+    """
     latest = state.metadata_latest.get("rfswitch") or {}
     name = latest.get("sw_state_name")
     entered_unix = state.rfswitch_state_entered_unix
-    schedule = obs_cfg.get("switch_schedule", {}) or {}
+    schedule = (state.panda_config_latest or {}).get(
+        "switch_schedule", {}
+    ) or {}
+
     time_in_state_s = None
     if entered_unix is not None:
         time_in_state_s = max(0.0, time.time() - entered_unix)
+
     expected_dwell = schedule.get(name) if name else None
-    on_schedule = True
     next_expected_change_s = None
-    if expected_dwell is not None and time_in_state_s is not None:
+    on_schedule: Optional[bool] = None
+    if (
+        expected_dwell is not None
+        and time_in_state_s is not None
+        and state.panda_heartbeat
+    ):
         next_expected_change_s = expected_dwell - time_in_state_s
-        # If we're past the expected dwell by more than 10%, flag as off-schedule.
-        if time_in_state_s > expected_dwell * 1.1:
-            on_schedule = False
+        on_schedule = time_in_state_s <= expected_dwell * 1.1
+
     return {
         "state": name,
         "time_in_state_s": time_in_state_s,
@@ -556,9 +576,24 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
     }
 
 
-def _config_payload(obs_cfg: dict, thresholds: Thresholds) -> dict:
+def _config_payload(
+    state: StateSnapshot, obs_cfg: dict, thresholds: Thresholds
+) -> dict:
+    """Surface configuration to the dashboard.
+
+    ``switch_schedule`` and ``config_upload_unix`` come from the
+    panda-side ``ConfigStore`` (Redis), so the panel shows what panda
+    last uploaded. They persist after panda exits — operators can read
+    ``config_upload_unix`` to see how stale the published config is.
+    The other fields (``tempctrl_settings``, ``corr_*``, ``use_*``)
+    still come from the on-disk ``obs_config.yaml`` the dashboard was
+    started with; they drive ``Thresholds`` rendering decisions, not
+    runtime claims about what panda is doing.
+    """
+    panda_cfg = state.panda_config_latest or {}
     return {
-        "switch_schedule": obs_cfg.get("switch_schedule", {}) or {},
+        "switch_schedule": panda_cfg.get("switch_schedule", {}) or {},
+        "config_upload_unix": state.panda_config_upload_unix,
         "tempctrl_settings": obs_cfg.get("tempctrl_settings", {}) or {},
         "corr_save_dir": obs_cfg.get("corr_save_dir"),
         "corr_ntimes": obs_cfg.get("corr_ntimes"),
@@ -626,7 +661,7 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     @app.route("/api/rfswitch")
     def api_rfswitch():
         state = aggregator.snapshot()
-        return jsonify(_envelope(_rfswitch_payload(state, aggregator.obs_cfg)))
+        return jsonify(_envelope(_rfswitch_payload(state)))
 
     @app.route("/api/file")
     def api_file():
@@ -646,9 +681,12 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
 
     @app.route("/api/config")
     def api_config():
+        state = aggregator.snapshot()
         return jsonify(
             _envelope(
-                _config_payload(aggregator.obs_cfg, aggregator.thresholds)
+                _config_payload(
+                    state, aggregator.obs_cfg, aggregator.thresholds
+                )
             )
         )
 
