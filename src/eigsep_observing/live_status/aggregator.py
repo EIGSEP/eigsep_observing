@@ -43,7 +43,7 @@ from typing import Any, Optional
 import numpy as np
 from redis.exceptions import RedisError
 
-from eigsep_redis.config import ConfigStore
+from eigsep_redis import ConfigStore
 from eigsep_redis.heartbeat import HeartbeatReader
 from eigsep_redis.metadata import (
     MetadataSnapshotReader,
