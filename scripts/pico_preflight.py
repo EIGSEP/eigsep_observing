@@ -144,6 +144,19 @@ def render(transport):
         )
 
 
+def _positive_float(value):
+    """Validate that --watch is a positive number."""
+    try:
+        fvalue = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{value}' is not a valid number")
+    if fvalue <= 0:
+        raise argparse.ArgumentTypeError(
+            f"--watch must be positive, got {fvalue}"
+        )
+    return fvalue
+
+
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument(
@@ -153,7 +166,7 @@ def parse_args():
     )
     p.add_argument(
         "--watch",
-        type=float,
+        type=_positive_float,
         default=None,
         metavar="SECONDS",
         help="Refresh every N seconds (Ctrl-C to stop)",
