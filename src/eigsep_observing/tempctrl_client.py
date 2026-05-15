@@ -130,11 +130,39 @@ class TempCtrlClient:
         return self._proxy.is_available
 
     def get_status(self):
-        """Latest tempctrl metadata snapshot, or ``None`` if absent."""
+        """Latest tempctrl metadata snapshot, or ``None`` if absent.
+
+        The picohost producer publishes two streams — ``tempctrl_lna``
+        and ``tempctrl_load``, each with flat per-channel fields plus a
+        duplicated copy of the device-wide watchdog state. This method
+        merges them back into the flat ``LNA_*`` / ``LOAD_*`` shape
+        used internally by ``_tempctrl_health_check`` so callers don't
+        have to know about the split.
+        """
         try:
-            return self._reader.get("tempctrl")
+            lna = self._reader.get("tempctrl_lna")
         except KeyError:
+            lna = None
+        try:
+            load = self._reader.get("tempctrl_load")
+        except KeyError:
+            load = None
+        if not lna and not load:
             return None
+        merged = {}
+        for prefix, src in (("LNA_", lna), ("LOAD_", load)):
+            if not src:
+                continue
+            for k, v in src.items():
+                if k in ("sensor_name", "app_id"):
+                    continue
+                if k in ("watchdog_tripped", "watchdog_timeout_ms"):
+                    # Device-wide; same firmware tick produced both
+                    # entries, so first-write-wins.
+                    merged.setdefault(k, v)
+                else:
+                    merged[f"{prefix}{k}"] = v
+        return merged or None
 
     def set_watchdog_timeout(self, timeout_ms):
         self._proxy.send_command(

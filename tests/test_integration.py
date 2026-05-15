@@ -61,7 +61,11 @@ def test_sensor_metadata_in_redis(client, transport):
     metadata = MetadataSnapshotReader(transport).get()
 
     expected_sensors = {
-        "tempctrl",
+        # tempctrl publishes two streams (one per Peltier channel); the
+        # picohost producer fans the firmware's combined tick into
+        # tempctrl_lna and tempctrl_load.
+        "tempctrl_lna",
+        "tempctrl_load",
         "potmon",
         "imu_el",
         "imu_az",
@@ -81,11 +85,16 @@ def test_metadata_has_expected_fields(client, transport):
 
     metadata = MetadataSnapshotReader(transport).get()
 
-    # Check tempctrl LNA/LOAD channels
-    tempctrl = metadata.get("tempctrl", {})
-    assert "LNA_T_now" in tempctrl
-    assert "LOAD_T_now" in tempctrl
-    assert tempctrl.get("sensor_name") == "tempctrl"
+    # Each Peltier channel has its own stream with flat per-channel
+    # fields, a top-level status, and the device-wide watchdog fields
+    # duplicated in by the picohost handler.
+    for stream in ("tempctrl_lna", "tempctrl_load"):
+        entry = metadata.get(stream, {})
+        assert entry.get("sensor_name") == stream
+        assert "status" in entry
+        assert "T_now" in entry
+        assert "drive_level" in entry
+        assert "watchdog_timeout_ms" in entry
 
     # Check IMU (BNO085 RVC mode)
     imu = metadata.get("imu_el", {})

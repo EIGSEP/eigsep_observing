@@ -119,21 +119,24 @@ def _lidar_avg_entry(distance_m):
     }
 
 
-def _tempctrl_channel_entry(t_now, timestamp):
-    """One per-sample tempctrl channel (LNA or LOAD) after add_data's split.
+def _tempctrl_channel_entry(sensor_name, t_now, timestamp):
+    """One per-sample tempctrl channel (``tempctrl_lna`` or ``tempctrl_load``).
 
-    The top-level fields returned by ``_avg_temp_metadata`` are dropped
-    by the LNA/LOAD split in ``File.add_data``; only the per-channel
-    sub-dict survives. The bool/float fault flags are constant in this
-    fixture (steady-state operation); tests that need to exercise
-    fault-flag transitions construct their own samples. ``T_target`` is
-    a user-configured setpoint that is constant over the lifetime of a
-    real run, so it is hard-coded to ``25.0`` here rather than tracking
-    the per-sample ``t_now`` — matching the pattern used by every
-    inline tempctrl fixture in ``test_io.py``.
+    Picohost's ``PicoPeltier._peltier_redis_handler`` fans the firmware's
+    combined status tick into two flat streams; each stream then flows
+    through the generic ``_avg_sensor_values`` reduction like every
+    other sensor. The fixture mirrors the per-stream shape: a top-level
+    ``status`` plus the channel-data fields with the prefix stripped,
+    and the device-wide watchdog fields duplicated into both streams by
+    the handler. Steady-state values (``T_target``, drive flags) are
+    hard-coded to match the inline tempctrl fixtures in ``test_io.py``.
     """
     return {
+        "sensor_name": sensor_name,
         "status": "update",
+        "app_id": 1,
+        "watchdog_tripped": False,
+        "watchdog_timeout_ms": 5000,
         "T_now": t_now,
         "timestamp": timestamp,
         "T_target": 25.0,
@@ -202,11 +205,11 @@ CORR_METADATA = {
     "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "tempctrl_lna": [
-        _tempctrl_channel_entry(30.0 + 0.01 * i, 1.0 + i)
+        _tempctrl_channel_entry("tempctrl_lna", 30.0 + 0.01 * i, 1.0 + i)
         for i in range(NTIMES)
     ],
     "tempctrl_load": [
-        _tempctrl_channel_entry(25.0 + 0.01 * i, 1.0 + i)
+        _tempctrl_channel_entry("tempctrl_load", 25.0 + 0.01 * i, 1.0 + i)
         for i in range(NTIMES)
     ],
     "rfswitch": (

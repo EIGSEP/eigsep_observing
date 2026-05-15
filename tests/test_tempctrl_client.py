@@ -161,16 +161,20 @@ def test_set_watchdog_timeout(client):
 
 
 def test_get_status_returns_snapshot_or_none(client):
-    """get_status returns a dict with the full schema, or None before
-    the pico has published. Fire a command first to ensure at least
-    one publish has happened."""
+    """get_status merges the two split Redis streams back into the flat
+    LNA_*/LOAD_* shape callers (notably _tempctrl_health_check) depend
+    on. Returns None before either pico stream has published."""
     tc = TempCtrlClient(client.transport, settings=SETTINGS)
     tc.apply_settings()
     assert _wait_until(lambda: tc.get_status() is not None)
     status = tc.get_status()
-    assert status["sensor_name"] == "tempctrl"
+    # The merge preserves the legacy flat shape: device-wide watchdog
+    # fields at the top, per-channel fields under LNA_*/LOAD_* prefix.
     assert "LNA_T_target" in status
     assert "LOAD_T_target" in status
+    assert "LNA_status" in status
+    assert "LOAD_status" in status
+    assert "watchdog_timeout_ms" in status
 
 
 def test_is_available_reflects_registration(client):
