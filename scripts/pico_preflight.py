@@ -25,23 +25,48 @@ import argparse
 import sys
 import time
 
+from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_redis import HeartbeatReader, MetadataSnapshotReader, Transport
 from picohost.buses import PicoConfigStore
 from picohost.keys import pico_heartbeat_name
 from picohost.manager import APP_NAMES
 
-# Compact one-line summary per device type. Keep keys short — this
-# script is a glance, not a dump. Use scripts/monitor_meta.py for the
-# full reading.
-SUMMARY_FIELDS = {
-    "motor": ("az_pos", "el_pos"),
-    "tempctrl": ("LNA_T_now", "LOAD_T_now", "LNA_drive_level"),
-    "potmon": ("pot_el_angle", "pot_az_angle"),
-    "imu_el": ("yaw", "pitch", "roll"),
-    "imu_az": ("yaw", "pitch", "roll"),
-    "lidar": ("distance_m",),
-    "rfswitch": ("sw_state_name",),
+_SUMMARY_FIELD_PRIORITY = (
+    "az_pos",
+    "el_pos",
+    "LNA_T_now",
+    "LOAD_T_now",
+    "LNA_drive_level",
+    "pot_el_angle",
+    "pot_az_angle",
+    "yaw",
+    "pitch",
+    "roll",
+    "distance_m",
+    "sw_state_name",
+)
+_SUMMARY_FIELD_EXCLUDE = {
+    "sensor_name",
+    "status",
+    "app_id",
+    "watchdog_tripped",
+    "watchdog_timeout_ms",
 }
+
+
+def _summary_fields():
+    fields = {}
+    for name, schema in SENSOR_SCHEMAS.items():
+        preferred = [k for k in _SUMMARY_FIELD_PRIORITY if k in schema]
+        if preferred:
+            fields[name] = tuple(preferred)
+            continue
+        fallback = [k for k in schema if k not in _SUMMARY_FIELD_EXCLUDE][:3]
+        fields[name] = tuple(fallback)
+    return fields
+
+
+SUMMARY_FIELDS = _summary_fields()
 
 
 def _fmt_age(ts, now):
