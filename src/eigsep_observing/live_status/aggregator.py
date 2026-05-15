@@ -788,12 +788,21 @@ class LiveStatusAggregator:
 
             if panda_cfg is not None:
                 s.panda_config_latest = panda_cfg
-                upload_time = panda_cfg.get("upload_time")
-                s.panda_config_upload_unix = (
-                    float(upload_time)
-                    if isinstance(upload_time, (int, float))
-                    else None
-                )
+                try:
+                    s.panda_config_upload_unix = float(
+                        panda_cfg["upload_time"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    logger.error(
+                        "panda config missing/unparseable "
+                        "upload_time=%r (%s); dropping field. "
+                        "Producer contract: Transport.upload_dict "
+                        "injects upload_time on every ConfigStore "
+                        "upload as float-castable wallclock seconds.",
+                        panda_cfg.get("upload_time"),
+                        exc,
+                    )
+                    s.panda_config_upload_unix = None
 
     def _drain_status(self) -> tuple[list[tuple[int, str]], bool]:
         """Drain StatusReader until the next call times out.
