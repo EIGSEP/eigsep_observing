@@ -18,7 +18,7 @@ starting ``eigsep-panda`` to confirm every expected pico is reporting.
 When the manager is NOT running (e.g. picos are plugged into a bench
 Pi without ``pico-manager.service``), heartbeats and metadata will
 both be empty — go to the raw serial path instead:
-``python -m picohost.scripts.monitor_picos /dev/ttyACMx``.
+``python -m picohost/scripts/monitor_picos /dev/ttyACMx``.
 """
 
 import argparse
