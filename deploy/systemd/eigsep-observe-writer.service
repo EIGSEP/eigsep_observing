@@ -1,8 +1,11 @@
 [Unit]
 Description=EIGSEP corr-data file writer (observe.py)
 Documentation=https://github.com/EIGSEP/eigsep_observing/blob/main/deploy/systemd/README.md
-After=network-online.target redis-server.service eigsep-observe.service
-Wants=network-online.target redis-server.service eigsep-observe.service
+# chrony-wait.service: needs its own ordering (systemd `After=` does not
+# transitively delay this unit behind the supervisor's predecessors).
+# See eigsep-observe.service for the sync_time rationale.
+After=network-online.target redis-server.service eigsep-observe.service chrony-wait.service
+Wants=network-online.target redis-server.service eigsep-observe.service chrony-wait.service
 # Unbounded retries — see eigsep-observe.service for rationale.
 StartLimitIntervalSec=0
 
