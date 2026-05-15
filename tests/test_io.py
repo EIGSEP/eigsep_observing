@@ -387,10 +387,12 @@ def test_write_read_s11_file():
         # no filename, should create one automatically
         io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
         # check that the file was created
-        now = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        now = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y%m%d_%H%M%SZ"
+        )
         # might be off by a second, so we use glob to find the file
-        # filename format is {mode}s11_{timestamp}.h5, where mode="ant" here
-        assert len(list(Path(tmpdir).glob(f"ants11_{now[:-2]}*.h5"))) == 1
+        # filename format is {mode}s11_{timestamp}Z.h5, where mode="ant" here
+        assert len(list(Path(tmpdir).glob(f"ants11_{now[:-3]}*Z.h5"))) == 1
         filename = Path(tmpdir) / "test_s11.h5"
         io.write_s11_file(
             data,

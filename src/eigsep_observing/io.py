@@ -459,7 +459,9 @@ def write_s11_file(
 
     """
     if fname is None:
-        date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        date = datetime.datetime.now(datetime.timezone.utc).strftime(
+            "%Y%m%d_%H%M%SZ"
+        )
         mode = "ant" if "ant" in data else "rec"
         file_path = Path(save_dir) / f"{mode}s11_{date}.h5"
         # Disambiguate same-second collisions on auto-generated
@@ -1690,7 +1692,9 @@ class File:
 
         """
         if fname is None:
-            date = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            date = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%d_%H%M%SZ"
+            )
             fname = self.save_dir / f"corr_{date}.h5"
             # Disambiguate if a file with the same second-resolution
             # timestamp already exists. In production, file_time is
