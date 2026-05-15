@@ -16,7 +16,7 @@
 #     2. Run:  python scripts/republish_header.py
 #     3. The next corr file opened by observe.py will reflect the fix.
 #        The in-flight file keeps its file-start header snapshot (by
-#        design). panda_observe.py, motors, tempctrl, VNA, and RF switch
+#        design). eigsep-panda, motors, tempctrl, VNA, and RF switch
 #        are unaffected.
 #
 # ---------------------------------------------------------------------

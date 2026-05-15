@@ -28,13 +28,17 @@ dependencies = [
 ]
 
 [project.scripts]
-# Console scripts for the systemd-supervised observing path. The
-# scripts live under src/eigsep_observing/scripts/ so they ship inside
-# the wheel and resolve to /<venv>/bin on install — required by
-# downstream image builds that install from a wheelhouse and have no
-# source checkout. See deploy/systemd/README.md.
+# Console scripts for the observing entry points. They live under
+# src/eigsep_observing/scripts/ so they ship inside the wheel and
+# resolve to /<venv>/bin on install — required by downstream image
+# builds that install from a wheelhouse and have no source checkout.
+# eigsep-fpga-init / eigsep-observe back the backend systemd units;
+# eigsep-panda is operator-launched (loops control physical actuators
+# and self-recover from per-iteration faults — auto-restart adds risk
+# without buying liveness). See deploy/systemd/README.md.
 eigsep-fpga-init = "eigsep_observing.scripts.fpga_init:main"
 eigsep-observe   = "eigsep_observing.scripts.observe:main"
+eigsep-panda     = "eigsep_observing.scripts.panda_observe:main"
 
 [project.optional-dependencies]
 dev = [

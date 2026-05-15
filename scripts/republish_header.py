@@ -15,7 +15,7 @@ Effect on running processes:
   header snapshot (by design); the next file opened by
   ``EigObserver.record_corr_data`` picks up the corrected wiring via
   ``CorrConfigStore.get_header()``.
-- ``panda_observe.py`` (motors, tempctrl, VNA, RF switch): does not
+- ``eigsep-panda`` (motors, tempctrl, VNA, RF switch): does not
   read the corr header at all — zero impact.
 
 Refuses:
