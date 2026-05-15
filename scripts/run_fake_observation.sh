@@ -72,16 +72,17 @@ cleanup() {
 trap cleanup INT TERM HUP EXIT
 
 echo "Launching panda_observe --dummy -> ${PANDA_LOG}"
-python "${SCRIPT_DIR}/panda_observe.py" --dummy \
+# panda_observe, fpga_init, and observe all live in the package
+# (src/eigsep_observing/scripts/) so they install as console scripts.
+# Run via -m so the harness works in a source checkout (no
+# `pip install -e .` required).
+python -m eigsep_observing.scripts.panda_observe --dummy \
     >"${PANDA_LOG}" 2>&1 &
 PANDA_PID=$!
 
 sleep 2
 
 echo "Launching fpga_init --dummy --reinit -> ${FPGA_LOG}"
-# fpga_init.py and observe.py moved into the package (src/eigsep_observing/
-# scripts/) so they install as console scripts. Run via -m so the harness
-# works in a source checkout (no `pip install -e .` required).
 python -m eigsep_observing.scripts.fpga_init --dummy --reinit \
     >"${FPGA_LOG}" 2>&1 &
 FPGA_PID=$!
@@ -96,7 +97,7 @@ OBS_PID=$!
 echo ""
 echo "================================================================"
 echo "  Fake observation pipeline running:"
-echo "    panda_observe.py    PID ${PANDA_PID}"
+echo "    panda_observe       PID ${PANDA_PID}"
 echo "    fpga_init           PID ${FPGA_PID}"
 echo "    observe             PID ${OBS_PID}"
 echo "  Logs in ${LOG_DIR}/"

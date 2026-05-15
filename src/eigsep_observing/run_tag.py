@@ -1,7 +1,7 @@
 """Cross-process tag identifying which panda script is driving the run.
 
 Published by the panda-side entry-points
-(``scripts/panda_observe.py``, ``scripts/no_switch_observation.py``,
+(``eigsep-panda`` console script, ``scripts/no_switch_observation.py``,
 ``scripts/vna_position_sweep.py``) when they start, cleared in their
 ``finally`` blocks. Consumed by ``EigObserver.record_corr_data`` (corr
 file headers) and ``PandaClient.measure_s11`` (VNA file headers) so
