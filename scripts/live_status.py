@@ -83,6 +83,18 @@ def main(argv=None):
     )
     parser.add_argument("--panda-port", type=int, default=6379)
     parser.add_argument(
+        "--snap-fpga-host",
+        default=None,
+        help=(
+            "Override for the SNAP FPGA IP used by the reachability "
+            "probe. Default: read ``snap_ip`` from the corr config "
+            "in Redis once available (10.10.10.12 in the bundled "
+            "corr_config.yaml). Pass this only when corr config has "
+            "not yet been published and you want the SNAP FPGA tile "
+            "to still light up."
+        ),
+    )
+    parser.add_argument(
         "--obs-config",
         default=None,
         help=(
@@ -130,6 +142,7 @@ def main(argv=None):
         transport_panda=transport_panda,
         obs_cfg=obs_cfg,
         thresholds=thresholds,
+        snap_fpga_host_override=args.snap_fpga_host,
     )
 
     app = create_app(aggregator)
