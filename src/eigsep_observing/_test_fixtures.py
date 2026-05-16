@@ -26,6 +26,8 @@ without significant test rewrites.
 """
 
 import numpy as np
+from picohost.base import PicoPeltier
+from picohost.testing import TempCtrlEmulator
 
 # One corr file accumulates NTIMES integrations, each of duration
 # INTEGRATION_TIME seconds. FILE_TIME = NTIMES * INTEGRATION_TIME is the
@@ -119,34 +121,44 @@ def _lidar_avg_entry(distance_m):
     }
 
 
+def tempctrl_post_handler_reading(stream_name):
+    """One per-channel tempctrl reading after ``_peltier_redis_handler``.
+
+    The firmware/emulator emits one combined ``sensor_name="tempctrl"``
+    dict per status tick; ``PicoPeltier._peltier_redis_handler`` fans
+    that into two ``writer.add(...)`` calls — one per channel — and is
+    the boundary that produces the actual Redis-stream shapes. Composing
+    the emulator with the handler here means every test fixture downstream
+    is anchored to the real producer output rather than drifting on
+    hand-typed steady-state values.
+    """
+    pel = PicoPeltier.__new__(PicoPeltier)
+    captured = []
+    pel._base_redis_handler = lambda d: captured.append(dict(d))
+    pel._peltier_redis_handler(TempCtrlEmulator().get_status())
+    for entry in captured:
+        if entry.get("sensor_name") == stream_name:
+            return entry
+    raise AssertionError(
+        f"_peltier_redis_handler did not emit a {stream_name!r} entry; "
+        f"got sensor_names={[e.get('sensor_name') for e in captured]}"
+    )
+
+
 def _tempctrl_channel_entry(sensor_name, t_now, timestamp):
     """One per-sample tempctrl channel (``tempctrl_lna`` or ``tempctrl_load``).
 
-    Picohost's ``PicoPeltier._peltier_redis_handler`` fans the firmware's
-    combined status tick into two flat streams; each stream then flows
-    through the generic ``_avg_sensor_values`` reduction like every
-    other sensor. The fixture mirrors the per-stream shape: a top-level
-    ``status`` plus the channel-data fields with the prefix stripped,
-    and the device-wide watchdog fields duplicated into both streams by
-    the handler. Steady-state values (``T_target``, drive flags) are
-    hard-coded to match the inline tempctrl fixtures in ``test_io.py``.
+    Steady-state fields are derived from
+    ``tempctrl_post_handler_reading`` so the fixture stays anchored to
+    real ``TempCtrlEmulator`` + ``PicoPeltier._peltier_redis_handler``
+    output. Only ``T_now`` and ``timestamp`` are per-sample test inputs;
+    everything else (``T_target``, drive flags, watchdog) is the
+    emulator's steady-state value.
     """
-    return {
-        "sensor_name": sensor_name,
-        "status": "update",
-        "app_id": 1,
-        "watchdog_tripped": False,
-        "watchdog_timeout_ms": 5000,
-        "T_now": t_now,
-        "timestamp": timestamp,
-        "T_target": 25.0,
-        "drive_level": 0.0,
-        "enabled": True,
-        "active": True,
-        "int_disabled": False,
-        "hysteresis": 0.5,
-        "clamp": 100.0,
-    }
+    entry = tempctrl_post_handler_reading(sensor_name)
+    entry["T_now"] = t_now
+    entry["timestamp"] = timestamp
+    return entry
 
 
 def _potmon_avg_entry(pot_el_voltage):
