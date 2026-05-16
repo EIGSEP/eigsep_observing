@@ -198,6 +198,33 @@ class StateSnapshot:
     panda_error: Optional[str] = None
 
 
+def corr_observing_timeout_s(state: StateSnapshot) -> float:
+    """Infer a reasonable observing-idle timeout from corr cadence.
+
+    The corr loop advances ``corr_last_unix`` once per integration, so
+    a fixed 2 s threshold misreports "not observing" whenever
+    ``integration_time`` is configured above ~1 s. Prefer the measured
+    cadence, fall back to the header's ``integration_time``, and
+    finally to a 2 s floor. Scale by 2.5× so one slipped integration
+    doesn't flip the indicator.
+    """
+    cadence = None
+    if state.corr_cadence_s is not None and state.corr_cadence_s > 0:
+        cadence = float(state.corr_cadence_s)
+    elif state.corr_header is not None:
+        int_time = state.corr_header.get("integration_time")
+        if int_time is not None:
+            try:
+                int_time_f = float(int_time)
+            except (TypeError, ValueError):
+                int_time_f = None
+            if int_time_f and int_time_f > 0:
+                cadence = int_time_f
+    if cadence is None:
+        return 2.0
+    return max(2.0, cadence * 2.5)
+
+
 class LiveStatusAggregator:
     """Background poller + shared state for the live-status Flask app.
 

@@ -21,7 +21,11 @@ import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 from plotly.offline import get_plotlyjs
 
-from .aggregator import LiveStatusAggregator, StateSnapshot
+from .aggregator import (
+    LiveStatusAggregator,
+    StateSnapshot,
+    corr_observing_timeout_s,
+)
 from .calibration import (
     apply_calibration_auto,
     apply_calibration_cross_mag,
@@ -511,40 +515,13 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     }
 
 
-def _corr_observing_timeout_s(state: StateSnapshot) -> float:
-    """Infer a reasonable observing-idle timeout from corr cadence.
-
-    The corr loop advances ``corr_last_unix`` once per integration, so
-    a fixed 2 s threshold misreports "not observing" whenever
-    ``integration_time`` is configured above ~1 s. Prefer the measured
-    cadence, fall back to the header's ``integration_time``, and
-    finally to a 2 s floor. Scale by 2.5× so one slipped integration
-    doesn't flip the indicator.
-    """
-    cadence: Optional[float] = None
-    if state.corr_cadence_s is not None and state.corr_cadence_s > 0:
-        cadence = float(state.corr_cadence_s)
-    elif state.corr_header is not None:
-        int_time = state.corr_header.get("integration_time")
-        if int_time is not None:
-            try:
-                int_time_f = float(int_time)
-            except (TypeError, ValueError):
-                int_time_f = None
-            if int_time_f and int_time_f > 0:
-                cadence = int_time_f
-    if cadence is None:
-        return 2.0
-    return max(2.0, cadence * 2.5)
-
-
 def _health_payload(state: StateSnapshot, now: float) -> dict:
     panda_hb_age = None
     if state.panda_heartbeat_last_check_unix is not None:
         panda_hb_age = max(0.0, now - state.panda_heartbeat_last_check_unix)
     observing_inferred = False
     if state.corr_last_unix is not None:
-        timeout_s = _corr_observing_timeout_s(state)
+        timeout_s = corr_observing_timeout_s(state)
         observing_inferred = (now - state.corr_last_unix) < timeout_s
     reinit = dict(state.snap_reinit or {})
     # Recompute the age against ``now`` so the dashboard's "Reinits"
