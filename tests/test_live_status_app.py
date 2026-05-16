@@ -328,6 +328,47 @@ def test_health_route_surfaces_snap_reinit_count(agg_primed):
     assert data["snap_reinit"]["seconds_since_reinit"] is not None
 
 
+def test_health_route_snap_fpga_state_live_when_corr_fresh(agg_primed):
+    """corr fresh → state is 'live' regardless of probe result."""
+    agg_primed.state.corr_last_unix = time.time()
+    agg_primed.state.corr_header = {"integration_time": 0.27}
+    agg_primed.state.snap_fpga_reachable = False  # ignored when live
+    client = create_app(agg_primed).test_client()
+    body = client.get("/api/health").get_json()
+    assert body["data"]["snap_fpga_state"] == "live"
+
+
+def test_health_route_snap_fpga_state_reachable_when_probe_ok(
+    agg_primed,
+):
+    """corr stale + probe True → 'reachable'."""
+    agg_primed.state.corr_last_unix = None
+    agg_primed.state.snap_fpga_reachable = True
+    client = create_app(agg_primed).test_client()
+    body = client.get("/api/health").get_json()
+    assert body["data"]["snap_fpga_state"] == "reachable"
+
+
+def test_health_route_snap_fpga_state_unreachable_when_probe_fail(
+    agg_primed,
+):
+    """corr stale + probe False → 'unreachable'."""
+    agg_primed.state.corr_last_unix = None
+    agg_primed.state.snap_fpga_reachable = False
+    client = create_app(agg_primed).test_client()
+    body = client.get("/api/health").get_json()
+    assert body["data"]["snap_fpga_state"] == "unreachable"
+
+
+def test_health_route_snap_fpga_state_unknown_when_no_probe(agg_primed):
+    """corr stale + probe never ran → 'unknown'."""
+    agg_primed.state.corr_last_unix = None
+    agg_primed.state.snap_fpga_reachable = None
+    client = create_app(agg_primed).test_client()
+    body = client.get("/api/health").get_json()
+    assert body["data"]["snap_fpga_state"] == "unknown"
+
+
 def test_corr_route_has_pairs_and_freqs(client):
     body = client.get("/api/corr").get_json()
     data = body["data"]

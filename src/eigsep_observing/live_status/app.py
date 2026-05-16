@@ -536,6 +536,19 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
     run_age_s = None
     if state.run_started_at_unix is not None:
         run_age_s = max(0.0, now - state.run_started_at_unix)
+    # Tier the SNAP FPGA tile: corr stream beats probe, probe beats
+    # silence. ``observing_inferred`` and the probe both flag SNAP
+    # liveness; this layer picks the strongest available evidence so
+    # the operator sees "live" during normal observing and only sees
+    # the active-probe result when the observe loop isn't running.
+    if observing_inferred:
+        snap_fpga_state = "live"
+    elif state.snap_fpga_reachable is True:
+        snap_fpga_state = "reachable"
+    elif state.snap_fpga_reachable is False:
+        snap_fpga_state = "unreachable"
+    else:
+        snap_fpga_state = "unknown"
     return {
         "snap_connected": state.snap_connected,
         "panda_connected": state.panda_connected,
@@ -547,6 +560,8 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "snap_error": state.snap_error,
         "panda_error": state.panda_error,
         "snap_reinit": reinit,
+        "snap_fpga_state": snap_fpga_state,
+        "snap_fpga_last_probe_unix": state.snap_fpga_last_probe_unix,
         "run_tag": state.run_tag,
         "run_started_at_unix": state.run_started_at_unix,
         "run_age_s": run_age_s,
