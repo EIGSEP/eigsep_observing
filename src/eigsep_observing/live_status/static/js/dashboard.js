@@ -476,7 +476,13 @@ function renderRfswitch(rf) {
     el.textContent = "no switch data";
     return;
   }
-  const cls = rf.on_schedule ? "ok" : "warn";
+  // on_schedule is tri-state: true = ok, false = warn, null = undefined
+  // (no schedule in Redis, no observed transition yet, or panda
+  // heartbeat dead). Treat null as neutral, not a failure.
+  let cls;
+  if (rf.on_schedule === true) cls = "ok";
+  else if (rf.on_schedule === false) cls = "warn";
+  else cls = "unknown";
   const timeStr =
     rf.time_in_state_s !== null && rf.time_in_state_s !== undefined
       ? fmt(rf.time_in_state_s, 0) + "s"

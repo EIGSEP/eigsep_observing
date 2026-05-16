@@ -14,6 +14,7 @@ import time
 import numpy as np
 import pytest
 from eigsep_redis import (
+    ConfigStore,
     HeartbeatWriter,
     MetadataWriter,
     StatusWriter,
@@ -86,16 +87,24 @@ def _cross_bytes(value=5):
 
 @pytest.fixture
 def agg_primed():
-    """Aggregator with state populated by one SNAP tick + one panda tick.
+    """Aggregator with state populated by SNAP + panda ticks.
 
     Producers publish corr + adc_stats + heartbeat + rfswitch + tempctrl
-    + lidar; the test then ticks the aggregator once per bus so the
-    Flask handlers have something to project.
+    + lidar + obs_config; the panda side also drives one observed
+    rfswitch transition (RFNOFF → RFANT) during the prime so
+    ``rfswitch_state_entered_unix`` is latched and the dashboard's
+    dwell-time / on-schedule projections have a real entry timestamp
+    to work from. The first metadata arrival never latches
+    ``entered_unix`` on its own (see aggregator.py), so a single push
+    would leave it ``None``.
     """
     snap = DummyTransport()
     panda = DummyTransport()
     CorrConfigStore(snap).upload(CORR_CONFIG)
     CorrConfigStore(snap).upload_header(CORR_HEADER)
+    # Panda-side obs_config: drives ``_rfswitch_payload``'s schedule
+    # (the on-disk obs_cfg only seeds Thresholds now).
+    ConfigStore(panda).upload(OBS_CFG)
 
     # Corr row.
     CorrWriter(snap).add(
@@ -143,14 +152,17 @@ def agg_primed():
             "distance_m": 1.4,
         },
     )
+    # Seed a prior rfswitch state — required so the next push lands as
+    # an observed transition (entered_unix latches only on a real
+    # prev->new change, never on first arrival).
     panda_md.add(
         "rfswitch",
         {
             "sensor_name": "rfswitch",
             "app_id": 7,
             "status": "update",
-            "sw_state": 1,
-            "sw_state_name": "RFANT",
+            "sw_state": 2,
+            "sw_state_name": "RFNOFF",
         },
     )
     panda_md.add(
@@ -211,6 +223,19 @@ def agg_primed():
         read_timeout_s=0.05,
     )
     agg._snap_tick()
+    agg._panda_tick()
+    # Now drive the observed RFNOFF → RFANT transition so entered_unix
+    # latches and the dashboard's dwell-window projections work.
+    panda_md.add(
+        "rfswitch",
+        {
+            "sensor_name": "rfswitch",
+            "app_id": 7,
+            "status": "update",
+            "sw_state": 1,
+            "sw_state_name": "RFANT",
+        },
+    )
     agg._panda_tick()
     yield agg
     agg.stop(timeout=1.0)
@@ -431,7 +456,8 @@ def test_rfswitch_time_in_state_tracks_transitions_not_push_cadence(
     app.config.update(TESTING=True)
     client = app.test_client()
 
-    # Fixture already published RFANT once; capture the entry time.
+    # Fixture observed a RFNOFF -> RFANT transition during prime, so
+    # entered_unix is latched to the RFANT tick time.
     entered_after_prime = agg.state.rfswitch_state_entered_unix
     assert entered_after_prime is not None
 
@@ -497,6 +523,191 @@ def test_rfswitch_on_schedule_flips_false_when_dwell_exceeded(
     assert data["time_in_state_s"] > 66.0
     assert data["on_schedule"] is False
     assert data["next_expected_change_s"] < 0
+
+
+def test_rfswitch_payload_no_countdown_without_observed_transition():
+    """No latch on first metadata arrival — dashboard shows N/A.
+
+    A fresh aggregator that has only seen the switch parked (one
+    arrival, no transition) does not know when the switch actually
+    entered its current state. ``time_in_state_s`` and
+    ``next_expected_change_s`` must both be ``None`` so the dashboard
+    renders N/A rather than a misleading "just entered" countdown.
+    """
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+    ConfigStore(panda).upload(OBS_CFG)
+
+    panda_md = MetadataWriter(panda)
+    panda_md.add(
+        "rfswitch",
+        {
+            "sensor_name": "rfswitch",
+            "app_id": 7,
+            "status": "update",
+            "sw_state": 1,
+            "sw_state_name": "RFANT",
+        },
+    )
+    HeartbeatWriter(panda, name="client").set(ex=60, alive=True)
+    _rewind(panda, ["stream:rfswitch", "stream:status"])
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+        read_timeout_s=0.05,
+    )
+    try:
+        agg._panda_tick()
+        assert agg.state.rfswitch_state_entered_unix is None
+
+        app = create_app(agg)
+        app.config.update(TESTING=True)
+        data = app.test_client().get("/api/rfswitch").get_json()["data"]
+        assert data["state"] == "RFANT"
+        assert data["time_in_state_s"] is None
+        assert data["next_expected_change_s"] is None
+        assert data["on_schedule"] is None
+    finally:
+        agg.stop(timeout=1.0)
+
+
+def test_rfswitch_payload_no_countdown_without_schedule_in_redis():
+    """No config in Redis -> no schedule -> no countdown.
+
+    Mimics the "panda_observe never ran on this Redis" case: the pico
+    publishes rfswitch state but no panda script has uploaded an
+    obs_config. The dashboard must show current state but N/A for the
+    countdown — the schedule from the live-status app's on-disk
+    obs_config.yaml is no longer consulted for runtime claims.
+    """
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+    # NO ConfigStore(panda).upload — Redis "config" key is empty.
+
+    panda_md = MetadataWriter(panda)
+    panda_md.add(
+        "rfswitch",
+        {
+            "sensor_name": "rfswitch",
+            "app_id": 7,
+            "status": "update",
+            "sw_state": 2,
+            "sw_state_name": "RFNOFF",
+        },
+    )
+    HeartbeatWriter(panda, name="client").set(ex=60, alive=True)
+    _rewind(panda, ["stream:rfswitch", "stream:status"])
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+        read_timeout_s=0.05,
+    )
+    try:
+        # First tick: drain seeds metadata_latest["rfswitch"] = RFNOFF,
+        # prev was None → no latch (correct: first arrival).
+        agg._panda_tick()
+        # Now publish a real transition (RFNOFF → RFANT).
+        panda_md.add(
+            "rfswitch",
+            {
+                "sensor_name": "rfswitch",
+                "app_id": 7,
+                "status": "update",
+                "sw_state": 1,
+                "sw_state_name": "RFANT",
+            },
+        )
+        agg._panda_tick()
+        assert agg.state.panda_config_latest is None
+        assert agg.state.rfswitch_state_entered_unix is not None
+
+        app = create_app(agg)
+        app.config.update(TESTING=True)
+        data = app.test_client().get("/api/rfswitch").get_json()["data"]
+        assert data["state"] == "RFANT"
+        assert data["schedule"] == {}
+        assert data["time_in_state_s"] is not None
+        assert data["next_expected_change_s"] is None
+        assert data["on_schedule"] is None
+    finally:
+        agg.stop(timeout=1.0)
+
+
+def test_rfswitch_payload_no_countdown_when_heartbeat_dead(agg_primed):
+    """Schedule + transition observed, but panda heartbeat dead → N/A.
+
+    Models 'panda_observe was running, observed at least one switch,
+    then died'. The schedule remains in Redis, entered_unix remains
+    latched, but the dashboard must stop projecting a countdown
+    because no scheduler is actually driving the next transition.
+    """
+    agg = agg_primed
+    # Force heartbeat dead despite the fixture's prior tick reading it
+    # alive. Use the lock to mirror the way drain threads update state.
+    with agg._lock:
+        agg.state.panda_heartbeat = False
+
+    app = create_app(agg)
+    app.config.update(TESTING=True)
+    data = app.test_client().get("/api/rfswitch").get_json()["data"]
+    assert data["state"] == "RFANT"
+    # entered_unix is still latched from the prime, so we still know
+    # how long the switch has been in state — that's a fact.
+    assert data["time_in_state_s"] is not None
+    # But the countdown is gated on heartbeat liveness.
+    assert data["next_expected_change_s"] is None
+    assert data["on_schedule"] is None
+
+
+def test_config_route_surfaces_redis_schedule_and_upload_time(client):
+    """``_config_payload.switch_schedule`` comes from Redis ConfigStore
+    (uploaded by panda), and ``config_upload_unix`` carries the
+    ``upload_time`` ``Transport.upload_dict`` stamps on every upload.
+    """
+    body = client.get("/api/config").get_json()
+    data = body["data"]
+    assert data["switch_schedule"] == OBS_CFG["switch_schedule"]
+    assert data["config_upload_unix"] is not None
+    # upload_time must be a Unix timestamp near now.
+    assert abs(data["config_upload_unix"] - time.time()) < 60.0
+
+
+def test_config_route_schedule_empty_when_no_config_in_redis():
+    """No panda config uploaded → ``switch_schedule`` is ``{}`` and
+    ``config_upload_unix`` is ``None``. The disk-loaded obs_cfg's
+    ``switch_schedule`` is no longer consulted.
+    """
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+    # No ConfigStore upload.
+    _rewind(panda, ["stream:status"])
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+        read_timeout_s=0.05,
+    )
+    try:
+        agg._panda_tick()
+        assert agg.state.panda_config_latest is None
+        app = create_app(agg)
+        app.config.update(TESTING=True)
+        data = app.test_client().get("/api/config").get_json()["data"]
+        assert data["switch_schedule"] == {}
+        assert data["config_upload_unix"] is None
+        # But disk-backed fields still come through (Thresholds-driving
+        # rendering decisions, not runtime claims).
+        assert data["use_tempctrl"] is True
+    finally:
+        agg.stop(timeout=1.0)
 
 
 def test_file_route(client):
