@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoPeltier, PicoRFSwitch
+from picohost.base import PicoRFSwitch
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -41,7 +41,6 @@ from picohost.testing import (
     MotorEmulator,
     PotMonEmulator,
     RFSwitchEmulator,
-    TempCtrlEmulator,
 )
 
 from eigsep_redis.keys import STATUS_STREAM  # noqa: F401
@@ -49,7 +48,11 @@ from eigsep_redis.testing import DummyTransport
 
 import eigsep_observing
 from eigsep_observing import io
-from eigsep_observing._test_fixtures import HEADER, IMU_READING
+from eigsep_observing._test_fixtures import (
+    HEADER,
+    IMU_READING,
+    tempctrl_post_handler_reading,
+)
 from eigsep_observing.testing import (
     DummyEigsepFpga,
     DummyPandaClient,
@@ -124,25 +127,12 @@ def _motor_post_handler_reading():
 def _peltier_post_handler_reading(stream_name):
     """Return one per-channel tempctrl reading after _peltier_redis_handler.
 
-    The firmware/emulator emits one combined ``sensor_name="tempctrl"``
-    dict per status tick; ``PicoPeltier._peltier_redis_handler`` fans
-    that into two ``writer.add(...)`` calls — one per channel — and is
-    the boundary that produces the actual Redis-stream shapes. The
-    contract this test enforces is the *post-handler* per-stream shape,
-    so the fixture has to compose the emulator + the handler. Mirrors
-    ``_potmon_post_handler_reading``.
+    Delegates to ``tempctrl_post_handler_reading`` in ``_test_fixtures``
+    so the contract test and the shared golden fixtures (and the inline
+    fixtures in ``test_io.py``) are anchored to a single emulator-derived
+    source. Mirrors ``_potmon_post_handler_reading``.
     """
-    pel = PicoPeltier.__new__(PicoPeltier)
-    captured = []
-    pel._base_redis_handler = lambda d: captured.append(dict(d))
-    pel._peltier_redis_handler(TempCtrlEmulator().get_status())
-    for entry in captured:
-        if entry.get("sensor_name") == stream_name:
-            return entry
-    raise AssertionError(
-        f"_peltier_redis_handler did not emit a {stream_name!r} entry; "
-        f"got sensor_names={[e.get('sensor_name') for e in captured]}"
-    )
+    return tempctrl_post_handler_reading(stream_name)
 
 
 def _rfswitch_post_handler_reading():

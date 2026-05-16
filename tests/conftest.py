@@ -30,6 +30,7 @@ from eigsep_observing._test_fixtures import (  # noqa: F401 (re-exported)
     NTIMES,
     S11_HEADER,
     VNA_METADATA,
+    tempctrl_post_handler_reading,
 )
 from eigsep_observing.testing import DummyPandaClient
 

@@ -201,7 +201,7 @@ disagreement (`min`/`any`/`"UNKNOWN"`) and downstream can detect it from the
 file. Logging every cal-level wobble would generate ~14k events/hour during
 normal operation.
 
-**Two paths that bypass `_avg_sensor_values`:**
+**One path that bypasses `_avg_sensor_values`:**
 
 - `_avg_rfswitch_metadata` returns the bare switch-state *name* string
   (`"RFANT"`, `"VNAO"`, ...) or `"UNKNOWN"` (not a dict). It reads
@@ -211,12 +211,12 @@ normal operation.
   `RFSWITCH_TRANSITION_WINDOW_S` block in `io.py` for the additional
   forward-window flagging that fires on consecutive-sample switch state
   changes.
-- `_avg_temp_metadata` first averages the top-level (non-prefixed) fields via
-  `_avg_sensor_values`, then splits the `LNA_*`/`LOAD_*` channel keys into
-  `tempctrl_lna`/`tempctrl_load` sub-dicts and runs `_avg_sensor_values` on
-  each. The split happens in `File.add_data`, not here, so the streams in the
-  saved file are flat per-channel. Only `tempctrl` exercises this helper —
-  the standalone `temp_mon` Pico app was retired in picohost 1.0.0.
+
+`tempctrl_lna` and `tempctrl_load` are ordinary streams handled by the
+generic `_avg_sensor_values` path — picohost publishes them as
+separate per-channel streams, so the consumer no longer needs a custom
+splitter. (The standalone `temp_mon` Pico app was retired in picohost
+1.0.0.)
 
 **IMU mode (picohost 1.0.0).** The two IMU picos (`imu_el` panda elevation,
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:
