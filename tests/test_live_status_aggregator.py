@@ -879,6 +879,7 @@ def test_snap_fpga_probe_runs_when_corr_stale(agg, monkeypatch):
 
 
 def test_snap_fpga_probe_records_unreachable(agg, monkeypatch):
+    """Probe returning False updates state.snap_fpga_reachable to False."""
     agg.state.corr_config = {"snap_ip": "10.10.10.12"}
     monkeypatch.setattr(
         "eigsep_observing.live_status.aggregator.probe_snap_fpga",

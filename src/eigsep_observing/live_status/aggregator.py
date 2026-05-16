@@ -273,7 +273,7 @@ class LiveStatusAggregator:
         panda_tick_s: float = 0.5,
         read_timeout_s: float = 0.2,
         snap_fpga_probe_interval_s: float = 5.0,
-        snap_fpga_host: Optional[str] = None,
+        snap_fpga_host_override: Optional[str] = None,
         stop_event: Optional[threading.Event] = None,
     ):
         if read_timeout_s <= 0:
@@ -288,7 +288,7 @@ class LiveStatusAggregator:
         self._panda_tick_s = panda_tick_s
         self._read_timeout_s = read_timeout_s
         self._snap_fpga_probe_interval_s = snap_fpga_probe_interval_s
-        self._snap_fpga_host_override = snap_fpga_host
+        self._snap_fpga_host_override = snap_fpga_host_override
         self._stop_event = stop_event or threading.Event()
 
         # SNAP-side surfaces.
@@ -433,12 +433,9 @@ class LiveStatusAggregator:
         now = time.time()
         errors: list[str] = []
         any_ok = False
-        # Snapshot the fields the probe needs before the main lock
-        # block may overwrite them from Redis.  This lets tests pre-set
-        # state fields and have the probe see them deterministically.
         with self._lock:
-            _pre_corr_last_unix = self.state.corr_last_unix
-            _pre_corr_cfg = self.state.corr_config
+            corr_unix_pre_tick = self.state.corr_last_unix
+            corr_cfg_pre_tick = self.state.corr_config
 
         # Corr config + header (pointer-free gets). ``ValueError`` from
         # the store means "header/config not in Redis yet" — that's a
@@ -567,13 +564,13 @@ class LiveStatusAggregator:
             if reinit_h is not None:
                 s.snap_reinit = reinit_h
 
-        self._maybe_probe_snap_fpga(now, _pre_corr_last_unix, _pre_corr_cfg)
+        self._maybe_probe_snap_fpga(now, corr_unix_pre_tick, corr_cfg_pre_tick)
 
     def _maybe_probe_snap_fpga(
         self,
         now: float,
-        corr_unix: Optional[float],
-        corr_cfg: Optional[dict],
+        corr_unix_pre_tick: Optional[float],
+        corr_cfg_pre_tick: Optional[dict],
     ) -> None:
         """Probe the SNAP FPGA if corr is stale + interval elapsed.
 
@@ -583,7 +580,7 @@ class LiveStatusAggregator:
         fine — the probe is rate-limited to once per
         ``snap_fpga_probe_interval_s`` anyway.
 
-        Skips the probe entirely when ``corr_unix`` is fresh —
+        Skips the probe entirely when ``corr_unix_pre_tick`` is fresh —
         the corr stream itself is a stronger liveness signal. Also
         skips when no ``snap_ip`` is configured anywhere (corr config
         not yet read AND no CLI override), leaving
@@ -595,8 +592,8 @@ class LiveStatusAggregator:
             timeout_s = corr_observing_timeout_s(self.state)
 
         # Don't probe — corr stream is proving liveness.
-        if corr_unix is not None:
-            if (now - corr_unix) < timeout_s:
+        if corr_unix_pre_tick is not None:
+            if (now - corr_unix_pre_tick) < timeout_s:
                 return
 
         # Rate-limit the probe.
@@ -608,8 +605,8 @@ class LiveStatusAggregator:
 
         # Pick the host: corr_config first, CLI override second.
         snap_ip = None
-        if corr_cfg is not None:
-            snap_ip = corr_cfg.get("snap_ip")
+        if corr_cfg_pre_tick is not None:
+            snap_ip = corr_cfg_pre_tick.get("snap_ip")
         if not snap_ip:
             snap_ip = self._snap_fpga_host_override
         if not snap_ip:
