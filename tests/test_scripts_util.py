@@ -17,8 +17,10 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from eigsep_redis.testing import DummyTransport
 
 from eigsep_observing._scripts_util import build_transport, require_pico
+from eigsep_observing.testing import DummyPandaClient
 
 
 class _FakeProxy:
@@ -65,43 +67,69 @@ def test_require_pico_custom_hint_script(capsys):
 def test_build_transport_real_uses_real_port():
     """Real mode should construct a plain Transport — no dummy plumbing.
 
-    Patch the constructor at the module level (where the helper looks
-    it up) so we can assert the args without needing a real Redis
-    server on the test box.
+    Substitute ``DummyTransport`` (a real working subclass of
+    ``Transport`` backed by fakeredis) for ``Transport`` at the import
+    site so the test exercises the real construction path without
+    needing a Redis server. The host/port end up on the returned
+    instance as ordinary attributes, which is what we verify.
     """
-
-    # Use a plain instance (not a Mock) as the return value. Mock
-    # auto-creates attributes on access, which makes hasattr(mock, X)
-    # always True and defeats the absence assertion below.
-    class _BareTransport:
-        pass
-
-    fake = _BareTransport()
     with patch(
-        "eigsep_observing._scripts_util.Transport", return_value=fake
-    ) as MockTransport:
+        "eigsep_observing._scripts_util.Transport", DummyTransport
+    ):
         result = build_transport(False, host="example.org", real_port=4321)
-    MockTransport.assert_called_once_with(host="example.org", port=4321)
-    assert result is fake
-    # Real mode must not attach a dummy client — that would mask a
-    # misconfigured production deployment.
-    assert not hasattr(result, "_dummy_client")
+    try:
+        assert isinstance(result, DummyTransport)
+        assert result.host == "example.org"
+        assert result.port == 4321
+        # Real mode must not attach a dummy client — that would mask a
+        # misconfigured production deployment.
+        assert not hasattr(result, "_dummy_client")
+    finally:
+        result.close()
 
 
 def test_build_transport_dummy_attaches_client_and_resets():
-    """Dummy mode must reset fakeredis and attach DummyPandaClient.
+    """Dummy mode must reset fakeredis and attach a real DummyPandaClient.
 
     The ``_dummy_client`` attribute is load-bearing — without it the
     embedded PicoManager threads would be garbage-collected and every
-    proxy on the transport would report ``is_available=False``.
+    proxy on the transport would report ``is_available=False``. Run
+    the real ``DummyPandaClient`` (not a Mock) so that contract is
+    actually exercised: the test fails loudly if the embedded manager
+    ever stops registering picos on construction.
+
+    ``Transport`` is substituted with a ``DummyTransport`` subclass
+    that records ``reset()`` calls — we can't observe reset from the
+    fakeredis end-state because ``DummyPandaClient`` immediately
+    repopulates the DB.
     """
-    with patch("eigsep_observing._scripts_util.Transport") as MockTransport:
-        transport = MockTransport.return_value
-        # Patch DummyPandaClient at its real import path; the helper
-        # imports it lazily so the patch target is the canonical name.
-        with patch("eigsep_observing.testing.DummyPandaClient") as MockClient:
-            result = build_transport(True, host="localhost", dummy_port=6380)
-    MockTransport.assert_called_once_with(host="localhost", port=6380)
-    transport.reset.assert_called_once()
-    MockClient.assert_called_once_with(transport=transport)
-    assert result._dummy_client is MockClient.return_value
+    reset_calls: list[tuple[str, int]] = []
+
+    class _SpyDummyTransport(DummyTransport):
+        def reset(self):
+            reset_calls.append((self.host, self.port))
+            super().reset()
+
+    with patch(
+        "eigsep_observing._scripts_util.Transport", _SpyDummyTransport
+    ):
+        result = build_transport(True, host="localhost", dummy_port=6380)
+    try:
+        assert isinstance(result, _SpyDummyTransport)
+        assert result.host == "localhost"
+        assert result.port == 6380
+        assert reset_calls == [("localhost", 6380)]
+        assert isinstance(result._dummy_client, DummyPandaClient)
+        # The embedded PicoManager must have registered its picos
+        # before build_transport returned — that's the whole reason
+        # the dummy client gets stashed on the transport. If this
+        # ever regresses, manual scripts would silently see
+        # ``is_available=False`` on every proxy.
+        registered = {
+            n.decode() if isinstance(n, bytes) else n
+            for n in result.r.smembers("picos")
+        }
+        assert "rfswitch" in registered
+    finally:
+        result._dummy_client.stop()
+        result.close()
