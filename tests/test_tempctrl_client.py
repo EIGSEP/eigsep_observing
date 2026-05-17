@@ -174,7 +174,16 @@ def test_get_status_returns_snapshot_or_none(client):
     on. Returns None before either pico stream has published."""
     tc = TempCtrlClient(client.transport, settings=SETTINGS)
     tc.apply_settings()
-    assert _wait_until(lambda: tc.get_status() is not None)
+    # get_status() goes non-None as soon as EITHER pico stream
+    # (tempctrl_lna OR tempctrl_load) has published, but the asserts
+    # below need both. Under pytest -n auto the two streams can land
+    # in separate ticks, so wait until the merged dict carries both
+    # prefixes before snapshotting.
+    assert _wait_until(
+        lambda: (s := tc.get_status()) is not None
+        and "LNA_T_target" in s
+        and "LOAD_T_target" in s
+    )
     status = tc.get_status()
     # The merge preserves the legacy flat shape: device-wide watchdog
     # fields at the top, per-channel fields under LNA_*/LOAD_* prefix.
