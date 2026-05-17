@@ -113,7 +113,6 @@ class EigObserver:
             self.status_reader = StatusReader(transport_panda)
             self.heartbeat_reader = HeartbeatReader(transport_panda)
             self.vna_reader = VnaReader(transport_panda)
-            self.cfg = self.config.get()
             self._status_log_handler = StatusStreamHandler(transport_panda)
             logging.getLogger("eigsep_observing").addHandler(
                 self._status_log_handler

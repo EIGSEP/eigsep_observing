@@ -1,10 +1,16 @@
 """Observing-side file writer.
 
-Reads configuration from Redis (uploaded by PandaClient) and writes
-correlation and VNA data to disk. Either start order works: the script
-blocks on a 1 s retry loop until the Panda's ``ConfigStore`` is
-populated, and the systemd unit's ``Restart=on-failure`` covers the
-case where the Panda host is entirely unreachable.
+Writes correlation and VNA data to disk. Corr writing starts as soon as
+the SNAP is producing — independent of any panda-side state — and the
+``obs_config`` / ``run_tag`` overlays stamped into each corr file header
+are read opportunistically per file boundary (see
+:meth:`EigObserver._with_header_overlays`). This decouples the writer
+from ``panda_observe`` so any panda-side script (or none at all) can run
+alongside it.
+
+The VNA thread is spawned unconditionally whenever ``--panda`` is on;
+it polls ``panda_connected`` internally and sits idle if no VNA data
+appears on the stream.
 
 Installed as the ``eigsep-observe`` console script and run by the
 ``eigsep-observe-writer.service`` systemd unit (see ``deploy/systemd/``).
@@ -14,9 +20,8 @@ import argparse
 import logging
 import sys
 import threading
-import time
 
-from eigsep_redis import ConfigStore, Transport
+from eigsep_redis import Transport
 
 from eigsep_observing import EigObserver
 
@@ -51,6 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="corr_save_dir",
         default="/media/eigsep/T7/data",
         help="Directory for correlator HDF5 files.",
+    )
+    parser.add_argument(
+        "--vna-save-dir",
+        dest="vna_save_dir",
+        default="/media/eigsep/T7/data/s11_data",
+        help="Directory for VNA S11 HDF5 files.",
     )
     parser.add_argument(
         "--corr-ntimes",
@@ -122,17 +133,6 @@ def main() -> int:
         logger.warning("Not connecting to LattePanda")
         transport_panda = None
 
-    if args.use_panda:
-        logger.info("Waiting for Panda config in Redis.")
-        panda_config = ConfigStore(transport_panda)
-        while True:
-            try:
-                panda_config.get()
-                break
-            except ValueError:
-                logger.info("Panda config not yet available, retrying...")
-                time.sleep(1.0)
-
     if args.dummy:
         observer = DummyEigObserver(
             transport_snap=transport_snap,
@@ -171,12 +171,13 @@ def main() -> int:
         logger.info("Starting correlation file writing thread.")
         corr_thd.start()
 
-    # set up VNA file writing — use panda config from Redis
-    if args.use_panda and observer.cfg.get("use_vna", False):
-        logger.info(f"panda connected: {observer.panda_connected}")
+    # VNA file writing: spawn unconditionally when --panda is on. The
+    # thread polls ``panda_connected`` internally and idles on an empty
+    # VNA stream, so it's harmless when no panda script is publishing.
+    if args.use_panda:
         vna_thd = threading.Thread(
             target=observer.record_vna_data,
-            args=(observer.cfg["vna_save_dir"],),
+            args=(args.vna_save_dir,),
         )
         thds["vna"] = vna_thd
         logger.info("Starting VNA file writing thread.")

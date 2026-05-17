@@ -95,7 +95,7 @@ def test_observer_init_panda_only(observer_panda_only, transport_panda):
     """Test EigObserver initialization with only LattePanda connection."""
     assert observer_panda_only.transport_snap is None
     assert observer_panda_only.transport_panda is transport_panda
-    assert observer_panda_only.cfg is not None
+    assert observer_panda_only.config is not None
 
 
 def test_observer_init_both(observer_both, transport_snap, transport_panda):
@@ -103,7 +103,7 @@ def test_observer_init_both(observer_both, transport_snap, transport_panda):
     assert observer_both.transport_snap is transport_snap
     assert observer_both.transport_panda is transport_panda
     assert observer_both.corr_cfg is not None
-    assert observer_both.cfg is not None
+    assert observer_both.config is not None
 
 
 def test_observer_init_none():
@@ -112,6 +112,28 @@ def test_observer_init_none():
     assert observer.transport_snap is None
     assert observer.transport_panda is None
     observer.close()
+
+
+def test_observer_init_panda_empty_config_does_not_raise():
+    """Construction against an unseeded panda ConfigStore must not raise.
+
+    The writer must start as soon as the backend boots, without waiting
+    for ``panda_observe`` to upload an ``obs_config``. ``_with_header_overlays``
+    is the only consumer of the panda config; its read is defensive and
+    falls back to sentinels.
+    """
+    transport_panda = DummyTransport()
+    HeartbeatWriter(transport_panda).set(alive=True)
+    observer = EigObserver(transport_panda=transport_panda)
+    try:
+        assert observer.config is not None
+        overlaid = observer._with_header_overlays({"foo": 1})
+        assert overlaid["foo"] == 1
+        assert overlaid["obs_config"] == {}
+        assert overlaid["run_tag"] == "UNKNOWN"
+        assert overlaid["run_started_at_unix"] == 0.0
+    finally:
+        observer.close()
 
 
 def test_status_handler_does_not_block_caller_on_slow_xadd(
