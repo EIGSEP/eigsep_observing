@@ -64,10 +64,7 @@ class _State:
 
 
 def _snap(snapshot, name):
-    try:
-        return snapshot.get(name)
-    except KeyError:
-        return None
+    return snapshot.get().get(name)
 
 
 def _seed_state(snapshot):

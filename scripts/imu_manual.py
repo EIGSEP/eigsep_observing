@@ -48,10 +48,7 @@ BAR_WIDTH = 41  # odd so the zero-tick lines up
 
 
 def _read_imu(snapshot, name):
-    try:
-        snap = snapshot.get(name)
-    except KeyError:
-        return None
+    snap = snapshot.get().get(name)
     return snap or None
 
 

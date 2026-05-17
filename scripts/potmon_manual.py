@@ -26,10 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 def _read_potmon(snapshot):
-    try:
-        snap = snapshot.get("potmon")
-    except KeyError:
-        return None
+    snap = snapshot.get().get("potmon")
     return snap or None
 
 

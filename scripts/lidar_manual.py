@@ -27,10 +27,7 @@ BAR_WIDTH = 60
 
 
 def _read_lidar(snapshot):
-    try:
-        snap = snapshot.get("lidar")
-    except KeyError:
-        return None, None
+    snap = snapshot.get().get("lidar")
     if not snap:
         return None, None
     return snap.get("distance_m"), snap.get("status")

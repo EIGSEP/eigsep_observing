@@ -42,10 +42,7 @@ def _print_menu():
 
 
 def _read_current_state(snapshot):
-    try:
-        snap = snapshot.get("rfswitch")
-    except KeyError:
-        return None
+    snap = snapshot.get().get("rfswitch")
     return snap.get("sw_state_name") if snap else None
 
 
