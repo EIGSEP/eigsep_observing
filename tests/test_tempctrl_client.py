@@ -34,8 +34,16 @@ def _emulator(client):
     return client._manager.picos["tempctrl"]._emulator
 
 
-def _wait_until(predicate, timeout=2.0, interval=0.02):
-    """Poll ``predicate`` until it returns truthy or ``timeout`` elapses."""
+def _wait_until(predicate, timeout=5.0, interval=0.02):
+    """Poll ``predicate`` until it returns truthy or ``timeout`` elapses.
+
+    Default timeout is 5 s — the original 2 s was tight enough that under
+    ``pytest -n auto`` on a busy CI runner, ``test_get_status_returns_
+    snapshot_or_none`` would intermittently miss the first tempctrl
+    publish (200 ms emulator cadence × per-channel × scheduler jitter).
+    Healthy local runs complete in well under a second, so the bump only
+    extends the worst case.
+    """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():

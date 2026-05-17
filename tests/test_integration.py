@@ -38,6 +38,47 @@ def client(transport, dummy_cfg):
     c.stop()
 
 
+# All emulator-fed streams we expect after the embedded PicoManager starts
+# (one entry per registered DummyPico*). Used both as the fixture-readiness
+# wait condition and as the assertion target in test_sensor_metadata_in_redis.
+_EXPECTED_SENSORS = (
+    # tempctrl publishes two streams (one per Peltier channel); the
+    # picohost producer fans the firmware's combined tick into
+    # tempctrl_lna and tempctrl_load.
+    "tempctrl_lna",
+    "tempctrl_load",
+    "potmon",
+    "imu_el",
+    "imu_az",
+    "lidar",
+    "rfswitch",
+)
+
+
+def _wait_for_sensors(transport, sensors=_EXPECTED_SENSORS, timeout=5.0):
+    """Poll the metadata snapshot until every name in ``sensors`` has
+    published at least once. Returns the final snapshot. Raises
+    ``AssertionError`` (with the keys actually present) on timeout.
+
+    Replaces ``time.sleep(0.5)`` — under ``pytest -n auto`` on CI the
+    200 ms emulator cadence + reader-thread + Redis write chain can take
+    longer than a half-second wall clock. Condition-polling decouples
+    the test from how heavily the runner is loaded.
+    """
+    deadline = time.monotonic() + timeout
+    reader = MetadataSnapshotReader(transport)
+    while True:
+        metadata = reader.get()
+        if all(s in metadata for s in sensors):
+            return metadata
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"timed out after {timeout}s waiting for sensors "
+                f"{list(sensors)}; got keys: {list(metadata.keys())}"
+            )
+        time.sleep(0.02)
+
+
 def test_picos_registered(client):
     """PicoManager should register all dummy devices in Redis."""
     available = client.transport.r.smembers("picos")
@@ -56,23 +97,8 @@ def test_picos_registered(client):
 
 def test_sensor_metadata_in_redis(client, transport):
     """Emulators generate status that flows through redis_handler to Redis."""
-    time.sleep(0.5)
-
-    metadata = MetadataSnapshotReader(transport).get()
-
-    expected_sensors = {
-        # tempctrl publishes two streams (one per Peltier channel); the
-        # picohost producer fans the firmware's combined tick into
-        # tempctrl_lna and tempctrl_load.
-        "tempctrl_lna",
-        "tempctrl_load",
-        "potmon",
-        "imu_el",
-        "imu_az",
-        "lidar",
-        "rfswitch",
-    }
-    for sensor in expected_sensors:
+    metadata = _wait_for_sensors(transport)
+    for sensor in _EXPECTED_SENSORS:
         assert sensor in metadata, (
             f"Expected sensor '{sensor}' in metadata, "
             f"got keys: {list(metadata.keys())}"
@@ -81,9 +107,7 @@ def test_sensor_metadata_in_redis(client, transport):
 
 def test_metadata_has_expected_fields(client, transport):
     """Verify that metadata values contain the expected sensor fields."""
-    time.sleep(0.5)
-
-    metadata = MetadataSnapshotReader(transport).get()
+    metadata = _wait_for_sensors(transport)
 
     # Each Peltier channel has its own stream with flat per-channel
     # fields, a top-level status, and the device-wide watchdog fields
@@ -124,7 +148,7 @@ def test_metadata_has_expected_fields(client, transport):
 
 def test_metadata_snapshot_single_key(client, transport):
     """metadata_snapshot.get(key) returns just that sensor's data."""
-    time.sleep(0.5)
+    _wait_for_sensors(transport, sensors=("lidar",))
     lidar = MetadataSnapshotReader(transport).get("lidar")
     assert isinstance(lidar, dict)
     assert "distance_m" in lidar
