@@ -77,8 +77,11 @@ def _seed_state(snapshot):
     lna = _snap(snapshot, "tempctrl_lna") or {}
     load = _snap(snapshot, "tempctrl_load") or {}
     return _State(
-        lna_setpoint=float(lna.get("T_target") or 20.0),
-        load_setpoint=float(load.get("T_target") or 20.0),
+        lna_t = lna.get("T_target")
+        load_t = load.get("T_target")
+        return _State(
+            lna_setpoint=float(lna_t) if lna_t is not None else 20.0,
+            load_setpoint=float(load_t) if load_t is not None else 20.0,
         lna_enabled=bool(lna.get("enabled") or False),
         load_enabled=bool(load.get("enabled") or False),
     )
