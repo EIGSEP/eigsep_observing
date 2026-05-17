@@ -15,9 +15,10 @@ CFG_PATH = utils.get_config_path("dummy_config.yaml")
 class DummyEigObserver(EigObserver):
     def __init__(self, transport_snap=None, transport_panda=None):
         """
-        Override constructor to pre-seed the dummy configs on each
-        transport so the parent constructor's ``.get()`` calls find
-        them.
+        Pre-seed the dummy configs on each transport so the SNAP-side
+        ``CorrConfigStore.get()`` succeeds during parent construction
+        and ``_with_header_overlays`` finds a populated panda
+        ``ConfigStore`` when tests exercise the overlay path.
         """
         if transport_snap is not None:
             CorrConfigStore(transport_snap).upload(
