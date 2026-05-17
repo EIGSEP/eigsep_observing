@@ -331,6 +331,7 @@ def test_health_route_surfaces_snap_reinit_count(agg_primed):
 def test_health_route_snap_fpga_state_live_when_corr_fresh(agg_primed):
     """corr fresh → state is 'live' regardless of probe result."""
     agg_primed.state.corr_last_unix = time.time()
+    # Minimal dict: corr_observing_timeout_s only reads ["integration_time"].
     agg_primed.state.corr_header = {"integration_time": 0.27}
     agg_primed.state.snap_fpga_reachable = False  # ignored when live
     client = create_app(agg_primed).test_client()

@@ -848,6 +848,7 @@ def test_snap_fpga_probe_skipped_when_corr_fresh(agg, seeded, monkeypatch):
     snap, _panda = seeded
     # Seed a fresh corr_last_unix in state by directly stamping it.
     agg.state.corr_last_unix = time.time()
+    # Minimal dict: corr_observing_timeout_s only reads ["integration_time"].
     agg.state.corr_header = {"integration_time": 0.27}
 
     calls = []
@@ -868,6 +869,7 @@ def test_snap_fpga_probe_skipped_when_corr_fresh(agg, seeded, monkeypatch):
 
 def test_snap_fpga_probe_runs_when_corr_stale(agg, monkeypatch):
     """No corr data ever seen → probe should run and update state."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
     agg.state.corr_config = {"snap_ip": "10.10.10.12"}
     monkeypatch.setattr(
         "eigsep_observing.live_status.aggregator.probe_snap_fpga",
@@ -880,6 +882,7 @@ def test_snap_fpga_probe_runs_when_corr_stale(agg, monkeypatch):
 
 def test_snap_fpga_probe_records_unreachable(agg, monkeypatch):
     """Probe returning False updates state.snap_fpga_reachable to False."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
     agg.state.corr_config = {"snap_ip": "10.10.10.12"}
     monkeypatch.setattr(
         "eigsep_observing.live_status.aggregator.probe_snap_fpga",
@@ -893,6 +896,7 @@ def test_snap_fpga_probe_gated_by_interval(agg, monkeypatch):
     """Two ticks within the probe interval must only run the probe
     once — the inner tick cadence is 0.01 s, the probe interval is
     5 s by default."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
     agg.state.corr_config = {"snap_ip": "10.10.10.12"}
     calls = []
     monkeypatch.setattr(
