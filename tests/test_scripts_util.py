@@ -69,17 +69,23 @@ def test_build_transport_real_uses_real_port():
     it up) so we can assert the args without needing a real Redis
     server on the test box.
     """
-    with patch("eigsep_observing._scripts_util.Transport") as MockTransport:
-        instance = MockTransport.return_value
+
+    # Use a plain instance (not a Mock) as the return value. Mock
+    # auto-creates attributes on access, which makes hasattr(mock, X)
+    # always True and defeats the absence assertion below.
+    class _BareTransport:
+        pass
+
+    fake = _BareTransport()
+    with patch(
+        "eigsep_observing._scripts_util.Transport", return_value=fake
+    ) as MockTransport:
         result = build_transport(False, host="example.org", real_port=4321)
     MockTransport.assert_called_once_with(host="example.org", port=4321)
-    assert result is instance
+    assert result is fake
     # Real mode must not attach a dummy client — that would mask a
     # misconfigured production deployment.
-    assert (
-        not hasattr(instance, "_dummy_client")
-        or instance._dummy_client is MockTransport.return_value._dummy_client
-    )  # noqa: E501
+    assert not hasattr(result, "_dummy_client")
 
 
 def test_build_transport_dummy_attaches_client_and_resets():
