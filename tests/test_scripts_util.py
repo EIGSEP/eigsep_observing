@@ -73,9 +73,7 @@ def test_build_transport_real_uses_real_port():
     needing a Redis server. The host/port end up on the returned
     instance as ordinary attributes, which is what we verify.
     """
-    with patch(
-        "eigsep_observing._scripts_util.Transport", DummyTransport
-    ):
+    with patch("eigsep_observing._scripts_util.Transport", DummyTransport):
         result = build_transport(False, host="example.org", real_port=4321)
     try:
         assert isinstance(result, DummyTransport)
@@ -110,9 +108,7 @@ def test_build_transport_dummy_attaches_client_and_resets():
             reset_calls.append((self.host, self.port))
             super().reset()
 
-    with patch(
-        "eigsep_observing._scripts_util.Transport", _SpyDummyTransport
-    ):
+    with patch("eigsep_observing._scripts_util.Transport", _SpyDummyTransport):
         result = build_transport(True, host="localhost", dummy_port=6380)
     try:
         assert isinstance(result, _SpyDummyTransport)
