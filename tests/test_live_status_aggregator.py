@@ -835,3 +835,107 @@ def test_thresholds_from_constructor_override():
         assert agg.thresholds.bands["adc.rms"]["healthy"] == [1.0, 2.0]
     finally:
         agg.stop()
+
+
+# ---------------------------------------------------------------------
+# SNAP FPGA probe
+# ---------------------------------------------------------------------
+
+
+def test_snap_fpga_probe_skipped_when_corr_fresh(agg, seeded, monkeypatch):
+    """When the corr stream is fresh, the probe is a no-op — the corr
+    flow itself proves SNAP liveness, so we don't open extra sockets."""
+    snap, _panda = seeded
+    # Seed a fresh corr_last_unix in state by directly stamping it.
+    agg.state.corr_last_unix = time.time()
+    # Minimal dict: corr_observing_timeout_s only reads ["integration_time"].
+    agg.state.corr_header = {"integration_time": 0.27}
+
+    calls = []
+
+    def fake_probe(*args, **kwargs):
+        calls.append((args, kwargs))
+        return True
+
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        fake_probe,
+    )
+    agg._snap_tick()
+    assert calls == []  # probe must NOT have run
+    # snap_fpga_reachable stays None (probe never ran on this tick).
+    assert agg.state.snap_fpga_reachable is None
+
+
+def test_snap_fpga_probe_runs_when_corr_stale(agg, monkeypatch):
+    """No corr data ever seen → probe should run and update state."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
+    agg.state.corr_config = {"snap_ip": "10.10.10.12"}
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        lambda host, **kw: host == "10.10.10.12",
+    )
+    agg._snap_tick()
+    assert agg.state.snap_fpga_reachable is True
+    assert agg.state.snap_fpga_last_probe_unix is not None
+
+
+def test_snap_fpga_probe_records_unreachable(agg, monkeypatch):
+    """Probe returning False updates state.snap_fpga_reachable to False."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
+    agg.state.corr_config = {"snap_ip": "10.10.10.12"}
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        lambda host, **kw: False,
+    )
+    agg._snap_tick()
+    assert agg.state.snap_fpga_reachable is False
+
+
+def test_snap_fpga_probe_gated_by_interval(agg, monkeypatch):
+    """Two ticks within the probe interval must only run the probe
+    once — the inner tick cadence is 0.01 s, the probe interval is
+    5 s by default."""
+    # Minimal dict: _maybe_probe_snap_fpga only reads ["snap_ip"].
+    agg.state.corr_config = {"snap_ip": "10.10.10.12"}
+    calls = []
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        lambda host, **kw: calls.append(host) or True,
+    )
+    agg._snap_tick()
+    agg._snap_tick()
+    assert calls == ["10.10.10.12"]
+
+
+def test_snap_fpga_probe_uses_explicit_host_when_no_config(agg, monkeypatch):
+    """If the corr config hasn't been read yet but a snap_fpga_host
+    was passed to __init__, use it."""
+    agg._snap_fpga_host_override = "10.10.10.12"
+    agg.state.corr_config = None
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        lambda host, **kw: host == "10.10.10.12",
+    )
+    agg._snap_tick()
+    assert agg.state.snap_fpga_reachable is True
+
+
+def test_snap_fpga_probe_unknown_when_no_host(agg, monkeypatch):
+    """No snap_ip anywhere → probe skipped, state stays None."""
+    agg.state.corr_config = None
+    agg._snap_fpga_host_override = None
+    calls = []
+    monkeypatch.setattr(
+        "eigsep_observing.live_status.aggregator.probe_snap_fpga",
+        lambda *a, **kw: calls.append(a) or True,
+    )
+    agg._snap_tick()
+    assert calls == []
+    assert agg.state.snap_fpga_reachable is None
+
+
+def test_snapshot_exposes_snap_fpga_fields(agg):
+    snap = agg.snapshot()
+    assert hasattr(snap, "snap_fpga_reachable")
+    assert hasattr(snap, "snap_fpga_last_probe_unix")

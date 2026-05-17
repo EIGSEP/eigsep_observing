@@ -337,21 +337,47 @@ function updateVna(vna) {
 // ---- health --------------------------------------------------------
 
 function updateHealth(h, fileData) {
-  const snapTile = document.getElementById("tile-snap");
-  snapTile.className = `tile ${h.snap_connected ? "ok" : "danger"}`;
-  snapTile.textContent = `SNAP: ${h.snap_connected ? "connected" : "offline"}`;
+  // SNAP FPGA tile — tiered state from /api/health.
+  const fpgaTile = document.getElementById("tile-snap-fpga");
+  const fpgaClassMap = {
+    live: "ok",
+    reachable: "ok",
+    unreachable: "danger",
+    unknown: "unknown",
+  };
+  const fpgaLabelMap = {
+    live: "live (corr streaming)",
+    reachable: "reachable (no corr)",
+    unreachable: "unreachable",
+    unknown: "unknown",
+  };
+  const fpgaState = h.snap_fpga_state || "unknown";
+  fpgaTile.className = `tile ${fpgaClassMap[fpgaState] || "unknown"}`;
+  fpgaTile.textContent = `SNAP FPGA: ${fpgaLabelMap[fpgaState] || "unknown"}`;
 
-  const pandaTile = document.getElementById("tile-panda");
+  // Backend Redis tile — old "SNAP" tile, honestly named.
+  const redisTile = document.getElementById("tile-backend-redis");
+  redisTile.className = `tile ${h.snap_connected ? "ok" : "danger"}`;
+  redisTile.textContent = `Backend Redis: ${h.snap_connected ? "up" : "down"}`;
+
+  // Panda observe tile — same 3-state logic, clearer labels.
+  const pandaTile = document.getElementById("tile-panda-observe");
   let pandaClass = "danger";
-  if (h.panda_heartbeat) pandaClass = "ok";
-  else if (h.panda_connected) pandaClass = "warn";
+  let pandaLabel = "panda offline";
+  if (h.panda_heartbeat) {
+    pandaClass = "ok";
+    pandaLabel = "running";
+  } else if (h.panda_connected) {
+    pandaClass = "warn";
+    pandaLabel = "script idle";
+  }
   pandaTile.className = `tile ${pandaClass}`;
-  pandaTile.textContent =
-    `Panda: ${h.panda_heartbeat ? "alive" : h.panda_connected ? "stale HB" : "offline"}`;
+  pandaTile.textContent = `Panda observe: ${pandaLabel}`;
 
-  const obsTile = document.getElementById("tile-observing");
-  obsTile.className = `tile ${h.observing_inferred ? "ok" : "warn"}`;
-  obsTile.textContent = `Observing: ${h.observing_inferred ? "yes" : "no"}`;
+  // Corr loop tile — old "Observing" tile, honestly named.
+  const corrTile = document.getElementById("tile-corr-loop");
+  corrTile.className = `tile ${h.observing_inferred ? "ok" : "warn"}`;
+  corrTile.textContent = `Corr loop: ${h.observing_inferred ? "recording" : "idle"}`;
 
   const fileTile = document.getElementById("tile-file");
   if (fileData) {

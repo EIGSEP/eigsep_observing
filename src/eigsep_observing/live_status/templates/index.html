@@ -10,9 +10,10 @@
 <header>
   <h1>EIGSEP live status</h1>
   <div id="health-summary" class="health">
-    <span class="tile" id="tile-snap">SNAP: ?</span>
-    <span class="tile" id="tile-panda">Panda: ?</span>
-    <span class="tile" id="tile-observing">Observing: ?</span>
+    <span class="tile" id="tile-snap-fpga" title="SNAP FPGA reachability. 'live' = corr stream is flowing (proves SNAP responds at the casperfpga level). 'reachable' = corr is idle but a TCP connect to the katcp port (7147) succeeds. 'unreachable' = probe failed. 'unknown' = no snap_ip configured yet.">SNAP FPGA: ?</span>
+    <span class="tile" id="tile-backend-redis" title="Backend Redis (rpi_ip) liveness. Any successful read on the SNAP-side Redis flips this green.">Backend Redis: ?</span>
+    <span class="tile" id="tile-panda-observe" title="Panda observe script. 'running' = fresh heartbeat from panda_observe (or sibling script). 'script idle' = panda Redis is up but no script is publishing the heartbeat. 'panda offline' = panda Redis itself is unreachable.">Panda observe: ?</span>
+    <span class="tile" id="tile-corr-loop" title="Corr loop. 'recording' = a new corr integration arrived within 2.5x the integration cadence — eigsep-fpga-init is publishing data. 'idle' = no new integration in that window.">Corr loop: ?</span>
     <span class="tile" id="tile-file">Last file: ?</span>
     <span class="tile" id="tile-reinit" title="SNAP --reinit count since the last Redis flush. Bumps on every supervised crash-recovery.">Reinits: ?</span>
     <span class="tile" id="tile-run" title="Active panda script (panda_observe / no_switch_observation / vna_position_sweep). 'idle' means no script is currently driving the run.">Run: ?</span>

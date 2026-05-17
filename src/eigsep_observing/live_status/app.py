@@ -21,7 +21,11 @@ import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
 from plotly.offline import get_plotlyjs
 
-from .aggregator import LiveStatusAggregator, StateSnapshot
+from .aggregator import (
+    LiveStatusAggregator,
+    StateSnapshot,
+    corr_observing_timeout_s,
+)
 from .calibration import (
     apply_calibration_auto,
     apply_calibration_cross_mag,
@@ -511,40 +515,13 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     }
 
 
-def _corr_observing_timeout_s(state: StateSnapshot) -> float:
-    """Infer a reasonable observing-idle timeout from corr cadence.
-
-    The corr loop advances ``corr_last_unix`` once per integration, so
-    a fixed 2 s threshold misreports "not observing" whenever
-    ``integration_time`` is configured above ~1 s. Prefer the measured
-    cadence, fall back to the header's ``integration_time``, and
-    finally to a 2 s floor. Scale by 2.5× so one slipped integration
-    doesn't flip the indicator.
-    """
-    cadence: Optional[float] = None
-    if state.corr_cadence_s is not None and state.corr_cadence_s > 0:
-        cadence = float(state.corr_cadence_s)
-    elif state.corr_header is not None:
-        int_time = state.corr_header.get("integration_time")
-        if int_time is not None:
-            try:
-                int_time_f = float(int_time)
-            except (TypeError, ValueError):
-                int_time_f = None
-            if int_time_f and int_time_f > 0:
-                cadence = int_time_f
-    if cadence is None:
-        return 2.0
-    return max(2.0, cadence * 2.5)
-
-
 def _health_payload(state: StateSnapshot, now: float) -> dict:
     panda_hb_age = None
     if state.panda_heartbeat_last_check_unix is not None:
         panda_hb_age = max(0.0, now - state.panda_heartbeat_last_check_unix)
     observing_inferred = False
     if state.corr_last_unix is not None:
-        timeout_s = _corr_observing_timeout_s(state)
+        timeout_s = corr_observing_timeout_s(state)
         observing_inferred = (now - state.corr_last_unix) < timeout_s
     reinit = dict(state.snap_reinit or {})
     # Recompute the age against ``now`` so the dashboard's "Reinits"
@@ -559,6 +536,19 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
     run_age_s = None
     if state.run_started_at_unix is not None:
         run_age_s = max(0.0, now - state.run_started_at_unix)
+    # Tier the SNAP FPGA tile: corr stream beats probe, probe beats
+    # silence. ``observing_inferred`` and the probe both flag SNAP
+    # liveness; this layer picks the strongest available evidence so
+    # the operator sees "live" during normal observing and only sees
+    # the active-probe result when the observe loop isn't running.
+    if observing_inferred:
+        snap_fpga_state = "live"
+    elif state.snap_fpga_reachable is True:
+        snap_fpga_state = "reachable"
+    elif state.snap_fpga_reachable is False:
+        snap_fpga_state = "unreachable"
+    else:
+        snap_fpga_state = "unknown"
     return {
         "snap_connected": state.snap_connected,
         "panda_connected": state.panda_connected,
@@ -570,6 +560,8 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "snap_error": state.snap_error,
         "panda_error": state.panda_error,
         "snap_reinit": reinit,
+        "snap_fpga_state": snap_fpga_state,
+        "snap_fpga_last_probe_unix": state.snap_fpga_last_probe_unix,
         "run_tag": state.run_tag,
         "run_started_at_unix": state.run_started_at_unix,
         "run_age_s": run_age_s,

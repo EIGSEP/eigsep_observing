@@ -60,6 +60,7 @@ from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
 from ..vna import VnaReader
 from .signals import SIGNAL_REGISTRY
+from .snap_probe import probe_snap_fpga
 from .thresholds import Thresholds
 from .vna_calibration import VnaCache
 
@@ -197,6 +198,39 @@ class StateSnapshot:
     snap_error: Optional[str] = None
     panda_error: Optional[str] = None
 
+    # SNAP FPGA reachability (independent of corr stream). Probed via
+    # TCP to the katcp port only when corr is stale — corr flow is a
+    # stronger signal and makes the probe redundant.
+    snap_fpga_reachable: Optional[bool] = None
+    snap_fpga_last_probe_unix: Optional[float] = None
+
+
+def corr_observing_timeout_s(state: StateSnapshot) -> float:
+    """Infer a reasonable observing-idle timeout from corr cadence.
+
+    The corr loop advances ``corr_last_unix`` once per integration, so
+    a fixed 2 s threshold misreports "not observing" whenever
+    ``integration_time`` is configured above ~1 s. Prefer the measured
+    cadence, fall back to the header's ``integration_time``, and
+    finally to a 2 s floor. Scale by 2.5× so one slipped integration
+    doesn't flip the indicator.
+    """
+    cadence = None
+    if state.corr_cadence_s is not None and state.corr_cadence_s > 0:
+        cadence = float(state.corr_cadence_s)
+    elif state.corr_header is not None:
+        int_time = state.corr_header.get("integration_time")
+        if int_time is not None:
+            try:
+                int_time_f = float(int_time)
+            except (TypeError, ValueError):
+                int_time_f = None
+            if int_time_f and int_time_f > 0:
+                cadence = int_time_f
+    if cadence is None:
+        return 2.0
+    return max(2.0, cadence * 2.5)
+
 
 class LiveStatusAggregator:
     """Background poller + shared state for the live-status Flask app.
@@ -238,6 +272,8 @@ class LiveStatusAggregator:
         snap_tick_s: float = 0.5,
         panda_tick_s: float = 0.5,
         read_timeout_s: float = 0.2,
+        snap_fpga_probe_interval_s: float = 5.0,
+        snap_fpga_host_override: Optional[str] = None,
         stop_event: Optional[threading.Event] = None,
     ):
         if read_timeout_s <= 0:
@@ -251,6 +287,8 @@ class LiveStatusAggregator:
         self._snap_tick_s = snap_tick_s
         self._panda_tick_s = panda_tick_s
         self._read_timeout_s = read_timeout_s
+        self._snap_fpga_probe_interval_s = snap_fpga_probe_interval_s
+        self._snap_fpga_host_override = snap_fpga_host_override
         self._stop_event = stop_event or threading.Event()
 
         # SNAP-side surfaces.
@@ -375,6 +413,8 @@ class LiveStatusAggregator:
                     if s.last_rfnon_pairs is not None
                     else None
                 ),
+                snap_fpga_reachable=s.snap_fpga_reachable,
+                snap_fpga_last_probe_unix=s.snap_fpga_last_probe_unix,
             )
 
     # -- SNAP drain loop -------------------------------------------
@@ -393,6 +433,9 @@ class LiveStatusAggregator:
         now = time.time()
         errors: list[str] = []
         any_ok = False
+        with self._lock:
+            corr_unix_pre_tick = self.state.corr_last_unix
+            corr_cfg_pre_tick = self.state.corr_config
 
         # Corr config + header (pointer-free gets). ``ValueError`` from
         # the store means "header/config not in Redis yet" — that's a
@@ -520,6 +563,59 @@ class LiveStatusAggregator:
 
             if reinit_h is not None:
                 s.snap_reinit = reinit_h
+
+        self._maybe_probe_snap_fpga(now, corr_unix_pre_tick, corr_cfg_pre_tick)
+
+    def _maybe_probe_snap_fpga(
+        self,
+        now: float,
+        corr_unix_pre_tick: Optional[float],
+        corr_cfg_pre_tick: Optional[dict],
+    ) -> None:
+        """Probe the SNAP FPGA if corr is stale + interval elapsed.
+
+        Parameters are snapshotted by ``_snap_tick`` *before* the main
+        lock block so test pre-sets survive the Redis read. In
+        production the values are from the previous tick, which is
+        fine — the probe is rate-limited to once per
+        ``snap_fpga_probe_interval_s`` anyway.
+
+        Skips the probe entirely when ``corr_unix_pre_tick`` is fresh —
+        the corr stream itself is a stronger liveness signal. Also
+        skips when no ``snap_ip`` is configured anywhere (corr config
+        not yet read AND no CLI override), leaving
+        ``snap_fpga_reachable`` at ``None`` so the tile shows
+        "unknown" rather than a false negative.
+        """
+        with self._lock:
+            last_probe = self.state.snap_fpga_last_probe_unix
+            timeout_s = corr_observing_timeout_s(self.state)
+
+        # Don't probe — corr stream is proving liveness.
+        if corr_unix_pre_tick is not None:
+            if (now - corr_unix_pre_tick) < timeout_s:
+                return
+
+        # Rate-limit the probe.
+        if (
+            last_probe is not None
+            and (now - last_probe) < self._snap_fpga_probe_interval_s
+        ):
+            return
+
+        # Pick the host: corr_config first, CLI override second.
+        snap_ip = None
+        if corr_cfg_pre_tick is not None:
+            snap_ip = corr_cfg_pre_tick.get("snap_ip")
+        if not snap_ip:
+            snap_ip = self._snap_fpga_host_override
+        if not snap_ip:
+            return  # state.snap_fpga_reachable stays None → "unknown"
+
+        result = probe_snap_fpga(snap_ip)
+        with self._lock:
+            self.state.snap_fpga_reachable = result
+            self.state.snap_fpga_last_probe_unix = now
 
     def _read_corr(self) -> tuple[Optional[tuple], bool]:
         """Drain the corr stream to the latest entry; reshape the tail.
