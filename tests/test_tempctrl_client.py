@@ -180,9 +180,11 @@ def test_get_status_returns_snapshot_or_none(client):
     # in separate ticks, so wait until the merged dict carries both
     # prefixes before snapshotting.
     assert _wait_until(
-        lambda: (s := tc.get_status()) is not None
-        and "LNA_T_target" in s
-        and "LOAD_T_target" in s
+        lambda: (
+            (s := tc.get_status()) is not None
+            and "LNA_T_target" in s
+            and "LOAD_T_target" in s
+        )
     )
     status = tc.get_status()
     # The merge preserves the legacy flat shape: device-wide watchdog
