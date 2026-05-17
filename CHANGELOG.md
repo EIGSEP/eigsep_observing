@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.3.0...v2.4.0) (2026-05-17)
+
+
+### Features
+
+* **observe:** decouple writer from panda ConfigStore ([6b795a2](https://github.com/EIGSEP/eigsep_observing/commit/6b795a2bcf4dbfdfcbe99739db524b019474a184))
+* **scripts:** manual bring-up tools for rfswitch, lidar, imu, potmon, tempctrl ([#116](https://github.com/EIGSEP/eigsep_observing/issues/116)) ([8da0dc5](https://github.com/EIGSEP/eigsep_observing/commit/8da0dc56cc7fe78c4b1ad344b70605fd4eeabe9e))
+* **tempctrl:** consume per-channel Redis streams; drop _avg_temp_metadata ([988cfc3](https://github.com/EIGSEP/eigsep_observing/commit/988cfc3a9ffc1d609b67a1b7d3fd80902d9eea7f))
+
+
+### Bug Fixes
+
+* **live-status:** source switch_schedule from Redis; suppress fake "next change" ([ceec4f3](https://github.com/EIGSEP/eigsep_observing/commit/ceec4f36676658034f6c330dc9b3d53a5b561197))
+
 ## [2.3.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.2.0...v2.3.0) (2026-05-15)
 
 
