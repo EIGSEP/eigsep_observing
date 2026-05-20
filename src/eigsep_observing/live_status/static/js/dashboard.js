@@ -451,8 +451,10 @@ function updateHealth(h, fileData) {
 
 // ---- metadata + adc + tempctrl + rfswitch --------------------------
 
-// Render the two tempctrl streams as separate sub-blocks (LNA, LOAD),
-// each with its own pane-status header and two data rows (now, drive).
+// Render the two tempctrl streams (LNA, LOAD) into side-by-side
+// sub-blocks. Each block shows status/age, the live temperature vs
+// setpoint, the current drive level, the enable/active control flags,
+// and the watchdog fault flag.
 function renderTempctrlTiles(meta, classifiers) {
   const channels = [
     { label: "LNA", stream: "tempctrl_lna", containerId: "tempctrl-lna-block" },
@@ -471,23 +473,42 @@ function renderTempctrlTiles(meta, classifiers) {
     const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
     const dClass = (entry.classify || {})[`${stream}.drive_level`] || "unknown";
     container.appendChild(makePaneStatusHeader(label, entry));
-    const rowT = document.createElement("div");
-    rowT.className = "tempctrl-row";
-    rowT.append(
-      makeSpan("label", "now"),
-      makeSpan(tileClass(tClass), `${fmt(value.T_now, 2)} C`),
-      makeSpan("value", ""),
-    );
-    container.appendChild(rowT);
-    const rowD = document.createElement("div");
-    rowD.className = "tempctrl-row";
-    rowD.append(
-      makeSpan("label", "drive"),
-      makeSpan(tileClass(dClass), `${fmt(value.drive_level, 2)}`),
-      makeSpan("value", ""),
-    );
-    container.appendChild(rowD);
+    appendTileRow(container, "now", tileClass(tClass), `${fmt(value.T_now, 2)} C`);
+    appendValueRow(container, "set", `${fmt(value.T_target, 2)} C`);
+    appendTileRow(container, "drive", tileClass(dClass), fmt(value.drive_level, 2));
+    appendValueRow(container, "enabled", boolText(value.enabled));
+    appendValueRow(container, "active", boolText(value.active));
+    const wdTripped = value.watchdog_tripped === true;
+    const wdCls = wdTripped ? "danger" : (value.watchdog_tripped === false ? "ok" : "unknown");
+    appendTileRow(container, "watchdog", tileClass(wdCls), wdTripped ? "TRIPPED" : "ok");
   }
+}
+
+function boolText(v) {
+  if (v === true) return "yes";
+  if (v === false) return "no";
+  return "—";
+}
+
+function appendValueRow(container, label, text) {
+  const row = document.createElement("div");
+  row.className = "metadata-row";
+  row.append(
+    makeSpan("label", label),
+    makeSpan("value", text, "grid-column: span 2;"),
+  );
+  container.appendChild(row);
+}
+
+function appendTileRow(container, label, tileCls, text) {
+  const row = document.createElement("div");
+  row.className = "metadata-row";
+  row.append(
+    makeSpan("label", label),
+    makeSpan(tileCls, text),
+    makeSpan("value", ""),
+  );
+  container.appendChild(row);
 }
 
 // ---- new per-pico renderers ----------------------------------------
@@ -533,29 +554,27 @@ function renderImu(meta) {
   }
 }
 
+// Motor is a single stream that drives two axes (az, el). The status
+// and age are stream-wide, so the same entry feeds both column headers;
+// the column label (az / el) is what makes the split readable.
 function renderMotor(meta) {
-  const container = document.getElementById("motor-block");
-  if (!container) return;
-  container.replaceChildren();
   const entry = meta["motor"];
-  if (!entry) {
-    container.textContent = "no motor data";
-    return;
-  }
-  const v = entry.value || {};
-  container.appendChild(makePaneStatusHeader("motor", entry));
-  const rows = [
-    ["az", `${fmt(v.az_pos, 1)} / ${fmt(v.az_target_pos, 1)}`],
-    ["el", `${fmt(v.el_pos, 1)} / ${fmt(v.el_target_pos, 1)}`],
+  const axes = [
+    { label: "az", containerId: "motor-az-block", posKey: "az_pos", targetKey: "az_target_pos" },
+    { label: "el", containerId: "motor-el-block", posKey: "el_pos", targetKey: "el_target_pos" },
   ];
-  for (const [lab, txt] of rows) {
-    const row = document.createElement("div");
-    row.className = "metadata-row";
-    row.append(
-      makeSpan("label", lab),
-      makeSpan("value", txt, "grid-column: span 2;"),
-    );
-    container.appendChild(row);
+  for (const { label, containerId, posKey, targetKey } of axes) {
+    const container = document.getElementById(containerId);
+    if (!container) continue;
+    container.replaceChildren();
+    if (!entry) {
+      container.textContent = "no motor data";
+      continue;
+    }
+    const v = entry.value || {};
+    container.appendChild(makePaneStatusHeader(label, entry));
+    appendValueRow(container, "position", fmt(v[posKey], 1));
+    appendValueRow(container, "target", fmt(v[targetKey], 1));
   }
 }
 

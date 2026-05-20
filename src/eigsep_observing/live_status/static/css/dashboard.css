@@ -196,14 +196,15 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   margin-top: 10px;
 }
 
-/* IMU card spans full width and lays its two streams side-by-side. */
-.imu-grid {
+/* Two-column sub-grid for wide cards that fan a single subsystem into
+   two halves (IMU el/az, Tempctrl LNA/LOAD, Motor az/el). */
+.two-col-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
 }
 
-.imu-col h3 {
+.col-block h3 {
   margin: 0 0 4px;
   font-size: 12px;
   color: var(--muted);
