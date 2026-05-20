@@ -106,6 +106,33 @@ function makeSpan(className, text, style) {
   return s;
 }
 
+// Per-sensor pane header row: display name | status tile | age.
+// Used at the top of every per-pico card (and per-stream sub-block).
+// Tile color is binary by status: an explicit "error" goes danger, any
+// other non-empty status goes ok, missing status renders unknown.
+// Per-field classify tags are reserved for the data tiles themselves
+// (today only tempctrl wires those; imu/motor/potmon/lidar have no
+// classify thresholds configured).
+function makePaneStatusHeader(displayName, entry) {
+  const row = document.createElement("div");
+  row.className = "pane-status";
+  const status = entry && entry.status;
+  let cls;
+  if (status === "error") cls = "danger";
+  else if (status) cls = "ok";
+  else cls = "unknown";
+  const ageStr =
+    entry && entry.age_s !== null && entry.age_s !== undefined
+      ? `${fmt(entry.age_s, 1)}s`
+      : "—";
+  row.append(
+    makeSpan("name", displayName),
+    makeSpan(tileClass(cls), status || "?"),
+    makeSpan("age", ageStr),
+  );
+  return row;
+}
+
 async function fetchJson(path) {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${path} -> ${r.status}`);
@@ -424,86 +451,202 @@ function updateHealth(h, fileData) {
 
 // ---- metadata + adc + tempctrl + rfswitch --------------------------
 
-function renderMetadataTiles(meta) {
-  const container = document.getElementById("metadata-tiles");
-  container.replaceChildren();
-  for (const sensor of Object.keys(meta).sort()) {
-    const entry = meta[sensor];
-    const row = document.createElement("div");
-    row.className = "metadata-row";
-    const classifyTag = Object.values(entry.classify || {})[0] || "unknown";
-    const tileCls = tileClass(
-      entry.status === "error" ? "danger" : classifyTag
-    );
-    const ageStr =
-      entry.age_s !== null && entry.age_s !== undefined
-        ? `${fmt(entry.age_s, 1)}s`
-        : "—";
-    row.append(
-      makeSpan("label", sensor),
-      makeSpan(tileCls, entry.status || "?"),
-      makeSpan("value", ageStr)
-    );
-    container.appendChild(row);
-  }
-}
-
+// Render the two tempctrl streams as separate sub-blocks (LNA, LOAD),
+// each with its own pane-status header and two data rows (now, drive).
 function renderTempctrlTiles(meta, classifiers) {
-  const container = document.getElementById("tempctrl-tiles");
-  container.replaceChildren();
   const channels = [
-    { label: "LNA", stream: "tempctrl_lna" },
-    { label: "LOAD", stream: "tempctrl_load" },
+    { label: "LNA", stream: "tempctrl_lna", containerId: "tempctrl-lna-block" },
+    { label: "LOAD", stream: "tempctrl_load", containerId: "tempctrl-load-block" },
   ];
-  let any = false;
-  for (const { label, stream } of channels) {
+  for (const { label, stream, containerId } of channels) {
+    const container = document.getElementById(containerId);
+    if (!container) continue;
+    container.replaceChildren();
     const entry = meta[stream];
-    if (!entry) continue;
-    any = true;
+    if (!entry) {
+      container.textContent = `no ${label.toLowerCase()} data`;
+      continue;
+    }
     const value = entry.value || {};
     const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
     const dClass = (entry.classify || {})[`${stream}.drive_level`] || "unknown";
-    const row = document.createElement("div");
-    row.className = "tempctrl-row";
-    row.append(
-      makeSpan("label", label),
+    container.appendChild(makePaneStatusHeader(label, entry));
+    const rowT = document.createElement("div");
+    rowT.className = "tempctrl-row";
+    rowT.append(
+      makeSpan("label", "now"),
       makeSpan(tileClass(tClass), `${fmt(value.T_now, 2)} C`),
-      makeSpan(tileClass(dClass), `drive ${fmt(value.drive_level, 2)}`)
+      makeSpan("value", ""),
     );
-    container.appendChild(row);
-  }
-  if (!any) {
-    container.textContent = "no tempctrl data";
+    container.appendChild(rowT);
+    const rowD = document.createElement("div");
+    rowD.className = "tempctrl-row";
+    rowD.append(
+      makeSpan("label", "drive"),
+      makeSpan(tileClass(dClass), `${fmt(value.drive_level, 2)}`),
+      makeSpan("value", ""),
+    );
+    container.appendChild(rowD);
   }
 }
 
-function renderAdcTiles(adc) {
-  const container = document.getElementById("adc-tiles");
+// ---- new per-pico renderers ----------------------------------------
+
+function renderImu(meta) {
+  const blocks = [
+    { id: "imu-el-block", stream: "imu_el", label: "IMU el" },
+    { id: "imu-az-block", stream: "imu_az", label: "IMU az" },
+  ];
+  for (const { id, stream, label } of blocks) {
+    const container = document.getElementById(id);
+    if (!container) continue;
+    container.replaceChildren();
+    const entry = meta[stream];
+    if (!entry) {
+      container.textContent = `no ${stream} data`;
+      continue;
+    }
+    const value = entry.value || {};
+    container.appendChild(makePaneStatusHeader(label, entry));
+    const rows = [
+      ["yaw", fmt(value.yaw, 2) + "°"],
+      ["pitch", fmt(value.pitch, 2) + "°"],
+      ["roll", fmt(value.roll, 2) + "°"],
+    ];
+    for (const [lab, txt] of rows) {
+      const row = document.createElement("div");
+      row.className = "metadata-row";
+      row.append(
+        makeSpan("label", lab),
+        makeSpan("value", txt, "grid-column: span 2;"),
+      );
+      container.appendChild(row);
+    }
+    const accelRow = document.createElement("div");
+    accelRow.className = "metadata-row";
+    const accelText = `${fmt(value.accel_x, 2)} / ${fmt(value.accel_y, 2)} / ${fmt(value.accel_z, 2)}`;
+    accelRow.append(
+      makeSpan("label", "accel"),
+      makeSpan("value", accelText, "grid-column: span 2;"),
+    );
+    container.appendChild(accelRow);
+  }
+}
+
+function renderMotor(meta) {
+  const container = document.getElementById("motor-block");
+  if (!container) return;
   container.replaceChildren();
-  if (!adc.per_input) return;
-  for (const entry of adc.per_input) {
+  const entry = meta["motor"];
+  if (!entry) {
+    container.textContent = "no motor data";
+    return;
+  }
+  const v = entry.value || {};
+  container.appendChild(makePaneStatusHeader("motor", entry));
+  const rows = [
+    ["az", `${fmt(v.az_pos, 1)} / ${fmt(v.az_target_pos, 1)}`],
+    ["el", `${fmt(v.el_pos, 1)} / ${fmt(v.el_target_pos, 1)}`],
+  ];
+  for (const [lab, txt] of rows) {
     const row = document.createElement("div");
-    row.className = "adc-row";
+    row.className = "metadata-row";
+    row.append(
+      makeSpan("label", lab),
+      makeSpan("value", txt, "grid-column: span 2;"),
+    );
+    container.appendChild(row);
+  }
+}
+
+function renderPotmon(meta) {
+  const container = document.getElementById("potmon-block");
+  if (!container) return;
+  container.replaceChildren();
+  const entry = meta["potmon"];
+  if (!entry) {
+    container.textContent = "no potmon data";
+    return;
+  }
+  const v = entry.value || {};
+  container.appendChild(makePaneStatusHeader("potmon", entry));
+  const rows = [
+    ["el", `${fmt(v.pot_el_angle, 2)}° (${fmt(v.pot_el_voltage, 3)} V)`],
+    ["az", `${fmt(v.pot_az_angle, 2)}° (${fmt(v.pot_az_voltage, 3)} V)`],
+  ];
+  for (const [lab, txt] of rows) {
+    const row = document.createElement("div");
+    row.className = "metadata-row";
+    row.append(
+      makeSpan("label", lab),
+      makeSpan("value", txt, "grid-column: span 2;"),
+    );
+    container.appendChild(row);
+  }
+}
+
+function renderLidar(meta) {
+  const container = document.getElementById("lidar-block");
+  if (!container) return;
+  container.replaceChildren();
+  const entry = meta["lidar"];
+  if (!entry) {
+    container.textContent = "no lidar data";
+    return;
+  }
+  const v = entry.value || {};
+  container.appendChild(makePaneStatusHeader("lidar", entry));
+  const row = document.createElement("div");
+  row.className = "metadata-row";
+  row.append(
+    makeSpan("label", "distance"),
+    makeSpan("value", `${fmt(v.distance_m, 2)} m`, "grid-column: span 2;"),
+  );
+  container.appendChild(row);
+}
+
+// ADC stats live as a sub-section of the corr-spectra card so the
+// clipping/RMS diagnostic sits right under the spectrum it describes.
+// Two-column grid, 12 cells (6 inputs x 2 cores).
+function renderAdcInCorr(adc) {
+  const container = document.getElementById("corr-adc-section");
+  if (!container) return;
+  container.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "ADC (clipping + RMS)";
+  container.appendChild(heading);
+  if (!adc || !adc.per_input) return;
+  const grid = document.createElement("div");
+  grid.className = "adc-grid";
+  for (const entry of adc.per_input) {
+    const cell = document.createElement("div");
+    cell.className = "adc-cell";
     const rmsStr = entry.rms !== null ? fmt(entry.rms, 1) : "—";
     const clipStr =
       entry.clip_frac !== null && entry.clip_frac !== undefined
         ? fmt(entry.clip_frac * 100, 2) + "%"
         : "—";
     const inputName = pickLabel(`in${entry.input}`, entry.label);
-    row.append(
+    cell.append(
       makeSpan("label", `${inputName}/c${entry.core}`),
       makeSpan("value", `rms ${rmsStr}`),
-      makeSpan("value", `clip ${clipStr}`)
+      makeSpan("value", `clip ${clipStr}`),
     );
-    container.appendChild(row);
+    grid.appendChild(cell);
   }
+  container.appendChild(grid);
 }
 
-function renderRfswitch(rf) {
+function renderRfswitch(rf, metaEntry) {
   const el = document.getElementById("rfswitch");
   el.replaceChildren();
+  if (metaEntry) {
+    el.appendChild(makePaneStatusHeader("rfswitch", metaEntry));
+  }
   if (!rf.state) {
-    el.textContent = "no switch data";
+    const empty = document.createElement("div");
+    empty.textContent = "no switch data";
+    el.appendChild(empty);
     return;
   }
   // on_schedule is tri-state: true = ok, false = warn, null = undefined
@@ -582,10 +725,13 @@ async function tick() {
     lastAdc = adc.data;
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
-    renderMetadataTiles(metadata.data);
     renderTempctrlTiles(metadata.data, null);
-    renderAdcTiles(adc.data);
-    renderRfswitch(rfswitch.data);
+    renderImu(metadata.data);
+    renderMotor(metadata.data);
+    renderPotmon(metadata.data);
+    renderLidar(metadata.data);
+    renderRfswitch(rfswitch.data, metadata.data["rfswitch"]);
+    renderAdcInCorr(adc.data);
     renderStatusLog(status.data);
     updateVna(vna.data);
   } catch (e) {
@@ -600,7 +746,7 @@ function initWiringToggle() {
   cb.addEventListener("change", () => {
     setUseWiringLabels(cb.checked);
     if (lastCorr) updateCorr(lastCorr);
-    if (lastAdc) renderAdcTiles(lastAdc);
+    if (lastAdc) renderAdcInCorr(lastAdc);
   });
 }
 
