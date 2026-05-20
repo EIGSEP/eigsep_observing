@@ -455,7 +455,7 @@ function updateHealth(h, fileData) {
 // sub-blocks. Each block shows status/age, the live temperature vs
 // setpoint, the current drive level, the enable/active control flags,
 // and the watchdog fault flag.
-function renderTempctrlTiles(meta, classifiers) {
+function renderTempctrlTiles(meta) {
   const channels = [
     { label: "LNA", stream: "tempctrl_lna", containerId: "tempctrl-lna-block" },
     { label: "LOAD", stream: "tempctrl_load", containerId: "tempctrl-load-block" },
