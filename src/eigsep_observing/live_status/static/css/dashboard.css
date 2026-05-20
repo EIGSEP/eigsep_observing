@@ -165,3 +165,84 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
 
 .vna-status.stale { color: var(--warn); }
 .vna-status.error { color: var(--danger); }
+
+/* Per-sensor pane header: display name | status tile | age. Sits at
+   the top of every per-pico card (and inside each sub-block of cards
+   that fan out multiple streams, like IMU and Tempctrl). */
+.pane-status {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 6px;
+}
+
+.pane-status .name {
+  font-size: 13px;
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.pane-status .age {
+  font-family: "JetBrains Mono", Consolas, monospace;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* Multi-stream cards (Tempctrl LNA/LOAD) stack sub-blocks vertically. */
+.stream-block + .stream-block {
+  margin-top: 10px;
+}
+
+/* Two-column sub-grid for wide cards that fan a single subsystem into
+   two halves (IMU el/az, Tempctrl LNA/LOAD, Motor az/el). */
+.two-col-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.col-block h3 {
+  margin: 0 0 4px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* ADC sub-section inside the Correlation spectra card. Two-column
+   grid, 6 rows, sitting below plot-phase. */
+.adc-section {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.adc-section h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.adc-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  column-gap: 16px;
+  row-gap: 2px;
+}
+
+.adc-cell {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) 1fr auto;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.adc-cell:last-child,
+.adc-cell:nth-last-child(2) {
+  border-bottom: none;
+}
