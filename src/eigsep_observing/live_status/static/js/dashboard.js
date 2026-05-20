@@ -480,7 +480,8 @@ function renderTempctrlTiles(meta) {
     appendValueRow(container, "active", boolText(value.active));
     const wdTripped = value.watchdog_tripped === true;
     const wdCls = wdTripped ? "danger" : (value.watchdog_tripped === false ? "ok" : "unknown");
-    appendTileRow(container, "watchdog", tileClass(wdCls), wdTripped ? "TRIPPED" : "ok");
+    const wdText = wdTripped ? "TRIPPED" : (value.watchdog_tripped === false ? "ok" : "—");
+    appendTileRow(container, "watchdog", tileClass(wdCls), wdText);
   }
 }
 
