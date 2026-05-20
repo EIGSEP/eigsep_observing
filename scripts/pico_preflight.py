@@ -7,13 +7,18 @@ Reads three places in Redis on the pico-manager host:
 - ``heartbeat:pico:{name}`` (``HeartbeatReader``) — TTL-backed
   liveness, asserted by the manager on every health check
   (``HEARTBEAT_TTL = 4 * HEALTH_CHECK_INTERVAL = 20 s`` today).
-- ``metadata`` hash + ``{name}_ts`` (``MetadataSnapshotReader``) —
+- ``metadata`` hash + ``{stream}_ts`` (``MetadataSnapshotReader``) —
   latest 200 ms sample plus the panda-side ``_ts`` so we can show
   freshness even when the heartbeat alone says "alive".
 
-Prints one line per logical device in ``picohost.manager.APP_NAMES``,
-including ones that aren't flashed (shown as ``--``). Use this before
-starting ``eigsep-panda`` to confirm every expected pico is reporting.
+Prints one line per published metadata stream. That is usually one
+row per logical device in ``picohost.manager.APP_NAMES`` (including
+ones that aren't flashed, shown as ``--``); the one exception is
+``tempctrl``, whose single Pico drives two Peltier channels and so
+fans out into ``tempctrl_lna`` and ``tempctrl_load`` (see
+``picohost.base.PicoPeltier._peltier_redis_handler``). Both channel
+rows share the same port and heartbeat. Use this before starting
+``eigsep-panda`` to confirm every expected pico is reporting.
 
 When the manager is NOT running (e.g. picos are plugged into a bench
 Pi without ``pico-manager.service``), heartbeats and metadata will
@@ -31,12 +36,17 @@ from picohost.buses import PicoConfigStore
 from picohost.keys import pico_heartbeat_name
 from picohost.manager import APP_NAMES
 
+# Per-channel Peltier fields are unprefixed in the split streams
+# (``T_now`` / ``drive_level``, not ``LNA_T_now`` / ``LNA_drive_level``)
+# because ``_peltier_redis_handler`` strips the ``LNA_`` / ``LOAD_``
+# prefix when fanning the firmware tick into ``tempctrl_lna`` /
+# ``tempctrl_load``. The stream label in the leftmost column already
+# tells us which channel each row is.
 _SUMMARY_FIELD_PRIORITY = (
     "az_pos",
     "el_pos",
-    "LNA_T_now",
-    "LOAD_T_now",
-    "LNA_drive_level",
+    "T_now",
+    "drive_level",
     "pot_el_angle",
     "pot_az_angle",
     "yaw",
@@ -67,6 +77,18 @@ def _summary_fields():
 
 
 SUMMARY_FIELDS = _summary_fields()
+
+# Map device name (from ``APP_NAMES``) to the ordered list of metadata
+# stream names it publishes. Most devices publish exactly one stream
+# named after the device; ``tempctrl`` is the exception. Keys absent
+# from this map default to ``(device,)`` via ``_streams_for``.
+DEVICE_STREAMS = {
+    "tempctrl": ("tempctrl_lna", "tempctrl_load"),
+}
+
+
+def _streams_for(device):
+    return DEVICE_STREAMS.get(device, (device,))
 
 
 def _fmt_age(ts, now):
@@ -125,16 +147,17 @@ def render(transport):
     meta = snapshot.get()
     now = time.time()
 
-    print(f"{'device':10} {'port':14} {'alive':5} {'age':>5}  reading")
+    print(f"{'stream':14} {'port':14} {'alive':5} {'age':>5}  reading")
     print("-" * 72)
-    for name in APP_NAMES.values():
-        port = flashed.get(name, "--")
-        hb = HeartbeatReader(transport, name=pico_heartbeat_name(name))
+    for device in APP_NAMES.values():
+        port = flashed.get(device, "--")
+        hb = HeartbeatReader(transport, name=pico_heartbeat_name(device))
         alive = "yes" if hb.check() else "no"
-        ts = meta.get(f"{name}_ts")
-        age = _fmt_age(ts, now)
-        summary = _fmt_summary(name, meta.get(name))
-        print(f"{name:10} {port:14} {alive:5} {age:>5}  {summary}")
+        for stream in _streams_for(device):
+            ts = meta.get(f"{stream}_ts")
+            age = _fmt_age(ts, now)
+            summary = _fmt_summary(stream, meta.get(stream))
+            print(f"{stream:14} {port:14} {alive:5} {age:>5}  {summary}")
 
     if devices is None:
         print()
