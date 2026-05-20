@@ -17,25 +17,13 @@ from argparse import ArgumentParser
 import curses
 import logging
 
-from eigsep_redis import Transport
-
 from eigsep_observing import MotorZeroer
-from eigsep_observing.testing import DummyPandaClient  # noqa: F401
+from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.utils import configure_eig_logger
 
 
 configure_eig_logger(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def _build_transport(dummy):
-    if dummy:
-        logger.warning("Running in DUMMY mode, no hardware will be used.")
-        transport = Transport(host="localhost", port=6380)
-        transport.reset()
-        transport._dummy_client = DummyPandaClient(transport=transport)
-        return transport
-    return Transport(host="localhost", port=6379)
 
 
 def _render(screen, zeroer, deg):
@@ -104,5 +92,5 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
-    transport = _build_transport(args.dummy)
+    transport = build_transport(args.dummy)
     curses.wrapper(_curses_main, transport, args)
