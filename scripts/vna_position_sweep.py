@@ -33,7 +33,6 @@ from eigsep_redis import ConfigStore, StatusWriter, Transport
 from eigsep_observing import PandaClient
 from eigsep_observing.run_tag import clear as clear_run_tag
 from eigsep_observing.run_tag import publish as publish_run_tag
-from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 
@@ -67,6 +66,8 @@ def _build_client(transport, cfg, dummy):
     cfg["serialize_motion_and_switching"] = True
     ConfigStore(transport).upload(cfg)
     if dummy:
+        from eigsep_observing.testing import DummyPandaClient
+
         return DummyPandaClient(transport=transport, default_cfg=cfg)
     return PandaClient(transport)
 
