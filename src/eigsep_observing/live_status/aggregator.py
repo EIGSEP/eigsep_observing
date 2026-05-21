@@ -59,10 +59,10 @@ from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
 from ..vna import VnaReader
+from ..vna_calibration import VnaCache
 from .signals import SIGNAL_REGISTRY
 from .snap_probe import probe_snap_fpga
 from .thresholds import Thresholds
-from .vna_calibration import VnaCache
 
 logger = logging.getLogger(__name__)
 
@@ -138,7 +138,7 @@ class StateSnapshot:
     last_rfnon_acc_cnt: Optional[int] = None
 
     # Most recent VNA payload, cached per-mode. The route handler
-    # calibrates lazily off these (see live_status/vna_calibration.py)
+    # calibrates lazily off these (see eigsep_observing.vna_calibration)
     # so the drain thread doesn't pay the calkit cost when nobody's
     # rendering the pane. ``ant`` and ``rec`` evict independently, so
     # the operator can flip between them without losing the other view.

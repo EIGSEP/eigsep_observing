@@ -7,7 +7,7 @@ run during normal observing, publishes through ``vna_writer`` so the
 live-status VNA pane updates in the browser, and *also* writes a
 self-contained local HDF5 file containing the raw arrays and the
 first-order-calibrated S11 (ideal +1/-1/0 OSL — the same calibration
-``live_status.vna_calibration.calibrate_s11`` applies on the
+``eigsep_observing.vna_calibration.calibrate_s11`` applies on the
 dashboard).
 
 Run alongside ``scripts/live_status.py`` for visual confirmation, or
@@ -183,6 +183,8 @@ def main():
         cfg = yaml.safe_load(f)
     if not args.save_dir.exists():
         raise SystemExit(f"save-dir does not exist: {args.save_dir}")
+    if not args.save_dir.is_dir():
+        raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
     transport = _build_transport(args.dummy)
 

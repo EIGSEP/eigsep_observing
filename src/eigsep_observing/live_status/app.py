@@ -31,9 +31,9 @@ from .calibration import (
     apply_calibration_cross_mag,
     compute_gain_trx,
 )
+from ..vna_calibration import VnaCache, calibrate_s11
 from .signals import enabled_signals
 from .thresholds import Thresholds
-from .vna_calibration import VnaCache, calibrate_s11
 
 
 logger = logging.getLogger(__name__)
