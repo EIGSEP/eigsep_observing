@@ -24,7 +24,7 @@ from eigsep_observing.io import _IMU_SCHEMA
 from eigsep_observing.utils import configure_eig_logger
 
 
-configure_eig_logger(level=logging.INFO)
+configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
 # Field names this script renders. Asserting against the schema keeps
