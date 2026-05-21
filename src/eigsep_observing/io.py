@@ -644,6 +644,9 @@ _PELTIER_SCHEMA = {
     "stall_tripped": bool,
     "hysteresis": float,
     "clamp": float,
+    "Kp": float,
+    "Ki": float,
+    "integral": float,
 }
 
 # `potmon` (potentiometer monitor): the producer is `PotMonEmulator` +
