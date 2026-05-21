@@ -641,6 +641,7 @@ _PELTIER_SCHEMA = {
     "enabled": bool,
     "active": bool,
     "int_disabled": bool,
+    "stall_tripped": bool,
     "hysteresis": float,
     "clamp": float,
 }

@@ -109,6 +109,13 @@ def _fmt_summary(name, reading):
         return ""
     fields = SUMMARY_FIELDS.get(name, ())
     parts = []
+    # Surface non-healthy status (firmware convention: "update" = ok,
+    # "error" = sensor read failure / fault) so a stuck-at-init reading
+    # like tempctrl_load T_now=0.00 is recognizable as a fault rather
+    # than a real value. Silent on healthy channels.
+    status = reading.get("status")
+    if status is not None and status != "update":
+        parts.append(f"status={status}")
     for k in fields:
         if k not in reading:
             continue
