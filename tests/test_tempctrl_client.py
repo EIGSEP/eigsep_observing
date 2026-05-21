@@ -7,6 +7,7 @@ sent via :class:`TempCtrlClient` land with the right fields.
 """
 
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -20,12 +21,16 @@ SETTINGS = {
         "target_C": 27.5,
         "hysteresis_C": 0.3,
         "clamp": 0.5,
+        "Kp": 0.25,
+        "Ki": 0.01,
     },
     "LOAD": {
         "enable": True,
         "target_C": 22.0,
         "hysteresis_C": 0.4,
         "clamp": 0.7,
+        "Kp": 0.18,
+        "Ki": 0.02,
     },
 }
 
@@ -70,15 +75,21 @@ def test_apply_settings_pushes_all_fields(client):
             and em.load.T_target == pytest.approx(22.0)
             and em.lna.hysteresis == pytest.approx(0.3)
             and em.load.hysteresis == pytest.approx(0.4)
+            and em.lna.Kp == pytest.approx(0.25)
+            and em.lna.Ki == pytest.approx(0.01)
+            and em.load.Kp == pytest.approx(0.18)
+            and em.load.Ki == pytest.approx(0.02)
             and em.lna.enabled is True
             and em.load.enabled is True
         )
     ), (
         f"emulator state did not converge: watchdog={em.watchdog_timeout_ms}, "
         f"LNA(clamp={em.lna.clamp}, T_target={em.lna.T_target}, "
-        f"hyst={em.lna.hysteresis}, enabled={em.lna.enabled}), "
+        f"hyst={em.lna.hysteresis}, Kp={em.lna.Kp}, Ki={em.lna.Ki}, "
+        f"enabled={em.lna.enabled}), "
         f"LOAD(clamp={em.load.clamp}, T_target={em.load.T_target}, "
-        f"hyst={em.load.hysteresis}, enabled={em.load.enabled})"
+        f"hyst={em.load.hysteresis}, Kp={em.load.Kp}, Ki={em.load.Ki}, "
+        f"enabled={em.load.enabled})"
     )
 
 
@@ -161,6 +172,83 @@ def test_set_enable_uses_settings_for_unspecified_channel(client):
     )
 
 
+def test_set_gains_pushes_to_emulator(client):
+    """Full-kwargs set_gains lands on both channels."""
+    em = _emulator(client)
+    tc = TempCtrlClient(client.transport, settings={})
+    tc.set_gains(LNA_Kp=0.3, LNA_Ki=0.02, LOAD_Kp=0.15, LOAD_Ki=0.005)
+    assert _wait_until(
+        lambda: (
+            em.lna.Kp == pytest.approx(0.3)
+            and em.lna.Ki == pytest.approx(0.02)
+            and em.load.Kp == pytest.approx(0.15)
+            and em.load.Ki == pytest.approx(0.005)
+        )
+    ), (
+        f"gains did not land: LNA(Kp={em.lna.Kp}, Ki={em.lna.Ki}), "
+        f"LOAD(Kp={em.load.Kp}, Ki={em.load.Ki})"
+    )
+
+
+def test_set_gains_partial_leaves_other_channel(client):
+    """Partial-kwargs set_gains touches only the named channel."""
+    em = _emulator(client)
+    load_Kp_before = em.load.Kp
+    load_Ki_before = em.load.Ki
+    tc = TempCtrlClient(client.transport, settings={})
+    tc.set_gains(LNA_Kp=0.4, LNA_Ki=0.03)
+    assert _wait_until(
+        lambda: (
+            em.lna.Kp == pytest.approx(0.4)
+            and em.lna.Ki == pytest.approx(0.03)
+        )
+    )
+    assert em.load.Kp == pytest.approx(load_Kp_before)
+    assert em.load.Ki == pytest.approx(load_Ki_before)
+
+
+def test_set_gains_no_kwargs_is_no_op(client):
+    """``set_gains()`` with everything None must not send a command —
+    otherwise the proxy round-trip would fire for nothing."""
+    tc = TempCtrlClient(client.transport, settings={})
+    with patch.object(tc._proxy, "send_command") as send:
+        tc.set_gains()
+    send.assert_not_called()
+
+
+def test_reset_integral_clears_channel(client):
+    """``reset_integral(LNA=True)`` zeroes the LNA accumulator via the
+    emulator's reset hook. (LOAD-channel isolation is verified at the
+    proxy boundary in ``test_reset_integral_sends_per_channel_kwargs``;
+    the disabled-channel reset that the emulator runs every tick would
+    mask any direct LOAD-state assertion here.)"""
+    em = _emulator(client)
+    em.lna.integral = 1.234
+    tc = TempCtrlClient(client.transport, settings={})
+    tc.reset_integral(LNA=True)
+    assert _wait_until(lambda: em.lna.integral == pytest.approx(0.0))
+
+
+def test_reset_integral_sends_per_channel_kwargs(client):
+    """Spy on the proxy: ``reset_integral`` must forward exactly the
+    channel kwargs it was called with (so LOAD stays untouched on an
+    LNA-only reset)."""
+    tc = TempCtrlClient(client.transport, settings={})
+    with patch.object(tc._proxy, "send_command") as send:
+        tc.reset_integral(LNA=True)
+    send.assert_called_once_with("reset_integral", LNA=True, LOAD=False)
+
+
+def test_reset_integral_no_channels_is_no_op(client):
+    """Both channels False must skip the command — otherwise an
+    operator press with no channel selected would silently bounce
+    nothing across the proxy."""
+    tc = TempCtrlClient(client.transport, settings={})
+    with patch.object(tc._proxy, "send_command") as send:
+        tc.reset_integral()
+    send.assert_not_called()
+
+
 def test_set_watchdog_timeout(client):
     em = _emulator(client)
     tc = TempCtrlClient(client.transport, settings={})
@@ -214,6 +302,8 @@ def test_is_available_reflects_registration(client):
         # YAML `enable: "false"` parses as the truthy string "False";
         # bool(...) would silently arm the channel. Reject it loudly.
         ({"LNA": {"enable": "false"}}, "enable"),
+        ({"LNA": {"Kp": "tiny"}}, "Kp"),
+        ({"LOAD": {"Ki": [0.0, 0.1]}}, "Ki"),
     ],
 )
 def test_coerce_settings_raises_on_bad_config(bad_settings, needle):
@@ -231,7 +321,8 @@ def test_coerce_settings_none_returns_empty():
 
 def test_coerce_settings_normalizes_types():
     """Int literals in float fields are accepted and promoted to float;
-    bool ``enable`` is preserved as-is."""
+    bool ``enable`` is preserved as-is. Kp/Ki ride the same float-coerce
+    path as the other numeric fields."""
     out = TempCtrlClient._coerce_settings(
         {
             "watchdog_timeout_ms": 30000,
@@ -239,6 +330,8 @@ def test_coerce_settings_normalizes_types():
                 "enable": True,
                 "target_C": 25,  # int in a float field
                 "clamp": 1,
+                "Kp": 0,  # int in a float field
+                "Ki": 0,
             },
         }
     )
@@ -247,3 +340,7 @@ def test_coerce_settings_normalizes_types():
     assert out["LNA"]["target_C"] == 25.0
     assert isinstance(out["LNA"]["clamp"], float)
     assert out["LNA"]["enable"] is True
+    assert isinstance(out["LNA"]["Kp"], float)
+    assert out["LNA"]["Kp"] == 0.0
+    assert isinstance(out["LNA"]["Ki"], float)
+    assert out["LNA"]["Ki"] == 0.0

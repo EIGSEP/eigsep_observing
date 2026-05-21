@@ -108,6 +108,41 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "LOAD drive level",
         enabled_by="use_tempctrl",
     ),
+    # PI controller diagnostics. Threshold-less — Kp/Ki are config and
+    # `integral` is unbounded by design (anti-windup clamps it at the
+    # saturation boundary). Surfaced so the operator can confirm tuned
+    # gains landed and watch the integrator settle after a setpoint
+    # step or a `reset_integral` command.
+    "tempctrl_lna.Kp": Signal(
+        "tempctrl_lna.Kp",
+        "LNA Kp",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_load.Kp": Signal(
+        "tempctrl_load.Kp",
+        "LOAD Kp",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_lna.Ki": Signal(
+        "tempctrl_lna.Ki",
+        "LNA Ki",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_load.Ki": Signal(
+        "tempctrl_load.Ki",
+        "LOAD Ki",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_lna.integral": Signal(
+        "tempctrl_lna.integral",
+        "LNA integral",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_load.integral": Signal(
+        "tempctrl_load.integral",
+        "LOAD integral",
+        enabled_by="use_tempctrl",
+    ),
     # Site-geometry signals — YAML override only (TODO after deploy).
     "lidar.distance_m": Signal(
         "lidar.distance_m",

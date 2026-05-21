@@ -14,6 +14,11 @@ Controls:
   + / -    LNA setpoint +/- 0.5 deg C
   ] / [    LOAD setpoint +/- 0.5 deg C
   c        cycle clamp through (0.1, 0.3, 0.5, 1.0) on both channels
+  g / G    LNA Kp +/- 0.05
+  h / H    LOAD Kp +/- 0.05
+  i / I    LNA Ki +/- 0.005
+  k / K    LOAD Ki +/- 0.005
+  z / Z    reset LNA / LOAD PI integrator
   w        push a 5 s watchdog (should trip if not refreshed)
   r        re-enable both channels at their last setpoint
   q        quit
@@ -40,6 +45,10 @@ logger = logging.getLogger(__name__)
 
 CLAMPS = (0.1, 0.3, 0.5, 1.0)
 SETPOINT_STEP_C = 0.5
+KP_STEP = 0.05
+KI_STEP = 0.005  # smaller — integral accumulates over many ticks
+DEFAULT_KP = 0.2  # firmware default, matches TempCtrlEmulator
+DEFAULT_KI = 0.0  # firmware default — opt-in via this script or yaml
 WATCHDOG_PROBE_MS = 5000
 
 
@@ -48,17 +57,31 @@ class _State:
 
     Firmware is the source of truth for ``T_now`` / ``drive_level`` /
     ``watchdog_tripped`` (read from snapshot). The local copies of
-    setpoints, enable flags, and the clamp index are only used so the
-    +/- keys can bump them — they're seeded from the snapshot on
-    startup if available, and re-pushed on every change so a missed
+    setpoints, enable flags, gains, and the clamp index are only used
+    so the bump keys can step them — they're seeded from the snapshot
+    on startup if available, and re-pushed on every change so a missed
     command can't leave the firmware and the UI disagreeing.
     """
 
-    def __init__(self, lna_setpoint, load_setpoint, lna_enabled, load_enabled):
+    def __init__(
+        self,
+        lna_setpoint,
+        load_setpoint,
+        lna_enabled,
+        load_enabled,
+        lna_Kp,
+        lna_Ki,
+        load_Kp,
+        load_Ki,
+    ):
         self.lna_setpoint = lna_setpoint
         self.load_setpoint = load_setpoint
         self.lna_enabled = lna_enabled
         self.load_enabled = load_enabled
+        self.lna_Kp = lna_Kp
+        self.lna_Ki = lna_Ki
+        self.load_Kp = load_Kp
+        self.load_Ki = load_Ki
         self.clamp_idx = 2  # default 0.5
         self.last_message = ""
 
@@ -78,11 +101,23 @@ def _seed_state(snapshot):
     load = _snap(snapshot, "tempctrl_load") or {}
     lna_t = lna.get("T_target")
     load_t = load.get("T_target")
+
+    def _f(d, k, default):
+        v = d.get(k)
+        return (
+            float(v)
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            else default
+        )
     return _State(
         lna_setpoint=float(lna_t) if lna_t is not None else 20.0,
         load_setpoint=float(load_t) if load_t is not None else 20.0,
         lna_enabled=bool(lna.get("enabled") or False),
         load_enabled=bool(load.get("enabled") or False),
+        lna_Kp=_f(lna, "Kp", DEFAULT_KP),
+        lna_Ki=_f(lna, "Ki", DEFAULT_KI),
+        load_Kp=_f(load, "Kp", DEFAULT_KP),
+        load_Ki=_f(load, "Ki", DEFAULT_KI),
     )
 
 
@@ -125,6 +160,22 @@ def _push_clamp(proxy, state):
     state.last_message = _send(proxy, "set_clamp", LNA=value, LOAD=value)
 
 
+def _push_gains(proxy, state):
+    """Push all four gains. Mirrors `apply_settings`' partial-kwarg
+    pattern: the LNA/LOAD knobs are independent, but bundling the push
+    means one round-trip per keypress and matches what the operator
+    sees in the readout.
+    """
+    state.last_message = _send(
+        proxy,
+        "set_gains",
+        LNA_Kp=state.lna_Kp,
+        LNA_Ki=state.lna_Ki,
+        LOAD_Kp=state.load_Kp,
+        LOAD_Ki=state.load_Ki,
+    )
+
+
 def _fmt(value, fmt):
     if not isinstance(value, (int, float)):
         return "    --"
@@ -159,23 +210,51 @@ def _render(screen, snapshot, state):
         f"{_fmt(load.get('clamp'), '6.2f')}  "
         f"{str(load.get('enabled')):>7}  {load.get('status')!r}",
     )
+    # PI controller readout — Kp/Ki are config-set (last-write-wins
+    # cached in PicoPeltier._last_gains), `integral` is the firmware
+    # accumulator.
+    screen.addstr(5, 0, "channel   Kp     Ki      integral")
+    screen.addstr(
+        6,
+        0,
+        "LNA      "
+        f"{_fmt(lna.get('Kp'), '6.3f')}  "
+        f"{_fmt(lna.get('Ki'), '6.3f')}  "
+        f"{_fmt(lna.get('integral'), '8.3f')}",
+    )
+    screen.addstr(
+        7,
+        0,
+        "LOAD     "
+        f"{_fmt(load.get('Kp'), '6.3f')}  "
+        f"{_fmt(load.get('Ki'), '6.3f')}  "
+        f"{_fmt(load.get('integral'), '8.3f')}",
+    )
     # watchdog_tripped is duplicated across both streams (see
     # _PELTIER_SCHEMA) — read from either; LNA is fine.
     screen.addstr(
-        5, 0, f"watchdog_tripped: {bool(lna.get('watchdog_tripped'))}"
+        9, 0, f"watchdog_tripped: {bool(lna.get('watchdog_tripped'))}"
     )
     screen.addstr(
-        6,
+        10,
         0,
         f"client setpoints: LNA={state.lna_setpoint:.2f} "
         f"LOAD={state.load_setpoint:.2f}  "
         f"clamp={CLAMPS[state.clamp_idx]:.2f}",
     )
-    screen.addstr(8, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
-    screen.addstr(9, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
-    screen.addstr(10, 0, "w push 5s watchdog   r re-enable both   q quit")
+    screen.addstr(
+        11,
+        0,
+        f"client gains: LNA(Kp={state.lna_Kp:.3f}, Ki={state.lna_Ki:.3f})  "
+        f"LOAD(Kp={state.load_Kp:.3f}, Ki={state.load_Ki:.3f})",
+    )
+    screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
+    screen.addstr(14, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
+    screen.addstr(15, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
+    screen.addstr(16, 0, "z/Z reset LNA/LOAD integral")
+    screen.addstr(17, 0, "w push 5s watchdog   r re-enable both   q quit")
     if state.last_message:
-        screen.addstr(12, 0, f"> {state.last_message}"[: curses.COLS - 1])
+        screen.addstr(19, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
 
 
@@ -209,6 +288,34 @@ def _handle_key(ch, proxy, state):
     elif ch == ord("c"):
         state.clamp_idx = (state.clamp_idx + 1) % len(CLAMPS)
         _push_clamp(proxy, state)
+    elif ch == ord("g"):
+        state.lna_Kp = max(0.0, state.lna_Kp + KP_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("G"):
+        state.lna_Kp = max(0.0, state.lna_Kp - KP_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("h"):
+        state.load_Kp = max(0.0, state.load_Kp + KP_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("H"):
+        state.load_Kp = max(0.0, state.load_Kp - KP_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("i"):
+        state.lna_Ki = max(0.0, state.lna_Ki + KI_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("I"):
+        state.lna_Ki = max(0.0, state.lna_Ki - KI_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("k"):
+        state.load_Ki = max(0.0, state.load_Ki + KI_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("K"):
+        state.load_Ki = max(0.0, state.load_Ki - KI_STEP)
+        _push_gains(proxy, state)
+    elif ch == ord("z"):
+        state.last_message = _send(proxy, "reset_integral", LNA=True)
+    elif ch == ord("Z"):
+        state.last_message = _send(proxy, "reset_integral", LOAD=True)
     elif ch == ord("w"):
         state.last_message = _send(
             proxy, "set_watchdog_timeout", timeout_ms=WATCHDOG_PROBE_MS
