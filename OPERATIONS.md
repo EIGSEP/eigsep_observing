@@ -45,6 +45,17 @@ eigsep-observe --no-snap
 eigsep-panda --dummy          # terminal 1
 eigsep-observe --dummy        # terminal 2
 
+# Test-bench data collection (no SNAP): save pico metadata while you
+# exercise actuators with motor_manual / tempctrl_manual / etc. The
+# panda's PicoManager service must already be running; record_metadata
+# is a consumer that drains the streams to its own HDF5 file.
+python scripts/record_metadata.py --save-dir /tmp/runs
+
+# Same idea for VNA: loop ant/rec bundles at a fixed interval and
+# save each via save_vna_manual_h5 (also publishes to Redis so the
+# live-status panes update).
+python scripts/record_vna.py --save-dir /tmp/runs --interval 300
+
 # Custom observing config (switch schedule / VNA / motor) — panda side
 eigsep-panda --cfg_file /path/to/my_config.yaml
 
