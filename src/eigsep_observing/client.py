@@ -540,6 +540,23 @@ class PandaClient:
         RuntimeError
             If the VNA is not initialized.
 
+        Returns
+        -------
+        s11 : dict[str, np.ndarray]
+            The bundle that was just published (raw DUT traces plus
+            ``cal:VNAO`` / ``cal:VNAS`` / ``cal:VNAL`` standards).
+        header : dict
+            The VNA header that was just published, including the
+            provenance overlays (``run_tag``, ``obs_config``,
+            ``metadata_snapshot_unix``).
+        metadata : dict
+            The panda-side metadata snapshot captured at trigger time.
+
+        Returning the published payload lets bring-up scripts (e.g.
+        ``scripts/vna_manual.py``) write a local artifact without
+        having to re-drain the VNA stream and racing the live-status
+        aggregator's reader.
+
         Notes
         -----
         This function does all the switching needed for the VNA
@@ -603,6 +620,7 @@ class PandaClient:
 
         self.vna_writer.add(s11, header=header, metadata=metadata)
         self.logger.info("Vna data added to redis")
+        return s11, header, metadata
 
     def run_calibration_sequence(
         self, *, vna_modes=("ant", "rec"), schedule=None

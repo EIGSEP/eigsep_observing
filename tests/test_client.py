@@ -785,6 +785,26 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     )
 
 
+def test_measure_s11_returns_published_payload(transport, dummy_cfg):
+    """measure_s11 must return (s11, header, metadata) matching what it
+    just published, so callers (notably the vna_manual bring-up script)
+    can write a local artifact without racing the VNA stream reader."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        result = client.measure_s11("ant")
+        assert isinstance(result, tuple) and len(result) == 3
+        s11, header, metadata = result
+        assert set(("ant", "noise", "load")).issubset(s11.keys())
+        assert {"cal:VNAO", "cal:VNAS", "cal:VNAL"}.issubset(s11.keys())
+        assert header["mode"] == "ant"
+        assert "freqs" in header
+        assert isinstance(metadata, dict)
+    finally:
+        client.stop()
+
+
 # The tests below exercise ``_safe_switch``'s exception-to-bool
 # translation end-to-end by patching the firmware-side ``switch()``
 # method on the DummyPicoRFSwitch. PicoManager's exception handler
