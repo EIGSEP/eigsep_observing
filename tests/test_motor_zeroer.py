@@ -153,6 +153,16 @@ def test_handle_key_plus_minus_adjusts_step(client):
     assert deg == pytest.approx(0.1)
 
 
+def test_handle_key_plus_recovers_integer_steps_from_floor(client):
+    # After bottoming out at 0.1, "+" must snap back to a clean
+    # integer ladder instead of producing 1.1, 2.1, 3.1, ...
+    zeroer = _zeroer(client.transport)
+    deg, _, _ = zeroer.handle_key(ord("+"), 0.1)
+    assert deg == 1.0
+    deg, _, _ = zeroer.handle_key(ord("+"), deg)
+    assert deg == 2.0
+
+
 def test_handle_key_enter_zeroes(client):
     zeroer = _zeroer(client.transport)
     motor = client._manager.picos["motor"]
