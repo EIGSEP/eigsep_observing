@@ -9,6 +9,7 @@ import numpy as np
 from eigsep_redis.keys import DATA_STREAMS_SET
 
 from .keys import VNA_STREAM
+from .vna_calibration import calibrate_s11
 
 logger = logging.getLogger(__name__)
 
@@ -182,12 +183,6 @@ def save_vna_manual_h5(s11, header, metadata, *, save_dir, mode):
     pathlib.Path
         The path of the file that was written.
     """
-    # Local import: live_status/__init__.py eagerly imports
-    # aggregator.py, which imports VnaReader from this module. A
-    # module-top import of calibrate_s11 would create a circular
-    # import (vna -> live_status -> aggregator -> vna).
-    from .live_status.vna_calibration import calibrate_s11
-
     if mode not in {"ant", "rec"}:
         raise ValueError(f"mode must be 'ant' or 'rec', got {mode!r}")
     save_dir = Path(save_dir)

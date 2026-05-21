@@ -1,16 +1,19 @@
-"""Field-grade OSL calibration for the live-status VNA pane.
+"""Field-grade OSL calibration for the EIGSEP VNA path.
 
 The deployed system uses generic SMA open / short / load caps as
 calibration standards, not the metrology-grade S911T calkit that
 :class:`cmt_vna.calkit.S911T` models. We therefore assume **ideal**
 reflection coefficients — ``+1`` open, ``-1`` short, ``0`` load — and
-accept the systematic error that introduces. The dashboard is a
-quick-look monitor; lab post-processing on the saved ``.h5`` files
-re-applies a precise calkit model when needed.
+accept the systematic error that introduces. Online displays and
+bring-up artifacts are quick-look outputs; lab post-processing on
+the saved ``.h5`` files re-applies a precise calkit model when
+needed.
 
-Pure numpy / cmt_vna primitives. No Redis, no Flask, no aggregator —
-the route handler in ``app.py`` and the cache in ``aggregator.py`` are
-the only callers.
+Pure numpy / cmt_vna primitives. No Redis, no Flask, no aggregator.
+Callers: the live-status route handler in ``live_status/app.py``,
+the cache in ``live_status/aggregator.py``, and
+``eigsep_observing.vna.save_vna_manual_h5`` (the local-HDF5 path of
+``scripts/vna_manual.py``).
 """
 
 from __future__ import annotations

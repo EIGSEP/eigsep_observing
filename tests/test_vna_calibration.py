@@ -1,9 +1,10 @@
-"""Tests for the live-status ideal-OSL VNA calibration helpers.
+"""Tests for the EIGSEP ideal-OSL VNA calibration helpers.
 
-The cal is display-only — operator-visible S11 in dB on the live
-dashboard. Field deployment uses generic SMA caps as OSL standards;
-the math here assumes ideal reflection coefficients (+1 / -1 / 0) and
-relies on lab post-processing for precise correction (see
+The cal is quick-look — operator-visible S11 in dB on the live
+dashboard and the first-order trace in bring-up HDF5 files. Field
+deployment uses generic SMA caps as OSL standards; the math here
+assumes ideal reflection coefficients (+1 / -1 / 0) and relies on
+lab post-processing for precise correction (see
 ``vna_calibration.py``).
 
 Round-trip pattern: synthesize a known network and a known DUT, embed
@@ -18,7 +19,7 @@ import numpy as np
 import pytest
 from cmt_vna.calkit import embed_sparams
 
-from eigsep_observing.live_status.vna_calibration import (
+from eigsep_observing.vna_calibration import (
     VnaCache,
     calibrate_s11,
 )

@@ -1092,7 +1092,7 @@ def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
 # Smaller than the production sweep (npoints=1000 in
 # config/dummy_config.yaml) to keep these route tests fast — the
 # calibration math is shape-agnostic and tested independently in
-# test_live_status_vna_calibration.py.
+# test_vna_calibration.py.
 _VNA_NFREQ = 32
 
 
