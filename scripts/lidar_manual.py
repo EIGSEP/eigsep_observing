@@ -20,7 +20,7 @@ from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.utils import configure_eig_logger
 
 
-configure_eig_logger(level=logging.INFO)
+configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
 BAR_WIDTH = 60

@@ -35,7 +35,7 @@ from eigsep_observing._scripts_util import build_transport, require_pico
 from eigsep_observing.utils import configure_eig_logger
 
 
-configure_eig_logger(level=logging.INFO)
+configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
 CLAMPS = (0.1, 0.3, 0.5, 1.0)
