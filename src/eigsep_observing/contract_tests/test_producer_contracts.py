@@ -272,7 +272,6 @@ def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
     cfg["use_vna"] = True
-    cfg["vna_save_dir"] = str(tmp_path)
     transport = DummyTransport()
     client = DummyPandaClient(transport, default_cfg=cfg)
     try:

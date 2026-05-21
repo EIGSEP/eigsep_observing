@@ -22,7 +22,6 @@ def dummy_cfg(tmp_path):
     path = eigsep_observing.utils.get_config_path("dummy_config.yaml")
     with open(path, "r") as f:
         cfg = yaml.safe_load(f)
-    cfg["vna_save_dir"] = str(tmp_path)
     return cfg
 
 

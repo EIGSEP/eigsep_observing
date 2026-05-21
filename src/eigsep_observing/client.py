@@ -368,7 +368,6 @@ class PandaClient:
             ip=self.cfg["vna_ip"],
             port=self.cfg["vna_port"],
             timeout=self.cfg["vna_timeout"],
-            save_dir=self.cfg["vna_save_dir"],
             switch_fn=self._switch,
         )
         kwargs = self.cfg["vna_settings"].copy()

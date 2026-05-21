@@ -50,7 +50,6 @@ def transport_panda():
                 "fstart": 1e6,
                 "power_dBm": {"ant": -20, "rec": -40},
             },
-            "vna_save_dir": "/tmp/test_vna",
             "vna_interval": 0.5,
         }
     )
@@ -976,7 +975,7 @@ def test_with_header_overlays_panda_published(observer_both, transport_panda):
     assert out["run_started_at_unix"] == 42.0
     # obs_config carries the panda fixture config (plus the
     # ConfigStore.upload_dict-injected ``upload_time`` field).
-    assert out["obs_config"]["vna_save_dir"] == "/tmp/test_vna"
+    assert out["obs_config"]["vna_interval"] == 0.5
     assert "vna_settings" in out["obs_config"]
 
 
@@ -1060,7 +1059,7 @@ def test_record_corr_data_writes_overlays_into_header(
     assert written["sync_time"] == sync_time
     assert written["run_tag"] == "no_switch_observation"
     assert written["run_started_at_unix"] == 100.0
-    assert written["obs_config"]["vna_save_dir"] == "/tmp/test_vna"
+    assert written["obs_config"]["vna_interval"] == 0.5
 
 
 def _read_status_entries(transport):
