@@ -31,6 +31,7 @@ class TempCtrlClient:
                 "watchdog_timeout_ms": int,
                 "LNA": {
                     "enable": bool,
+                    "cooling_enabled": bool,  # optional; firmware default True
                     "target_C": float,
                     "hysteresis_C": float,
                     "clamp": float,
@@ -49,6 +50,11 @@ class TempCtrlClient:
         field names already and are forwarded unchanged via
         :meth:`set_gains`. Omitting either gain leaves the firmware
         default in place (``Kp=0.2``, ``Ki=0.0``).
+        ``cooling_enabled`` is the asymmetric-clamp safety setting
+        (False clamps drive to ``[0, +clamp]`` instead of
+        ``[-clamp, +clamp]``); omit to leave the firmware default
+        (True) in place. Deployments that cannot dissipate Peltier
+        heat should set this False on the affected channel.
     source : str
         Identifier stamped on proxy command stream entries.
     """
@@ -119,14 +125,15 @@ class TempCtrlClient:
                             f"tempctrl[{ch}].{fname}: {val!r} not "
                             f"float-coercible ({exc})"
                         ) from exc
-            if "enable" in section:
-                val = section["enable"]
-                if not isinstance(val, bool):
-                    raise ValueError(
-                        f"tempctrl[{ch}].enable: {val!r} must be a "
-                        f"bool, got {type(val).__name__}"
-                    )
-                coerced["enable"] = val
+            for bname in ("enable", "cooling_enabled"):
+                if bname in section:
+                    val = section[bname]
+                    if not isinstance(val, bool):
+                        raise ValueError(
+                            f"tempctrl[{ch}].{bname}: {val!r} must be a "
+                            f"bool, got {type(val).__name__}"
+                        )
+                    coerced[bname] = val
             out[ch] = coerced
         return out
 
@@ -182,6 +189,25 @@ class TempCtrlClient:
             kwargs["LOAD"] = float(LOAD)
         if kwargs:
             self._proxy.send_command("set_clamp", **kwargs)
+
+    def set_cooling_enabled(self, *, LNA=None, LOAD=None):
+        """Allow/forbid negative (cooling) drive per channel.
+
+        Mirrors :meth:`picohost.base.PicoPeltier.set_cooling_enabled`.
+        ``False`` clamps drive to ``[0, +clamp]`` instead of
+        ``[-clamp, +clamp]`` firmware-side — the cooling-mode
+        thermal-runaway guard. Only the kwargs that are not ``None``
+        are forwarded, so partial application does not flip the
+        untouched channel. Firmware caches the setting for replay on
+        reconnect.
+        """
+        kwargs = {}
+        if LNA is not None:
+            kwargs["LNA"] = bool(LNA)
+        if LOAD is not None:
+            kwargs["LOAD"] = bool(LOAD)
+        if kwargs:
+            self._proxy.send_command("set_cooling_enabled", **kwargs)
 
     def set_gains(
         self, *, LNA_Kp=None, LNA_Ki=None, LOAD_Kp=None, LOAD_Ki=None
@@ -270,18 +296,22 @@ class TempCtrlClient:
         """Push the full config to the pico in safe order.
 
         Order matches ``PicoPeltier``'s reconnect replay
-        (watchdog → clamp → gains → temperature → enable):
+        (watchdog → clamp → cooling_enabled → gains → temperature →
+        enable):
 
         1. ``set_watchdog_timeout`` first so any subsequent
            delay-between-commands cannot trip a zero-timeout default.
         2. ``set_clamp`` — establish the duty-cycle ceiling before
            anything is armed.
-        3. ``set_gains`` — tune the PI controller before the setpoint
+        3. ``set_cooling_enabled`` — apply the asymmetric-clamp safety
+           setting before the PI controller can produce drive on the
+           new config.
+        4. ``set_gains`` — tune the PI controller before the setpoint
            is published, so the very first PI tick on the new target
            uses the configured Kp/Ki rather than firmware defaults.
-        4. ``set_temperature`` — publish the target (and hysteresis)
+        5. ``set_temperature`` — publish the target (and hysteresis)
            while still disarmed (or at prior arm state).
-        5. ``set_enable`` — arm last, so by the time the channel turns
+        6. ``set_enable`` — arm last, so by the time the channel turns
            on the clamp, gains, and setpoint are already in place.
 
         Idempotent: calling repeatedly with unchanged settings is a
@@ -289,7 +319,8 @@ class TempCtrlClient:
         with identical ones). Missing sections are skipped — e.g.
         omitting ``watchdog_timeout_ms`` leaves whatever the firmware
         currently has. Missing ``Kp``/``Ki`` likewise leaves the
-        firmware defaults in place.
+        firmware defaults in place. Missing ``cooling_enabled`` leaves
+        the firmware default (True) in place.
 
         Raises
         ------
@@ -308,6 +339,10 @@ class TempCtrlClient:
         self.set_clamp(
             LNA=lna.get("clamp"),
             LOAD=load.get("clamp"),
+        )
+        self.set_cooling_enabled(
+            LNA=lna.get("cooling_enabled"),
+            LOAD=load.get("cooling_enabled"),
         )
         self.set_gains(
             LNA_Kp=lna.get("Kp"),

@@ -1908,6 +1908,64 @@ def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
         client.stop()
 
 
+def test_init_tempctrl_warns_when_cooling_disabled(
+    transport, dummy_cfg, caplog
+):
+    """``cooling_enabled: False`` is a deliberate non-default safety
+    setting — surface it loudly at init so operators know the
+    asymmetric-clamp guard is active. Fires per affected channel."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = {
+        "LNA": {
+            "enable": True,
+            "cooling_enabled": False,
+            "target_C": 25.0,
+        },
+        "LOAD": {
+            "enable": True,
+            "cooling_enabled": True,
+            "target_C": 25.0,
+        },
+    }
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        # LNA fires (cooling disabled); LOAD does not.
+        assert any("LNA cooling disabled" in m for m in warnings), (
+            f"expected LNA cooling warning in: {warnings}"
+        )
+        assert not any("LOAD cooling disabled" in m for m in warnings), (
+            f"unexpected LOAD warning in: {warnings}"
+        )
+    finally:
+        client.stop()
+
+
+def test_init_tempctrl_no_warning_when_cooling_default(
+    transport, dummy_cfg, caplog
+):
+    """Default config (no ``cooling_enabled`` key) leaves firmware
+    default True — no cooling-disabled warning should fire."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    # dummy_cfg already has tempctrl_settings without cooling_enabled.
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, default_cfg=cfg)
+    try:
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert not any("cooling disabled" in m for m in warnings), (
+            f"unexpected cooling warning with default config: {warnings}"
+        )
+    finally:
+        client.stop()
+
+
 def test_tempctrl_settings_non_dict_disables_client(
     transport, dummy_cfg, caplog
 ):
