@@ -147,6 +147,11 @@ class MotorZeroer:
         if key == "q":
             return deg_state, True, False
         if key == "+":
+            # Snap back to integer ladder when climbing out of the
+            # 0.1 fine-jog floor; otherwise "- - + +" leaves a 0.1
+            # offset baked in forever (1.1, 2.1, ...).
+            if deg_state < 1.0:
+                return 1.0, False, False
             return deg_state + 1, False, False
         if key == "-":
             return max(0.1, deg_state - 1), False, False
