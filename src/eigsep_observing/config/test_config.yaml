@@ -37,4 +37,3 @@ vna_settings:
   power_dBm:
     ant: 0.0
     rec: -40.0
-vna_save_dir: "/home/eigsep/eigsep_observing/test_data/s11"

@@ -30,7 +30,6 @@ vna_settings:
   power_dBm:
     ant: 0.0
     rec: -40.0
-vna_save_dir: "/media/eigsep/T7/data/s11_data"
 
 # motor
 use_motor: false

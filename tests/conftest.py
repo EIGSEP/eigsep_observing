@@ -71,7 +71,6 @@ def dummy_cfg(module_tmpdir):
             "ifbw": 100.0,
             "power_dBm": {"ant": 0.0, "rec": -40.0},
         },
-        "vna_save_dir": str(module_tmpdir),
         "use_motor": False,
         "motor_interval": 1,
         "motor_failure_retry_s": 0.5,
