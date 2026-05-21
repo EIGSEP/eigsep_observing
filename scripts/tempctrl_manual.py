@@ -27,6 +27,16 @@ Every command goes through :class:`picohost.proxy.PicoProxy` so
 behavior mirrors the production tempctrl_loop path. Setpoints and
 clamp values are tracked client-side so the +/- keys can bump them
 without round-tripping the firmware to read back the current value.
+
+Trip clearing (picohost >= 3.4.0 / pico-firmware e0724e0): ``enabled``
+is host intent only — firmware never mutates it. Drive engages iff
+``enabled && !int_disabled && !stall_tripped && !watchdog_tripped``
+(shown as the ``armed`` column in the readout). The sticky trips
+``stall_tripped`` and ``watchdog_tripped`` are cleared by an explicit
+``*_enable=true`` rising edge from the host. From this UI that means
+``l`` (LNA on), ``o`` (LOAD on), or ``r`` (re-enable both) double as
+the operator's trip-clear ack — bare keepalives refresh the watchdog
+timer but no longer clear the trip flag.
 """
 
 from argparse import ArgumentParser
@@ -182,13 +192,34 @@ def _fmt(value, fmt):
     return format(value, fmt)
 
 
+def _armed(channel):
+    """Derive whether firmware drive is engaged for ``channel``.
+
+    Mirrors the firmware gate (picohost >= 3.4.0): drive engages iff
+    ``enabled && !int_disabled && !stall_tripped && !watchdog_tripped``.
+    Since ``enabled`` is now host intent only (firmware never clears
+    it on trip), this derived flag is what the operator actually wants
+    to read off the panel to confirm the channel is driving.
+    """
+    if not channel:
+        return None
+    return bool(
+        channel.get("enabled")
+        and not channel.get("int_disabled")
+        and not channel.get("stall_tripped")
+        and not channel.get("watchdog_tripped")
+    )
+
+
 def _render(screen, snapshot, state):
     lna = _snap(snapshot, "tempctrl_lna") or {}
     load = _snap(snapshot, "tempctrl_load") or {}
     screen.clear()
     screen.addstr(0, 0, "=== tempctrl manual ===")
     screen.addstr(
-        1, 0, "channel  T_now    T_target  drive   clamp   enabled  status"
+        1,
+        0,
+        "channel  T_now    T_target  drive   clamp   enabled  armed  status",
     )
     screen.addstr(
         2,
@@ -198,7 +229,8 @@ def _render(screen, snapshot, state):
         f"{_fmt(lna.get('T_target'), '6.2f')}    "
         f"{_fmt(lna.get('drive_level'), '6.2f')}  "
         f"{_fmt(lna.get('clamp'), '6.2f')}  "
-        f"{str(lna.get('enabled')):>7}  {lna.get('status')!r}",
+        f"{str(lna.get('enabled')):>7}  "
+        f"{str(_armed(lna)):>5}  {lna.get('status')!r}",
     )
     screen.addstr(
         3,
@@ -208,19 +240,22 @@ def _render(screen, snapshot, state):
         f"{_fmt(load.get('T_target'), '6.2f')}    "
         f"{_fmt(load.get('drive_level'), '6.2f')}  "
         f"{_fmt(load.get('clamp'), '6.2f')}  "
-        f"{str(load.get('enabled')):>7}  {load.get('status')!r}",
+        f"{str(load.get('enabled')):>7}  "
+        f"{str(_armed(load)):>5}  {load.get('status')!r}",
     )
     # PI controller readout — Kp/Ki are config-set (last-write-wins
     # cached in PicoPeltier._last_gains), `integral` is the firmware
-    # accumulator.
-    screen.addstr(5, 0, "channel   Kp     Ki      integral")
+    # accumulator. `stall_tripped` is per-channel and sticky; clear it
+    # with an `l on` / `o on` (or `r`) rising-edge ack.
+    screen.addstr(5, 0, "channel   Kp     Ki      integral  stall_tripped")
     screen.addstr(
         6,
         0,
         "LNA      "
         f"{_fmt(lna.get('Kp'), '6.3f')}  "
         f"{_fmt(lna.get('Ki'), '6.3f')}  "
-        f"{_fmt(lna.get('integral'), '8.3f')}",
+        f"{_fmt(lna.get('integral'), '8.3f')}  "
+        f"{str(lna.get('stall_tripped')):>13}",
     )
     screen.addstr(
         7,
@@ -228,7 +263,8 @@ def _render(screen, snapshot, state):
         "LOAD     "
         f"{_fmt(load.get('Kp'), '6.3f')}  "
         f"{_fmt(load.get('Ki'), '6.3f')}  "
-        f"{_fmt(load.get('integral'), '8.3f')}",
+        f"{_fmt(load.get('integral'), '8.3f')}  "
+        f"{str(load.get('stall_tripped')):>13}",
     )
     # watchdog_tripped is duplicated across both streams (see
     # _PELTIER_SCHEMA) — read from either; LNA is fine.
