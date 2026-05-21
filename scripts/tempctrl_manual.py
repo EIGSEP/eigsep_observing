@@ -42,6 +42,7 @@ timer but no longer clear the trip flag.
 from argparse import ArgumentParser
 import curses
 import logging
+import time
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
@@ -60,6 +61,13 @@ KI_STEP = 0.005  # smaller — integral accumulates over many ticks
 DEFAULT_KP = 0.2  # firmware default, matches TempCtrlEmulator
 DEFAULT_KI = 0.0  # firmware default — opt-in via this script or yaml
 WATCHDOG_PROBE_MS = 5000
+# picohost STATUS_CADENCE_MS = 200; poll at the same cadence so we
+# wake on the next publish without busy-spinning.
+PICO_PUBLISH_INTERVAL_S = 0.2
+# Headroom over the 200 ms cadence: a healthy pico publishes within
+# one tick; 5 s of slack absorbs a slow PicoManager restart without
+# masking a stuck producer.
+SEED_TIMEOUT_S = 5.0
 
 
 class _State:
@@ -100,17 +108,56 @@ def _snap(snapshot, name):
     return snapshot.get().get(name)
 
 
-def _seed_state(snapshot):
-    """Build a starting :class:`_State` from whatever the firmware reports.
+def _seed_state(
+    snapshot,
+    *,
+    timeout_s=SEED_TIMEOUT_S,
+    poll_interval_s=PICO_PUBLISH_INTERVAL_S,
+):
+    """Block until firmware has published ``T_target`` on both
+    ``tempctrl_lna`` and ``tempctrl_load``, then build a starting
+    :class:`_State` from those values.
 
-    Defaults if a field is missing or the channel hasn't published yet
-    are deliberately conservative: 20 deg C setpoint, channels off, so
-    the operator has to opt into actually driving the peltier.
+    No hardcoded setpoint fallback — the pico's own ``T_target``
+    (firmware default 30 deg C until reconfigured) is the single
+    source of truth, so the UI can never disagree with what the
+    firmware is actually driving. ``enabled`` likewise comes from the
+    pico; missing ``Kp`` / ``Ki`` fall back to the firmware-side
+    defaults (``DEFAULT_KP`` / ``DEFAULT_KI``).
+
+    Raises
+    ------
+    SystemExit
+        ``T_target`` did not appear on one or both streams within
+        ``timeout_s``. ``require_pico`` passed first, so the proxy
+        heartbeat is live — that means the pico is registered but the
+        firmware tempctrl publisher hasn't pushed a status frame yet.
+        Usually a misflashed pico or a stuck producer thread.
     """
-    lna = _snap(snapshot, "tempctrl_lna") or {}
-    load = _snap(snapshot, "tempctrl_load") or {}
-    lna_t = lna.get("T_target")
-    load_t = load.get("T_target")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        lna = _snap(snapshot, "tempctrl_lna") or {}
+        load = _snap(snapshot, "tempctrl_load") or {}
+        if (
+            lna.get("T_target") is not None
+            and load.get("T_target") is not None
+        ):
+            break
+        if time.monotonic() >= deadline:
+            missing = [
+                name
+                for name, d in (
+                    ("tempctrl_lna", lna),
+                    ("tempctrl_load", load),
+                )
+                if d.get("T_target") is None
+            ]
+            raise SystemExit(
+                f"ERROR: tempctrl pico is registered but did not publish "
+                f"T_target on {missing} within {timeout_s:.1f}s. "
+                f"Check pico-manager logs."
+            )
+        time.sleep(poll_interval_s)
 
     def _f(d, k, default):
         v = d.get(k)
@@ -119,9 +166,10 @@ def _seed_state(snapshot):
             if isinstance(v, (int, float)) and not isinstance(v, bool)
             else default
         )
+
     return _State(
-        lna_setpoint=float(lna_t) if lna_t is not None else 20.0,
-        load_setpoint=float(load_t) if load_t is not None else 20.0,
+        lna_setpoint=float(lna["T_target"]),
+        load_setpoint=float(load["T_target"]),
         lna_enabled=bool(lna.get("enabled") or False),
         load_enabled=bool(load.get("enabled") or False),
         lna_Kp=_f(lna, "Kp", DEFAULT_KP),
