@@ -30,49 +30,17 @@ from picohost.proxy import PicoProxy
 
 from eigsep_observing import PandaClient, run_tag
 from eigsep_observing._scripts_util import require_pico
-from eigsep_observing.utils import configure_eig_logger, get_config_path
-from eigsep_observing.vna import save_vna_manual_h5
+from eigsep_observing._vna_manual_core import (
+    build_vna_client,
+    build_vna_transport,
+    load_vna_cfg,
+    run_bundle,
+)
+from eigsep_observing.utils import configure_eig_logger
 
 
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
-
-
-def _build_transport(dummy):
-    if dummy:
-        logger.warning("Running in DUMMY mode, no hardware will be used.")
-        transport = Transport(host="localhost", port=6380)
-        transport.reset()
-        return transport
-    return Transport(host="localhost", port=6379)
-
-
-def _build_client(transport, cfg, dummy):
-    # Build a transient local cfg view: vna_manual is a bring-up tool,
-    # not an authorized uploader. Mutating the persistent Redis cfg
-    # would stamp these bring-up flags into corr-file overlays opened
-    # by ``eigsep-observe`` while this script runs, misrepresenting the
-    # rig's true operating intent. Pass cfg= directly so PandaClient
-    # uses it in-process without touching ConfigStore.
-    cfg = dict(cfg)
-    cfg["use_vna"] = True
-    cfg["use_switches"] = False
-    cfg["use_motor"] = False
-    cfg["use_tempctrl"] = False
-    cfg["serialize_motion_and_switching"] = False
-    if dummy:
-        from eigsep_observing.testing import DummyPandaClient
-
-        return DummyPandaClient(transport=transport, cfg=cfg)
-    return PandaClient(transport, cfg=cfg)
-
-
-def _summary_db(arr):
-    mag = np.abs(np.asarray(arr))
-    mag = mag[mag > 0]
-    if mag.size == 0:
-        return float("nan")
-    return float(20.0 * np.log10(np.mean(mag)))
 
 
 def _print_banner(cfg, save_dir):
@@ -103,26 +71,6 @@ def _print_menu(last_summary):
     print("  [q] quit")
 
 
-def _run_bundle(client, mode, save_dir):
-    with client.coord.switch_section():
-        try:
-            payload = client.measure_s11(mode)
-        except (RuntimeError, TimeoutError, ValueError) as exc:
-            return f"!! {mode} bundle failed: {type(exc).__name__}: {exc}"
-    s11, header, metadata = payload
-    try:
-        path = save_vna_manual_h5(
-            s11, header, metadata, save_dir=save_dir, mode=mode
-        )
-    except OSError as exc:
-        return (
-            f"!! {mode} bundle measured (published to Redis) but local "
-            f"save failed: {exc}"
-        )
-    db = _summary_db(s11[mode])
-    return f"{mode} saved {path.name}  (|Γ|_{mode}_mean={db:.1f} dB)"
-
-
 def _repl(client, save_dir):
     last = ""
     while True:
@@ -139,7 +87,7 @@ def _repl(client, save_dir):
         if choice in ("a", "r"):
             mode = "ant" if choice == "a" else "rec"
             try:
-                last = _run_bundle(client, mode, save_dir)
+                last = run_bundle(client, mode, save_dir)
             except KeyboardInterrupt:
                 last = f"!! {mode} bundle interrupted"
             print(last)
@@ -180,18 +128,13 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    if args.cfg_file is None:
-        args.cfg_file = get_config_path(
-            "dummy_config.yaml" if args.dummy else "obs_config.yaml"
-        )
-    with open(args.cfg_file, "r") as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_vna_cfg(args.cfg_file, args.dummy)
     if not args.save_dir.exists():
         raise SystemExit(f"save-dir does not exist: {args.save_dir}")
     if not args.save_dir.is_dir():
         raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
-    transport = _build_transport(args.dummy)
+    transport = build_vna_transport(args.dummy)
 
     with run_tag.session(transport, "vna_manual"):
         client = _build_client(transport, cfg, args.dummy)
