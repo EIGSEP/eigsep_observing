@@ -353,12 +353,10 @@ class TestConfigureEigLogger:
     """Test configure_eig_logger.
 
     pytest's logging plugin attaches a ``LogCaptureHandler`` to the
-    root logger right before each test body, so ``hasHandlers()``
-    always returns ``True`` from inside a test — which would
-    short-circuit ``configure_eig_logger``'s idempotency guard and
-    prevent our handlers from being added. Each test clears
-    ``root.handlers`` inline before calling, and the autouse fixture
-    restores the original handlers on teardown.
+    root logger right before each test body. Most tests want to
+    inspect the exact handler set after ``configure_eig_logger``, so
+    each test clears ``root.handlers`` inline first and the autouse
+    fixture restores the original handlers on teardown.
     """
 
     @pytest.fixture(autouse=True)
@@ -413,8 +411,9 @@ class TestConfigureEigLogger:
         assert not any(type(h) is logging.StreamHandler for h in handlers)
 
     def test_idempotent_no_duplicate_handlers(self, tmp_path):
-        """A second call must not stack handlers — we already guard on
-        ``hasHandlers``, this is the regression test."""
+        """A second call must not stack handlers. The function checks
+        for an existing ``RotatingFileHandler`` and an existing plain
+        ``StreamHandler`` separately and skips each if already present."""
         logging.getLogger().handlers.clear()
         with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
             configure_eig_logger()
@@ -446,3 +445,36 @@ class TestConfigureEigLogger:
             if isinstance(h, RotatingFileHandler)
         ]
         assert Path(file_handlers[0].baseFilename) == target
+
+    def test_console_false_strips_pre_existing_stream_handler(self, tmp_path):
+        """A stray ``StreamHandler`` (e.g. from a leaked
+        ``logging.basicConfig()`` call earlier in the import chain)
+        must be removed when ``console=False`` so the repainting UI
+        scripts get a clean stderr. Without this, ``console=False`` is
+        a silent no-op behind the ``hasHandlers`` guard."""
+        root = logging.getLogger()
+        root.handlers.clear()
+        leaked = logging.StreamHandler()
+        root.addHandler(leaked)
+        assert root.hasHandlers()
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger(console=False)
+        handlers = root.handlers
+        assert any(isinstance(h, RotatingFileHandler) for h in handlers)
+        assert not any(type(h) is logging.StreamHandler for h in handlers)
+
+    def test_console_true_does_not_duplicate_pre_existing_stream(
+        self, tmp_path
+    ):
+        """If a ``StreamHandler`` is already attached, ``console=True``
+        must not stack a second one. Pairs with the strip behavior so
+        the function is idempotent regardless of prior state."""
+        root = logging.getLogger()
+        root.handlers.clear()
+        root.addHandler(logging.StreamHandler())
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger()
+        stream_handlers = [
+            h for h in root.handlers if type(h) is logging.StreamHandler
+        ]
+        assert len(stream_handlers) == 1
