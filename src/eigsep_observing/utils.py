@@ -186,16 +186,20 @@ def configure_eig_logger(
     # Attach the rotating file handler if one isn't already in place.
     # A pre-existing StreamHandler from a stray logging.basicConfig()
     # call must not block the file handler — we still want logs on disk.
-    has_file_handler = any(
-        isinstance(h, RotatingFileHandler) for h in logger.handlers
-    )
-    if not has_file_handler:
+    file_handlers = [
+        h for h in logger.handlers if isinstance(h, RotatingFileHandler)
+    ]
+    if not file_handlers:
         file_handler = RotatingFileHandler(
             log_file, maxBytes=max_bytes, backupCount=backup_count
         )
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
+    else:
+        for h in file_handlers:
+            h.setLevel(level)
+            h.setFormatter(formatter)
 
     # Honor `console` actively: when False, strip any plain
     # StreamHandlers (e.g. installed by logging.basicConfig()) so a
@@ -213,6 +217,10 @@ def configure_eig_logger(
             console_handler.setLevel(level)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
+        else:
+            for h in stream_handlers:
+                h.setLevel(level)
+                h.setFormatter(formatter)
     else:
         for h in stream_handlers:
             logger.removeHandler(h)

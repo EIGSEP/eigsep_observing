@@ -478,3 +478,39 @@ class TestConfigureEigLogger:
             h for h in root.handlers if type(h) is logging.StreamHandler
         ]
         assert len(stream_handlers) == 1
+
+    def test_console_true_reconfigures_pre_existing_stream(self, tmp_path):
+        root = logging.getLogger()
+        root.handlers.clear()
+        leaked = logging.StreamHandler()
+        leaked.setLevel(logging.ERROR)
+        leaked.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(leaked)
+        with patch("eigsep_observing.utils.Path.home", return_value=tmp_path):
+            configure_eig_logger(level=logging.DEBUG)
+        stream_handlers = [
+            h for h in root.handlers if type(h) is logging.StreamHandler
+        ]
+        assert stream_handlers == [leaked]
+        assert leaked.level == logging.DEBUG
+        assert leaked.formatter._fmt == (
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+
+    def test_existing_rotating_file_handler_is_reconfigured(self, tmp_path):
+        root = logging.getLogger()
+        root.handlers.clear()
+        target = tmp_path / "preexisting.log"
+        existing = RotatingFileHandler(target, maxBytes=1, backupCount=1)
+        existing.setLevel(logging.ERROR)
+        existing.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(existing)
+        configure_eig_logger(level=logging.WARNING, console=False)
+        file_handlers = [
+            h for h in root.handlers if isinstance(h, RotatingFileHandler)
+        ]
+        assert file_handlers == [existing]
+        assert existing.level == logging.WARNING
+        assert existing.formatter._fmt == (
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
