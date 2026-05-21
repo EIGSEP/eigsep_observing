@@ -446,6 +446,17 @@ class PandaClient:
         self.logger.info(
             f"Tempctrl initialized (settings={self.tempctrl.settings})"
         )
+        # Cooling-mode guard: a deliberate non-default safety setting
+        # (see picohost asymmetric clamp). Surfaced once at init rather
+        # than every tempctrl_loop iteration — it's a deployment choice,
+        # not a runtime fault.
+        for ch in ("LNA", "LOAD"):
+            section = self.tempctrl.settings.get(ch, {})
+            if section.get("cooling_enabled") is False:
+                self.logger.warning(
+                    f"Tempctrl {ch} cooling disabled — drive clamped to "
+                    "[0, +clamp] (asymmetric-clamp safety guard)."
+                )
 
     def switch_loop(self):
         """

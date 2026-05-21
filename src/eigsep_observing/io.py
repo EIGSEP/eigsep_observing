@@ -642,6 +642,11 @@ _PELTIER_SCHEMA = {
     "active": bool,
     "int_disabled": bool,
     "stall_tripped": bool,
+    # Asymmetric-clamp safety setting (False forbids drive<0). Reduces
+    # via `any` like every other bool config field; a mid-integration
+    # toggle is an operator action and rare enough that surfacing
+    # disagreement via the existing invariant-throttle is acceptable.
+    "cooling_enabled": bool,
     "hysteresis": float,
     "clamp": float,
     "Kp": float,

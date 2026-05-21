@@ -304,6 +304,10 @@ def test_is_available_reflects_registration(client):
         ({"LNA": {"enable": "false"}}, "enable"),
         ({"LNA": {"Kp": "tiny"}}, "Kp"),
         ({"LOAD": {"Ki": [0.0, 0.1]}}, "Ki"),
+        # `cooling_enabled: "false"` has the same trap as `enable`: a
+        # non-bool truthy value would silently leave the cooling guard
+        # *armed* (i.e. the safety setting wouldn't apply).
+        ({"LNA": {"cooling_enabled": "false"}}, "cooling_enabled"),
     ],
 )
 def test_coerce_settings_raises_on_bad_config(bad_settings, needle):
@@ -322,12 +326,14 @@ def test_coerce_settings_none_returns_empty():
 def test_coerce_settings_normalizes_types():
     """Int literals in float fields are accepted and promoted to float;
     bool ``enable`` is preserved as-is. Kp/Ki ride the same float-coerce
-    path as the other numeric fields."""
+    path as the other numeric fields. ``cooling_enabled`` rides the same
+    strict-bool path as ``enable``."""
     out = TempCtrlClient._coerce_settings(
         {
             "watchdog_timeout_ms": 30000,
             "LNA": {
                 "enable": True,
+                "cooling_enabled": False,
                 "target_C": 25,  # int in a float field
                 "clamp": 1,
                 "Kp": 0,  # int in a float field
@@ -340,7 +346,110 @@ def test_coerce_settings_normalizes_types():
     assert out["LNA"]["target_C"] == 25.0
     assert isinstance(out["LNA"]["clamp"], float)
     assert out["LNA"]["enable"] is True
+    assert out["LNA"]["cooling_enabled"] is False
     assert isinstance(out["LNA"]["Kp"], float)
     assert out["LNA"]["Kp"] == 0.0
     assert isinstance(out["LNA"]["Ki"], float)
     assert out["LNA"]["Ki"] == 0.0
+
+
+def test_set_cooling_enabled_pushes_to_emulator(client):
+    """``set_cooling_enabled`` flips the firmware-side cooling_enabled
+    flag on the addressed channel(s)."""
+    tc = TempCtrlClient(client.transport)
+    em = _emulator(client)
+    assert em.lna.cooling_enabled is True
+    assert em.load.cooling_enabled is True
+
+    tc.set_cooling_enabled(LNA=False, LOAD=True)
+
+    assert _wait_until(
+        lambda: (
+            em.lna.cooling_enabled is False and em.load.cooling_enabled is True
+        )
+    ), (
+        f"cooling_enabled did not propagate: "
+        f"LNA={em.lna.cooling_enabled}, LOAD={em.load.cooling_enabled}"
+    )
+
+
+def test_set_cooling_enabled_partial_leaves_other_channel(client):
+    """Partial-kwargs ``set_cooling_enabled`` touches only the named
+    channel (matches ``set_clamp`` / ``set_gains`` shape)."""
+    tc = TempCtrlClient(client.transport)
+    em = _emulator(client)
+
+    tc.set_cooling_enabled(LNA=False)
+
+    assert _wait_until(lambda: em.lna.cooling_enabled is False)
+    # LOAD was never sent; firmware default (True) untouched.
+    assert em.load.cooling_enabled is True
+
+
+def test_set_cooling_enabled_no_kwargs_is_no_op(client):
+    """``set_cooling_enabled()`` with both args None must not send a
+    command — partial-application callers don't flip the untouched
+    channel."""
+    tc = TempCtrlClient(client.transport)
+    with patch.object(tc._proxy, "send_command") as mock_send:
+        tc.set_cooling_enabled()
+        mock_send.assert_not_called()
+
+
+def test_apply_settings_applies_cooling_enabled(client):
+    """``cooling_enabled`` field in the yaml settings reaches the
+    emulator via ``apply_settings``."""
+    settings = {
+        "LNA": {"enable": True, "cooling_enabled": False, "target_C": 25.0},
+        "LOAD": {"enable": True, "cooling_enabled": True, "target_C": 25.0},
+    }
+    tc = TempCtrlClient(client.transport, settings=settings)
+    tc.apply_settings()
+    em = _emulator(client)
+    assert _wait_until(
+        lambda: (
+            em.lna.cooling_enabled is False and em.load.cooling_enabled is True
+        )
+    ), (
+        f"apply_settings did not propagate cooling_enabled: "
+        f"LNA={em.lna.cooling_enabled}, LOAD={em.load.cooling_enabled}"
+    )
+
+
+def test_apply_settings_order_cooling_before_gains():
+    """``apply_settings`` pushes cooling_enabled between clamp and
+    gains so the asymmetric-clamp safety setting is in place before
+    the PI controller can produce drive on the new config."""
+    from eigsep_redis.testing import DummyTransport
+
+    transport = DummyTransport()
+    tc = TempCtrlClient(
+        transport,
+        settings={
+            "watchdog_timeout_ms": 25000,
+            "LNA": {
+                "enable": True,
+                "cooling_enabled": False,
+                "target_C": 25.0,
+                "clamp": 0.5,
+                "Kp": 0.3,
+                "Ki": 0.01,
+            },
+        },
+    )
+    sent = []
+    with patch.object(
+        tc._proxy,
+        "send_command",
+        side_effect=lambda cmd, **kw: sent.append(cmd),
+    ):
+        tc.apply_settings()
+    # Order: watchdog → clamp → cooling_enabled → gains → temperature → enable.
+    assert sent == [
+        "set_watchdog_timeout",
+        "set_clamp",
+        "set_cooling_enabled",
+        "set_gains",
+        "set_temperature",
+        "set_enable",
+    ]
