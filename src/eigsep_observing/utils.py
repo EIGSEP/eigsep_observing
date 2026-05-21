@@ -178,22 +178,44 @@ def configure_eig_logger(
 
     logger = logging.getLogger()  # get the root logger
     logger.setLevel(level)
-    if not logger.hasHandlers():
-        formatter = logging.Formatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Attach the rotating file handler if one isn't already in place.
+    # A pre-existing StreamHandler from a stray logging.basicConfig()
+    # call must not block the file handler — we still want logs on disk.
+    has_file_handler = any(
+        isinstance(h, RotatingFileHandler) for h in logger.handlers
+    )
+    if not has_file_handler:
         file_handler = RotatingFileHandler(
             log_file, maxBytes=max_bytes, backupCount=backup_count
         )
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
-        if console:
+
+    # Honor `console` actively: when False, strip any plain
+    # StreamHandlers (e.g. installed by logging.basicConfig()) so a
+    # repainting UI script can guarantee a clean stderr. When True,
+    # attach one only if none is already present so repeated calls
+    # don't double-log to the terminal.
+    stream_handlers = [
+        h
+        for h in logger.handlers
+        if type(h) is logging.StreamHandler  # exact: don't strip subclasses
+    ]
+    if console:
+        if not stream_handlers:
             console_handler = logging.StreamHandler()
             console_handler.setLevel(level)
             console_handler.setFormatter(formatter)
             logger.addHandler(console_handler)
+    else:
+        for h in stream_handlers:
+            logger.removeHandler(h)
     return logger
 
 
