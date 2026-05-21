@@ -1,16 +1,18 @@
 """Observing-side file writer.
 
-Writes correlation and VNA data to disk. Corr writing starts as soon as
-the SNAP is producing — independent of any panda-side state — and the
-``obs_config`` / ``run_tag`` overlays stamped into each corr file header
-are read opportunistically per file boundary (see
-:meth:`EigObserver._with_header_overlays`). This decouples the writer
-from ``panda_observe`` so any panda-side script (or none at all) can run
-alongside it.
+Writes correlation and VNA data to disk. SNAP is required — the corr
+thread is the writer's reason to exist. The panda is optional and
+opportunistic: ``obs_config`` / ``run_tag`` overlays and the per-
+integration metadata sidecar are read whenever the panda is reachable
+(see :meth:`EigObserver._with_header_overlays` and the corr loop's
+drain at ``observer.record_corr_data``), and a panda that is missing
+at startup or drops mid-run is logged at WARNING and degrades to
+corr-only without raising. Corr data is sacred; a panda failure must
+never block a SNAP-side write.
 
-The VNA thread is spawned unconditionally whenever ``--panda`` is on;
-it polls ``panda_connected`` internally and sits idle if no VNA data
-appears on the stream.
+The VNA file thread runs unconditionally — it polls ``panda_connected``
+internally and idles on an empty VNA stream, so it's harmless when no
+panda is publishing.
 
 Installed as the ``eigsep-observe`` console script and run by the
 ``eigsep-observe-writer.service`` systemd unit (see ``deploy/systemd/``).
@@ -21,6 +23,7 @@ import logging
 import sys
 import threading
 
+import redis.exceptions
 from eigsep_redis import Transport
 
 from eigsep_observing import EigObserver
@@ -71,25 +74,36 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Integrations per correlator HDF5 file.",
     )
     parser.add_argument(
-        "--snap",
-        dest="use_snap",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Read correlation data from RPi Redis in box.",
-    )
-    parser.add_argument(
-        "--panda",
-        dest="use_panda",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Connect to LattePanda in box.",
-    )
-    parser.add_argument(
         "--dummy",
         action="store_true",
         help="Run in dummy mode, using mock Redis instances.",
     )
     return parser
+
+
+def _connect_panda(panda_ip: str, redis_port: int, logger) -> Transport | None:
+    """Attempt the panda transport; warn and degrade on failure.
+
+    The corr loop's only hard dependency is the SNAP transport. Header
+    overlays (``obs_config`` / ``run_tag``) and the metadata sidecar
+    are best-effort, with the observer already wired to handle
+    ``transport_panda=None`` (sentinel header values, empty metadata).
+    A non-fatal startup-time WARNING preserves "corr data is sacred"
+    when the panda is down for a SNAP-only test session.
+    """
+    logger.info(f"Connecting to LattePanda at {panda_ip}.")
+    try:
+        return Transport(host=panda_ip, port=redis_port)
+    except redis.exceptions.ConnectionError as exc:
+        logger.warning(
+            "Panda Redis unreachable at %s:%s (%s). Running corr-only — "
+            "restart the observer once the panda is back to re-enable "
+            "metadata sidecar and header overlays.",
+            panda_ip,
+            redis_port,
+            exc,
+        )
+        return None
 
 
 def main() -> int:
@@ -119,19 +133,15 @@ def main() -> int:
         rpi_ip = args.rpi_ip
         panda_ip = args.panda_ip
 
-    # initialize the Redis transports
-    if args.use_snap:
-        logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
-        transport_snap = Transport(host=rpi_ip, port=redis_port)
-    else:
-        logger.warning("Not connecting to RPi Redis instance.")
-        transport_snap = None
-    if args.use_panda:
-        logger.info(f"Connecting to LattePanda at {panda_ip}.")
-        transport_panda = Transport(host=panda_ip, port=redis_port)
-    else:
-        logger.warning("Not connecting to LattePanda")
-        transport_panda = None
+    # SNAP transport is required — there is no "observer without SNAP"
+    # mode any more (use scripts/record_metadata.py for test bench data
+    # collection that needs no correlator). A SNAP-side failure here
+    # is fatal; nothing else this script does makes sense without it.
+    logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
+    transport_snap = Transport(host=rpi_ip, port=redis_port)
+
+    # Panda transport is opportunistic — see _connect_panda.
+    transport_panda = _connect_panda(panda_ip, redis_port, logger)
 
     if args.dummy:
         observer = DummyEigObserver(
@@ -164,24 +174,22 @@ def main() -> int:
             corr_crashed[0] = True
             observer.stop_event.set()
 
-    # set up file writing: corr_thd for correlation data, panda_thd for s11
-    if args.use_snap:
-        corr_thd = threading.Thread(target=_corr_target)
-        thds["corr"] = corr_thd
-        logger.info("Starting correlation file writing thread.")
-        corr_thd.start()
+    corr_thd = threading.Thread(target=_corr_target)
+    thds["corr"] = corr_thd
+    logger.info("Starting correlation file writing thread.")
+    corr_thd.start()
 
-    # VNA file writing: spawn unconditionally when --panda is on. The
-    # thread polls ``panda_connected`` internally and idles on an empty
-    # VNA stream, so it's harmless when no panda script is publishing.
-    if args.use_panda:
-        vna_thd = threading.Thread(
-            target=observer.record_vna_data,
-            args=(args.vna_save_dir,),
-        )
-        thds["vna"] = vna_thd
-        logger.info("Starting VNA file writing thread.")
-        vna_thd.start()
+    # VNA file writing: always spawn. The thread polls
+    # ``panda_connected`` internally and idles on an empty VNA stream,
+    # so it's harmless when no panda is publishing or the panda is
+    # unreachable.
+    vna_thd = threading.Thread(
+        target=observer.record_vna_data,
+        args=(args.vna_save_dir,),
+    )
+    thds["vna"] = vna_thd
+    logger.info("Starting VNA file writing thread.")
+    vna_thd.start()
 
     try:
         observer.stop_event.wait()  # wait until stop event
@@ -200,9 +208,8 @@ def main() -> int:
 
     if args.dummy:
         # reset Redis instances
-        if args.use_snap:
-            transport_snap.reset()
-        if args.use_panda:
+        transport_snap.reset()
+        if transport_panda is not None:
             transport_panda.reset()
 
     return 1 if corr_crashed[0] else 0

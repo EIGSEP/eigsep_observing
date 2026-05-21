@@ -35,11 +35,11 @@ LOGS
 eigsep-panda                  # on panda
 eigsep-observe                # on ground
 
-# Observer only (no panda connection, SNAP correlator only)
-eigsep-observe --no-panda
-
-# Panda only (no SNAP)
-eigsep-observe --no-snap
+# SNAP-only is automatic: if the panda Redis is unreachable at startup
+# (or drops mid-run), eigsep-observe logs a WARNING and keeps writing
+# corr files. Header overlays become sentinels (obs_config={},
+# run_tag="UNKNOWN") and the metadata sidecar is empty until the panda
+# is back — corr data itself is unaffected.
 
 # Dry run with fake hardware
 eigsep-panda --dummy          # terminal 1
@@ -69,7 +69,7 @@ eigsep-observe --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
 | What crashed | What to do |
 |---|---|
 | Observer only | Restart `eigsep-observe`. Panda keeps running. You may lose some data that overflowed the Redis stream buffer. |
-| Panda only | SSH into panda, restart `eigsep-panda`. It reads config from Redis automatically. Observer keeps writing SNAP data (without metadata) until panda reconnects. |
+| Panda only | SSH into panda, restart `eigsep-panda`. It reads config from Redis automatically. Observer keeps writing SNAP data (without metadata sidecar / overlays) until panda reconnects; on reconnect, metadata stream positions are skipped to the current tail so resumed sidecar averages stay aligned with the corr integration window (no replayed backlog). |
 | Both | Start panda first, then observer. |
 | Redis | Everything stops. Restart Redis, then panda, then observer. |
 

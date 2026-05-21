@@ -1193,3 +1193,253 @@ def test_status_handler_skips_warning_and_info(
     assert not any(
         "io-info-should-not-mirror" in msg for _, msg in new_entries
     ), new_entries
+
+
+# ---------------------------------------------------------------------------
+# Defensive panda handling (corr-data-is-sacred)
+# ---------------------------------------------------------------------------
+
+
+def test_panda_connected_tolerates_connection_error(observer_panda_only):
+    """A dropped panda Redis connection makes ``heartbeat_reader.check``
+    raise ``ConnectionError``. ``panda_connected`` must return ``False``
+    rather than propagate, so the corr loop's "if panda_connected: drain"
+    gate stays safe.
+    """
+    import redis.exceptions
+
+    with patch.object(
+        observer_panda_only.heartbeat_reader,
+        "check",
+        side_effect=redis.exceptions.ConnectionError("connection refused"),
+    ):
+        assert observer_panda_only.panda_connected is False
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_drain_failure_continues_with_empty_metadata(
+    mock_file_class, observer_both, caplog
+):
+    """``metadata_stream.drain`` raising ``ConnectionError`` must not
+    kill the corr loop. The integration is written with ``metadata=None``
+    (corr data is sacred) and a WARNING is logged once per throttle
+    window.
+    """
+    import redis.exceptions
+
+    observer = observer_both
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    def read_side_effect(*a, **kw):
+        observer.stop_event.set()
+        return (123, mock_data)
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+        patch.object(
+            observer.metadata_stream,
+            "drain",
+            side_effect=redis.exceptions.ConnectionError("connection refused"),
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    mock_file.add_data.assert_called_once()
+    assert mock_file.add_data.call_args.kwargs["metadata"] is None
+    assert any(
+        "Panda metadata drain failed" in rec.message for rec in caplog.records
+    )
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_drain_failure_warning_is_throttled(
+    mock_file_class, observer_both, caplog
+):
+    """Repeated ``drain`` failures over the same throttle window emit
+    only one WARNING. The corr loop runs at multi-Hz cadence; without
+    throttling a dead panda would flood the log.
+    """
+    import redis.exceptions
+
+    observer = observer_both
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 5:
+            observer.stop_event.set()
+        return (123, mock_data)
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+        patch.object(
+            observer.metadata_stream,
+            "drain",
+            side_effect=redis.exceptions.ConnectionError("down"),
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    drain_warnings = [
+        rec
+        for rec in caplog.records
+        if "Panda metadata drain failed" in rec.message
+    ]
+    assert read_count[0] >= 5, "loop didn't iterate enough to test throttle"
+    assert len(drain_warnings) == 1, (
+        f"expected one throttled WARNING, got {len(drain_warnings)}"
+    )
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_skip_to_tail_on_panda_recover(
+    mock_file_class, observer_both, transport_panda, caplog
+):
+    """After a drain failure, when the panda comes back the next
+    successful drain must skip backlog and start at the current stream
+    tails. This keeps metadata aligned with the corr integration
+    window instead of smearing outage-era readings into new rows.
+    """
+    import redis.exceptions
+    from eigsep_redis.keys import METADATA_STREAMS_SET
+
+    observer = observer_both
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    # Seed an "outage backlog" entry into the metadata stream before the
+    # recovery iteration runs. Without skip-to-tail the recovery drain
+    # would pick this up.
+    backlog_sample = {"temp_c": 99.0, "status": "stale"}
+    MetadataWriter(transport_panda).add("sensor_a", backlog_sample)
+
+    mock_data = generate_data(ntimes=1)
+    drain_calls = []
+    real_drain = observer.metadata_stream.drain
+
+    def drain_side_effect(*a, **kw):
+        # First call: simulate connection error (outage). Subsequent
+        # calls behave normally — the loop's skip-to-tail recovery
+        # should have advanced the read pointer past the backlog.
+        drain_calls.append(time.monotonic())
+        if len(drain_calls) == 1:
+            raise redis.exceptions.ConnectionError("down")
+        return real_drain(*a, **kw)
+
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] == 2:
+            # Add a *post-recovery* entry; the recovery iteration should
+            # see only this one, not the backlog seeded above.
+            MetadataWriter(transport_panda).add(
+                "sensor_a", {"temp_c": 25.0, "status": "fresh"}
+            )
+        if read_count[0] >= 3:
+            observer.stop_event.set()
+        return (123, mock_data)
+
+    caplog.set_level(logging.INFO, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+        patch.object(
+            observer.metadata_stream, "drain", side_effect=drain_side_effect
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    # Confirm we actually exercised the recover-and-resume path.
+    assert len(drain_calls) >= 2
+    assert any("Panda reconnected" in rec.message for rec in caplog.records), [
+        r.message for r in caplog.records
+    ]
+
+    # No call to add_data carried the stale backlog reading.
+    seen_metadata = [
+        call.kwargs.get("metadata")
+        for call in mock_file.add_data.call_args_list
+    ]
+    stale_seen = any(
+        isinstance(m, dict)
+        and any(backlog_sample in v for v in m.values() if isinstance(v, list))
+        for m in seen_metadata
+    )
+    assert not stale_seen, (
+        f"stale backlog reading leaked into corr file: {seen_metadata}"
+    )
+
+    # Sanity: stream is registered so the skip helper actually had
+    # something to advance.
+    assert transport_panda.r.smembers(METADATA_STREAMS_SET)
+
+
+def test_skip_metadata_streams_to_tail_pops_read_positions(transport_panda):
+    """Direct unit test for the skip-to-tail helper: after a writer has
+    pushed several entries, ``_skip_metadata_streams_to_tail`` should
+    advance the local read pointer to the current tail so the next
+    drain returns nothing until a new entry arrives.
+    """
+    from eigsep_observing.observer import _skip_metadata_streams_to_tail
+    from eigsep_redis import MetadataStreamReader
+
+    writer = MetadataWriter(transport_panda)
+    reader = MetadataStreamReader(transport_panda)
+
+    writer.add("temp", {"value": 1.0})
+    writer.add("temp", {"value": 2.0})
+    writer.add("temp", {"value": 3.0})
+
+    # Rewind to the start of the stream so backlog is visible to drain.
+    # Without this the default "start at last-generated-id" semantics
+    # skip pre-existing entries — the bug skip-to-tail prevents on a
+    # reconnect.
+    transport_panda._set_last_read_id("stream:temp", "0-0")
+    assert reader.drain() == {
+        "stream:temp": [{"value": 1.0}, {"value": 2.0}, {"value": 3.0}]
+    }
+
+    # Pretend an outage: more backlog accumulates while the reader is
+    # not draining. Without skip-to-tail it would all replay on the
+    # next drain.
+    writer.add("temp", {"value": 4.0})
+    # Rewind again so the next call to ``_get_last_read_id`` would
+    # otherwise see the backlog.
+    transport_panda._set_last_read_id("stream:temp", "0-0")
+
+    _skip_metadata_streams_to_tail(transport_panda)
+    # Skip-to-tail advanced the pointer past the backlog → empty drain.
+    assert reader.drain() == {}
+
+    # A fresh entry after the skip is delivered normally.
+    writer.add("temp", {"value": 5.0})
+    out = reader.drain()
+    assert out == {"stream:temp": [{"value": 5.0}]}

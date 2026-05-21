@@ -2,12 +2,14 @@ import logging
 import threading
 import time
 
+import redis.exceptions
 from eigsep_redis import (
     ConfigStore,
     HeartbeatReader,
     MetadataStreamReader,
     StatusReader,
 )
+from eigsep_redis.keys import METADATA_STREAMS_SET
 
 from . import io, obs_config_owner, run_tag
 from .corr import CorrConfigStore, CorrReader
@@ -16,6 +18,54 @@ from .status_log_handler import PANDA_RELAY_LOGGER, StatusStreamHandler
 from .vna import VnaReader
 
 logger = logging.getLogger(__name__)
+
+
+# Global throttle for "panda drain raised" WARNINGs while panda is
+# down: matches the invariant-disagreement throttle in io.py and the
+# stream-staleness throttle in eigsep_redis.MetadataStreamReader.
+_DRAIN_WARN_INTERVAL_S = 60.0
+
+
+def _skip_metadata_streams_to_tail(transport):
+    """Pin local read positions to each panda metadata stream's
+    current Redis tail so the next drain returns only entries
+    published *after* this call.
+
+    Used by ``record_corr_data`` on a panda reconnect: the picos kept
+    publishing during the outage (their connection to the panda Redis
+    was fine — only the observer's was broken), so the stream still
+    holds backlog. Averaging that backlog into the *current* corr
+    integration would smear historical sensor readings across new corr
+    rows. Skipping to tail keeps metadata aligned with the corr
+    integration window, the same way the corr loop itself picks up the
+    SNAP's current row after a SNAP-side recovery rather than
+    replaying its backlog.
+
+    Pinning to the resolved tail (rather than popping the entry and
+    relying on the lazy ``xinfo_stream`` fallback) matters because the
+    fallback re-resolves on every drain — it would see entries added
+    *after* the skip as also-already-tail and silently drop them.
+    Pinning captures the tail at skip-time; everything after that
+    tail flows normally.
+
+    Touches ``transport._last_read_ids`` directly — the same hook
+    :class:`eigsep_redis.MetadataStreamReader` advances internally on
+    every drain. Once ``eigsep_redis`` exposes a public
+    ``skip_to_latest()`` helper this should call through to that.
+    """
+    members = transport.r.smembers(METADATA_STREAMS_SET)
+    with transport._stream_lock:
+        for member in members:
+            stream = member.decode() if isinstance(member, bytes) else member
+            try:
+                tail = transport.r.xinfo_stream(stream)["last-generated-id"]
+            except redis.exceptions.ResponseError:
+                # Stream not created yet (registered but never written).
+                # Drop the cached position; the next drain falls back
+                # through ``_get_last_read_id`` and re-resolves.
+                transport._last_read_ids.pop(stream, None)
+                continue
+            transport._last_read_ids[stream] = tail
 
 
 def _tick_liveness_deadline(deadline, liveness_timeout, reason):
@@ -163,12 +213,22 @@ class EigObserver:
 
     @property
     def panda_connected(self):
-        """
-        Check if the LattePanda Redis connection is established.
+        """Check whether the LattePanda Redis connection is alive.
+
+        Returns ``False`` when the panda transport was never built
+        (e.g. the panda was unreachable at observer startup) and also
+        when a previously-good connection has dropped — Redis client
+        operations on a dead socket raise ``ConnectionError``, which
+        we treat as "not connected" rather than letting it crash the
+        corr loop. Corr data is sacred; a panda failure must not block
+        a SNAP-side write.
         """
         if self.transport_panda is None:
             return False
-        return self.heartbeat_reader.check()
+        try:
+            return self.heartbeat_reader.check()
+        except redis.exceptions.ConnectionError:
+            return False
 
     def status_logger(self):
         """
@@ -190,7 +250,13 @@ class EigObserver:
                 if self.stop_event.wait(1):  # wait 1s before checking again
                     return
             self.logger.debug("Panda connected.")
-            level, status = self.status_reader.read(timeout=0.1)
+            try:
+                level, status = self.status_reader.read(timeout=0.1)
+            except redis.exceptions.ConnectionError:
+                # Treat the drop as a disconnect and loop back to the
+                # outer `panda_connected` wait. The next successful
+                # read picks up where the producer is now.
+                continue
             if status is not None:
                 self._panda_relay_logger.log(level, status)
 
@@ -334,6 +400,10 @@ class EigObserver:
         cached_header = None
         cached_sync_time = None
         last_write_deadline = None
+        # Track panda drops so we can skip metadata stream positions to
+        # the current tail on reconnect — see _skip_metadata_streams_to_tail.
+        panda_was_down = False
+        last_drain_warn_monotonic = 0.0
         try:
             while not self.stop_event.is_set():
                 if file.counter == 0:
@@ -427,8 +497,59 @@ class EigObserver:
                     continue
                 self.logger.info(f"{acc_cnt=}")
                 if self.panda_connected:
-                    metadata = self.metadata_stream.drain()
+                    if panda_was_down:
+                        # On reconnect, jump every metadata stream
+                        # past the outage backlog so the next drain
+                        # picks up the producer's "now". Keeps the
+                        # metadata cadence aligned with corr
+                        # integrations instead of smearing historical
+                        # readings into the current row.
+                        try:
+                            _skip_metadata_streams_to_tail(
+                                self.transport_panda
+                            )
+                            self.logger.info(
+                                "Panda reconnected; metadata stream "
+                                "positions reset to current tails."
+                            )
+                            panda_was_down = False
+                        except redis.exceptions.ConnectionError:
+                            # Bounced again between panda_connected
+                            # and the skip; treat as still-down and
+                            # try again next iteration.
+                            metadata = {}
+                            adc = self.adc_metadata_stream.drain()
+                            if adc:
+                                metadata.update(adc)
+                            if not metadata:
+                                metadata = None
+                            file.add_data(
+                                acc_cnt,
+                                cached_sync_time,
+                                data,
+                                metadata=metadata,
+                            )
+                            last_write_deadline = None
+                            continue
+                    try:
+                        metadata = self.metadata_stream.drain()
+                    except redis.exceptions.ConnectionError as exc:
+                        panda_was_down = True
+                        now_mono = time.monotonic()
+                        if (
+                            now_mono - last_drain_warn_monotonic
+                            >= _DRAIN_WARN_INTERVAL_S
+                        ):
+                            self.logger.warning(
+                                "Panda metadata drain failed: %s. "
+                                "Continuing corr writes with empty "
+                                "metadata until panda is back.",
+                                exc,
+                            )
+                            last_drain_warn_monotonic = now_mono
+                        metadata = {}
                 else:
+                    panda_was_down = True
                     metadata = {}
                 # adc_stats lives on the SNAP transport,
                 # merge into the same metadata dict
