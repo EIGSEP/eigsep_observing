@@ -261,12 +261,12 @@ def _run(transport, out_path, interval, stop_event):
                     try:
                         payload = json.loads(raw)
                     except (ValueError, TypeError) as exc:
-                        logger.warning(
+                        logger.error(
                             "Failed to decode entry on %s: %s", stream, exc
                         )
                         continue
                     if not isinstance(payload, dict):
-                        logger.warning(
+                        logger.error(
                             "Skipping non-dict payload on %s: %r",
                             stream,
                             payload,

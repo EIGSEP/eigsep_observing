@@ -111,7 +111,10 @@ def _loop(client, save_dir, bundles, interval, stop_event):
             except KeyboardInterrupt:
                 summary = f"!! {mode} bundle interrupted"
                 stop_event.set()
-            logger.info("%s", summary)
+            if summary.startswith("!!"):
+                logger.error("%s", summary)
+            else:
+                logger.info("%s", summary)
         if stop_event.is_set():
             break
         # ``wait`` returns True when the event fires mid-sleep, so the
