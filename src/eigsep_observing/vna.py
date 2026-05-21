@@ -1,6 +1,9 @@
 import json
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 
+import h5py
 import numpy as np
 
 from eigsep_redis.keys import DATA_STREAMS_SET
@@ -143,3 +146,106 @@ class VnaReader:
             )
             vna_data[k.decode()] = arr
         return vna_data, header, metadata
+
+
+def save_vna_manual_h5(s11, header, metadata, *, save_dir, mode):
+    """Write one VNA bundle to a local HDF5 file for bring-up tests.
+
+    The companion to ``scripts/vna_manual.py``. Stores raw S11 arrays
+    under ``/raw/``, ideal-OSL calibrated S11 (matching the live-status
+    pane's calibration) under ``/calibrated/``, the freq axis under
+    ``/freqs``, the header on root attrs (nested dicts JSON-encoded),
+    and the metadata snapshot under ``/metadata_snapshot/`` attrs.
+
+    Calibration failures (shape mismatch from ``calibrate_s11``) are
+    logged at ERROR and the ``/calibrated/`` group is skipped — the
+    raw arrays still land so the operator can re-calibrate offline.
+
+    Parameters
+    ----------
+    s11 : dict[str, np.ndarray]
+        The first element of the tuple returned by
+        ``PandaClient.measure_s11``.
+    header : dict
+        The second element. Must contain ``"freqs"`` (sequence of Hz).
+    metadata : dict
+        The third element (panda metadata snapshot at trigger time).
+    save_dir : pathlib.Path
+        Directory the file is written into. Must already exist.
+    mode : str
+        Either ``"ant"`` or ``"rec"``. Used in the filename and to
+        pick which keys count as DUTs (everything that is not a
+        ``cal:*`` standard).
+
+    Returns
+    -------
+    pathlib.Path
+        The path of the file that was written.
+    """
+    # Local import: live_status/__init__.py eagerly imports
+    # aggregator.py, which imports VnaReader from this module. A
+    # module-top import of calibrate_s11 would create a circular
+    # import (vna -> live_status -> aggregator -> vna).
+    from .live_status.vna_calibration import calibrate_s11
+
+    if mode not in {"ant", "rec"}:
+        raise ValueError(f"mode must be 'ant' or 'rec', got {mode!r}")
+    save_dir = Path(save_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = save_dir / f"vna_manual_{mode}_{stamp}.h5"
+
+    dut_keys = sorted(k for k in s11 if not k.startswith("cal:"))
+    cal_o = np.asarray(s11["cal:VNAO"])
+    cal_s = np.asarray(s11["cal:VNAS"])
+    cal_l = np.asarray(s11["cal:VNAL"])
+
+    calibrated = {}
+    cal_error = None
+    for dut in dut_keys:
+        try:
+            calibrated[dut] = calibrate_s11(
+                np.asarray(s11[dut]), cal_o, cal_s, cal_l
+            )
+        except ValueError as exc:
+            cal_error = exc
+            calibrated = {}
+            break
+    if cal_error is not None:
+        logger.error(
+            "vna_manual: calibration failed for mode=%r, skipping "
+            "/calibrated/ group: %s",
+            mode,
+            cal_error,
+        )
+
+    with h5py.File(path, "w") as f:
+        raw_grp = f.create_group("raw")
+        for key, arr in s11.items():
+            raw_grp.create_dataset(key, data=np.asarray(arr))
+        if calibrated:
+            cal_grp = f.create_group("calibrated")
+            for dut, arr in calibrated.items():
+                cal_grp.create_dataset(dut, data=arr)
+        f.create_dataset(
+            "freqs", data=np.asarray(header["freqs"], dtype=float)
+        )
+        for k, v in header.items():
+            if k in {"freqs", "mode"}:
+                continue
+            if isinstance(v, (dict, list, tuple)):
+                f.attrs[k] = json.dumps(v)
+            elif isinstance(v, np.ndarray):
+                f.attrs[k] = json.dumps(v.tolist())
+            else:
+                f.attrs[k] = v
+        f.attrs["mode"] = mode
+        f.attrs["vna_manual_script_version"] = "1"
+        meta_grp = f.create_group("metadata_snapshot")
+        for k, v in (metadata or {}).items():
+            if isinstance(v, (dict, list, tuple)):
+                meta_grp.attrs[k] = json.dumps(v)
+            elif isinstance(v, np.ndarray):
+                meta_grp.attrs[k] = json.dumps(v.tolist())
+            else:
+                meta_grp.attrs[k] = v
+    return path
