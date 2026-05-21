@@ -50,8 +50,15 @@ tempctrl_settings:
     target_C: 25.0
     hysteresis_C: 0.5
     clamp: 0.6
+    # PI gains — omit to keep firmware defaults (Kp=0.2, Ki=0.0).
+    # Ki=0 ships pico-firmware PR #88 as a pure discontinuity fix; opt in to
+    # integral action by uncommenting and tuning per-channel.
+    # Kp: 0.2
+    # Ki: 0.0
   LOAD:
     enable: true
     target_C: 25.0
     hysteresis_C: 0.5
     clamp: 0.6
+    # Kp: 0.2
+    # Ki: 0.0

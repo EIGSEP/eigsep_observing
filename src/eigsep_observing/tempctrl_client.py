@@ -34,6 +34,8 @@ class TempCtrlClient:
                     "target_C": float,
                     "hysteresis_C": float,
                     "clamp": float,
+                    "Kp": float,   # optional; firmware default 0.2
+                    "Ki": float,   # optional; firmware default 0.0
                 },
                 "LOAD": {... same keys as LNA ...},
             }
@@ -43,7 +45,10 @@ class TempCtrlClient:
         override." The yaml schema is kept readable (``target_C``,
         ``hysteresis_C``) and translated to firmware field names
         (``LNA_temp_target``, ``LNA_hysteresis``, ...) inside
-        :meth:`apply_settings`.
+        :meth:`apply_settings`. ``Kp`` and ``Ki`` are firmware-side
+        field names already and are forwarded unchanged via
+        :meth:`set_gains`. Omitting either gain leaves the firmware
+        default in place (``Kp=0.2``, ``Ki=0.0``).
     source : str
         Identifier stamped on proxy command stream entries.
     """
@@ -104,7 +109,7 @@ class TempCtrlClient:
                     f"{type(section).__name__}"
                 )
             coerced = {}
-            for fname in ("target_C", "hysteresis_C", "clamp"):
+            for fname in ("target_C", "hysteresis_C", "clamp", "Kp", "Ki"):
                 if fname in section:
                     val = section[fname]
                     try:
@@ -178,6 +183,45 @@ class TempCtrlClient:
         if kwargs:
             self._proxy.send_command("set_clamp", **kwargs)
 
+    def set_gains(
+        self, *, LNA_Kp=None, LNA_Ki=None, LOAD_Kp=None, LOAD_Ki=None
+    ):
+        """Set PI gains per channel.
+
+        Mirrors :meth:`picohost.base.PicoPeltier.set_gains`. Only the
+        kwargs that are not ``None`` are forwarded, so partial
+        application (e.g. tuning ``LNA_Ki`` while leaving everything
+        else alone) does not disturb other gains. Firmware caches the
+        last gains for replay on reconnect, so this method does not
+        need its own re-push loop.
+        """
+        kwargs = {}
+        if LNA_Kp is not None:
+            kwargs["LNA_Kp"] = float(LNA_Kp)
+        if LNA_Ki is not None:
+            kwargs["LNA_Ki"] = float(LNA_Ki)
+        if LOAD_Kp is not None:
+            kwargs["LOAD_Kp"] = float(LOAD_Kp)
+        if LOAD_Ki is not None:
+            kwargs["LOAD_Ki"] = float(LOAD_Ki)
+        if kwargs:
+            self._proxy.send_command("set_gains", **kwargs)
+
+    def reset_integral(self, *, LNA=False, LOAD=False):
+        """Clear the PI integrator on the selected channel(s).
+
+        One-shot. No-op if both channels are ``False`` so a
+        partial-application caller doesn't reset the wrong channel.
+        Operator-driven (e.g. after a large setpoint step that
+        accumulated integral that's no longer relevant); the steady
+        state controller does its own anti-windup.
+        """
+        if not LNA and not LOAD:
+            return
+        self._proxy.send_command(
+            "reset_integral", LNA=bool(LNA), LOAD=bool(LOAD)
+        )
+
     def set_temperature(
         self, *, T_LNA=None, LNA_hyst=None, T_LOAD=None, LOAD_hyst=None
     ):
@@ -225,22 +269,27 @@ class TempCtrlClient:
     def apply_settings(self):
         """Push the full config to the pico in safe order.
 
-        Order:
+        Order matches ``PicoPeltier``'s reconnect replay
+        (watchdog → clamp → gains → temperature → enable):
 
         1. ``set_watchdog_timeout`` first so any subsequent
            delay-between-commands cannot trip a zero-timeout default.
         2. ``set_clamp`` — establish the duty-cycle ceiling before
            anything is armed.
-        3. ``set_temperature`` — publish the target (and hysteresis)
+        3. ``set_gains`` — tune the PI controller before the setpoint
+           is published, so the very first PI tick on the new target
+           uses the configured Kp/Ki rather than firmware defaults.
+        4. ``set_temperature`` — publish the target (and hysteresis)
            while still disarmed (or at prior arm state).
-        4. ``set_enable`` — arm last, so by the time the channel turns
-           on the clamp and setpoint are already in place.
+        5. ``set_enable`` — arm last, so by the time the channel turns
+           on the clamp, gains, and setpoint are already in place.
 
         Idempotent: calling repeatedly with unchanged settings is a
         no-op on the hardware side (firmware replaces current values
         with identical ones). Missing sections are skipped — e.g.
         omitting ``watchdog_timeout_ms`` leaves whatever the firmware
-        currently has.
+        currently has. Missing ``Kp``/``Ki`` likewise leaves the
+        firmware defaults in place.
 
         Raises
         ------
@@ -259,6 +308,12 @@ class TempCtrlClient:
         self.set_clamp(
             LNA=lna.get("clamp"),
             LOAD=load.get("clamp"),
+        )
+        self.set_gains(
+            LNA_Kp=lna.get("Kp"),
+            LNA_Ki=lna.get("Ki"),
+            LOAD_Kp=load.get("Kp"),
+            LOAD_Ki=load.get("Ki"),
         )
         self.set_temperature(
             T_LNA=lna.get("target_C"),
