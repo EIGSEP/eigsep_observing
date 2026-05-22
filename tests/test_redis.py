@@ -56,8 +56,8 @@ class _BusBundle:
     def reset(self):
         return self.transport.reset()
 
-    def _set_last_read_id(self, stream, read_id):
-        return self.transport._set_last_read_id(stream, read_id)
+    def set_last_read_id(self, stream, read_id):
+        return self.transport.set_last_read_id(stream, read_id)
 
     def add_raw(self, key, value, ex=None):
         return self.transport.add_raw(key, value, ex=ex)
@@ -298,7 +298,7 @@ def test_metadata_stream_with_entries_skips_check(server, client, caplog):
     client.metadata.add("acc_cnt", 1)
     # Read from the start so the just-added entry is visible to drain
     # (default position is the last-generated-id, which xread excludes).
-    server._set_last_read_id("stream:acc_cnt", "0-0")
+    server.set_last_read_id("stream:acc_cnt", "0-0")
     # Backdate _after_ the add so the stream entry is visible but
     # the hash _ts is artificially old.
     _backdate_ts(server, "acc_cnt", seconds_ago=120)
@@ -401,8 +401,8 @@ def test_metadata_stream_drain_ignores_vna_stream(obs_server, obs_client):
     assert b"stream:temp" in metadata_members
 
     # Reset read positions so the streaming drain picks up seeded entries.
-    obs_server._set_last_read_id("stream:acc_cnt", "0-0")
-    obs_server._set_last_read_id("stream:temp", "0-0")
+    obs_server.set_last_read_id("stream:acc_cnt", "0-0")
+    obs_server.set_last_read_id("stream:temp", "0-0")
 
     # Default drain() must not touch stream:vna (would raise on
     # json.loads of the numpy payload) and must return the metadata.
@@ -537,24 +537,31 @@ def test_bus_classes_have_no_cross_bus_methods():
         "client_heartbeat_set",
         "client_heartbeat_check",
     )
+    # Status*, Corr*, Vna*, AdcSnapshot* are SingleStreamReader /
+    # SingleStreamWriter subclasses. ``vars(cls)`` only enumerates
+    # names defined on the subclass itself (not inherited), so the
+    # expected sets here are the bus-specific knobs each class adds
+    # on top of the base. Inherited names (``read`` / ``publish``)
+    # still work; this guard exists to catch cross-bus methods being
+    # added to a class, not to assert the inheritance surface.
     surfaces = {
-        StatusWriter: {"send", "maxlen"},
-        StatusReader: {"read", "stream"},
+        StatusWriter: {"send", "maxlen", "stream", "data_set"},
+        StatusReader: {"stream", "data_set"},
         HeartbeatWriter: {"set"},
         HeartbeatReader: {"check"},
         ConfigStore: {"upload", "get"},
-        CorrWriter: {"add", "maxlen"},
-        CorrReader: {"read", "seek"},
+        CorrWriter: {"add", "maxlen", "stream", "publish"},
+        CorrReader: {"read", "seek", "stream", "absent_warning"},
         CorrConfigStore: {
             "upload",
             "get",
             "upload_header",
             "get_header",
         },
-        VnaWriter: {"add", "maxlen"},
-        VnaReader: {"read"},
-        AdcSnapshotWriter: {"add", "maxlen"},
-        AdcSnapshotReader: {"read"},
+        VnaWriter: {"add", "maxlen", "stream"},
+        VnaReader: {"stream", "absent_warning"},
+        AdcSnapshotWriter: {"add", "maxlen", "stream"},
+        AdcSnapshotReader: {"stream", "absent_warning"},
     }
     # CorrConfigStore legitimately owns upload/get/upload_header/
     # get_header — those are its surface, not cross-bus. Scope the
@@ -960,8 +967,13 @@ def test_is_alive(server, client):
 
 
 def test_status(server, client):
-    # initial state
-    assert client.status_reader.stream == {"stream:status": "$"}
+    # StatusReader.stream is now the stream *name* (str), inherited
+    # from SingleStreamReader; the cursor lives on the transport and
+    # is "$" (newest-after-call) until the first read.
+    assert client.status_reader.stream == "stream:status"
+    assert (
+        client.transport.get_last_read_id(client.status_reader.stream) == "$"
+    )
 
     # Test blocking reads using ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=2) as executor:

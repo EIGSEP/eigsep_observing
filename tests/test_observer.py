@@ -733,7 +733,7 @@ def test_record_corr_data_panda_connected_drains_metadata(
     MetadataWriter(transport_panda).add("sensor_a", sample)
     # Rewind last-read-id so drain() picks up the entry we just pushed
     # (xread skips entries at/before the last-generated-id by default).
-    transport_panda._set_last_read_id("stream:sensor_a", "0-0")
+    transport_panda.set_last_read_id("stream:sensor_a", "0-0")
 
     def read_side_effect(*a, **kw):
         observer.stop_event.set()
@@ -842,7 +842,7 @@ def test_record_vna_data(
     # Push data into the Redis stream and reset read position so
     # the VNA reader picks it up on the first call.
     VnaWriter(transport_panda).add(s11, header=header, metadata=metadata)
-    transport_panda._set_last_read_id("stream:vna", "0-0")
+    transport_panda.set_last_read_id("stream:vna", "0-0")
 
     def stop_after_read():
         """Wait for the write, then stop."""

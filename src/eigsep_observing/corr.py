@@ -4,6 +4,7 @@ import time
 
 import numpy as np
 
+from eigsep_redis import SingleStreamReader, SingleStreamWriter
 from eigsep_redis.keys import DATA_STREAMS_SET
 
 from .keys import (
@@ -113,7 +114,7 @@ class CorrConfigStore:
         return json.loads(raw)
 
 
-class CorrWriter:
+class CorrWriter(SingleStreamWriter):
     """
     Publish raw correlator spectra onto the corr stream.
 
@@ -129,10 +130,25 @@ class CorrWriter:
     the worst-case Redis footprint around 360 MB.
     """
 
+    stream = CORR_STREAM
     maxlen = 2500
 
-    def __init__(self, transport):
-        self.transport = transport
+    def _encode(self, data, cnt, dtype=">i4"):
+        redis_data = {p.encode("utf-8"): d for p, d in data.items()}
+        redis_data["acc_cnt"] = str(cnt).encode("utf-8")
+        redis_data["dtype"] = dtype.encode("utf-8")
+        return redis_data
+
+    def publish(self, data, cnt, dtype=">i4"):
+        """
+        XADD one integration plus the side-set bookkeeping. The
+        per-pair keys are registered in ``CORR_PAIRS_SET`` *before*
+        the xadd so that ``CorrReader.read(pairs=None)`` can resolve
+        the active pair list via ``smembers``.
+        """
+        pair_keys = [p.encode("utf-8") for p in data.keys()]
+        self.transport.r.sadd(CORR_PAIRS_SET, *pair_keys)
+        super().publish(data, cnt, dtype=dtype)
 
     def add(self, data, cnt, sync_time, dtype=">i4"):
         """
@@ -159,21 +175,10 @@ class CorrWriter:
         if not sync_time:
             _log_unsynced_drop(cnt)
             return
-        redis_data = {p.encode("utf-8"): d for p, d in data.items()}
-        r = self.transport.r
-        r.sadd(CORR_PAIRS_SET, *redis_data.keys())
-        redis_data["acc_cnt"] = str(cnt).encode("utf-8")
-        redis_data["dtype"] = dtype.encode("utf-8")
-        r.xadd(
-            CORR_STREAM,
-            redis_data,
-            maxlen=self.maxlen,
-            approximate=True,
-        )
-        r.sadd(DATA_STREAMS_SET, CORR_STREAM)
+        self.publish(data, cnt, dtype=dtype)
 
 
-class CorrReader:
+class CorrReader(SingleStreamReader):
     """
     Consume raw correlator spectra from the corr stream.
 
@@ -193,10 +198,24 @@ class CorrReader:
     trigger false alarms.
     """
 
+    stream = CORR_STREAM
+    absent_warning = (
+        "No correlation data stream found. "
+        "Please ensure the SNAP is running and sending data."
+    )
+
     def __init__(self, transport):
-        self.transport = transport
+        super().__init__(transport)
         self._prev_acc_cnt = None
         self._last_gap_warn_monotonic = 0.0
+        # Per-call decode context — set by read() before delegating
+        # to super().read(), consumed by _decode(). Single-threaded
+        # per reader (one corr loop), so the stash is safe.
+        self._read_pairs = None
+        self._read_unpack = True
+
+    def _absent_sentinel(self):
+        return None, {}
 
     def seek(self, position):
         """
@@ -204,7 +223,7 @@ class CorrReader:
         linearity sweep) that want to start from a specific entry
         rather than from '$' / the last read.
         """
-        self.transport._set_last_read_id(CORR_STREAM, position)
+        self.transport.set_last_read_id(CORR_STREAM, position)
         self._prev_acc_cnt = None
 
     def read(self, pairs=None, timeout=10, unpack=True):
@@ -231,28 +250,21 @@ class CorrReader:
         TimeoutError
             If no entry arrives within ``timeout``.
         """
-        r = self.transport.r
-        if not r.sismember(DATA_STREAMS_SET, CORR_STREAM):
-            self.transport.logger.warning(
-                "No correlation data stream found. "
-                "Please ensure the SNAP is running and sending data."
-            )
-            return None, {}
         if pairs is None:
-            pairs = r.smembers(CORR_PAIRS_SET)
-        pairs = {p.encode() if isinstance(p, str) else p for p in pairs}
-        last_id = self.transport._streams_from_set(DATA_STREAMS_SET)[
-            CORR_STREAM
-        ]
-        out = r.xread(
-            {CORR_STREAM: last_id},
-            count=1,
-            block=int(timeout * 1000),
-        )
-        if not out:
-            raise TimeoutError("No correlation data received within timeout.")
-        eid, fields = out[0][1][0]
-        self.transport._set_last_read_id(CORR_STREAM, eid)
+            # Resolve from the producer-registered set. The base
+            # read()'s membership check will short-circuit to
+            # _absent_sentinel() if CORR_STREAM isn't registered
+            # yet, so an empty smembers here is harmless.
+            r = self.transport.r
+            if r.sismember(DATA_STREAMS_SET, CORR_STREAM):
+                pairs = r.smembers(CORR_PAIRS_SET)
+        if pairs is not None:
+            pairs = {p.encode() if isinstance(p, str) else p for p in pairs}
+        self._read_pairs = pairs
+        self._read_unpack = unpack
+        return super().read(timeout=timeout)
+
+    def _decode(self, entry_id, fields):
         acc_cnt = int(fields.pop(b"acc_cnt").decode())
         if self._prev_acc_cnt is not None:
             gap = acc_cnt - self._prev_acc_cnt
@@ -273,6 +285,8 @@ class CorrReader:
                     )
         self._prev_acc_cnt = acc_cnt
         dtype = fields.pop(b"dtype").decode()
+        pairs = self._read_pairs or set()
+        unpack = self._read_unpack
         data = {}
         for k, v in fields.items():
             if k not in pairs:

@@ -2,14 +2,14 @@ import json
 import logging
 
 import numpy as np
-from eigsep_redis.keys import DATA_STREAMS_SET
+from eigsep_redis import SingleStreamReader, SingleStreamWriter
 
 from .keys import ADC_SNAPSHOT_STREAM
 
 logger = logging.getLogger(__name__)
 
 
-class AdcSnapshotWriter:
+class AdcSnapshotWriter(SingleStreamWriter):
     """
     Publish raw ADC snapshot arrays onto the diagnostic snapshot stream.
 
@@ -29,10 +29,38 @@ class AdcSnapshotWriter:
     it would pull is already stale for debugging purposes.
     """
 
+    stream = ADC_SNAPSHOT_STREAM
     maxlen = 60
 
-    def __init__(self, transport):
-        self.transport = transport
+    def _encode(
+        self,
+        data,
+        unix_ts,
+        sync_time=None,
+        corr_acc_cnt=None,
+        wiring=None,
+    ):
+        if not isinstance(data, np.ndarray):
+            raise ValueError("data must be a numpy array")
+        # Force C-contiguous so tobytes() and the reader's reshape
+        # always agree on memory layout regardless of what the caller
+        # passed (views, F-contig, strided, etc.).
+        data = np.ascontiguousarray(data)
+        arr_meta = {
+            "dtype": data.dtype.str,
+            "shape": list(data.shape),
+        }
+        sidecar = {
+            "arr_meta": arr_meta,
+            "unix_ts": float(unix_ts),
+            "sync_time": sync_time,
+            "corr_acc_cnt": corr_acc_cnt,
+            "wiring": wiring,
+        }
+        return {
+            "data": data.tobytes(),
+            "sidecar": json.dumps(sidecar),
+        }
 
     def add(
         self,
@@ -71,82 +99,33 @@ class AdcSnapshotWriter:
         ValueError
             If ``data`` is not a numpy array.
         """
-        if not isinstance(data, np.ndarray):
-            raise ValueError("data must be a numpy array")
-        # Force C-contiguous so tobytes() and the reader's reshape
-        # always agree on memory layout regardless of what the caller
-        # passed (views, F-contig, strided, etc.).
-        data = np.ascontiguousarray(data)
-        arr_meta = {
-            "dtype": data.dtype.str,
-            "shape": list(data.shape),
-        }
-        sidecar = {
-            "arr_meta": arr_meta,
-            "unix_ts": float(unix_ts),
-            "sync_time": sync_time,
-            "corr_acc_cnt": corr_acc_cnt,
-            "wiring": wiring,
-        }
-        payload = {
-            "data": data.tobytes(),
-            "sidecar": json.dumps(sidecar),
-        }
-        r = self.transport.r
-        r.xadd(
-            ADC_SNAPSHOT_STREAM,
-            payload,
-            maxlen=self.maxlen,
-            approximate=True,
+        self.publish(
+            data,
+            unix_ts,
+            sync_time=sync_time,
+            corr_acc_cnt=corr_acc_cnt,
+            wiring=wiring,
         )
-        r.sadd(DATA_STREAMS_SET, ADC_SNAPSHOT_STREAM)
 
 
-class AdcSnapshotReader:
-    """Consume ADC snapshot frames from the diagnostic snapshot stream."""
+class AdcSnapshotReader(SingleStreamReader):
+    """
+    Consume ADC snapshot frames from the diagnostic snapshot stream.
 
-    def __init__(self, transport):
-        self.transport = transport
+    Returns ``(data, sidecar)`` from :meth:`read`; the
+    ``(None, None)`` tuple is returned when the snapshot stream
+    isn't registered yet (producer hasn't started).
+    """
 
-    def read(self, timeout=0):
-        """
-        Blocking read of one ADC snapshot frame.
+    stream = ADC_SNAPSHOT_STREAM
+    absent_warning = (
+        "No ADC snapshot stream found. Publisher may not have started yet."
+    )
 
-        Parameters
-        ----------
-        timeout : float
-            Timeout in seconds. Pass 0 to block indefinitely.
+    def _absent_sentinel(self):
+        return None, None
 
-        Returns
-        -------
-        (data, sidecar) : tuple
-            ``(np.ndarray, dict)``. Returns ``(None, None)`` if no
-            snapshot stream exists yet.
-
-        Raises
-        ------
-        TimeoutError
-            If no entry arrives within ``timeout``.
-        """
-        r = self.transport.r
-        if not r.sismember(DATA_STREAMS_SET, ADC_SNAPSHOT_STREAM):
-            self.transport.logger.warning(
-                "No ADC snapshot stream found. "
-                "Publisher may not have started yet."
-            )
-            return None, None
-        last_id = self.transport._streams_from_set(DATA_STREAMS_SET)[
-            ADC_SNAPSHOT_STREAM
-        ]
-        out = r.xread(
-            {ADC_SNAPSHOT_STREAM: last_id},
-            count=1,
-            block=int(timeout * 1000),
-        )
-        if not out:
-            raise TimeoutError("No ADC snapshot received within timeout.")
-        eid, fields = out[0][1][0]
-        self.transport._set_last_read_id(ADC_SNAPSHOT_STREAM, eid)
+    def _decode(self, entry_id, fields):
         sidecar = json.loads(fields[b"sidecar"].decode("utf-8"))
         arr_meta = sidecar["arr_meta"]
         data = np.frombuffer(
