@@ -13,12 +13,11 @@ from eigsep_redis import (
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
-from . import obs_config_owner, run_tag
-from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient
 from .tempctrl_client import TempCtrlClient
 from .vna import VnaWriter
+from .vna import measure_s11 as _measure_s11
 
 logger = logging.getLogger(__name__)
 
@@ -576,71 +575,16 @@ class PandaClient:
         routes through PicoManager.
 
         """
-        if mode not in ["ant", "rec"]:
-            raise ValueError(
-                f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'."
-            )
-        if self.vna is None:
-            raise RuntimeError(
-                "VNA not initialized. Cannot execute VNA commands."
-            )
-
-        self.vna.power_dBm = self.cfg["vna_settings"]["power_dBm"][mode]
-        osl_s11 = self.vna.measure_OSL()
-        if mode == "ant":
-            self.logger.info("Measuring antenna, noise, load S11")
-            s11 = self.vna.measure_ant(measure_noise=True, measure_load=True)
-        else:  # mode is rec
-            self.logger.info("Measuring receiver S11")
-            s11 = self.vna.measure_rec()
-        # s11 is a dict with keys ant & noise, or rec
-        for k, v in osl_s11.items():
-            s11[f"cal:{k}"] = v  # add OSL calibration data
-
-        header = self.vna.header
-        header["mode"] = mode
-        header["metadata_snapshot_unix"] = time.time()
-        # Provenance overlays — same shape and sentinel convention as
-        # EigObserver._with_header_overlays. self.cfg is canonical
-        # here because PandaClient owns the obs_config upload.
-        tag = run_tag.read(self.transport)
-        owner = obs_config_owner.read_owner(self.transport)
-        header["run_tag"] = (
-            tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
+        return _measure_s11(
+            self.vna,
+            mode,
+            cfg=self.cfg,
+            transport=self.transport,
+            vna_writer=self.vna_writer,
+            metadata_snapshot=self.metadata_snapshot,
+            on_contract_violation=self._warn_with_status,
+            logger=self.logger,
         )
-        header["run_started_at_unix"] = (
-            tag["run_started_at_unix"]
-            if tag["run_started_at_unix"] is not None
-            else 0.0
-        )
-        header["obs_config_owner"] = (
-            owner["owner"] if owner["owner"] is not None else "UNKNOWN"
-        )
-        header["obs_config_owner_uploaded_unix"] = (
-            owner["uploaded_at_unix"]
-            if owner["uploaded_at_unix"] is not None
-            else 0.0
-        )
-        header["obs_config"] = dict(self.cfg)
-        metadata = self.metadata_snapshot.get()
-
-        # Producer self-check against the VNA S11 contract (see
-        # io.VNA_S11_HEADER_SCHEMA). Loud but non-blocking: never
-        # raises, always publishes, so corr/VNA data flow is
-        # uninterrupted when the producer disagrees with its own
-        # contract.
-        violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(
-            s11, mode
-        )
-        if violations:
-            self._warn_with_status(
-                f"VNA S11 producer contract violation (mode={mode!r}): "
-                + "; ".join(violations)
-            )
-
-        self.vna_writer.add(s11, header=header, metadata=metadata)
-        self.logger.info("Vna data added to redis")
-        return s11, header, metadata
 
     def run_calibration_sequence(
         self, *, vna_modes=("ant", "rec"), schedule=None

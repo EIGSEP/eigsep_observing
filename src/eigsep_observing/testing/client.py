@@ -55,6 +55,35 @@ DUMMY_PICO_CLASSES = {
 }
 
 
+def start_dummy_pico_manager(transport):
+    """Create and start a :class:`PicoManager` populated with dummy devices.
+
+    The manager and each device share ``transport`` so producers
+    (picohost) and consumers (PandaClient or any bring-up script) talk
+    to the same (fake)redis. Each device gets its own
+    :class:`MetadataWriter` — the new picohost device API (picohost
+    1.0.0+) routes status publication through ``metadata_writer``
+    instead of the retired ``eig_redis`` composition shim. Per-device
+    :class:`HeartbeatWriter` entries mirror
+    ``PicoManager._register_devices`` so ``PicoProxy`` availability
+    checks succeed immediately after start.
+
+    Returns the started manager; callers are responsible for calling
+    ``manager.stop()`` on teardown.
+    """
+    mgr = PicoManager(transport)
+    writer = MetadataWriter(transport)
+    for name, cls in DUMMY_PICO_CLASSES.items():
+        pico = cls("/dev/dummy", metadata_writer=writer, name=name)
+        mgr.picos[name] = pico
+        hb = HeartbeatWriter(transport, name=pico_heartbeat_name(name))
+        hb.set(ex=HEARTBEAT_TTL, alive=True)
+        mgr._heartbeats[name] = hb
+        transport.r.sadd("picos", name)
+    mgr.start()
+    return mgr
+
+
 class DummyPandaClient(PandaClient):
     """
     Test PandaClient backed by an in-process PicoManager.
@@ -92,32 +121,8 @@ class DummyPandaClient(PandaClient):
         # Start the embedded manager BEFORE super().__init__ so that
         # PicoProxy.is_available is True when the parent constructor
         # builds sw_proxy.
-        self._manager = self._start_dummy_manager(transport)
+        self._manager = start_dummy_pico_manager(transport)
         super().__init__(transport, cfg=forwarded_cfg)
-
-    def _start_dummy_manager(self, transport):
-        """Create and start a PicoManager with dummy devices.
-
-        The manager and each device share ``transport`` so producers
-        (picohost) and consumers (PandaClient) talk to the same Redis.
-        Each device gets its own :class:`MetadataWriter` — the new
-        picohost device API (picohost 1.0.0+) routes status publication
-        through ``metadata_writer`` instead of the retired ``eig_redis``
-        composition shim. Per-device :class:`HeartbeatWriter` entries
-        mirror ``PicoManager._register_devices`` so ``PicoProxy``
-        availability checks succeed immediately after start.
-        """
-        mgr = PicoManager(transport)
-        writer = MetadataWriter(transport)
-        for name, cls in DUMMY_PICO_CLASSES.items():
-            pico = cls("/dev/dummy", metadata_writer=writer, name=name)
-            mgr.picos[name] = pico
-            hb = HeartbeatWriter(transport, name=pico_heartbeat_name(name))
-            hb.set(ex=HEARTBEAT_TTL, alive=True)
-            mgr._heartbeats[name] = hb
-            transport.r.sadd("picos", name)
-        mgr.start()
-        return mgr
 
     def init_VNA(self):
         """

@@ -763,7 +763,7 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
         _arm_status_reader(client)
         violations = ["missing key 'npoints'", "key 'mode': expected str"]
         with patch(
-            "eigsep_observing.client._validate_vna_s11_header",
+            "eigsep_observing.vna._validate_vna_s11_header",
             return_value=violations,
         ):
             caplog.set_level(logging.WARNING, logger="eigsep_observing.client")
