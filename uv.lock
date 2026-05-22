@@ -379,7 +379,7 @@ interactive = [
 
 [package.metadata]
 requires-dist = [
-    { name = "eigsep-redis", specifier = ">=2.2.1" },
+    { name = "eigsep-redis", specifier = ">=2.3.0" },
     { name = "eigsep-vna", specifier = ">=1.3" },
     { name = "fakeredis", marker = "extra == 'dev'" },
     { name = "flask" },
@@ -387,7 +387,7 @@ requires-dist = [
     { name = "ipython", marker = "extra == 'interactive'" },
     { name = "matplotlib", marker = "extra == 'interactive'" },
     { name = "numpy" },
-    { name = "picohost", specifier = ">=3.5.0" },
+    { name = "picohost", specifier = ">=3.6.0" },
     { name = "plotly" },
     { name = "pyserial-mock", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
@@ -401,14 +401,14 @@ provides-extras = ["dev", "interactive"]
 
 [[package]]
 name = "eigsep-redis"
-version = "2.2.1"
+version = "2.3.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "redis" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/25/90/04310f5780c4a2edc56a78e31ee8e6b78f0492aacc18502047904be66a48/eigsep_redis-2.2.1.tar.gz", hash = "sha256:a37f8166499318405c27b1ef36e3c92e1e3370544d066ce40e34da6eabf678d4", size = 18976, upload-time = "2026-05-22T18:59:00.81Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/15/9c/3a918f101bf7bcd683921af34f013043067e9cb5cbda2c93beff1d3253c8/eigsep_redis-2.3.0.tar.gz", hash = "sha256:c40ba13af1ab0207de7b558c3e382b24d54792d943841e7806a8b76676da3af2", size = 23660, upload-time = "2026-05-22T23:06:11.926Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/35/c6cac0386b9c0871aba16a585aa2c0f15a4ee6f32bcfe78f546f07930b36/eigsep_redis-2.2.1-py3-none-any.whl", hash = "sha256:ecf7b2599c908ecdd2dc0daa0f164c40a10aad3ea6a8304464d3eb9228687a67", size = 13845, upload-time = "2026-05-22T18:58:59.903Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/5a/3d81cccaec4b1af0dca464a617604bc6d870cbf5d89711945e5a43db601b/eigsep_redis-2.3.0-py3-none-any.whl", hash = "sha256:a3e2ffe5699dc3fe577b0ad9c01fd3e75c705514529931f5cb08c43b599e3538", size = 16558, upload-time = "2026-05-22T23:06:13.178Z" },
 ]
 
 [[package]]
@@ -1195,7 +1195,7 @@ wheels = [
 
 [[package]]
 name = "picohost"
-version = "3.5.0"
+version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eigsep-redis" },
@@ -1203,9 +1203,9 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyserial" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b0/b3/5e8db42d189c402d444eff9ce08e8c83169eecfcd4b8ad9b147a3c30db40/picohost-3.5.0.tar.gz", hash = "sha256:bcb85e12cf00495d840d30a8c8bab32fba789acabbce22e8436895a674f65507", size = 92864, upload-time = "2026-05-21T23:34:16.512Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7b/cc/d25be1181efb6bb592406f31a626bc67849cec1ed5088fba44f03d1e247b/picohost-3.6.0.tar.gz", hash = "sha256:042031cb7ad67e1dd322a2e4f937ec143d1afb0807adec28827fc3f0ae8b2e3f", size = 92890, upload-time = "2026-05-22T23:42:04.305Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/ff/13066dc530b6aea33bae2283e59057c481054cba735fa1dc196212de8134/picohost-3.5.0-py3-none-any.whl", hash = "sha256:043dd0de8b3ab78b311e03af7287261480052d8898efbcdd3e9b90d40fc3cfbb", size = 55485, upload-time = "2026-05-21T23:34:14.906Z" },
+    { url = "https://files.pythonhosted.org/packages/76/b4/dbcc710a44e5532465d6ba3907cdcbc6f8981975b82a5629fc7c35f9dcbd/picohost-3.6.0-py3-none-any.whl", hash = "sha256:5333e2500ea5c4b6d030783e43e05fcb2c986015ccee030973acf232970d0876", size = 55542, upload-time = "2026-05-22T23:42:02.932Z" },
 ]
 
 [[package]]
