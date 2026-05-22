@@ -21,6 +21,12 @@ ruff format --check .             # Check formatting (line length 79)
 
 **Source layout**: `src/eigsep_observing/` with `src`-layout setuptools packaging.
 
+Operator bring-up scripts under `scripts/` (`*_manual.py`,
+`record_*.py`, `vna_sweep.py`, etc.) follow a separate contract —
+they coexist with a running production observer and may not
+masquerade as one. See `scripts/CLAUDE.md` before adding or
+modifying any script in that directory.
+
 ### Core classes (all use Redis for communication):
 
 - **Transport** (`eigsep_redis.transport`, sibling repo [`eigsep_redis`](https://github.com/EIGSEP/eigsep_redis)) - Shared Redis transport object: connection, last-read-id bookkeeping, raw K/V, lifecycle. Owns nothing bus-specific. Writer and reader classes are constructed with a `Transport` and share state through it. Tests use `DummyTransport` (fakeredis-backed). The entire Redis transport + per-bus writer/reader layer lives in the `eigsep_redis` sibling repo; `eigsep_observing` consumes it as a dependency.

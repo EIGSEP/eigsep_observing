@@ -1,17 +1,24 @@
 """Looped VNA recorder for test-bench data collection.
 
 Same building blocks as :mod:`scripts.vna_manual` — production
-``PandaClient.measure_s11`` bundles, ``save_vna_manual_h5`` for the
-local HDF5 — but the interactive REPL is replaced with a timed loop
-that alternates the requested bundles at a fixed interval. Designed
-for hardware tests where the operator wants a steady stream of VNA
-captures running in the background while motor/tempctrl scripts
-exercise other parts of the system.
+``eigsep_observing.vna.measure_s11`` protocol, ``save_vna_manual_h5``
+for the local HDF5 — but the interactive REPL is replaced with a timed
+loop that alternates the requested bundles at a fixed interval.
+Designed for hardware tests where the operator wants a steady stream
+of VNA captures running in the background while motor/tempctrl
+scripts exercise other parts of the system.
 
 Each iteration runs every selected bundle (default: ``ant`` then
 ``rec``) in order, prints the per-bundle summary, then sleeps until
 the next tick. SIGINT / SIGTERM stop the loop after the current
 bundle completes so the in-flight HDF5 is closed cleanly.
+
+Like ``vna_manual``, this script follows the bring-up contract in
+``scripts/CLAUDE.md``: it builds only the minimal VNA-producer
+subsystem, never a :class:`PandaClient`. The Pico arbitrates rfswitch
+state, so concurrent operator scripts (motor_manual, tempctrl_manual,
+...) and the production observer all coexist without an in-process
+coord lock.
 """
 
 from argparse import ArgumentParser
@@ -24,51 +31,22 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from eigsep_redis import ConfigStore, Transport
 from picohost.proxy import PicoProxy
 
-from eigsep_observing import PandaClient
-from eigsep_observing._scripts_util import require_pico
+from eigsep_observing import run_tag
+from eigsep_observing._scripts_util import build_transport_bare, require_pico
 from eigsep_observing.utils import configure_eig_logger, get_config_path
-from eigsep_observing.vna import save_vna_manual_h5
+from eigsep_observing.vna import (
+    build_vna_subsystem,
+    measure_s11,
+    save_vna_manual_h5,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 _VALID_BUNDLES = ("ant", "rec")
-
-
-def _build_transport(dummy):
-    """Bare transport for the VNA scripts. The shared
-    ``_scripts_util.build_transport`` auto-attaches a no-cfg
-    ``DummyPandaClient`` for the other manual scripts, which would
-    collide with the cfg-aware ``DummyPandaClient`` ``_build_vna_client``
-    constructs below."""
-    if dummy:
-        logger.warning("Running in DUMMY mode, no hardware will be used.")
-        transport = Transport(host="localhost", port=6380)
-        transport.reset()
-        return transport
-    return Transport(host="localhost", port=6379)
-
-
-def _build_vna_client(transport, cfg, dummy):
-    """VNA-only ``PandaClient``: switches/motor/tempctrl off,
-    motion/switching serialization off (each bundle runs inside its
-    own ``switch_section``)."""
-    cfg = dict(cfg)
-    cfg["use_vna"] = True
-    cfg["use_switches"] = False
-    cfg["use_motor"] = False
-    cfg["use_tempctrl"] = False
-    cfg["serialize_motion_and_switching"] = False
-    ConfigStore(transport).upload(cfg)
-    if dummy:
-        from eigsep_observing.testing import DummyPandaClient
-
-        return DummyPandaClient(transport=transport, cfg=cfg)
-    return PandaClient(transport)
 
 
 def _summary_db(arr):
@@ -79,15 +57,22 @@ def _summary_db(arr):
     return float(20.0 * np.log10(np.mean(mag)))
 
 
-def _run_bundle(client, mode, save_dir):
+def _run_bundle(subsystem, cfg, transport, mode, save_dir):
     """Run one OSL+DUT bundle and write the local HDF5 file. Catches
     measurement failures and local-save OS errors so the loop can keep
     going."""
-    with client.coord.switch_section():
-        try:
-            payload = client.measure_s11(mode)
-        except (RuntimeError, TimeoutError, ValueError) as exc:
-            return f"!! {mode} bundle failed: {type(exc).__name__}: {exc}"
+    try:
+        payload = measure_s11(
+            subsystem.vna,
+            mode,
+            cfg=cfg,
+            transport=transport,
+            vna_writer=subsystem.vna_writer,
+            metadata_snapshot=subsystem.metadata_snapshot,
+            on_contract_violation=logger.warning,
+        )
+    except (RuntimeError, TimeoutError, ValueError) as exc:
+        return f"!! {mode} bundle failed: {type(exc).__name__}: {exc}"
     s11, header, metadata = payload
     try:
         path = save_vna_manual_h5(
@@ -129,7 +114,7 @@ def _parse_args():
     parser.add_argument(
         "--dummy",
         action="store_true",
-        help="Run against a fakeredis-backed DummyPandaClient.",
+        help="Run against a fakeredis-backed DummyVNA + dummy PicoManager.",
     )
     parser.add_argument(
         "--save-dir",
@@ -164,13 +149,15 @@ def _parse_args():
     return parser.parse_args()
 
 
-def _loop(client, save_dir, bundles, interval, stop_event):
+def _loop(subsystem, cfg, transport, save_dir, bundles, interval, stop_event):
     while not stop_event.is_set():
         for mode in bundles:
             if stop_event.is_set():
                 break
             try:
-                summary = _run_bundle(client, mode, save_dir)
+                summary = _run_bundle(
+                    subsystem, cfg, transport, mode, save_dir
+                )
             except KeyboardInterrupt:
                 summary = f"!! {mode} bundle interrupted"
                 stop_event.set()
@@ -203,8 +190,14 @@ def main():
     if not args.save_dir.is_dir():
         raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
-    transport = _build_transport(args.dummy)
-    client = _build_vna_client(transport, cfg, args.dummy)
+    transport = build_transport_bare(args.dummy)
+    # require_pico runs again inside build_vna_subsystem, but checking
+    # before subsystem assembly gives the operator a clearer error
+    # path (no VNA setup attempted against a missing rfswitch).
+    require_pico(PicoProxy("rfswitch", transport, source="record_vna"))
+    subsystem = build_vna_subsystem(
+        transport, cfg, source="record_vna", dummy=args.dummy
+    )
 
     stop_event = threading.Event()
 
@@ -218,18 +211,24 @@ def main():
     signal.signal(signal.SIGTERM, _handle)
 
     try:
-        require_pico(PicoProxy("rfswitch", transport, source="record_vna"))
-        if client.vna is None:
-            raise SystemExit("VNA not initialized; check vna config block.")
-        logger.info(
-            "Looping bundles %s every %.1fs, saving to %s.",
-            bundles,
-            args.interval,
-            args.save_dir.resolve(),
-        )
-        _loop(client, args.save_dir, bundles, args.interval, stop_event)
+        with run_tag.session(transport, "record_vna"):
+            logger.info(
+                "Looping bundles %s every %.1fs, saving to %s.",
+                bundles,
+                args.interval,
+                args.save_dir.resolve(),
+            )
+            _loop(
+                subsystem,
+                cfg,
+                transport,
+                args.save_dir,
+                bundles,
+                args.interval,
+                stop_event,
+            )
     finally:
-        client.stop()
+        subsystem.cleanup()
     return 0
 
 

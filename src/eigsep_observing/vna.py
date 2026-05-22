@@ -1,15 +1,21 @@
 import json
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import h5py
 import numpy as np
 
+from cmt_vna import VNA
+from eigsep_redis import MetadataSnapshotReader
 from eigsep_redis.keys import DATA_STREAMS_SET
+from picohost.proxy import PicoProxy
 
 from . import obs_config_owner, run_tag
+from ._scripts_util import require_pico
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .keys import VNA_STREAM
 from .vna_calibration import calibrate_s11
@@ -150,6 +156,122 @@ class VnaReader:
             )
             vna_data[k.decode()] = arr
         return vna_data, header, metadata
+
+
+@dataclass
+class VnaSubsystem:
+    """Minimal VNA-producer surface a bring-up script needs to call
+    :func:`measure_s11`.
+
+    Returned by :func:`build_vna_subsystem`. See ``scripts/CLAUDE.md``
+    for the broader bring-up-script contract this dataclass embodies.
+    """
+
+    vna: VNA
+    vna_writer: "VnaWriter"
+    metadata_snapshot: MetadataSnapshotReader
+    cleanup: Callable[[], None]
+
+
+def build_vna_subsystem(transport, cfg, *, source, dummy=False):
+    """Assemble the minimum VNA-producer subsystem for bring-up scripts.
+
+    The bring-up-script counterpart to ``PandaClient.init_VNA``: builds
+    the configured ``cmt_vna.VNA`` (or ``DummyVNA``), wires its
+    ``switch_fn`` through a ``PicoProxy("rfswitch")`` so the Pico's
+    command stream arbitrates switching across concurrent producers,
+    and returns the producer bus surface (``VnaWriter``) plus the
+    consumer snapshot (``MetadataSnapshotReader``) needed to call
+    :func:`measure_s11`.
+
+    Unlike ``PandaClient.__init__`` this:
+
+    - does **not** start a panda heartbeat thread (``panda:hb*``
+      belongs to the real panda process);
+    - does **not** force-switch the rig to RFANT at startup
+      (would fight a running observer);
+    - does **not** upload ``cfg`` to ``ConfigStore`` (the running
+      observer owns it);
+    - does **not** build a ``MotionSwitchCoordinator`` (its in-process
+      lock would not serialize against the real observer or sibling
+      bring-up scripts in other terminals; the Pico does the
+      cross-process arbitration).
+
+    These omissions are the contract documented in ``scripts/CLAUDE.md``.
+
+    Parameters
+    ----------
+    transport : eigsep_redis.Transport
+        Bare transport — typically from
+        ``_scripts_util.build_transport_bare``. Must NOT have a
+        ``DummyPandaClient`` already attached (would double-register
+        dummy picos when ``dummy=True``).
+    cfg : dict
+        Loaded obs_config (``vna_ip`` / ``vna_port`` / ``vna_timeout``
+        / ``vna_settings``). Not uploaded to Redis.
+    source : str
+        Identifier stamped onto the ``PicoProxy("rfswitch", ...)`` so
+        operator log lines distinguish ``vna_manual`` /
+        ``record_vna`` / etc.
+    dummy : bool, optional
+        If True, use ``DummyVNA`` and start an in-process dummy
+        ``PicoManager`` (so the ``rfswitch`` proxy resolves). The
+        manager is shut down by the returned ``cleanup`` callback.
+
+    Returns
+    -------
+    VnaSubsystem
+        Dataclass with ``vna``, ``vna_writer``, ``metadata_snapshot``
+        and a ``cleanup`` callable the caller must invoke on teardown
+        (idempotent; no-op when ``dummy=False``).
+
+    Raises
+    ------
+    SystemExit
+        If ``rfswitch`` is not registered with ``PicoManager`` (raised
+        from :func:`require_pico` with an operator-actionable message).
+    """
+    sw_proxy = PicoProxy("rfswitch", transport, source=source)
+
+    def switch_fn(state):
+        if sw_proxy.send_command("switch", state=state) is None:
+            raise RuntimeError(
+                f"RF switch to {state} failed: rfswitch not registered "
+                "with PicoManager."
+            )
+
+    manager = None
+    vna_cls = VNA
+    if dummy:
+        from cmt_vna.testing import DummyVNA
+        from eigsep_observing.testing import start_dummy_pico_manager
+
+        vna_cls = DummyVNA
+        manager = start_dummy_pico_manager(transport)
+
+    vna = vna_cls(
+        ip=cfg["vna_ip"],
+        port=cfg["vna_port"],
+        timeout=cfg["vna_timeout"],
+        switch_fn=switch_fn,
+    )
+
+    require_pico(sw_proxy)
+
+    setup_kwargs = cfg["vna_settings"].copy()
+    setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
+    vna.setup(**setup_kwargs)
+
+    def cleanup():
+        if manager is not None:
+            manager.stop()
+
+    return VnaSubsystem(
+        vna=vna,
+        vna_writer=VnaWriter(transport),
+        metadata_snapshot=MetadataSnapshotReader(transport),
+        cleanup=cleanup,
+    )
 
 
 def measure_s11(
