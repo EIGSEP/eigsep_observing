@@ -13,8 +13,6 @@ from pathlib import Path
 
 import pytest
 
-from eigsep_observing._vna_manual_core import build_vna_client
-
 
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
 
@@ -30,7 +28,8 @@ def _load():
 @pytest.fixture
 def vna_client(transport, dummy_cfg):
     """``DummyPandaClient`` with ``use_vna=True`` and a live ``DummyVNA``."""
-    c = build_vna_client(transport, dummy_cfg, dummy=True)
+    rv = _load()
+    c = rv._build_vna_client(transport, dummy_cfg, dummy=True)
     yield c
     c.stop()
 
@@ -43,7 +42,7 @@ def test_loop_runs_each_bundle_then_stops(vna_client, tmp_path, monkeypatch):
     save_dir = tmp_path
     stop_event = threading.Event()
     calls = []
-    real_run = rv.run_bundle
+    real_run = rv._run_bundle
 
     def _tracker(client_, mode, save_dir_):
         result = real_run(client_, mode, save_dir_)
@@ -52,7 +51,7 @@ def test_loop_runs_each_bundle_then_stops(vna_client, tmp_path, monkeypatch):
             stop_event.set()
         return result
 
-    monkeypatch.setattr(rv, "run_bundle", _tracker)
+    monkeypatch.setattr(rv, "_run_bundle", _tracker)
 
     rv._loop(
         client=vna_client,
