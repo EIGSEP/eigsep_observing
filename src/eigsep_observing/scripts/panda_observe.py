@@ -31,9 +31,8 @@ import yaml
 
 from eigsep_redis import ConfigStore, Transport
 
-from eigsep_observing import PandaClient
-from eigsep_observing.run_tag import clear as clear_run_tag
-from eigsep_observing.run_tag import publish as publish_run_tag
+from eigsep_observing import PandaClient, run_tag
+from eigsep_observing.obs_config_owner import publish_owner
 
 try:
     from eigsep_observing.testing import DummyPandaClient
@@ -95,56 +94,65 @@ def main() -> int:
         logger.warning("Running in DUMMY mode, no hardware will be used.")
         transport = Transport(host="localhost", port=6380)
         transport.reset()  # reset test redis database
-        ConfigStore(transport).upload(cfg)
-        client = DummyPandaClient(transport=transport, default_cfg=cfg)
     else:
         transport = Transport(host="localhost", port=6379)
-        ConfigStore(transport).upload(cfg)
-        client = PandaClient(transport)
 
-    logger.info(f"Client configuration: {client.cfg}")
+    client = None
     thds = {}
     try:
-        publish_run_tag(transport, "panda_observe")
+        with run_tag.session(transport, "panda_observe"):
+            # Upload obs_config + claim ownership inside the session so
+            # that if another driver currently owns the run_tag, the
+            # RuntimeError from session() fires before we overwrite the
+            # legitimate owner's obs_config / obs_config_owner stamps
+            # (obs_config_owner has no clear() — once written, it
+            # persists until the next uploader).
+            ConfigStore(transport).upload(cfg)
+            publish_owner(transport, "panda_observe")
+            if args.dummy:
+                client = DummyPandaClient(transport=transport, cfg=cfg)
+            else:
+                client = PandaClient(transport)
+            logger.info(f"Client configuration: {client.cfg}")
 
-        # switches
-        if client.cfg["use_switches"]:
-            switch_thd = Thread(target=client.switch_loop)
-            thds["switch"] = switch_thd
-            logger.info("Starting switch thread")
-            switch_thd.start()
+            # switches
+            if client.cfg["use_switches"]:
+                switch_thd = Thread(target=client.switch_loop)
+                thds["switch"] = switch_thd
+                logger.info("Starting switch thread")
+                switch_thd.start()
 
-        # VNA
-        if client.cfg["use_vna"]:
-            vna_thd = Thread(target=client.vna_loop)
-            thds["vna"] = vna_thd
-            logger.info("Starting VNA thread")
-            vna_thd.start()
+            # VNA
+            if client.cfg["use_vna"]:
+                vna_thd = Thread(target=client.vna_loop)
+                thds["vna"] = vna_thd
+                logger.info("Starting VNA thread")
+                vna_thd.start()
 
-        # motor (periodic az/el scans)
-        if client.cfg.get("use_motor", False):
-            motor_thd = Thread(target=client.motor_loop)
-            thds["motor"] = motor_thd
-            logger.info("Starting motor thread")
-            motor_thd.start()
+            # motor (periodic az/el scans)
+            if client.cfg.get("use_motor", False):
+                motor_thd = Thread(target=client.motor_loop)
+                thds["motor"] = motor_thd
+                logger.info("Starting motor thread")
+                motor_thd.start()
 
-        # tempctrl
-        if client.cfg.get("use_tempctrl", False):
-            tempctrl_thd = Thread(target=client.tempctrl_loop)
-            thds["tempctrl"] = tempctrl_thd
-            logger.info("Starting tempctrl thread")
-            tempctrl_thd.start()
+            # tempctrl
+            if client.cfg.get("use_tempctrl", False):
+                tempctrl_thd = Thread(target=client.tempctrl_loop)
+                thds["tempctrl"] = tempctrl_thd
+                logger.info("Starting tempctrl thread")
+                tempctrl_thd.start()
 
-        client.stop_client.wait()  # wait until stop signal is set
+            client.stop_client.wait()  # wait until stop signal is set
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, stopping threads")
     finally:
-        client.stop()
+        if client is not None:
+            client.stop()
         for name, t in thds.items():
             logger.info(f"Joining thread {name}")
             t.join()
             logger.info(f"Thread {name} joined")
-        clear_run_tag(transport)
         logger.info("All threads joined, exiting.")
 
     return 0

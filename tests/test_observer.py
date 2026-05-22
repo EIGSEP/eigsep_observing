@@ -131,6 +131,8 @@ def test_observer_init_panda_empty_config_does_not_raise():
         assert overlaid["obs_config"] == {}
         assert overlaid["run_tag"] == "UNKNOWN"
         assert overlaid["run_started_at_unix"] == 0.0
+        assert overlaid["obs_config_owner"] == "UNKNOWN"
+        assert overlaid["obs_config_owner_uploaded_unix"] == 0.0
     finally:
         observer.close()
 
@@ -444,6 +446,8 @@ def test_record_corr_data_transient_header_blip_uses_cache(
         **good_header,
         "run_tag": "UNKNOWN",
         "run_started_at_unix": 0.0,
+        "obs_config_owner": "UNKNOWN",
+        "obs_config_owner_uploaded_unix": 0.0,
         "obs_config": {},
     }
     mock_file.set_header.assert_any_call(header=expected_header)
@@ -958,12 +962,14 @@ def test_record_vna_data_stop_event(observer_panda_only, transport_panda):
 
 
 def test_with_header_overlays_no_panda_uses_sentinels(observer_snap_only):
-    """No transport_panda → run_tag sentinels + empty obs_config."""
+    """No transport_panda → run_tag + owner sentinels + empty obs_config."""
     observer = observer_snap_only
     out = observer._with_header_overlays({"sync_time": 12345.0})
     assert out["sync_time"] == 12345.0
     assert out["run_tag"] == "UNKNOWN"
     assert out["run_started_at_unix"] == 0.0
+    assert out["obs_config_owner"] == "UNKNOWN"
+    assert out["obs_config_owner_uploaded_unix"] == 0.0
     assert out["obs_config"] == {}
 
 
@@ -988,6 +994,54 @@ def test_with_header_overlays_panda_no_tag_published(
     assert out["run_started_at_unix"] == 0.0
     # obs_config is still populated — the fixture uploaded one.
     assert "vna_settings" in out["obs_config"]
+
+
+def test_with_header_overlays_owner_trusted(observer_both, transport_panda):
+    """run_tag == obs_config_owner: the active driver also uploaded the cfg.
+
+    Downstream's strongest trust check passes — the cfg block in the
+    header reflects what is running right now.
+    """
+    from eigsep_observing import obs_config_owner
+
+    run_tag.publish(transport_panda, "panda_observe", started_unix=10.0)
+    obs_config_owner.publish_owner(
+        transport_panda, "panda_observe", uploaded_at_unix=5.0
+    )
+    out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["run_tag"] == "panda_observe"
+    assert out["obs_config_owner"] == "panda_observe"
+    assert out["obs_config_owner_uploaded_unix"] == 5.0
+
+
+def test_with_header_overlays_bring_up_overlap(observer_both, transport_panda):
+    """run_tag=vna_manual, owner=panda_observe: bring-up tool overlap.
+
+    The persistent cfg was uploaded by panda_observe but a bring-up
+    tool (which never touches ConfigStore.upload) is currently driving
+    the panda. Downstream's necessary trust check
+    (owner != "UNKNOWN") passes; the stronger run_tag == owner check
+    distinguishes this case.
+    """
+    from eigsep_observing import obs_config_owner
+
+    obs_config_owner.publish_owner(
+        transport_panda, "panda_observe", uploaded_at_unix=5.0
+    )
+    run_tag.publish(transport_panda, "vna_manual", started_unix=10.0)
+    out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["run_tag"] == "vna_manual"
+    assert out["obs_config_owner"] == "panda_observe"
+    assert out["obs_config_owner_uploaded_unix"] == 5.0
+
+
+def test_with_header_overlays_owner_unknown(observer_both, transport_panda):
+    """No owner published → "UNKNOWN" sentinel; trust check fails closed."""
+    run_tag.publish(transport_panda, "vna_manual", started_unix=10.0)
+    out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["run_tag"] == "vna_manual"
+    assert out["obs_config_owner"] == "UNKNOWN"
+    assert out["obs_config_owner_uploaded_unix"] == 0.0
 
 
 def test_with_header_overlays_obs_config_failure_errors(observer_both, caplog):
@@ -1059,6 +1113,8 @@ def test_record_corr_data_writes_overlays_into_header(
     assert written["sync_time"] == sync_time
     assert written["run_tag"] == "no_switch_observation"
     assert written["run_started_at_unix"] == 100.0
+    assert written["obs_config_owner"] == "UNKNOWN"
+    assert written["obs_config_owner_uploaded_unix"] == 0.0
     assert written["obs_config"]["vna_interval"] == 0.5
 
 

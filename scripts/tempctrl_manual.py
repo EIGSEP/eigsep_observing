@@ -47,6 +47,7 @@ import time
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
 
+from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import build_transport, require_pico
 from eigsep_observing.utils import configure_eig_logger
 
@@ -451,7 +452,8 @@ def _parse_args():
 def main():
     args = _parse_args()
     transport = build_transport(args.dummy)
-    curses.wrapper(_curses_main, transport, args)
+    with run_tag.session(transport, "tempctrl_manual"):
+        curses.wrapper(_curses_main, transport, args)
 
 
 if __name__ == "__main__":

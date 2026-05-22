@@ -19,6 +19,7 @@ import time
 
 from eigsep_redis import MetadataSnapshotReader
 
+from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.io import _IMU_SCHEMA
 from eigsep_observing.utils import configure_eig_logger
@@ -131,15 +132,16 @@ def _parse_args():
 def main():
     args = _parse_args()
     transport = build_transport(args.dummy)
-    snapshot = MetadataSnapshotReader(transport)
-    if args.which == "both":
-        names = ["imu_el", "imu_az"]
-    else:
-        names = [f"imu_{args.which}"]
-    try:
-        _render_loop(snapshot, names, args.interval)
-    except KeyboardInterrupt:
-        print()
+    with run_tag.session(transport, "imu_manual"):
+        snapshot = MetadataSnapshotReader(transport)
+        if args.which == "both":
+            names = ["imu_el", "imu_az"]
+        else:
+            names = [f"imu_{args.which}"]
+        try:
+            _render_loop(snapshot, names, args.interval)
+        except KeyboardInterrupt:
+            print()
 
 
 if __name__ == "__main__":

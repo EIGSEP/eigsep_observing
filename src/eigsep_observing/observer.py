@@ -9,7 +9,7 @@ from eigsep_redis import (
     StatusReader,
 )
 
-from . import io, run_tag
+from . import io, obs_config_owner, run_tag
 from .corr import CorrConfigStore, CorrReader
 from .file_heartbeat import publish as publish_file_heartbeat
 from .status_log_handler import PANDA_RELAY_LOGGER, StatusStreamHandler
@@ -198,23 +198,32 @@ class EigObserver:
         """Return a copy of ``header`` with panda-side overlay fields merged in.
 
         Adds ``run_tag`` / ``run_started_at_unix`` (from
-        :mod:`eigsep_observing.run_tag`) and ``obs_config`` (from
-        :class:`eigsep_redis.ConfigStore`) so each corr file records the
-        active panda script and the panda-side config snapshot at
-        file-open time.
+        :mod:`eigsep_observing.run_tag`),
+        ``obs_config_owner`` / ``obs_config_owner_uploaded_unix`` (from
+        :mod:`eigsep_observing.obs_config_owner`), and ``obs_config``
+        (from :class:`eigsep_redis.ConfigStore`) so each corr file
+        records the active panda script, the last script to upload the
+        config, and the panda-side config snapshot at file-open time.
+
+        Downstream trust check: ``obs_config_owner != "UNKNOWN"`` means
+        someone legitimately uploaded the cfg at some point;
+        ``run_tag == obs_config_owner`` means that same script is the
+        active driver right now.
 
         All overlay reads are defensive: a missing or malformed
-        run_tag, a missing obs_config, or a transient transport
-        failure all resolve to ``"UNKNOWN"`` / ``0.0`` / ``{}`` rather
-        than raising. Corr data is sacred — overlay enrichment must
-        never block a corr file from being written. Sentinel values
-        (rather than dropping the keys) guarantee every post-PR file
-        carries the field and let downstream distinguish
-        "no producer info" from "old file without this field."
+        run_tag, a missing obs_config_owner, a missing obs_config, or a
+        transient transport failure all resolve to ``"UNKNOWN"`` /
+        ``0.0`` / ``{}`` rather than raising. Corr data is sacred —
+        overlay enrichment must never block a corr file from being
+        written. Sentinel values (rather than dropping the keys)
+        guarantee every post-PR file carries the field and let
+        downstream distinguish "no producer info" from "old file
+        without this field."
         """
         out = dict(header)
         if self.transport_panda is not None:
             tag = run_tag.read(self.transport_panda)
+            owner = obs_config_owner.read_owner(self.transport_panda)
             try:
                 obs_cfg = self.config.get()
             except Exception as exc:
@@ -222,6 +231,7 @@ class EigObserver:
                 obs_cfg = {}
         else:
             tag = {"run_tag": None, "run_started_at_unix": None}
+            owner = {"owner": None, "uploaded_at_unix": None}
             obs_cfg = {}
         out["run_tag"] = (
             tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
@@ -229,6 +239,14 @@ class EigObserver:
         out["run_started_at_unix"] = (
             tag["run_started_at_unix"]
             if tag["run_started_at_unix"] is not None
+            else 0.0
+        )
+        out["obs_config_owner"] = (
+            owner["owner"] if owner["owner"] is not None else "UNKNOWN"
+        )
+        out["obs_config_owner_uploaded_unix"] = (
+            owner["uploaded_at_unix"]
+            if owner["uploaded_at_unix"] is not None
             else 0.0
         )
         out["obs_config"] = obs_cfg

@@ -103,6 +103,6 @@ def transport():
 
 @pytest.fixture
 def client(transport, dummy_cfg):
-    c = DummyPandaClient(transport, default_cfg=dummy_cfg)
+    c = DummyPandaClient(transport, cfg=dummy_cfg)
     yield c
     c.stop()

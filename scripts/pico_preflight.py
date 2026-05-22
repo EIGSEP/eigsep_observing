@@ -30,6 +30,7 @@ import argparse
 import sys
 import time
 
+from eigsep_observing import run_tag
 from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_redis import HeartbeatReader, MetadataSnapshotReader, Transport
 from picohost.buses import PicoConfigStore
@@ -207,22 +208,24 @@ def parse_args():
 def main():
     args = parse_args()
     transport = Transport(args.host)
-    if args.watch is None:
-        render(transport)
-        return 0
-    try:
-        while True:
-            # ANSI clear + home so the table redraws in place.
-            sys.stdout.write("\x1b[2J\x1b[H")
-            print(
-                f"pico_preflight @ {args.host}  ({time.strftime('%H:%M:%S')})"
-            )
-            print()
+    with run_tag.session(transport, "pico_preflight"):
+        if args.watch is None:
             render(transport)
-            sys.stdout.flush()
-            time.sleep(args.watch)
-    except KeyboardInterrupt:
-        return 0
+            return 0
+        try:
+            while True:
+                # ANSI clear + home so the table redraws in place.
+                sys.stdout.write("\x1b[2J\x1b[H")
+                print(
+                    f"pico_preflight @ {args.host}  "
+                    f"({time.strftime('%H:%M:%S')})"
+                )
+                print()
+                render(transport)
+                sys.stdout.flush()
+                time.sleep(args.watch)
+        except KeyboardInterrupt:
+            return 0
 
 
 if __name__ == "__main__":

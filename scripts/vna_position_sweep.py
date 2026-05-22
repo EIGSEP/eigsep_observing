@@ -30,9 +30,8 @@ import yaml
 
 from eigsep_redis import ConfigStore, StatusWriter, Transport
 
-from eigsep_observing import PandaClient
-from eigsep_observing.run_tag import clear as clear_run_tag
-from eigsep_observing.run_tag import publish as publish_run_tag
+from eigsep_observing import PandaClient, run_tag
+from eigsep_observing.obs_config_owner import publish_owner
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 
@@ -65,10 +64,11 @@ def _build_client(transport, cfg, dummy):
     cfg["use_tempctrl"] = cfg.get("use_tempctrl", False)
     cfg["serialize_motion_and_switching"] = True
     ConfigStore(transport).upload(cfg)
+    publish_owner(transport, "vna_position_sweep")
     if dummy:
         from eigsep_observing.testing import DummyPandaClient
 
-        return DummyPandaClient(transport=transport, default_cfg=cfg)
+        return DummyPandaClient(transport=transport, cfg=cfg)
     return PandaClient(transport)
 
 
@@ -104,42 +104,47 @@ def main(transport, args):
     status = StatusWriter(transport)
     client = None
     try:
-        client = _build_client(transport, cfg, args.dummy)
-        if client.motor_client is None:
-            raise RuntimeError(
-                "Motor client not initialized; check motor pico registration."
+        with run_tag.session(transport, "vna_position_sweep"):
+            client = _build_client(transport, cfg, args.dummy)
+            if client.motor_client is None:
+                raise RuntimeError(
+                    "Motor client not initialized; check motor pico "
+                    "registration."
+                )
+            if client.vna is None:
+                raise RuntimeError(
+                    "VNA not initialized; check vna config block."
+                )
+
+            status.send(
+                f"vna_position_sweep started ({len(grid)} grid points, "
+                f"settle_s={settle_s})"
             )
-        if client.vna is None:
-            raise RuntimeError("VNA not initialized; check vna config block.")
+            logger.info(
+                f"vna_position_sweep started ({len(grid)} grid points, "
+                f"settle_s={settle_s})"
+            )
 
-        publish_run_tag(transport, "vna_position_sweep")
-        status.send(
-            f"vna_position_sweep started ({len(grid)} grid points, "
-            f"settle_s={settle_s})"
-        )
-        logger.info(
-            f"vna_position_sweep started ({len(grid)} grid points, "
-            f"settle_s={settle_s})"
-        )
-
-        client.motor_client.set_delay()
-        client.motor_client.halt()
-        client.motor_client.home()
-        for idx, (az, el) in enumerate(grid):
-            if client.stop_client.is_set():
-                logger.info("stop_client set; aborting sweep")
-                break
-            logger.info(f"[{idx + 1}/{len(grid)}] move_to az={az}, el={el}")
-            client.motor_client.move_to(az_deg=az, el_deg=el)
-            if settle_s > 0 and client.stop_client.wait(settle_s):
-                break
-            with client.coord.switch_section():
-                for mode in ("ant", "rec"):
-                    logger.info(
-                        f"[{idx + 1}/{len(grid)}] measure_s11({mode!r})"
-                    )
-                    client.measure_s11(mode)
-        client.motor_client.home()
+            client.motor_client.set_delay()
+            client.motor_client.halt()
+            client.motor_client.home()
+            for idx, (az, el) in enumerate(grid):
+                if client.stop_client.is_set():
+                    logger.info("stop_client set; aborting sweep")
+                    break
+                logger.info(
+                    f"[{idx + 1}/{len(grid)}] move_to az={az}, el={el}"
+                )
+                client.motor_client.move_to(az_deg=az, el_deg=el)
+                if settle_s > 0 and client.stop_client.wait(settle_s):
+                    break
+                with client.coord.switch_section():
+                    for mode in ("ant", "rec"):
+                        logger.info(
+                            f"[{idx + 1}/{len(grid)}] measure_s11({mode!r})"
+                        )
+                        client.measure_s11(mode)
+            client.motor_client.home()
     except KeyboardInterrupt:
         logger.info("Sweep interrupted by user")
     except (TimeoutError, RuntimeError) as exc:
@@ -153,7 +158,6 @@ def main(transport, args):
             if client.motor_client is not None:
                 client.motor_client.halt()
             client.stop()
-        clear_run_tag(transport)
         status.send("vna_position_sweep ended")
         logger.info("vna_position_sweep ended")
 

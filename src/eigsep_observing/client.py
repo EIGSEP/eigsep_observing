@@ -3,8 +3,6 @@ import threading
 import time
 from contextlib import contextmanager
 
-import yaml
-
 from cmt_vna import VNA
 from eigsep_redis import (
     ConfigStore,
@@ -15,18 +13,14 @@ from eigsep_redis import (
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
-from . import run_tag
+from . import obs_config_owner, run_tag
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient
 from .tempctrl_client import TempCtrlClient
-from .utils import get_config_path
 from .vna import VnaWriter
 
 logger = logging.getLogger(__name__)
-default_cfg_file = get_config_path("obs_config.yaml")
-with open(default_cfg_file, "r") as f:
-    default_cfg = yaml.safe_load(f)
 
 # Valid RF switch state names, sourced from the firmware-side class so
 # that a pico firmware change flows through automatically.
@@ -50,11 +44,16 @@ class PandaClient:
         snapshot, status, heartbeat, VNA producer) — not the full
         observer-side bus. Wrong-role access (e.g. ``corr_reader``) is
         an ``AttributeError`` rather than a runtime foot-gun.
-    default_cfg : dict
-        Default configuration to use if no config is found in Redis.
+    cfg : dict, optional
+        Transient observing config. If ``None`` (default), read the
+        persistent cfg from Redis (raise ``RuntimeError`` if absent —
+        an uploader script such as ``panda_observe`` must have seeded
+        Redis first). If a dict, use it directly and skip the Redis
+        read entirely. Bring-up scripts pass a local cfg here so they
+        do not mutate the persistent cfg used by file-header overlays.
     """
 
-    def __init__(self, transport, default_cfg=default_cfg):
+    def __init__(self, transport, *, cfg=None):
         self.logger = logger
         self.transport = transport
         self.config = ConfigStore(transport)
@@ -63,13 +62,14 @@ class PandaClient:
         self.heartbeat = HeartbeatWriter(transport)
         self.vna_writer = VnaWriter(transport)
         self.stop_client = threading.Event()
-        cfg = self._get_cfg()
         if cfg is None:
-            self.logger.warning(
-                "No configuration found in Redis, using default config."
-            )
-            self.config.upload(default_cfg)
             cfg = self._get_cfg()
+            if cfg is None:
+                raise RuntimeError(
+                    "No obs_config in Redis; start panda_observe "
+                    "(or another uploader) first, or pass cfg=<dict> "
+                    "for transient use."
+                )
         self.cfg = cfg
 
         # RF switch proxy is a thin Redis-key facade — no hardware
@@ -604,12 +604,21 @@ class PandaClient:
         # EigObserver._with_header_overlays. self.cfg is canonical
         # here because PandaClient owns the obs_config upload.
         tag = run_tag.read(self.transport)
+        owner = obs_config_owner.read_owner(self.transport)
         header["run_tag"] = (
             tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
         )
         header["run_started_at_unix"] = (
             tag["run_started_at_unix"]
             if tag["run_started_at_unix"] is not None
+            else 0.0
+        )
+        header["obs_config_owner"] = (
+            owner["owner"] if owner["owner"] is not None else "UNKNOWN"
+        )
+        header["obs_config_owner_uploaded_unix"] = (
+            owner["uploaded_at_unix"]
+            if owner["uploaded_at_unix"] is not None
             else 0.0
         )
         header["obs_config"] = dict(self.cfg)

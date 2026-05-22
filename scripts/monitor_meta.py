@@ -3,13 +3,21 @@ import time
 
 from eigsep_redis import MetadataSnapshotReader, Transport
 
-transport = Transport("10.10.10.11")
-snapshot = MetadataSnapshotReader(transport)
+from eigsep_observing import run_tag
 
-while True:
-    try:
-        m = snapshot.get()
-        print(json.dumps(m, indent=2, sort_keys=False))
-        time.sleep(1.0)
-    except KeyboardInterrupt:
-        break
+
+def main():
+    transport = Transport("10.10.10.11")
+    snapshot = MetadataSnapshotReader(transport)
+    with run_tag.session(transport, "monitor_meta"):
+        while True:
+            try:
+                m = snapshot.get()
+                print(json.dumps(m, indent=2, sort_keys=False))
+                time.sleep(1.0)
+            except KeyboardInterrupt:
+                break
+
+
+if __name__ == "__main__":
+    main()
