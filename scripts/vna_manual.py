@@ -28,6 +28,7 @@ from picohost.proxy import PicoProxy
 from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import require_pico
 from eigsep_observing._vna_manual_core import (
+    build_vna_client,
     build_vna_transport,
     load_vna_cfg,
     run_bundle,
@@ -133,7 +134,7 @@ def main():
     transport = build_vna_transport(args.dummy)
 
     with run_tag.session(transport, "vna_manual"):
-        client = _build_client(transport, cfg, args.dummy)
+        client = build_vna_client(transport, cfg, args.dummy)
         try:
             require_pico(PicoProxy("rfswitch", transport, source="vna_manual"))
             if client.vna is None:
