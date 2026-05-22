@@ -180,7 +180,11 @@ def _parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def cli():
     args = _parse_args()
     transport = _build_transport(args.dummy)
     main(transport, args)
+
+
+if __name__ == "__main__":
+    cli()
