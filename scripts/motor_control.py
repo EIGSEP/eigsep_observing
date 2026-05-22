@@ -13,9 +13,10 @@ import time
 
 import numpy as np
 from eigsep_redis import StatusWriter
+from picohost.proxy import PicoProxy
 
 from eigsep_observing import MotorClient, run_tag
-from eigsep_observing._scripts_util import build_transport
+from eigsep_observing._scripts_util import build_transport, require_pico
 from eigsep_observing.utils import configure_eig_logger
 
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def main(transport, args):
+    require_pico(PicoProxy("motor", transport, source="motor_control"))
     with run_tag.session(transport, "motor_control"):
         status = StatusWriter(transport)
         motor = MotorClient(transport)
