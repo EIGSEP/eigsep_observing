@@ -1965,7 +1965,7 @@ def test_init_tempctrl_warns_when_cooling_disabled(
         },
     }
     caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelname == "WARNING"
@@ -1990,7 +1990,7 @@ def test_init_tempctrl_no_warning_when_cooling_default(
     cfg["use_tempctrl"] = True
     # dummy_cfg already has tempctrl_settings without cooling_enabled.
     caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         warnings = [
             r.getMessage() for r in caplog.records if r.levelname == "WARNING"

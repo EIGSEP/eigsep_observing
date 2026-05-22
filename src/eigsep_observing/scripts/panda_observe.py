@@ -94,19 +94,27 @@ def main() -> int:
         logger.warning("Running in DUMMY mode, no hardware will be used.")
         transport = Transport(host="localhost", port=6380)
         transport.reset()  # reset test redis database
-        ConfigStore(transport).upload(cfg)
-        publish_owner(transport, "panda_observe")
-        client = DummyPandaClient(transport=transport, cfg=cfg)
     else:
         transport = Transport(host="localhost", port=6379)
-        ConfigStore(transport).upload(cfg)
-        publish_owner(transport, "panda_observe")
-        client = PandaClient(transport)
 
-    logger.info(f"Client configuration: {client.cfg}")
+    client = None
     thds = {}
     try:
         with run_tag.session(transport, "panda_observe"):
+            # Upload obs_config + claim ownership inside the session so
+            # that if another driver currently owns the run_tag, the
+            # RuntimeError from session() fires before we overwrite the
+            # legitimate owner's obs_config / obs_config_owner stamps
+            # (obs_config_owner has no clear() — once written, it
+            # persists until the next uploader).
+            ConfigStore(transport).upload(cfg)
+            publish_owner(transport, "panda_observe")
+            if args.dummy:
+                client = DummyPandaClient(transport=transport, cfg=cfg)
+            else:
+                client = PandaClient(transport)
+            logger.info(f"Client configuration: {client.cfg}")
+
             # switches
             if client.cfg["use_switches"]:
                 switch_thd = Thread(target=client.switch_loop)
@@ -139,7 +147,8 @@ def main() -> int:
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt received, stopping threads")
     finally:
-        client.stop()
+        if client is not None:
+            client.stop()
         for name, t in thds.items():
             logger.info(f"Joining thread {name}")
             t.join()
