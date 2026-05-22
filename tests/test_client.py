@@ -36,8 +36,8 @@ def _arm_status_reader(client):
     test; subsequent ``_status_reader(client).read(...)`` calls will
     then see only entries produced by the action.
     """
-    tip = client.transport._get_last_read_id(STATUS_STREAM)
-    client.transport._set_last_read_id(STATUS_STREAM, tip)
+    tip = client.transport.get_last_read_id(STATUS_STREAM)
+    client.transport.set_last_read_id(STATUS_STREAM, tip)
 
 
 def _heartbeat_reader(client):

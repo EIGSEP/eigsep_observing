@@ -280,7 +280,7 @@ def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
         # test_vna_reader_skips_producer_backlog); rewind to stream
         # origin so this single-threaded test picks up the entry the
         # producer just pushed.
-        client.transport._set_last_read_id("stream:vna", "0-0")
+        client.transport.set_last_read_id("stream:vna", "0-0")
         data, header, metadata = VnaReader(client.transport).read(timeout=1)
     finally:
         client.stop()

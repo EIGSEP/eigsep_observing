@@ -41,7 +41,7 @@ def _seed_reader_cursor(transport):
     without needing threads. Mirrors the intent of
     ``CorrReader.seek("0-0")`` — consumer-first rewind — for a reader
     whose structural surface is just ``{"read"}``."""
-    transport._set_last_read_id(ADC_SNAPSHOT_STREAM, "0")
+    transport.set_last_read_id(ADC_SNAPSHOT_STREAM, "0")
 
 
 class TestAdcSnapshotRoundTrip:

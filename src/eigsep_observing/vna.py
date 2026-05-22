@@ -10,8 +10,11 @@ import h5py
 import numpy as np
 
 from cmt_vna import VNA
-from eigsep_redis import MetadataSnapshotReader
-from eigsep_redis.keys import DATA_STREAMS_SET
+from eigsep_redis import (
+    MetadataSnapshotReader,
+    SingleStreamReader,
+    SingleStreamWriter,
+)
 from picohost.proxy import PicoProxy
 
 from . import obs_config_owner, run_tag
@@ -23,7 +26,7 @@ from .vna_calibration import calibrate_s11
 logger = logging.getLogger(__name__)
 
 
-class VnaWriter:
+class VnaWriter(SingleStreamWriter):
     """
     Publish VNA S11 measurements onto the VNA stream.
 
@@ -39,30 +42,10 @@ class VnaWriter:
     well beyond any realistic ground-reader outage window.
     """
 
+    stream = VNA_STREAM
     maxlen = 200
 
-    def __init__(self, transport):
-        self.transport = transport
-
-    def add(self, data, header=None, metadata=None):
-        """
-        Publish one VNA measurement.
-
-        Parameters
-        ----------
-        data : dict[str, np.ndarray]
-            Keys are measurement modes (e.g. ``"ant"``, ``"rec"``,
-            ``"cal:open"``), values are complex arrays.
-        header : dict or None
-            VNA configuration. Placed in the file header downstream.
-        metadata : dict or None
-            Live sensor snapshot at VNA trigger time.
-
-        Raises
-        ------
-        ValueError
-            If ``data`` is empty.
-        """
+    def _encode(self, data, header=None, metadata=None):
         arr = next(iter(data.values()), None)
         if arr is None:
             raise ValueError("Data cannot be empty")
@@ -85,61 +68,49 @@ class VnaWriter:
                 if isinstance(v, np.ndarray):
                     _md[k] = v.tolist()
             payload["metadata"] = json.dumps(_md)
-        r = self.transport.r
-        r.xadd(
-            VNA_STREAM,
-            payload,
-            maxlen=self.maxlen,
-            approximate=True,
-        )
-        r.sadd(DATA_STREAMS_SET, VNA_STREAM)
+        return payload
 
-
-class VnaReader:
-    """Consume VNA S11 measurements from the VNA stream."""
-
-    def __init__(self, transport):
-        self.transport = transport
-
-    def read(self, timeout=0):
+    def add(self, data, header=None, metadata=None):
         """
-        Blocking read of one VNA entry.
+        Publish one VNA measurement.
 
         Parameters
         ----------
-        timeout : int
-            Timeout in seconds. Pass 0 to block indefinitely.
-
-        Returns
-        -------
-        (data, header, metadata) : tuple
-            ``(dict[str, np.ndarray], dict | None, dict | None)``.
-            Returns ``(None, None, None)`` if no VNA stream exists yet.
+        data : dict[str, np.ndarray]
+            Keys are measurement modes (e.g. ``"ant"``, ``"rec"``,
+            ``"cal:open"``), values are complex arrays.
+        header : dict or None
+            VNA configuration. Placed in the file header downstream.
+        metadata : dict or None
+            Live sensor snapshot at VNA trigger time.
 
         Raises
         ------
-        TimeoutError
-            If no entry arrives within ``timeout``.
+        ValueError
+            If ``data`` is empty.
         """
-        r = self.transport.r
-        if not r.sismember(DATA_STREAMS_SET, VNA_STREAM):
-            self.transport.logger.warning(
-                "No VNA data stream found. "
-                "Please ensure the VNA is running and sending data."
-            )
-            return None, None, None
-        last_id = self.transport._streams_from_set(DATA_STREAMS_SET)[
-            VNA_STREAM
-        ]
-        out = r.xread(
-            {VNA_STREAM: last_id},
-            count=1,
-            block=int(timeout * 1000),
-        )
-        if not out:
-            raise TimeoutError("No VNA data received within timeout.")
-        eid, fields = out[0][1][0]
-        self.transport._set_last_read_id(VNA_STREAM, eid)
+        self.publish(data, header=header, metadata=metadata)
+
+
+class VnaReader(SingleStreamReader):
+    """
+    Consume VNA S11 measurements from the VNA stream.
+
+    Returns ``(data, header, metadata)`` from :meth:`read`; the
+    ``(None, None, None)`` tuple is returned when the VNA stream
+    isn't registered yet (producer hasn't started).
+    """
+
+    stream = VNA_STREAM
+    absent_warning = (
+        "No VNA data stream found. "
+        "Please ensure the VNA is running and sending data."
+    )
+
+    def _absent_sentinel(self):
+        return None, None, None
+
+    def _decode(self, entry_id, fields):
         arr_meta = json.loads(fields.pop(b"arr_meta").decode("utf-8"))
         if b"header" in fields:
             header = json.loads(fields.pop(b"header").decode("utf-8"))

@@ -95,7 +95,7 @@ def _rewind_streams(transport, names):
     read after, so we manually reset the cursor to the beginning.
     """
     for name in names:
-        transport._set_last_read_id(name, "0")
+        transport.set_last_read_id(name, "0")
 
 
 @pytest.fixture

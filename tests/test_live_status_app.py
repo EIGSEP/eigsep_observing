@@ -70,7 +70,7 @@ CORR_HEADER = {
 
 def _rewind(transport, names):
     for n in names:
-        transport._set_last_read_id(n, "0")
+        transport.set_last_read_id(n, "0")
 
 
 def _auto_bytes(value=100):
