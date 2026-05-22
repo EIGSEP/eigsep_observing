@@ -36,9 +36,15 @@ dependencies = [
 # eigsep-panda is operator-launched (loops control physical actuators
 # and self-recover from per-iteration faults — auto-restart adds risk
 # without buying liveness). See deploy/systemd/README.md.
-eigsep-fpga-init = "eigsep_observing.scripts.fpga_init:main"
-eigsep-observe   = "eigsep_observing.scripts.observe:main"
-eigsep-panda     = "eigsep_observing.scripts.panda_observe:main"
+eigsep-fpga-init              = "eigsep_observing.scripts.fpga_init:main"
+eigsep-observe                = "eigsep_observing.scripts.observe:main"
+eigsep-panda                  = "eigsep_observing.scripts.panda_observe:main"
+# Alt-mode panda observers (see scripts/CLAUDE.md): structurally
+# panda_observe-like, mutually exclusive with eigsep-panda. main() takes
+# (transport, args) so tests can drive it directly; cli() is the no-arg
+# entry-point shim that builds the transport from --dummy and forwards.
+eigsep-no-switch-observation  = "eigsep_observing.scripts.no_switch_observation:cli"
+eigsep-vna-position-sweep     = "eigsep_observing.scripts.vna_position_sweep:cli"
 
 [project.optional-dependencies]
 dev = [
