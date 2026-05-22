@@ -22,16 +22,12 @@ from argparse import ArgumentParser
 import logging
 from pathlib import Path
 
-import numpy as np
-import yaml
 
-from eigsep_redis import Transport
 from picohost.proxy import PicoProxy
 
-from eigsep_observing import PandaClient, run_tag
+from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import require_pico
 from eigsep_observing._vna_manual_core import (
-    build_vna_client,
     build_vna_transport,
     load_vna_cfg,
     run_bundle,
