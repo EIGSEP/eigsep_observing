@@ -34,8 +34,7 @@ import h5py
 import numpy as np
 import redis.exceptions
 
-from eigsep_redis import Transport
-from eigsep_redis.keys import METADATA_STREAMS_SET
+from eigsep_redis import MetadataStreamReader, Transport, entry_id_to_unix
 
 from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_observing.utils import configure_eig_logger
@@ -138,12 +137,6 @@ class _StreamWriter:
         self.count = new_count
 
 
-def _entry_id_to_unix(eid_bytes):
-    """Redis stream entry IDs are ``{millis}-{seq}``. Return seconds float."""
-    millis = int(eid_bytes.decode().split("-", 1)[0])
-    return millis / 1000.0
-
-
 def _group_name(stream):
     """``stream:imu_el`` → ``imu_el``."""
     return (
@@ -203,47 +196,19 @@ def _parse_args():
 
 
 def _run(transport, out_path, interval, stop_event):
+    reader = MetadataStreamReader(transport)
     writers = {}  # stream_name -> _StreamWriter
-    last_ids = {}  # stream_name -> last-read-id bytes
 
     with h5py.File(out_path, "w") as h5file:
         while not stop_event.is_set():
             try:
-                members = transport.r.smembers(METADATA_STREAMS_SET)
+                drained = reader.drain(with_ids=True)
             except redis.exceptions.ConnectionError as exc:
-                logger.warning("Stream discovery failed: %s", exc)
+                logger.warning("drain failed: %s", exc)
                 stop_event.wait(interval)
                 continue
 
-            for s in members:
-                key = s.decode()
-                if key in last_ids:
-                    continue
-                # New stream: start from current tail so we don't
-                # replay backlog at startup.
-                try:
-                    info = transport.r.xinfo_stream(key)
-                    last_ids[key] = info["last-generated-id"]
-                except redis.exceptions.ResponseError:
-                    last_ids[key] = b"0-0"
-
-            if not last_ids:
-                logger.debug("No metadata streams registered yet.")
-                stop_event.wait(interval)
-                continue
-
-            try:
-                resp = (
-                    transport.r.xread(last_ids, block=int(interval * 1000))
-                    or []
-                )
-            except redis.exceptions.ConnectionError as exc:
-                logger.warning("xread failed: %s", exc)
-                stop_event.wait(interval)
-                continue
-
-            for stream_bytes, entries in resp:
-                stream = stream_bytes.decode()
+            for stream, entries in drained.items():
                 writer = writers.get(stream)
                 if writer is None:
                     writer = _StreamWriter(
@@ -253,18 +218,7 @@ def _run(transport, out_path, interval, stop_event):
                     )
                     writers[stream] = writer
 
-                for entry_id, fields in entries:
-                    last_ids[stream] = entry_id
-                    raw = fields.get(b"value")
-                    if raw is None:
-                        continue
-                    try:
-                        payload = json.loads(raw)
-                    except (ValueError, TypeError) as exc:
-                        logger.error(
-                            "Failed to decode entry on %s: %s", stream, exc
-                        )
-                        continue
+                for entry_id, payload in entries:
                     if not isinstance(payload, dict):
                         logger.error(
                             "Skipping non-dict payload on %s: %r",
@@ -272,9 +226,13 @@ def _run(transport, out_path, interval, stop_event):
                             payload,
                         )
                         continue
-                    writer.append(_entry_id_to_unix(entry_id), payload)
+                    writer.append(entry_id_to_unix(entry_id), payload)
 
             h5file.flush()
+            # drain() is non-blocking, so pace the loop here. Picos
+            # publish at ~5 Hz; a 1 s default batches ~5 entries per
+            # drain. stop_event.wait keeps SIGINT responsiveness.
+            stop_event.wait(interval)
 
     return writers
 
