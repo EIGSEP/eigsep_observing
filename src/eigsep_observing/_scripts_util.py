@@ -1,10 +1,15 @@
 """Shared helpers for the standalone manual test scripts under ``scripts/``.
 
-Two responsibilities, both deliberately small:
+Three responsibilities, all deliberately small:
 
 - :func:`build_transport` mirrors the ``--dummy`` bootstrap used by
-  ``motor_manual.py`` / ``motor_control.py`` so every per-app manual
-  script can share one well-tested transport path.
+  the multi-pico manual scripts (``motor_manual.py`` / ``motor_control.py``
+  / ``potmon_manual.py`` / ...) so every per-app manual script can
+  share one well-tested transport path.
+- :func:`build_transport_bare` is the equivalent for bring-up scripts
+  that build their *own* minimal producer surface and explicitly do
+  not want a ``DummyPandaClient`` masquerading on the transport in
+  dummy mode (see ``scripts/CLAUDE.md`` for the contract).
 - :func:`require_pico` is a structural availability check the manual
   scripts run before issuing any command, so an operator who forgot to
   start ``pico-manager.service`` (or who flashed the wrong pico) gets a
@@ -42,6 +47,13 @@ def build_transport(
     ``transport._dummy_client`` to keep it alive — without that
     reference Python would garbage-collect the embedded PicoManager
     threads and the proxy would see ``is_available=False``.
+
+    Bring-up scripts that build their own minimal producer surface
+    (e.g. ``vna_manual.py`` / ``record_vna.py``) want
+    :func:`build_transport_bare` instead — the auto-attached
+    ``DummyPandaClient`` here violates the no-PandaClient-masquerade
+    rule documented in ``scripts/CLAUDE.md`` and competes with the
+    script's own dummy-pico bootstrap.
     """
     if dummy:
         logger.warning("Running in DUMMY mode, no hardware will be used.")
@@ -50,6 +62,35 @@ def build_transport(
         transport = Transport(host=host, port=dummy_port)
         transport.reset()
         transport._dummy_client = DummyPandaClient(transport=transport)
+        return transport
+    return Transport(host=host, port=real_port)
+
+
+def build_transport_bare(
+    dummy: bool,
+    *,
+    host: str = "localhost",
+    real_port: int = 6379,
+    dummy_port: int = 6380,
+) -> Transport:
+    """Return a :class:`Transport` with no client attached.
+
+    The bring-up-script variant of :func:`build_transport`: same port
+    convention, same fakeredis reset on dummy, but explicitly does
+    **not** instantiate a ``DummyPandaClient`` on the transport.
+
+    Bring-up scripts (``vna_manual.py``, ``record_vna.py``, etc.) build
+    their own minimal producer surface (see ``scripts/CLAUDE.md``) and
+    spin up only the dummy picos they actually need. Attaching a
+    ``DummyPandaClient`` from this helper would (a) start a heartbeat
+    thread that collides with whatever the script is meant to test and
+    (b) double-register dummy picos if the script also calls
+    ``start_dummy_pico_manager`` directly.
+    """
+    if dummy:
+        logger.warning("Running in DUMMY mode, no hardware will be used.")
+        transport = Transport(host=host, port=dummy_port)
+        transport.reset()
         return transport
     return Transport(host=host, port=real_port)
 

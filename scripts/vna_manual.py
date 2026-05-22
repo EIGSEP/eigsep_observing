@@ -1,21 +1,22 @@
 """Interactive VNA bring-up tool.
 
 Drives the production ``eigsep_observing.vna.measure_s11`` protocol
-one bundle at a time, without constructing a :class:`PandaClient`.
-Each Enter-pressed selection (``a`` = antenna, ``r`` = receiver) runs
-the same OSL + DUT sequence the production ``vna_loop`` would run,
-publishes through ``vna_writer`` so the live-status VNA pane updates
-in the browser, and *also* writes a self-contained local HDF5 file
-containing the raw arrays and the first-order-calibrated S11 (ideal
-+1/-1/0 OSL — the same calibration
+one bundle at a time. Each Enter-pressed selection (``a`` = antenna,
+``r`` = receiver) runs the same OSL + DUT sequence the production
+``vna_loop`` would run, publishes through ``vna_writer`` so the
+live-status VNA pane updates in the browser, and *also* writes a
+self-contained local HDF5 file containing the raw arrays and the
+first-order-calibrated S11 (ideal +1/-1/0 OSL — the same calibration
 ``eigsep_observing.vna_calibration.calibrate_s11`` applies on the
 dashboard).
 
-Unlike a real panda boot, this script does **not** start a heartbeat
-thread, does **not** force-RFANT the rig, does **not** upload an
-obs_config to Redis, and does **not** build a motion/switch
-coordinator. It's a side-channel operator harness, structurally
-distinct from the production driver.
+Follows the bring-up contract in ``scripts/CLAUDE.md``: builds only
+the minimal VNA producer subsystem via
+:func:`eigsep_observing.vna.build_vna_subsystem`, never a
+:class:`PandaClient`. This means no heartbeat thread, no boot-time
+force-RFANT, no ``ConfigStore`` upload, no in-process coord lock —
+the tool can run alongside a production observer (and other operator
+scripts in sibling terminals) without competing for any of those.
 
 Run alongside ``scripts/live_status.py`` for visual confirmation, or
 post-process the saved ``.h5`` files in a notebook.
@@ -32,15 +33,11 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from cmt_vna import VNA
-from eigsep_redis import MetadataSnapshotReader, Transport
-from picohost.proxy import PicoProxy
-
 from eigsep_observing import run_tag
-from eigsep_observing._scripts_util import require_pico
+from eigsep_observing._scripts_util import build_transport_bare
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 from eigsep_observing.vna import (
-    VnaWriter,
+    build_vna_subsystem,
     measure_s11,
     save_vna_manual_h5,
 )
@@ -48,84 +45,6 @@ from eigsep_observing.vna import (
 
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
-
-
-def _build_transport(dummy):
-    """Bare transport for the VNA scripts. ``_build_subsystem`` below
-    attaches its own minimal ``start_dummy_pico_manager`` in dummy mode
-    (rfswitch only), so this helper doesn't auto-attach the full
-    ``DummyPandaClient`` that ``_scripts_util.build_transport`` would."""
-    if dummy:
-        logger.warning("Running in DUMMY mode, no hardware will be used.")
-        transport = Transport(host="localhost", port=6380)
-        transport.reset()
-        return transport
-    return Transport(host="localhost", port=6379)
-
-
-def _switch_via_proxy(sw_proxy, state):
-    """Raise on switch failure; matches cmt_vna's ``switch_fn`` contract."""
-    if sw_proxy.send_command("switch", state=state) is None:
-        raise RuntimeError(
-            f"RF switch to {state} failed: rfswitch not registered "
-            "with PicoManager."
-        )
-
-
-def _build_subsystem(transport, cfg, dummy):
-    """Assemble the minimum VNA-producer surface for vna_manual.
-
-    Returns ``(vna, vna_writer, metadata_snapshot, cleanup)``. The
-    ``cfg`` is never uploaded to Redis — it only feeds local
-    ``measure_s11`` parameters and the local file-header overlay.
-
-    Unlike :class:`PandaClient`, this assembly does **not** start a
-    panda heartbeat thread, does **not** force-RFANT the rig at
-    startup, and does **not** build a motion/switch coordinator. It is
-    deliberately not a panda boot — just enough to drive one
-    ``measure_s11`` call at a time from an operator REPL.
-    """
-    sw_proxy = PicoProxy("rfswitch", transport, source="vna_manual")
-
-    def switch_fn(state):
-        _switch_via_proxy(sw_proxy, state)
-
-    manager = None
-    if dummy:
-        from cmt_vna.testing import DummyVNA
-        from eigsep_observing.testing import start_dummy_pico_manager
-
-        manager = start_dummy_pico_manager(transport)
-        vna = DummyVNA(
-            ip=cfg["vna_ip"],
-            port=cfg["vna_port"],
-            timeout=cfg["vna_timeout"],
-            switch_fn=switch_fn,
-        )
-    else:
-        vna = VNA(
-            ip=cfg["vna_ip"],
-            port=cfg["vna_port"],
-            timeout=cfg["vna_timeout"],
-            switch_fn=switch_fn,
-        )
-
-    require_pico(sw_proxy)
-
-    setup_kwargs = cfg["vna_settings"].copy()
-    setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
-    vna.setup(**setup_kwargs)
-
-    def cleanup():
-        if manager is not None:
-            manager.stop()
-
-    return (
-        vna,
-        VnaWriter(transport),
-        MetadataSnapshotReader(transport),
-        cleanup,
-    )
 
 
 def _summary_db(arr):
@@ -165,15 +84,14 @@ def _print_menu(last_summary):
 
 
 def _run_bundle(subsystem, cfg, transport, mode, save_dir):
-    vna, vna_writer, metadata_snapshot, _ = subsystem
     try:
         payload = measure_s11(
-            vna,
+            subsystem.vna,
             mode,
             cfg=cfg,
             transport=transport,
-            vna_writer=vna_writer,
-            metadata_snapshot=metadata_snapshot,
+            vna_writer=subsystem.vna_writer,
+            metadata_snapshot=subsystem.metadata_snapshot,
             on_contract_violation=logger.warning,
         )
     except (RuntimeError, TimeoutError, ValueError) as exc:
@@ -263,15 +181,16 @@ def main():
     if not args.save_dir.is_dir():
         raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
-    transport = _build_transport(args.dummy)
-    subsystem = _build_subsystem(transport, cfg, args.dummy)
-    cleanup = subsystem[3]
+    transport = build_transport_bare(args.dummy)
+    subsystem = build_vna_subsystem(
+        transport, cfg, source="vna_manual", dummy=args.dummy
+    )
     with run_tag.session(transport, "vna_manual"):
         try:
             _print_banner(cfg, args.save_dir)
             _repl(subsystem, cfg, transport, args.save_dir)
         finally:
-            cleanup()
+            subsystem.cleanup()
 
 
 if __name__ == "__main__":
