@@ -9,7 +9,6 @@ from eigsep_redis import (
     MetadataStreamReader,
     StatusReader,
 )
-from eigsep_redis.keys import METADATA_STREAMS_SET
 
 from . import io, obs_config_owner, run_tag
 from .corr import CorrConfigStore, CorrReader
@@ -24,48 +23,6 @@ logger = logging.getLogger(__name__)
 # down: matches the invariant-disagreement throttle in io.py and the
 # stream-staleness throttle in eigsep_redis.MetadataStreamReader.
 _DRAIN_WARN_INTERVAL_S = 60.0
-
-
-def _skip_metadata_streams_to_tail(transport):
-    """Pin local read positions to each panda metadata stream's
-    current Redis tail so the next drain returns only entries
-    published *after* this call.
-
-    Used by ``record_corr_data`` on a panda reconnect: the picos kept
-    publishing during the outage (their connection to the panda Redis
-    was fine — only the observer's was broken), so the stream still
-    holds backlog. Averaging that backlog into the *current* corr
-    integration would smear historical sensor readings across new corr
-    rows. Skipping to tail keeps metadata aligned with the corr
-    integration window, the same way the corr loop itself picks up the
-    SNAP's current row after a SNAP-side recovery rather than
-    replaying its backlog.
-
-    Pinning to the resolved tail (rather than popping the entry and
-    relying on the lazy ``xinfo_stream`` fallback) matters because the
-    fallback re-resolves on every drain — it would see entries added
-    *after* the skip as also-already-tail and silently drop them.
-    Pinning captures the tail at skip-time; everything after that
-    tail flows normally.
-
-    Touches ``transport._last_read_ids`` directly — the same hook
-    :class:`eigsep_redis.MetadataStreamReader` advances internally on
-    every drain. Once ``eigsep_redis`` exposes a public
-    ``skip_to_latest()`` helper this should call through to that.
-    """
-    members = transport.r.smembers(METADATA_STREAMS_SET)
-    with transport._stream_lock:
-        for member in members:
-            stream = member.decode() if isinstance(member, bytes) else member
-            try:
-                tail = transport.r.xinfo_stream(stream)["last-generated-id"]
-            except redis.exceptions.ResponseError:
-                # Stream not created yet (registered but never written).
-                # Drop the cached position; the next drain falls back
-                # through ``_get_last_read_id`` and re-resolves.
-                transport._last_read_ids.pop(stream, None)
-                continue
-            transport._last_read_ids[stream] = tail
 
 
 def _tick_liveness_deadline(deadline, liveness_timeout, reason):
@@ -401,7 +358,7 @@ class EigObserver:
         cached_sync_time = None
         last_write_deadline = None
         # Track panda drops so we can skip metadata stream positions to
-        # the current tail on reconnect — see _skip_metadata_streams_to_tail.
+        # the current tail on reconnect via metadata_stream.skip_to_latest().
         panda_was_down = False
         last_drain_warn_monotonic = 0.0
         try:
@@ -505,9 +462,7 @@ class EigObserver:
                         # integrations instead of smearing historical
                         # readings into the current row.
                         try:
-                            _skip_metadata_streams_to_tail(
-                                self.transport_panda
-                            )
+                            self.metadata_stream.skip_to_latest()
                             self.logger.info(
                                 "Panda reconnected; metadata stream "
                                 "positions reset to current tails."
