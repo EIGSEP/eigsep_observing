@@ -55,7 +55,7 @@ def build_vna_client(
     if dummy:
         from .testing import DummyPandaClient
 
-        return DummyPandaClient(transport=transport, default_cfg=cfg)
+        return DummyPandaClient(transport=transport, cfg=cfg)
     return PandaClient(transport)
 
 
