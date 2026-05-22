@@ -452,11 +452,20 @@ def test_metadata_readers_have_no_cross_bus_methods():
     """Structural guard: metadata readers only read metadata, nothing else."""
     for cls, expected in (
         # ``max_age_s`` / ``warn_interval_s`` are tunables, not bus
-        # methods — see the readers' docstrings.
+        # methods — see the readers' docstrings. ``skip_to_latest``
+        # operates on metadata-stream read pointers only (advances
+        # past backlog after a transport outage), so it's
+        # metadata-bus-internal, not a cross-bus surface.
         (MetadataSnapshotReader, {"get", "max_age_s"}),
         (
             MetadataStreamReader,
-            {"drain", "streams", "max_age_s", "warn_interval_s"},
+            {
+                "drain",
+                "streams",
+                "skip_to_latest",
+                "max_age_s",
+                "warn_interval_s",
+            },
         ),
     ):
         public = {name for name in vars(cls) if not name.startswith("_")}

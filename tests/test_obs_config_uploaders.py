@@ -42,6 +42,9 @@ BRING_UP_SCRIPTS = {
 #   - live_status.py / live_plotter.py: long-running dashboards that
 #     may run alongside any driver; publishing would trample or be
 #     refused by the session check.
+#   - record_metadata.py / record_vna.py: test-bench recorders that
+#     run alongside the active driver(s); same trample/refuse concern
+#     as the dashboards.
 #   - observe.py: ground-PC eigsep-observe writer, a consumer of the
 #     panda transport (it reads obs_config but never publishes run_tag).
 #   - SNAP-side scripts (republish_header.py, adc_snapshot*.py,
@@ -50,6 +53,8 @@ BRING_UP_SCRIPTS = {
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
+    "record_metadata.py",
+    "record_vna.py",
     "observe.py",
     "republish_header.py",
     "adc_snapshot.py",
