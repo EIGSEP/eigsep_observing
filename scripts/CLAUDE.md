@@ -1,13 +1,33 @@
 # Bring-up scripts contract
 
 The scripts in this directory (`*_manual.py`, `record_*.py`,
-`vna_sweep.py`, `vna_position_sweep.py`, `no_switch_observation.py`,
 `motor_control.py`, `pico_preflight.py`, etc.) are operator tools
 for **field verification, lab bring-up, and ad-hoc debugging**. The
-production observing path is in
-`src/eigsep_observing/scripts/` (`fpga_init`, `observe`,
-`panda_observe`) and is *not* governed by this contract — those have
-their own architecture documented in the top-level `CLAUDE.md`.
+production observing path is in `src/eigsep_observing/scripts/`
+(`fpga_init`, `observe`, `panda_observe`) and is *not* governed by
+this contract — it has its own architecture documented in the
+top-level `CLAUDE.md`.
+
+The same exclusion applies to **alternative observing modes** —
+scripts that take exclusive control of the panda for the duration
+of their run (own the heartbeat, drive their own switch / motor /
+VNA orchestration to a defined endpoint, are mutually exclusive
+with `panda_observe`). These are structurally `panda_observe`-like:
+they build a full :class:`PandaClient`, upload `obs_config`, and
+coordinate state. They live alongside `panda_observe` in
+`src/eigsep_observing/scripts/`, not here. Current examples:
+``no_switch_observation``, ``vna_position_sweep``.
+
+The test for which category a new script belongs in: **does it need
+exclusive control of the panda for its run?** If yes (it starts its
+own loops, pins switch/motor state across operations, or makes any
+assumption about what else is/isn't running), write it under
+`src/eigsep_observing/scripts/`. If no (commands fired inline from
+one terminal, composable with sibling scripts), it belongs here.
+Touching multiple picos does not by itself push a script into the
+alt-mode category — driving motor + rfswitch + VNA inline through
+:class:`PicoProxy` / :class:`MotorClient` /
+:func:`build_vna_subsystem` is still bring-up.
 
 Bring-up scripts must coexist with a production observer running on
 the panda, and with each other (one operator may run a motor script

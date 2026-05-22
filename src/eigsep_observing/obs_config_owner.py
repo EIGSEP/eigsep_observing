@@ -9,7 +9,8 @@ and the cfg it uploaded persists in Redis after the script exits. A
 its content is still authoritative.
 
 Published by the three uploader scripts (``eigsep-panda``,
-``scripts/no_switch_observation.py``, ``scripts/vna_position_sweep.py``)
+``src/eigsep_observing/scripts/no_switch_observation.py``,
+``src/eigsep_observing/scripts/vna_position_sweep.py``)
 immediately after their ``ConfigStore.upload(cfg)`` call. Consumed by
 ``EigObserver._with_header_overlays`` and ``PandaClient.measure_s11``
 so corr- and VNA-file headers carry the cfg provenance alongside the

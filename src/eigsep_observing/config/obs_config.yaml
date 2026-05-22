@@ -43,7 +43,7 @@ motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
 # turn out to bleed RF interference into VNA/correlator data.
 serialize_motion_and_switching: false
 
-# vna position sweep (used by scripts/vna_position_sweep.py)
+# vna position sweep (used by src/eigsep_observing/scripts/vna_position_sweep.py)
 vna_position_sweep:
   az_grid_deg: [0, 90, 180, 270]
   el_grid_deg: [0, 90, 180, 270]

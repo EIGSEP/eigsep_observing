@@ -35,7 +35,7 @@ motor_scan: {}
 # motion-switch coordination (default off; tests opt in per-fixture)
 serialize_motion_and_switching: false
 
-# vna position sweep (used by scripts/vna_position_sweep.py)
+# vna position sweep (used by src/eigsep_observing/scripts/vna_position_sweep.py)
 vna_position_sweep:
   az_grid_deg: [-1.0, 1.0]
   el_grid_deg: [-1.0, 1.0]
