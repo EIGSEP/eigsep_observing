@@ -35,15 +35,16 @@ def _load_record_metadata():
 def _wait_for_streams(transport, expected_count, timeout=5.0):
     """Block until at least ``expected_count`` metadata streams are
     registered, or ``timeout`` elapses."""
-    from eigsep_redis.keys import METADATA_STREAMS_SET
+    from eigsep_redis import MetadataStreamReader
 
+    reader = MetadataStreamReader(transport)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        members = transport.r.smembers(METADATA_STREAMS_SET)
-        if len(members) >= expected_count:
-            return members
+        streams = reader.streams
+        if len(streams) >= expected_count:
+            return streams
         time.sleep(0.05)
-    return transport.r.smembers(METADATA_STREAMS_SET)
+    return reader.streams
 
 
 def test_record_metadata_captures_dummy_pico_streams(client, tmp_path):
@@ -147,12 +148,6 @@ def test_stream_writer_handles_lazy_field(tmp_path):
         assert y_vals[0] in (b"", "")
         assert y_vals[1] in (b"hello", "hello")
         assert y_vals[2] in (b"world", "world")
-
-
-def test_entry_id_to_unix_parses_millis():
-    rm = _load_record_metadata()
-    assert rm._entry_id_to_unix(b"1716304212000-0") == 1716304212.0
-    assert rm._entry_id_to_unix(b"1716304212500-3") == 1716304212.5
 
 
 def test_group_name_strips_stream_prefix():
