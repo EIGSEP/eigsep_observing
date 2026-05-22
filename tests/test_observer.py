@@ -1508,8 +1508,9 @@ def test_record_corr_data_drain_failure_continues_with_empty_metadata(
 ):
     """``metadata_stream.drain`` raising ``ConnectionError`` must not
     kill the corr loop. The integration is written with ``metadata=None``
-    (corr data is sacred) and a WARNING is logged once per throttle
-    window.
+    (corr data is sacred) and an ERROR is logged once per throttle
+    window — the CLAUDE.md rule for narrow safety nets around non-corr
+    processing.
     """
     import redis.exceptions
 
@@ -1548,11 +1549,11 @@ def test_record_corr_data_drain_failure_continues_with_empty_metadata(
 
 
 @patch("eigsep_observing.io.File")
-def test_record_corr_data_drain_failure_warning_is_throttled(
+def test_record_corr_data_drain_failure_error_is_throttled(
     mock_file_class, observer_both, caplog
 ):
     """Repeated ``drain`` failures over the same throttle window emit
-    only one WARNING. The corr loop runs at multi-Hz cadence; without
+    only one ERROR. The corr loop runs at multi-Hz cadence; without
     throttling a dead panda would flood the log.
     """
     import redis.exceptions
@@ -1588,15 +1589,16 @@ def test_record_corr_data_drain_failure_warning_is_throttled(
     ):
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
 
-    drain_warnings = [
+    drain_errors = [
         rec
         for rec in caplog.records
         if "Panda metadata drain failed" in rec.message
     ]
     assert read_count[0] >= 5, "loop didn't iterate enough to test throttle"
-    assert len(drain_warnings) == 1, (
-        f"expected one throttled WARNING, got {len(drain_warnings)}"
+    assert len(drain_errors) == 1, (
+        f"expected one throttled ERROR, got {len(drain_errors)}"
     )
+    assert drain_errors[0].levelname == "ERROR", drain_errors[0].levelname
 
 
 @patch("eigsep_observing.io.File")
@@ -1622,6 +1624,18 @@ def test_record_corr_data_skip_to_tail_on_panda_recover(
     # Seed an "outage backlog" entry into the metadata stream before the
     # recovery iteration runs. Without skip-to-tail the recovery drain
     # would pick this up.
+    #
+    # Fixture deviation: the stream name (``"sensor_a"``), field
+    # (``"temp_c"``), and status values (``"stale"``, ``"fresh"``) are
+    # synthetic — none correspond to entries in ``SENSOR_SCHEMAS``.
+    # This is intentional: the test exercises the metadata-stream
+    # read-pointer mechanics (does the recovery path's
+    # ``skip_to_latest`` advance past outage backlog?), which operate
+    # below the schema layer. A real producer payload would add no
+    # coverage here, and using a real schema would couple this test to
+    # ``_avg_sensor_values`` reductions that the recovery path doesn't
+    # touch. See ``tests/test_io.py`` for the end-to-end fixture
+    # round-trip that validates the producer→avg→write→read contract.
     backlog_sample = {"temp_c": 99.0, "status": "stale"}
     MetadataWriter(transport_panda).add("sensor_a", backlog_sample)
 

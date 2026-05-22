@@ -19,9 +19,10 @@ from .vna import VnaReader
 logger = logging.getLogger(__name__)
 
 
-# Global throttle for "panda drain raised" WARNINGs while panda is
-# down: matches the invariant-disagreement throttle in io.py and the
-# stream-staleness throttle in eigsep_redis.MetadataStreamReader.
+# Global throttle for the panda-down log spam (corr-side drain-failure
+# ERROR and VNA-side wait WARNINGs) while panda is down: matches the
+# invariant-disagreement throttle in io.py and the stream-staleness
+# throttle in eigsep_redis.MetadataStreamReader.
 _DRAIN_WARN_INTERVAL_S = 60.0
 
 
@@ -467,11 +468,6 @@ class EigObserver:
                         # readings into the current row.
                         try:
                             self.metadata_stream.skip_to_latest()
-                            self.logger.info(
-                                "Panda reconnected; metadata stream "
-                                "positions reset to current tails."
-                            )
-                            panda_was_down = False
                         except redis.exceptions.ConnectionError:
                             # Bounced again between panda_connected
                             # and the skip; treat as still-down and
@@ -493,13 +489,17 @@ class EigObserver:
                     try:
                         metadata = self.metadata_stream.drain()
                     except redis.exceptions.ConnectionError as exc:
+                        # Safety net for the corr-is-sacred contract:
+                        # ERROR (not WARNING) per CLAUDE.md, throttled
+                        # to one emit per ``_DRAIN_WARN_INTERVAL_S``
+                        # window so a long outage doesn't flood the log.
                         panda_was_down = True
                         now_mono = time.monotonic()
                         if (
                             now_mono - last_drain_warn_monotonic
                             >= _DRAIN_WARN_INTERVAL_S
                         ):
-                            self.logger.warning(
+                            self.logger.error(
                                 "Panda metadata drain failed: %s. "
                                 "Continuing corr writes with empty "
                                 "metadata until panda is back.",
@@ -507,6 +507,20 @@ class EigObserver:
                             )
                             last_drain_warn_monotonic = now_mono
                         metadata = {}
+                    else:
+                        # Only signal "reconnected" once the drain
+                        # actually succeeds. If skip_to_latest() passes
+                        # but drain immediately raises (flapping panda:
+                        # heartbeat ok, single op fails), the INFO
+                        # would otherwise fire at ~4 Hz for the length
+                        # of the flap. Tying it to drain success makes
+                        # the INFO mean "metadata pipeline is back."
+                        if panda_was_down:
+                            self.logger.info(
+                                "Panda reconnected; metadata stream "
+                                "positions reset to current tails."
+                            )
+                            panda_was_down = False
                 else:
                     panda_was_down = True
                     metadata = {}
