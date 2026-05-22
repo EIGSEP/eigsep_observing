@@ -24,7 +24,7 @@ dependencies = [
   "plotly",
   "picohost>=3.5.0",
   "eigsep-vna>=1.3",
-  "eigsep_redis>=2.1",
+  "eigsep_redis>=2.2.1",
 ]
 
 [project.scripts]
