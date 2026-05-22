@@ -58,17 +58,60 @@ def transport_panda():
 
 
 @pytest.fixture
-def observer_snap_only(transport_snap):
-    """EigObserver with only SNAP connection."""
-    obs = EigObserver(transport_snap=transport_snap)
+def transport_panda_down():
+    """DummyTransport with no heartbeat — ``panda_connected`` reads False.
+
+    Drop-in for tests that previously passed ``transport_panda=None``.
+    Surfaces still exist (the lazy-Transport refactor builds them
+    unconditionally) so use sites that wrap reads in
+    ``try/except redis.exceptions.ConnectionError`` get to exercise
+    the absent-data path against a real (fakeredis-backed) transport.
+    """
+    return DummyTransport()
+
+
+@pytest.fixture
+def observer_snap_only(transport_snap, transport_panda_down):
+    """EigObserver with SNAP up, panda transport present but offline."""
+    obs = EigObserver(
+        transport_snap=transport_snap,
+        transport_panda=transport_panda_down,
+    )
     yield obs
     obs.close()
 
 
 @pytest.fixture
-def observer_panda_only(transport_panda):
-    """EigObserver with only LattePanda connection."""
-    obs = EigObserver(transport_panda=transport_panda)
+def transport_snap_only_for_panda():
+    """DummyTransport seeded with a corr config — SNAP-side default for
+    panda-focused tests that previously passed ``transport_snap=None``.
+
+    Production requires SNAP to be reachable (the corr thread is the
+    writer's reason to exist); the constructor now reflects that by
+    making ``transport_snap`` mandatory. Tests that don't exercise the
+    corr loop still need a seeded SNAP transport so
+    ``CorrConfigStore(transport_snap).get()`` succeeds during observer
+    construction.
+    """
+    t = DummyTransport()
+    CorrConfigStore(t).upload(
+        {
+            "integration_time": 1.0,
+            "pairs": ["0", "1", "2", "3", "02", "13"],
+        }
+    )
+    return t
+
+
+@pytest.fixture
+def observer_panda_only(transport_snap_only_for_panda, transport_panda):
+    """EigObserver with panda up; SNAP transport is present (required)
+    but tests only exercise the panda surface.
+    """
+    obs = EigObserver(
+        transport_snap=transport_snap_only_for_panda,
+        transport_panda=transport_panda,
+    )
     yield obs
     obs.close()
 
@@ -83,18 +126,29 @@ def observer_both(transport_snap, transport_panda):
     obs.close()
 
 
-def test_observer_init_snap_only(observer_snap_only, transport_snap):
-    """Test EigObserver initialization with only SNAP connection."""
+def test_observer_init_snap_only(
+    observer_snap_only, transport_snap, transport_panda_down
+):
+    """SNAP up, panda transport present but offline (no heartbeat).
+
+    Verifies the post-refactor contract: both transports always exist
+    on the observer, and panda surfaces are built whether or not the
+    panda is reachable.
+    """
     assert observer_snap_only.transport_snap is transport_snap
-    assert observer_snap_only.transport_panda is None
+    assert observer_snap_only.transport_panda is transport_panda_down
     assert observer_snap_only.corr_cfg is not None
+    assert observer_snap_only.config is not None
+    assert observer_snap_only.panda_connected is False
 
 
 def test_observer_init_panda_only(observer_panda_only, transport_panda):
-    """Test EigObserver initialization with only LattePanda connection."""
-    assert observer_panda_only.transport_snap is None
+    """Panda up; SNAP transport present (mandatory) but tests focus on
+    the panda surface.
+    """
     assert observer_panda_only.transport_panda is transport_panda
     assert observer_panda_only.config is not None
+    assert observer_panda_only.panda_connected is True
 
 
 def test_observer_init_both(observer_both, transport_snap, transport_panda):
@@ -105,15 +159,24 @@ def test_observer_init_both(observer_both, transport_snap, transport_panda):
     assert observer_both.config is not None
 
 
-def test_observer_init_none():
-    """Test EigObserver initialization with no connections."""
-    observer = EigObserver()
-    assert observer.transport_snap is None
-    assert observer.transport_panda is None
-    observer.close()
+def test_observer_init_requires_both_transports():
+    """Both transports are required after the opportunistic-panda
+    refactor; ``EigObserver()`` with no args must raise.
+
+    Production builds the panda transport with ``lazy=True`` so
+    construction never fails even when the panda is unreachable;
+    tests that want a "panda is down" shape should pass an unseeded
+    ``DummyTransport`` (the ``transport_panda_down`` fixture).
+    """
+    with pytest.raises(TypeError):
+        EigObserver()
+    with pytest.raises(TypeError):
+        EigObserver(transport_snap=DummyTransport())
+    with pytest.raises(TypeError):
+        EigObserver(transport_panda=DummyTransport())
 
 
-def test_observer_init_panda_empty_config_does_not_raise():
+def test_observer_init_panda_empty_config_does_not_raise(transport_snap):
     """Construction against an unseeded panda ConfigStore must not raise.
 
     The writer must start as soon as the backend boots, without waiting
@@ -123,7 +186,9 @@ def test_observer_init_panda_empty_config_does_not_raise():
     """
     transport_panda = DummyTransport()
     HeartbeatWriter(transport_panda).set(alive=True)
-    observer = EigObserver(transport_panda=transport_panda)
+    observer = EigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
     try:
         assert observer.config is not None
         overlaid = observer._with_header_overlays({"foo": 1})
@@ -239,7 +304,7 @@ def test_status_handler_filter_rejects_sibling_root(
     )
 
 
-def test_close_detaches_status_stream_handler(transport_panda):
+def test_close_detaches_status_stream_handler(transport_snap, transport_panda):
     """``close()`` must remove the StatusStreamHandler from the
     module-level logger so a subsequent observer in the same process
     (notably the next test) does not mirror records into the stale
@@ -248,7 +313,9 @@ def test_close_detaches_status_stream_handler(transport_panda):
     ground = logging.getLogger("eigsep_observing")
     before = [h for h in ground.handlers if isinstance(h, StatusStreamHandler)]
 
-    obs = EigObserver(transport_panda=transport_panda)
+    obs = EigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
     installed = [
         h for h in ground.handlers if isinstance(h, StatusStreamHandler)
     ]
@@ -260,29 +327,38 @@ def test_close_detaches_status_stream_handler(transport_panda):
     assert obs._status_log_handler is None
 
 
-def test_snap_connected_property(observer_snap_only, observer_panda_only):
-    """Test snap_connected property."""
-    assert observer_snap_only.snap_connected is True
-    assert observer_panda_only.snap_connected is False
-
-
 def test_panda_connected_property(
     observer_snap_only, observer_panda_only, transport_panda
 ):
-    """Test panda_connected property."""
+    """``panda_connected`` reflects heartbeat liveness, not transport
+    existence (the transport is built unconditionally in lazy mode and
+    always exists after construction).
+    """
+    # Snap-only fixture: panda transport present but no heartbeat → False.
     assert observer_snap_only.panda_connected is False
+    # Panda-only fixture: heartbeat seeded by the transport_panda fixture.
     assert observer_panda_only.panda_connected is True
 
-    # Test when redis is None
-    observer_none = EigObserver()
-    assert observer_none.panda_connected is False
-
-    # Test when heartbeat check fails
+    # Heartbeat goes false → panda_connected goes false.
     HeartbeatWriter(transport_panda).set(alive=False)
     assert observer_panda_only.panda_connected is False
 
-    # clean up
-    observer_none.close()
+
+def test_panda_connected_handles_connection_error(observer_panda_only):
+    """``panda_connected`` must absorb ``redis.exceptions.ConnectionError``
+    from ``heartbeat_reader.check()`` and return False — the corr loop
+    relies on this gate, and a panda that dies mid-run must not crash
+    it. Replaces the legacy "transport is None" short-circuit, which
+    no longer applies under the lazy-Transport refactor.
+    """
+    import redis.exceptions
+
+    with patch.object(
+        observer_panda_only.heartbeat_reader,
+        "check",
+        side_effect=redis.exceptions.ConnectionError("nope"),
+    ):
+        assert observer_panda_only.panda_connected is False
 
 
 @patch("eigsep_observing.io.File")
@@ -751,16 +827,6 @@ def test_record_corr_data_panda_connected_drains_metadata(
     assert call_kwargs["metadata"] == {"stream:sensor_a": [sample]}
 
 
-def test_record_corr_data_no_snap():
-    """Test record_corr_data without snap connection raises AttributeError."""
-    observer = EigObserver()
-    try:
-        with pytest.raises(AttributeError):
-            observer.record_corr_data("/tmp")
-    finally:
-        observer.close()
-
-
 def test_status_logger(observer_panda_only, caplog):
     """Test status_logger method.
 
@@ -954,6 +1020,186 @@ def test_record_vna_data_stop_event(observer_panda_only, transport_panda):
 
     observer.record_vna_data("/tmp/test_vna", timeout=1)
     stop_thread.join()
+
+
+@patch("eigsep_observing.io.write_s11_file")
+def test_record_vna_data_survives_transient_connection_error(
+    mock_write, observer_panda_only, transport_panda, dummy_vna
+):
+    """A single ``redis.exceptions.ConnectionError`` from
+    ``vna_reader.read`` (panda drops between the ``panda_connected``
+    gate and the xread, or mid-xread) must not crash the VNA thread.
+    The loop logs, backs off, and resumes — and once the panda is
+    reachable again the next read writes a file.
+
+    Pre-refactor (commit 240b354) only ``TimeoutError`` was caught;
+    a ``ConnectionError`` would propagate and kill the thread for the
+    rest of the observer's lifetime, contradicting the
+    "VNA thread idles on an empty stream" docstring claim.
+    """
+    import redis.exceptions
+
+    observer = observer_panda_only
+    s11, header, metadata = _make_vna_payload(dummy_vna)
+    VnaWriter(transport_panda).add(s11, header=header, metadata=metadata)
+    transport_panda._set_last_read_id("stream:vna", "0-0")
+
+    real_read = observer.vna_reader.read
+    raised = [False]
+
+    def flaky_read(timeout=0):
+        if not raised[0]:
+            raised[0] = True
+            raise redis.exceptions.ConnectionError("panda dropped")
+        return real_read(timeout=timeout)
+
+    def stop_after_write():
+        while not mock_write.called:
+            time.sleep(0.01)
+        observer.stop_event.set()
+
+    stop_thread = threading.Thread(target=stop_after_write)
+    stop_thread.start()
+
+    with patch.object(observer.vna_reader, "read", side_effect=flaky_read):
+        observer.record_vna_data("/tmp/test_vna", timeout=5)
+    stop_thread.join()
+
+    assert raised[0], "ConnectionError branch never exercised"
+    mock_write.assert_called_once()
+
+
+def test_record_vna_data_tolerates_permanent_connection_error(
+    observer_panda_only,
+):
+    """A persistently-raising ``vna_reader.read`` must leave the loop
+    in a clean idle state — it logs the disconnect, waits on
+    ``stop_event``, and exits when set. The corr loop's
+    "panda is down" path stays open; the VNA thread can't crash and
+    block observer shutdown.
+    """
+    import redis.exceptions
+
+    observer = observer_panda_only
+
+    call_count = [0]
+
+    def always_fails(timeout=0):
+        call_count[0] += 1
+        if call_count[0] >= 3:
+            observer.stop_event.set()
+        raise redis.exceptions.ConnectionError("panda gone")
+
+    with patch.object(observer.vna_reader, "read", side_effect=always_fails):
+        observer.record_vna_data("/tmp/test_vna", timeout=1)
+
+    assert call_count[0] >= 3, (
+        "loop should iterate at least three times before stop"
+    )
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_resumes_when_panda_arrives_after_startup(
+    mock_file_class, observer_snap_only, transport_snap, caplog
+):
+    """Anchors the opportunistic-panda contract end-to-end: an observer
+    that booted with the panda unreachable (no heartbeat → an empty
+    DummyTransport) must keep writing corr files with empty metadata,
+    and the *moment* the panda comes back (heartbeat goes alive +
+    sensor data appears) the next corr integration's metadata sidecar
+    must include the new entries — with no observer restart.
+
+    Pre-refactor (commit 240b354) ``EigObserver.__init__`` only built
+    panda surfaces when ``transport_panda is not None``, so a
+    startup-down panda left ``self.metadata_stream`` permanently
+    missing and reconnection was impossible. The lazy-Transport
+    refactor in this PR closes that gap: surfaces are always built
+    against a real (possibly disconnected) transport, every
+    panda-touching call catches ``ConnectionError`` at use time, and
+    reconnection is implicit.
+    """
+    from eigsep_redis.keys import METADATA_STREAMS_SET
+
+    observer = observer_snap_only
+    transport_panda = observer.transport_panda
+    assert observer.panda_connected is False, (
+        "fixture must start with panda offline"
+    )
+
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    # Outage-era publish: register the stream while the panda is
+    # nominally "down" (heartbeat absent). On reconnect, the corr loop
+    # calls skip_to_latest() to discard this backlog — the test then
+    # publishes a *post-reconnect* sample (below) and asserts that
+    # entry flows through the metadata sidecar, not the stale one.
+    MetadataWriter(transport_panda).add(
+        "sensor_a", {"temp_c": 99.0, "status": "outage-backlog"}
+    )
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    read_count = [0]
+    add_data_metadata = []
+
+    def remember_metadata(*args, **kwargs):
+        add_data_metadata.append(kwargs.get("metadata"))
+
+    mock_file.add_data.side_effect = remember_metadata
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] == 2:
+            # Panda comes online: heartbeat goes alive. The corr loop's
+            # reconnect branch will run skip_to_latest() and drop the
+            # outage backlog seeded above.
+            HeartbeatWriter(transport_panda).set(alive=True)
+        if read_count[0] == 3:
+            # Post-reconnect publish: the next drain must pick this up.
+            MetadataWriter(transport_panda).add(
+                "sensor_a", {"temp_c": 25.0, "status": "update"}
+            )
+        if read_count[0] >= 5:
+            observer.stop_event.set()
+        return (123, mock_data)
+
+    caplog.set_level(logging.INFO, logger="eigsep_observing.observer")
+    with patch.object(
+        observer.corr_reader, "read", side_effect=read_side_effect
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    # First integration: panda still offline → metadata is empty.
+    assert add_data_metadata[0] in (None, {}), add_data_metadata
+    # By the final integration, the post-recovery sensor sample must
+    # have made it into the file — proving the metadata stream picked
+    # up implicitly without an observer restart.
+    fresh_seen = any(
+        isinstance(md, dict)
+        and any(
+            isinstance(entries, list)
+            and any(
+                isinstance(e, dict) and e.get("temp_c") == 25.0
+                for e in entries
+            )
+            for entries in md.values()
+        )
+        for md in add_data_metadata[1:]
+    )
+    assert fresh_seen, (
+        "post-reconnect sensor sample did not appear in any metadata "
+        f"sidecar: {add_data_metadata!r}"
+    )
+    # And the stream is registered (panda did publish) — sanity check.
+    assert (
+        transport_panda.r.sismember(METADATA_STREAMS_SET, b"stream:sensor_a")
+        == 1
+    )
 
 
 # ---------------------------------------------------------------------------

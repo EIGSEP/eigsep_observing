@@ -1,18 +1,20 @@
 """Observing-side file writer.
 
 Writes correlation and VNA data to disk. SNAP is required — the corr
-thread is the writer's reason to exist. The panda is optional and
-opportunistic: ``obs_config`` / ``run_tag`` overlays and the per-
-integration metadata sidecar are read whenever the panda is reachable
-(see :meth:`EigObserver._with_header_overlays` and the corr loop's
-drain at ``observer.record_corr_data``), and a panda that is missing
-at startup or drops mid-run is logged at WARNING and degrades to
-corr-only without raising. Corr data is sacred; a panda failure must
+thread is the writer's reason to exist. The panda is fully opportunistic:
+its transport is built in lazy mode (no startup ping), so the observer
+boots whether or not the panda is reachable, and every panda-touching
+call site (``obs_config`` / ``run_tag`` overlays, the per-integration
+metadata sidecar drain in ``observer.record_corr_data``, the status
+relay, and the VNA loop) catches ``ConnectionError`` at use-time and
+falls back to empty/sentinel data. A panda that comes online *after*
+``eigsep-observe`` starts is picked up implicitly on the next read —
+no observer restart needed. Corr data is sacred; a panda failure must
 never block a SNAP-side write.
 
 The VNA file thread runs unconditionally — it polls ``panda_connected``
-internally and idles on an empty VNA stream, so it's harmless when no
-panda is publishing.
+internally and idles on an empty VNA stream or a dead panda transport,
+so it's harmless when no panda is publishing.
 
 Installed as the ``eigsep-observe`` console script and run by the
 ``eigsep-observe-writer.service`` systemd unit (see ``deploy/systemd/``).
@@ -23,7 +25,6 @@ import logging
 import sys
 import threading
 
-import redis.exceptions
 from eigsep_redis import Transport
 
 from eigsep_observing import EigObserver
@@ -81,31 +82,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _connect_panda(panda_ip: str, redis_port: int, logger) -> Transport | None:
-    """Attempt the panda transport; warn and degrade on failure.
-
-    The corr loop's only hard dependency is the SNAP transport. Header
-    overlays (``obs_config`` / ``run_tag``) and the metadata sidecar
-    are best-effort, with the observer already wired to handle
-    ``transport_panda=None`` (sentinel header values, empty metadata).
-    A non-fatal startup-time WARNING preserves "corr data is sacred"
-    when the panda is down for a SNAP-only test session.
-    """
-    logger.info(f"Connecting to LattePanda at {panda_ip}.")
-    try:
-        return Transport(host=panda_ip, port=redis_port)
-    except redis.exceptions.ConnectionError as exc:
-        logger.warning(
-            "Panda Redis unreachable at %s:%s (%s). Running corr-only — "
-            "restart the observer once the panda is back to re-enable "
-            "metadata sidecar and header overlays.",
-            panda_ip,
-            redis_port,
-            exc,
-        )
-        return None
-
-
 def main() -> int:
     # logger with rotating file handler
     configure_eig_logger(level=logging.INFO)
@@ -140,8 +116,15 @@ def main() -> int:
     logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
     transport_snap = Transport(host=rpi_ip, port=redis_port)
 
-    # Panda transport is opportunistic — see _connect_panda.
-    transport_panda = _connect_panda(panda_ip, redis_port, logger)
+    # Panda transport is opportunistic: lazy=True skips the startup
+    # ping so construction always succeeds. Every panda-touching call
+    # site in EigObserver catches ConnectionError and falls back to
+    # empty/sentinel data, which means an offline panda surfaces as
+    # missing metadata sidecars and VNA files (not a crash) and a
+    # panda that comes online mid-run is picked up implicitly on the
+    # next read.
+    logger.info(f"Connecting (lazy) to LattePanda at {panda_ip}.")
+    transport_panda = Transport(host=panda_ip, port=redis_port, lazy=True)
 
     if args.dummy:
         observer = DummyEigObserver(
@@ -209,8 +192,7 @@ def main() -> int:
     if args.dummy:
         # reset Redis instances
         transport_snap.reset()
-        if transport_panda is not None:
-            transport_panda.reset()
+        transport_panda.reset()
 
     return 1 if corr_crashed[0] else 0
 

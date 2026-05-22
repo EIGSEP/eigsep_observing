@@ -70,7 +70,7 @@ def _tick_liveness_deadline(deadline, liveness_timeout, reason):
 
 
 class EigObserver:
-    def __init__(self, transport_snap=None, transport_panda=None):
+    def __init__(self, transport_snap, transport_panda):
         """
         Main controll class and filewriter for Eigsep observing.
         Provides methods to:
@@ -85,19 +85,31 @@ class EigObserver:
         ----------
         transport_snap : eigsep_redis.Transport
             The Redis transport for the Rasperry Pi controlling the
-            SNAP correlator. The observer builds only the consumer-side
-            corr surfaces from it (``corr_config``, ``corr_reader``).
+            SNAP correlator. SNAP is required — the corr thread is the
+            writer's reason to exist; ``scripts/observe.py`` fails fast
+            if the SNAP transport cannot be built. The observer builds
+            only the consumer-side corr surfaces from it
+            (``corr_config``, ``corr_reader``).
         transport_panda : eigsep_redis.Transport
-            The Redis transport for the LattePanda server. The observer
-            builds only the consumer-side panda surfaces from it
-            (``config``, ``metadata_stream``, ``status_reader``,
-            ``heartbeat_reader``, ``vna_reader``).
+            The Redis transport for the LattePanda server. In production
+            this is built with ``lazy=True`` by ``scripts/observe.py`` so
+            construction always succeeds even when the panda is
+            unreachable. The observer builds the consumer-side panda
+            surfaces (``config``, ``metadata_stream``, ``status_reader``,
+            ``heartbeat_reader``, ``vna_reader``) unconditionally, and
+            every panda-touching call site catches ``ConnectionError``
+            and falls back to empty/sentinel data. A panda that comes
+            online mid-run is therefore picked up implicitly on the
+            next read — no observer restart required.
 
         Notes
         -----
-        At least one of the transports must be provided. Connect to the
-        SNAP transport for reading correlator data, and to the
-        LattePanda transport for reading metadata and VNA measurements.
+        Both transports are required. Tests that want a "panda is
+        down" shape can pass an unseeded
+        :class:`eigsep_redis.testing.DummyTransport` (no heartbeat key
+        → ``panda_connected`` reads as ``False``); tests that want a
+        truly dead transport can pass a non-fakeredis ``Transport``
+        with ``lazy=True`` pointed at an unreachable host.
 
         """
         self.logger = logger
@@ -105,32 +117,27 @@ class EigObserver:
         self.transport_snap = transport_snap
         self.transport_panda = transport_panda
 
-        if transport_snap is not None:
-            self.corr_config = CorrConfigStore(transport_snap)
-            self.corr_reader = CorrReader(transport_snap)
-            self.corr_cfg = self.corr_config.get()
-            # SNAP-side diagnostic surface: drains ``adc_stats`` on
-            # every corr integration and feeds the file via the same
-            # averaging path as panda sensors.
-            self.adc_metadata_stream = MetadataStreamReader(transport_snap)
+        self.corr_config = CorrConfigStore(transport_snap)
+        self.corr_reader = CorrReader(transport_snap)
+        self.corr_cfg = self.corr_config.get()
+        # SNAP-side diagnostic surface: drains ``adc_stats`` on every
+        # corr integration and feeds the file via the same averaging
+        # path as panda sensors.
+        self.adc_metadata_stream = MetadataStreamReader(transport_snap)
 
-        if transport_panda is not None:
-            self.config = ConfigStore(transport_panda)
-            self.metadata_stream = MetadataStreamReader(transport_panda)
-            self.status_reader = StatusReader(transport_panda)
-            self.heartbeat_reader = HeartbeatReader(transport_panda)
-            self.vna_reader = VnaReader(transport_panda)
-            self._status_log_handler = StatusStreamHandler(transport_panda)
-            logging.getLogger("eigsep_observing").addHandler(
-                self._status_log_handler
-            )
-            # Dedicated child logger for re-emitting panda status
-            # messages so the StatusStreamHandler can skip them; see
-            # status_log_handler.PANDA_RELAY_LOGGER.
-            self._panda_relay_logger = logging.getLogger(PANDA_RELAY_LOGGER)
-        else:
-            self._status_log_handler = None
-            self._panda_relay_logger = None
+        self.config = ConfigStore(transport_panda)
+        self.metadata_stream = MetadataStreamReader(transport_panda)
+        self.status_reader = StatusReader(transport_panda)
+        self.heartbeat_reader = HeartbeatReader(transport_panda)
+        self.vna_reader = VnaReader(transport_panda)
+        self._status_log_handler = StatusStreamHandler(transport_panda)
+        logging.getLogger("eigsep_observing").addHandler(
+            self._status_log_handler
+        )
+        # Dedicated child logger for re-emitting panda status
+        # messages so the StatusStreamHandler can skip them; see
+        # status_log_handler.PANDA_RELAY_LOGGER.
+        self._panda_relay_logger = logging.getLogger(PANDA_RELAY_LOGGER)
 
         self.stop_event = threading.Event()  # main stop event
 
@@ -152,14 +159,13 @@ class EigObserver:
         """
         self.stop_event.set()
         self.status_thread.join(timeout=1)
-        if self._status_log_handler is not None:
-            try:
-                self._status_log_handler.close()
-            finally:
-                logging.getLogger("eigsep_observing").removeHandler(
-                    self._status_log_handler
-                )
-                self._status_log_handler = None
+        try:
+            self._status_log_handler.close()
+        finally:
+            logging.getLogger("eigsep_observing").removeHandler(
+                self._status_log_handler
+            )
+            self._status_log_handler = None
 
     @property
     def snap_connected(self):
@@ -172,16 +178,14 @@ class EigObserver:
     def panda_connected(self):
         """Check whether the LattePanda Redis connection is alive.
 
-        Returns ``False`` when the panda transport was never built
-        (e.g. the panda was unreachable at observer startup) and also
-        when a previously-good connection has dropped — Redis client
-        operations on a dead socket raise ``ConnectionError``, which
-        we treat as "not connected" rather than letting it crash the
-        corr loop. Corr data is sacred; a panda failure must not block
-        a SNAP-side write.
+        Returns ``False`` when the panda is unreachable — either it was
+        down at observer startup (the lazy transport built without a
+        ping) or a previously-good connection has dropped. Redis client
+        operations on a dead socket raise ``ConnectionError``, which we
+        treat as "not connected" rather than letting it crash the corr
+        loop. Corr data is sacred; a panda failure must not block a
+        SNAP-side write.
         """
-        if self.transport_panda is None:
-            return False
         try:
             return self.heartbeat_reader.check()
         except redis.exceptions.ConnectionError:
@@ -244,17 +248,17 @@ class EigObserver:
         without this field."
         """
         out = dict(header)
-        if self.transport_panda is not None:
-            tag = run_tag.read(self.transport_panda)
-            owner = obs_config_owner.read_owner(self.transport_panda)
-            try:
-                obs_cfg = self.config.get()
-            except Exception as exc:
-                self.logger.error("obs_config overlay read failed: %s", exc)
-                obs_cfg = {}
-        else:
-            tag = {"run_tag": None, "run_started_at_unix": None}
-            owner = {"owner": None, "uploaded_at_unix": None}
+        # All three reads are defensive: run_tag.read and
+        # obs_config_owner.read_owner already log+swallow and return
+        # the empty sentinel; the explicit try/except below covers
+        # ConfigStore.get raising ValueError (no config uploaded yet)
+        # or ConnectionError (panda unreachable).
+        tag = run_tag.read(self.transport_panda)
+        owner = obs_config_owner.read_owner(self.transport_panda)
+        try:
+            obs_cfg = self.config.get()
+        except Exception as exc:
+            self.logger.error("obs_config overlay read failed: %s", exc)
             obs_cfg = {}
         out["run_tag"] = (
             tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
@@ -553,6 +557,21 @@ class EigObserver:
             try:
                 data, header, metadata = self.vna_reader.read(timeout=timeout)
             except TimeoutError:
+                continue
+            except redis.exceptions.ConnectionError:
+                # Panda dropped between the `panda_connected` gate
+                # above and the read (or mid-xread). Treat the same
+                # as the disconnect-wait branch: log, back off, loop
+                # back to the gate. Without this, the VNA thread
+                # would crash and stay dead until observer restart,
+                # contradicting the "opportunistic panda" guarantee
+                # and the module docstring claim that the loop "idles
+                # on an empty VNA stream" when the panda is gone.
+                self.logger.warning(
+                    "VNA read failed: panda disconnected, waiting."
+                )
+                if self.stop_event.wait(1):
+                    return
                 continue
             if data is None:
                 self.logger.warning("No VNA data available. Waiting.")
