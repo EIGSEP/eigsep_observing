@@ -591,7 +591,8 @@ class PandaClient:
     ):
         """Run one calibration cycle: VNA sweep + non-RFANT switch dwells.
 
-        Used by ``scripts/no_switch_observation.py`` to bracket a clean
+        Used by ``src/eigsep_observing/scripts/no_switch_observation.py``
+        to bracket a clean
         motor scan with calibration solutions on either side. Order:
 
         1. VNA first — ``measure_s11`` for each mode in ``vna_modes``,

@@ -1,8 +1,11 @@
 """Smoke tests for the migrated motor scripts.
 
-The scripts live under ``scripts/`` (not on the package path), so
-import them by file location. Each test drives the script's ``main``
-callable against the dummy transport used everywhere else.
+The scripts live under ``scripts/`` (bring-up tools) or
+``src/eigsep_observing/scripts/`` (alt-mode observers like
+``no_switch_observation`` / ``vna_position_sweep``, per
+``scripts/CLAUDE.md``). ``_load`` resolves either location by file
+path so each test can drive the script's ``main`` callable against
+the dummy transport used everywhere else.
 """
 
 import importlib.util
@@ -19,15 +22,22 @@ from eigsep_observing import run_tag
 from eigsep_observing.keys import VNA_STREAM
 
 
-SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT_DIRS = (
+    _REPO_ROOT / "scripts",
+    _REPO_ROOT / "src" / "eigsep_observing" / "scripts",
+)
 
 
 def _load(name):
-    path = SCRIPTS_DIR / f"{name}.py"
-    spec = importlib.util.spec_from_file_location(name, path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+    for base in SCRIPT_DIRS:
+        path = base / f"{name}.py"
+        if path.exists():
+            spec = importlib.util.spec_from_file_location(name, path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    raise FileNotFoundError(f"{name}.py not found in {SCRIPT_DIRS}")
 
 
 def test_motor_control_main_runs_short_scan(client, monkeypatch):
