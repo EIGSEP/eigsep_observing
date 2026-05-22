@@ -1098,6 +1098,46 @@ def test_record_vna_data_tolerates_permanent_connection_error(
     )
 
 
+def test_record_vna_data_panda_down_warning_is_throttled(
+    observer_panda_only, caplog
+):
+    """A persistently-disconnected panda must not flood the log with
+    one ``"Waiting for LattePanda Redis connection..."`` WARNING per
+    iteration. The three panda-down branches in ``record_vna_data``
+    share a single ``_DRAIN_WARN_INTERVAL_S``-gated throttle, so the
+    full outage produces at most one WARNING per 60 s window — matching
+    the drain-warn cadence in ``record_corr_data``.
+    """
+    observer = observer_panda_only
+
+    iter_count = [0]
+
+    def always_disconnected():
+        iter_count[0] += 1
+        if iter_count[0] >= 5:
+            observer.stop_event.set()
+        return False
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with patch.object(
+        observer.heartbeat_reader,
+        "check",
+        side_effect=always_disconnected,
+    ):
+        observer.record_vna_data("/tmp/test_vna", timeout=1)
+
+    wait_warnings = [
+        rec
+        for rec in caplog.records
+        if "Waiting for LattePanda Redis connection" in rec.message
+    ]
+    assert iter_count[0] >= 5, "loop didn't iterate enough to test throttle"
+    assert len(wait_warnings) == 1, (
+        f"expected one throttled WARNING, got {len(wait_warnings)}: "
+        f"{[r.message for r in wait_warnings]}"
+    )
+
+
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_resumes_when_panda_arrives_after_startup(
     mock_file_class, observer_snap_only, transport_snap, caplog

@@ -539,8 +539,23 @@ class EigObserver:
             and panda reconnection.
 
         """
+        # The three "panda is down" branches below share one throttle
+        # using ``_DRAIN_WARN_INTERVAL_S`` (60 s) — the wait loop above
+        # otherwise iterates at 1 Hz, which would flood the log for the
+        # full outage. The timer is reset on every panda-up iteration so
+        # a fresh outage always emits immediately, matching the
+        # ``record_corr_data`` drain-warn cadence.
+        last_warn_monotonic = 0.0
+
+        def _throttled_warn(msg):
+            nonlocal last_warn_monotonic
+            now_mono = time.monotonic()
+            if now_mono - last_warn_monotonic >= _DRAIN_WARN_INTERVAL_S:
+                self.logger.warning(msg)
+                last_warn_monotonic = now_mono
+
         while not self.panda_connected:
-            self.logger.warning(
+            _throttled_warn(
                 "Waiting for LattePanda Redis connection to be established."
             )
             # wait(1) returns True when stop is requested
@@ -550,10 +565,14 @@ class EigObserver:
             # Panda can disconnect mid-operation after the initial
             # wait above; check here to avoid a full timeout cycle.
             if not self.panda_connected:
-                self.logger.warning("Panda disconnected, waiting.")
+                _throttled_warn("Panda disconnected, waiting.")
                 if self.stop_event.wait(1):
                     return
                 continue
+            # Panda is up — arm the throttle so the next disconnect
+            # (if any) emits immediately instead of being swallowed by
+            # the previous outage's window.
+            last_warn_monotonic = 0.0
             try:
                 data, header, metadata = self.vna_reader.read(timeout=timeout)
             except TimeoutError:
@@ -567,7 +586,7 @@ class EigObserver:
                 # contradicting the "opportunistic panda" guarantee
                 # and the module docstring claim that the loop "idles
                 # on an empty VNA stream" when the panda is gone.
-                self.logger.warning(
+                _throttled_warn(
                     "VNA read failed: panda disconnected, waiting."
                 )
                 if self.stop_event.wait(1):
