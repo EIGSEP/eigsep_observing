@@ -29,7 +29,8 @@ from argparse import ArgumentParser
 import logging
 from pathlib import Path
 
-
+import numpy as np
+import yaml
 
 from cmt_vna import VNA
 from eigsep_redis import MetadataSnapshotReader, Transport
@@ -43,10 +44,6 @@ from eigsep_observing.vna import (
     measure_s11,
     save_vna_manual_h5,
 )
-from eigsep_observing._vna_manual_core import (
-    build_vna_transport,
-    load_vna_cfg,
-)
 
 
 configure_eig_logger(level=logging.INFO, console=False)
@@ -54,6 +51,10 @@ logger = logging.getLogger(__name__)
 
 
 def _build_transport(dummy):
+    """Bare transport for the VNA scripts. ``_build_subsystem`` below
+    attaches its own minimal ``start_dummy_pico_manager`` in dummy mode
+    (rfswitch only), so this helper doesn't auto-attach the full
+    ``DummyPandaClient`` that ``_scripts_util.build_transport`` would."""
     if dummy:
         logger.warning("Running in DUMMY mode, no hardware will be used.")
         transport = Transport(host="localhost", port=6380)
@@ -248,13 +249,21 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    cfg = load_vna_cfg(args.cfg_file, args.dummy)
+
+    cfg_file = args.cfg_file
+    if cfg_file is None:
+        cfg_file = get_config_path(
+            "dummy_config.yaml" if args.dummy else "obs_config.yaml"
+        )
+    with open(cfg_file, "r") as f:
+        cfg = yaml.safe_load(f)
+
     if not args.save_dir.exists():
         raise SystemExit(f"save-dir does not exist: {args.save_dir}")
     if not args.save_dir.is_dir():
         raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
-    transport = build_vna_transport(args.dummy)
+    transport = _build_transport(args.dummy)
     subsystem = _build_subsystem(transport, cfg, args.dummy)
     cleanup = subsystem[3]
     with run_tag.session(transport, "vna_manual"):
