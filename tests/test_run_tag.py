@@ -17,6 +17,7 @@ from eigsep_observing.run_tag import (
     clear,
     publish,
     read,
+    session,
 )
 
 
@@ -130,3 +131,72 @@ def test_read_partial_null_payload_warns(caplog):
         out = read(t)
     assert out == {"run_tag": None, "run_started_at_unix": None}
     assert any("partial run_tag" in rec.message for rec in caplog.records)
+
+
+def test_publish_overwrite_with_different_tag_warns(caplog):
+    """publish-time second-line audit: WARN when overwriting another tag."""
+    t = DummyTransport()
+    publish(t, "panda_observe", started_unix=1.0)
+    with caplog.at_level("WARNING"):
+        publish(t, "vna_manual", started_unix=2.0)
+    assert read(t)["run_tag"] == "vna_manual"
+    assert any(
+        "is overwriting existing" in rec.message
+        and "panda_observe" in rec.message
+        for rec in caplog.records
+    )
+
+
+def test_publish_same_tag_no_overwrite_warning(caplog):
+    """Re-publishing the same tag is a no-op for the overwrite WARN."""
+    t = DummyTransport()
+    publish(t, "panda_observe", started_unix=1.0)
+    with caplog.at_level("WARNING"):
+        publish(t, "panda_observe", started_unix=2.0)
+    assert not any(
+        "is overwriting existing" in rec.message for rec in caplog.records
+    )
+
+
+def test_session_publishes_and_clears_on_exit():
+    t = DummyTransport()
+    assert read(t) == {"run_tag": None, "run_started_at_unix": None}
+    with session(t, "panda_observe"):
+        assert read(t)["run_tag"] == "panda_observe"
+    assert read(t) == {"run_tag": None, "run_started_at_unix": None}
+
+
+def test_session_refuses_when_other_tag_already_published():
+    t = DummyTransport()
+    publish(t, "panda_observe", started_unix=1.0)
+    with pytest.raises(RuntimeError, match="panda_observe"):
+        with session(t, "vna_manual"):
+            pass
+    assert read(t)["run_tag"] == "panda_observe"
+
+
+def test_session_allows_reentry_with_same_tag():
+    t = DummyTransport()
+    publish(t, "vna_manual", started_unix=1.0)
+    with session(t, "vna_manual"):
+        assert read(t)["run_tag"] == "vna_manual"
+    assert read(t) == {"run_tag": None, "run_started_at_unix": None}
+
+
+def test_session_safe_clear_does_not_trample_overwriter():
+    """If another script overwrites our tag mid-session (refuse-on-conflict
+    race lost), __exit__ must not clear — that other script is now the
+    legitimate driver."""
+    t = DummyTransport()
+    with session(t, "panda_observe"):
+        publish(t, "vna_manual", started_unix=5.0)  # simulated overwrite
+    assert read(t)["run_tag"] == "vna_manual"
+
+
+def test_session_clears_even_when_block_raises():
+    t = DummyTransport()
+    with pytest.raises(ValueError):
+        with session(t, "panda_observe"):
+            assert read(t)["run_tag"] == "panda_observe"
+            raise ValueError("work failed")
+    assert read(t) == {"run_tag": None, "run_started_at_unix": None}

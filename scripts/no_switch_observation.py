@@ -25,9 +25,8 @@ import yaml
 
 from eigsep_redis import ConfigStore, StatusWriter, Transport
 
-from eigsep_observing import PandaClient
-from eigsep_observing.run_tag import clear as clear_run_tag
-from eigsep_observing.run_tag import publish as publish_run_tag
+from eigsep_observing import PandaClient, run_tag
+from eigsep_observing.obs_config_owner import publish_owner
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 
 
@@ -52,10 +51,11 @@ def _build_client(transport, cfg, dummy):
     cfg["use_switches"] = False
     cfg["serialize_motion_and_switching"] = True
     ConfigStore(transport).upload(cfg)
+    publish_owner(transport, "no_switch_observation")
     if dummy:
         from eigsep_observing.testing import DummyPandaClient
 
-        return DummyPandaClient(transport=transport, default_cfg=cfg)
+        return DummyPandaClient(transport=transport, cfg=cfg)
     return PandaClient(transport)
 
 
@@ -90,49 +90,55 @@ def main(transport, args):
     status = StatusWriter(transport)
     client = None
     try:
-        client = _build_client(transport, cfg, args.dummy)
-        if client.motor_client is None:
-            raise RuntimeError(
-                "Motor client not initialized; check motor pico registration."
-            )
-        if client.vna is None:
-            raise RuntimeError("VNA not initialized; check vna config block.")
+        with run_tag.session(transport, "no_switch_observation"):
+            client = _build_client(transport, cfg, args.dummy)
+            if client.motor_client is None:
+                raise RuntimeError(
+                    "Motor client not initialized; check motor pico "
+                    "registration."
+                )
+            if client.vna is None:
+                raise RuntimeError(
+                    "VNA not initialized; check vna config block."
+                )
 
-        publish_run_tag(transport, "no_switch_observation")
-        status.send("no_switch_observation started")
-        logger.info("no_switch_observation started")
+            status.send("no_switch_observation started")
+            logger.info("no_switch_observation started")
 
-        client.motor_client.set_delay()
-        client.motor_client.halt()
-        client.motor_client.home()
+            client.motor_client.set_delay()
+            client.motor_client.halt()
+            client.motor_client.home()
 
-        if not _calibration(client, status, "pre-scan"):
-            return
+            if not _calibration(client, status, "pre-scan"):
+                return
 
-        # Pin RFANT for the duration of the scan. switch_session
-        # holds coord.switch_section() across the whole block;
-        # per-move motion_section calls re-acquire the same RLock
-        # from this thread, which is the load-bearing reason the
-        # underlying lock is an RLock and not a plain Lock.
-        with client.switch_session() as sw:
-            if not sw("RFANT"):
-                raise RuntimeError("Failed to pin rfswitch to RFANT for scan.")
-            status.send(
-                "no_switch_observation: rfswitch pinned RFANT, scanning"
-            )
-            logger.info("rfswitch pinned RFANT; starting scan")
-            client.motor_client.scan(
-                stop_event=client.stop_client, **scan_kwargs
-            )
+            # Pin RFANT for the duration of the scan. switch_session
+            # holds coord.switch_section() across the whole block;
+            # per-move motion_section calls re-acquire the same RLock
+            # from this thread, which is the load-bearing reason the
+            # underlying lock is an RLock and not a plain Lock.
+            with client.switch_session() as sw:
+                if not sw("RFANT"):
+                    raise RuntimeError(
+                        "Failed to pin rfswitch to RFANT for scan."
+                    )
+                status.send(
+                    "no_switch_observation: rfswitch pinned RFANT, scanning"
+                )
+                logger.info("rfswitch pinned RFANT; starting scan")
+                client.motor_client.scan(
+                    stop_event=client.stop_client, **scan_kwargs
+                )
 
-        client.motor_client.home()
+            client.motor_client.home()
 
-        if client.stop_client.is_set():
-            logger.warning(
-                "stop_client set after scan; skipping post-scan calibration"
-            )
-            return
-        _calibration(client, status, "post-scan")
+            if client.stop_client.is_set():
+                logger.warning(
+                    "stop_client set after scan; skipping post-scan "
+                    "calibration"
+                )
+                return
+            _calibration(client, status, "post-scan")
     except KeyboardInterrupt:
         logger.info("Observation interrupted by user")
     except (TimeoutError, RuntimeError) as exc:
@@ -146,7 +152,6 @@ def main(transport, args):
             if client.motor_client is not None:
                 client.motor_client.halt()
             client.stop()
-        clear_run_tag(transport)
         status.send("no_switch_observation ended")
         logger.info("no_switch_observation ended")
 

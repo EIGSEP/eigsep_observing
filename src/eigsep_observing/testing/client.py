@@ -2,18 +2,16 @@ from functools import partial
 
 import yaml
 from cmt_vna.testing import DummyVNA
-from eigsep_redis import HeartbeatWriter, MetadataWriter
+from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
 from eigsep_redis.testing import DummyTransport
 import picohost.testing
 from picohost.keys import pico_heartbeat_name
 from picohost.manager import HEARTBEAT_TTL, PicoManager
 
 from .. import PandaClient
+from ..utils import get_config_path
 
-default_cfg_file = (
-    "/home/christian/Documents/research/eigsep/eigsep_observing/src/"
-    "eigsep_observing/config/dummy_config.yaml"
-)
+_dummy_cfg_file = get_config_path("dummy_config.yaml")
 
 
 # Picohost ships a single ``DummyPicoIMU`` class whose ``EMULATOR_CLASS``
@@ -67,20 +65,35 @@ class DummyPandaClient(PandaClient):
     their devices already registered.
     """
 
-    def __init__(self, transport=None, default_cfg=None):
+    def __init__(self, transport=None, *, cfg=None):
         if transport is None:
             transport = DummyTransport()
-        if default_cfg is None:
+        if cfg is None:
+            # Mirror the parent's cfg=None semantics: when Redis has a
+            # cfg, forward cfg=None so the parent's ``_get_cfg`` reads
+            # it and emits the canonical "Using config from Redis" log.
+            # Only fall back to the packaged dummy yaml when Redis is
+            # empty — testing convenience that lets
+            # ``DummyPandaClient()`` work standalone without forcing
+            # every test to upload a cfg first. The fallback is
+            # in-memory only (no Redis upload), so it does not pollute
+            # the cfg-owner provenance.
             try:
-                with open(default_cfg_file, "r") as f:
-                    default_cfg = yaml.safe_load(f)
-            except FileNotFoundError:
-                default_cfg = {}
+                ConfigStore(transport).get()
+                forwarded_cfg = None
+            except ValueError:
+                try:
+                    with open(_dummy_cfg_file, "r") as f:
+                        forwarded_cfg = yaml.safe_load(f)
+                except FileNotFoundError:
+                    forwarded_cfg = {}
+        else:
+            forwarded_cfg = cfg
         # Start the embedded manager BEFORE super().__init__ so that
         # PicoProxy.is_available is True when the parent constructor
         # builds sw_proxy.
         self._manager = self._start_dummy_manager(transport)
-        super().__init__(transport, default_cfg=default_cfg)
+        super().__init__(transport, cfg=forwarded_cfg)
 
     def _start_dummy_manager(self, transport):
         """Create and start a PicoManager with dummy devices.

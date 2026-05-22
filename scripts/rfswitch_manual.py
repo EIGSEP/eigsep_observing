@@ -20,6 +20,7 @@ from eigsep_redis import MetadataSnapshotReader
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import build_transport, require_pico
 from eigsep_observing.utils import configure_eig_logger
 
@@ -135,13 +136,14 @@ def _parse_args():
 def main():
     args = _parse_args()
     transport = build_transport(args.dummy)
-    proxy = PicoProxy("rfswitch", transport, source="rfswitch_manual")
-    require_pico(proxy)
-    snapshot = MetadataSnapshotReader(transport)
-    try:
-        _repl(proxy, snapshot, args.cycle_dwell)
-    except KeyboardInterrupt:
-        print()
+    with run_tag.session(transport, "rfswitch_manual"):
+        proxy = PicoProxy("rfswitch", transport, source="rfswitch_manual")
+        require_pico(proxy)
+        snapshot = MetadataSnapshotReader(transport)
+        try:
+            _repl(proxy, snapshot, args.cycle_dwell)
+        except KeyboardInterrupt:
+            print()
 
 
 if __name__ == "__main__":

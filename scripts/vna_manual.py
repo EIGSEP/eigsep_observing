@@ -25,10 +25,10 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from eigsep_redis import ConfigStore, Transport
+from eigsep_redis import Transport
 from picohost.proxy import PicoProxy
 
-from eigsep_observing import PandaClient
+from eigsep_observing import PandaClient, run_tag
 from eigsep_observing._scripts_util import require_pico
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 from eigsep_observing.vna import save_vna_manual_h5
@@ -48,18 +48,23 @@ def _build_transport(dummy):
 
 
 def _build_client(transport, cfg, dummy):
+    # Build a transient local cfg view: vna_manual is a bring-up tool,
+    # not an authorized uploader. Mutating the persistent Redis cfg
+    # would stamp these bring-up flags into corr-file overlays opened
+    # by ``eigsep-observe`` while this script runs, misrepresenting the
+    # rig's true operating intent. Pass cfg= directly so PandaClient
+    # uses it in-process without touching ConfigStore.
     cfg = dict(cfg)
     cfg["use_vna"] = True
     cfg["use_switches"] = False
     cfg["use_motor"] = False
     cfg["use_tempctrl"] = False
     cfg["serialize_motion_and_switching"] = False
-    ConfigStore(transport).upload(cfg)
     if dummy:
         from eigsep_observing.testing import DummyPandaClient
 
-        return DummyPandaClient(transport=transport, default_cfg=cfg)
-    return PandaClient(transport)
+        return DummyPandaClient(transport=transport, cfg=cfg)
+    return PandaClient(transport, cfg=cfg)
 
 
 def _summary_db(arr):
@@ -188,15 +193,18 @@ def main():
 
     transport = _build_transport(args.dummy)
 
-    client = _build_client(transport, cfg, args.dummy)
-    try:
-        require_pico(PicoProxy("rfswitch", transport, source="vna_manual"))
-        if client.vna is None:
-            raise SystemExit("VNA not initialized; check vna config block.")
-        _print_banner(cfg, args.save_dir)
-        _repl(client, args.save_dir)
-    finally:
-        client.stop()
+    with run_tag.session(transport, "vna_manual"):
+        client = _build_client(transport, cfg, args.dummy)
+        try:
+            require_pico(PicoProxy("rfswitch", transport, source="vna_manual"))
+            if client.vna is None:
+                raise SystemExit(
+                    "VNA not initialized; check vna config block."
+                )
+            _print_banner(cfg, args.save_dir)
+            _repl(client, args.save_dir)
+        finally:
+            client.stop()
 
 
 if __name__ == "__main__":

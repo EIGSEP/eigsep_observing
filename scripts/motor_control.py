@@ -14,7 +14,7 @@ import time
 import numpy as np
 from eigsep_redis import StatusWriter
 
-from eigsep_observing import MotorClient
+from eigsep_observing import MotorClient, run_tag
 from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.utils import configure_eig_logger
 
@@ -24,34 +24,35 @@ logger = logging.getLogger(__name__)
 
 
 def main(transport, args):
-    status = StatusWriter(transport)
-    motor = MotorClient(transport)
+    with run_tag.session(transport, "motor_control"):
+        status = StatusWriter(transport)
+        motor = MotorClient(transport)
 
-    started = time.monotonic()
-    status.send("motor_control started")
-    logger.info("motor_control started")
+        started = time.monotonic()
+        status.send("motor_control started")
+        logger.info("motor_control started")
 
-    try:
-        motor.set_delay()
-        motor.halt()
-        motor.scan(
-            az_range_deg=np.linspace(-180.0, 180.0, 10),
-            el_range_deg=np.linspace(-180.0, 180.0, 10),
-            el_first=args.el_first,
-            repeat_count=args.count,
-            pause_s=args.pause_s,
-            sleep_between=args.sleep_s,
-        )
-    except KeyboardInterrupt:
-        logger.info("Scan interrupted by user")
-    except (TimeoutError, RuntimeError) as exc:
-        logger.error("Motor scan aborted: %s", exc)
-    finally:
-        motor.halt()
-        elapsed = time.monotonic() - started
-        msg = f"motor_control ended (duration={elapsed:.1f}s)"
-        status.send(msg)
-        logger.info(msg)
+        try:
+            motor.set_delay()
+            motor.halt()
+            motor.scan(
+                az_range_deg=np.linspace(-180.0, 180.0, 10),
+                el_range_deg=np.linspace(-180.0, 180.0, 10),
+                el_first=args.el_first,
+                repeat_count=args.count,
+                pause_s=args.pause_s,
+                sleep_between=args.sleep_s,
+            )
+        except KeyboardInterrupt:
+            logger.info("Scan interrupted by user")
+        except (TimeoutError, RuntimeError) as exc:
+            logger.error("Motor scan aborted: %s", exc)
+        finally:
+            motor.halt()
+            elapsed = time.monotonic() - started
+            msg = f"motor_control ended (duration={elapsed:.1f}s)"
+            status.send(msg)
+            logger.info(msg)
 
 
 def _parse_args():

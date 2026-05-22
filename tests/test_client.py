@@ -14,7 +14,7 @@ from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
-from eigsep_observing import MotorClient, TempCtrlClient, run_tag
+from eigsep_observing import MotorClient, PandaClient, TempCtrlClient, run_tag
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -57,47 +57,61 @@ def test_client(client):
         assert client.vna is None
 
 
-def test_get_cfg(caplog, dummy_cfg):
-    caplog.set_level("INFO")
-
-    # should be no config in redis at start
-    t = DummyTransport()  # different transport for test isolation
+def test_panda_client_uses_caller_cfg_without_touching_redis(dummy_cfg):
+    """``PandaClient(..., cfg=<dict>)`` uses the caller's cfg directly
+    and does not write it to Redis. Persistent Redis cfg is the
+    province of uploader scripts (panda_observe, vna_position_sweep,
+    no_switch_observation) — bring-up tools must not mutate it."""
+    t = DummyTransport()
     with pytest.raises(ValueError):
-        ConfigStore(t).get()
-    client2 = DummyPandaClient(t, default_cfg={})
-    client3 = None
+        ConfigStore(t).get()  # baseline: Redis is empty
+    client = DummyPandaClient(t, cfg=dummy_cfg)
     try:
-        # should have created a logger warning about missing config
-        for record in caplog.records:
-            if "No configuration found in Redis" in record.getMessage():
-                assert record.levelname == "WARNING"
-        # after init of client2, the cfg should be in redis
-        cfg_in_redis = client2._get_cfg()
-        assert "upload_time" in cfg_in_redis
-
-        # upload the dummy config to client2's redis
-        client2.config.upload(dummy_cfg)
-
-        # check that they're the same
-        retrieved_cfg = client2._get_cfg()
-        retrieved_cfg_copy = retrieved_cfg.copy()
-        del retrieved_cfg_copy["upload_time"]
-        dummy_cfg_serialized = json.loads(json.dumps(dummy_cfg))
-        compare_dicts(dummy_cfg_serialized, retrieved_cfg_copy)
-
-        # if reinit client2, it should get the config from redis
-        client3 = DummyPandaClient(t, default_cfg={})
-        retrieved_cfg2 = client3._get_cfg()
-        compare_dicts(client3.cfg, retrieved_cfg2)
-
-        # check logging
-        for record in caplog.records:
-            if "Using config from Redis" in record.getMessage():
-                assert record.levelname == "INFO"
+        assert client.cfg == dummy_cfg
+        # No side-effect upload: ConfigStore still sees an empty Redis.
+        with pytest.raises(ValueError):
+            ConfigStore(t).get()
     finally:
-        client2.stop()
-        if client3 is not None:
-            client3.stop()
+        client.stop()
+
+
+def test_panda_client_raises_when_cfg_kwarg_none_and_redis_empty():
+    """Bare ``PandaClient(transport)`` with no ``cfg=`` kwarg and an
+    empty Redis raises ``RuntimeError`` rather than silently bootstrapping
+    a default. The packaged default was the source of the
+    ``vna_manual``-style trust-eroding upload; the loud raise forces the
+    caller to either start an uploader or pass an explicit
+    ``cfg=<dict>``."""
+    t = DummyTransport()
+    with pytest.raises(RuntimeError, match="No obs_config in Redis"):
+        PandaClient(t)
+
+
+def test_panda_client_reads_cfg_from_redis_when_cfg_kwarg_none(
+    caplog, dummy_cfg
+):
+    """``PandaClient(..., cfg=None)`` reads the persistent cfg from
+    Redis when an uploader has seeded it. Exercises the production
+    happy path: panda_observe uploads cfg, then constructs the client
+    without an explicit ``cfg=`` kwarg."""
+    caplog.set_level("INFO")
+    t = DummyTransport()
+    ConfigStore(t).upload(dummy_cfg)
+    # cfg=None → DummyPandaClient reads from Redis (mirrors parent
+    # semantics), so the cfg actually used comes from the Redis upload.
+    client = DummyPandaClient(t)
+    try:
+        cfg_copy = client.cfg.copy()
+        del cfg_copy["upload_time"]
+        dummy_cfg_serialized = json.loads(json.dumps(dummy_cfg))
+        compare_dicts(dummy_cfg_serialized, cfg_copy)
+        assert any(
+            "Using config from Redis" in r.getMessage()
+            and r.levelname == "INFO"
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
 
 
 def test_switch_proxy_created(client):
@@ -208,7 +222,7 @@ def test_vna_loop_uses_redis_published_mode_for_switch_back(
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60  # long: only one iteration before stop
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         # Pre-seed the rfswitch in Redis to simulate a state PicoManager
         # set before this PandaClient process started.
@@ -265,7 +279,7 @@ def test_vna_loop_warns_and_defaults_when_rfswitch_absent(
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         # Wipe the rfswitch entry so the helper returns None.
         client.transport.r.hdel("metadata", "rfswitch")
@@ -314,7 +328,7 @@ def test_vna_loop_warns_on_failed_switch_back(transport, dummy_cfg, caplog):
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60  # long: only one iteration before stop
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client._safe_switch("RFNOFF")
         deadline = time.monotonic() + 2.0
@@ -366,7 +380,7 @@ def test_switch_loop_warns_on_failed_switch(transport, dummy_cfg, caplog):
     # Give the loop exactly one mode to try; cap wait so the stop event
     # breaks us out after the first iteration.
     cfg["switch_schedule"] = {"RFNOFF": 0.01}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
 
         def failing_switch(state):
@@ -573,7 +587,7 @@ def test_switch_session_serializes_with_switch_loop(transport, dummy_cfg):
     # Keep the schedule simple and long so switch_loop blocks on the
     # lock instead of racing through many iterations during the test.
     cfg["switch_schedule"] = {"RFANT": 60.0}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client._safe_switch("RFANT")
         _wait_for_published_mode(client, "RFANT")
@@ -662,7 +676,7 @@ def test_send_heartbeat_cycles_and_announces_shutdown(transport, dummy_cfg):
     hasn't expired yet), so we explicitly count ticks here by counting
     invocations of the writer's ``set`` method over a ~1.2s window."""
     calls = []
-    client = DummyPandaClient(transport, default_cfg=dummy_cfg)
+    client = DummyPandaClient(transport, cfg=dummy_cfg)
     try:
         original_set = client.heartbeat.set
 
@@ -732,7 +746,7 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
     test)."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
         violations = ["missing key 'npoints'", "key 'mode': expected str"]
@@ -772,7 +786,7 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     status stream during normal operation."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
         client.measure_s11("ant")
@@ -791,7 +805,7 @@ def test_measure_s11_returns_published_payload(transport, dummy_cfg):
     can write a local artifact without racing the VNA stream reader."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         result = client.measure_s11("ant")
         assert isinstance(result, tuple) and len(result) == 3
@@ -913,7 +927,7 @@ def test_switch_loop_survives_firmware_error(transport, dummy_cfg, caplog):
     still fire so the ground observer sees the stuck switch."""
     cfg = dict(dummy_cfg)
     cfg["switch_schedule"] = {"RFNOFF": 0.01}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         pico = client._manager.picos["rfswitch"]
 
@@ -949,7 +963,7 @@ def test_switch_loop_survives_timeout(transport, dummy_cfg, caplog):
     path."""
     cfg = dict(dummy_cfg)
     cfg["switch_schedule"] = {"RFNOFF": 0.01}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         client.sw_proxy.timeout = 0.1
         pico = client._manager.picos["rfswitch"]
@@ -986,7 +1000,7 @@ def test_vna_loop_survives_switch_back_error(transport, dummy_cfg, caplog):
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client._safe_switch("RFNOFF")
         _wait_for_published_mode(client, "RFNOFF")
@@ -1069,7 +1083,7 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
     or hardcoded power that would silently bias either mode."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         client.measure_s11("rec")
         expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
@@ -1082,11 +1096,11 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
 
 
 def test_measure_s11_injects_overlay_sentinels(transport, dummy_cfg):
-    """No run_tag published → ``UNKNOWN`` / ``0.0`` sentinels +
+    """No run_tag / owner published → ``UNKNOWN`` / ``0.0`` sentinels +
     ``obs_config`` snapshot from ``self.cfg``."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         with patch.object(client.vna_writer, "add") as mock_add:
             client.measure_s11("ant")
@@ -1094,6 +1108,8 @@ def test_measure_s11_injects_overlay_sentinels(transport, dummy_cfg):
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "UNKNOWN"
         assert header["run_started_at_unix"] == 0.0
+        assert header["obs_config_owner"] == "UNKNOWN"
+        assert header["obs_config_owner_uploaded_unix"] == 0.0
         assert header["obs_config"]["use_vna"] is True
         # Sanity: the existing fields are still present.
         assert header["mode"] == "ant"
@@ -1107,7 +1123,7 @@ def test_measure_s11_injects_published_run_tag(transport, dummy_cfg):
     measure_s11 call."""
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         run_tag.publish(transport, "vna_position_sweep", started_unix=12345.0)
         with patch.object(client.vna_writer, "add") as mock_add:
@@ -1115,6 +1131,26 @@ def test_measure_s11_injects_published_run_tag(transport, dummy_cfg):
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "vna_position_sweep"
         assert header["run_started_at_unix"] == 12345.0
+    finally:
+        client.stop()
+
+
+def test_measure_s11_injects_published_owner(transport, dummy_cfg):
+    """publish_owner flows into the VNA header on next measure_s11 call."""
+    from eigsep_observing import obs_config_owner
+
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        obs_config_owner.publish_owner(
+            transport, "panda_observe", uploaded_at_unix=7.5
+        )
+        with patch.object(client.vna_writer, "add") as mock_add:
+            client.measure_s11("ant")
+        header = mock_add.call_args.kwargs["header"]
+        assert header["obs_config_owner"] == "panda_observe"
+        assert header["obs_config_owner_uploaded_unix"] == 7.5
     finally:
         client.stop()
 
@@ -1144,7 +1180,7 @@ def test_boot_errors_when_rfant_initialization_fails(
     with patch.object(
         eigsep_observing.PandaClient, "_safe_switch", return_value=False
     ):
-        client = DummyPandaClient(transport, default_cfg=dummy_cfg)
+        client = DummyPandaClient(transport, cfg=dummy_cfg)
     try:
         assert any(
             "Boot-time RFANT initialization failed" in r.getMessage()
@@ -1169,7 +1205,7 @@ def test_vna_loop_recovers_to_rfant_on_measurement_exception(
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     cfg["vna_interval"] = 60  # long: one iteration then stop via RFANT
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         # Pre-seed a non-RFANT prev_mode so the recovery to RFANT is
         # distinguishable from a restore to prev_mode.
@@ -1243,7 +1279,7 @@ def test_use_motor_true_builds_motor_client(transport, dummy_cfg):
     addressable through the client's proxy."""
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert isinstance(client.motor_client, MotorClient)
         # Motor client shares the panda client's transport, i.e. the
@@ -1282,7 +1318,7 @@ def test_motor_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
     cfg = dict(dummy_cfg)
     cfg["use_motor"] = True
     cfg["motor_interval"] = 0  # invalid
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
         caplog.set_level("WARNING")
@@ -1316,7 +1352,7 @@ def test_motor_loop_calls_scan_with_stop_event_and_cfg_kwargs(
         "el_range_deg": [-1.0, 0.0, 1.0],
         "repeat_count": 1,
     }
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         scan_calls = []
 
@@ -1350,7 +1386,7 @@ def test_motor_loop_survives_scan_timeout_error_and_parks_motors(
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         home_calls = []
 
@@ -1405,7 +1441,7 @@ def test_motor_loop_survives_scan_runtime_error(transport, dummy_cfg, caplog):
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         home_calls = []
 
@@ -1457,7 +1493,7 @@ def test_motor_loop_logs_error_when_post_failure_home_also_fails(
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
 
         def raising_scan(**kwargs):
@@ -1517,7 +1553,7 @@ def test_motor_loop_waits_motor_interval_when_inline_park_succeeds(
     cfg["motor_interval"] = 3600
     cfg["motor_failure_retry_s"] = 5
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         motor_waits = []
 
@@ -1562,7 +1598,7 @@ def test_motor_loop_uses_failure_retry_interval_after_failed_park(
     cfg["motor_interval"] = 3600
     cfg["motor_failure_retry_s"] = 5
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         motor_waits = []
 
@@ -1611,7 +1647,7 @@ def test_motor_loop_recovery_retries_home_only_not_full_scan(
     cfg["motor_interval"] = 3600
     cfg["motor_failure_retry_s"] = 5
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         scan_calls = []
         home_calls = []
@@ -1679,7 +1715,7 @@ def test_motor_loop_exits_recovery_when_home_finally_succeeds(
     cfg["motor_interval"] = 3600
     cfg["motor_failure_retry_s"] = 5
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         scan_calls = []
         home_calls = []
@@ -1743,7 +1779,7 @@ def test_motor_loop_uses_motor_interval_after_successful_scan(
     cfg["motor_interval"] = 3600
     cfg["motor_failure_retry_s"] = 5
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         motor_waits = []
 
@@ -1788,7 +1824,7 @@ def test_motor_loop_invalid_failure_retry_s_falls_back_to_interval(
     cfg["motor_interval"] = 42
     cfg["motor_failure_retry_s"] = 0  # invalid
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         motor_waits = []
 
@@ -1841,7 +1877,7 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
     cfg["use_motor"] = True
     cfg["motor_interval"] = 60
     cfg["motor_scan"] = {"repeat_count": 1}
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
 
         def fake_scan(**kwargs):
@@ -1884,7 +1920,7 @@ def test_use_tempctrl_false_leaves_client_none(transport, dummy_cfg):
     ``self.tempctrl`` as ``None`` and skip the init call."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = False
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client.cfg.get("use_tempctrl", False) is False
         assert client.tempctrl is None
@@ -1897,7 +1933,7 @@ def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
     ``TempCtrlClient`` bound to the same transport."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert isinstance(client.tempctrl, TempCtrlClient)
         assert client.tempctrl.transport is client.transport
@@ -1976,7 +2012,7 @@ def test_tempctrl_settings_non_dict_disables_client(
     cfg["use_tempctrl"] = True
     cfg["tempctrl_settings"] = "not a dict"
     caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client.tempctrl is None
         assert any(
@@ -2002,7 +2038,7 @@ def test_tempctrl_settings_bad_numeric_disables_client(
         "LNA": {"target_C": "twenty-five"},
     }
     caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client.tempctrl is None
         assert any(
@@ -2022,7 +2058,7 @@ def test_tempctrl_loop_returns_when_client_is_none(
     spin, warning rides both channels."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = False
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client.tempctrl is None
         _arm_status_reader(client)
@@ -2047,7 +2083,7 @@ def test_tempctrl_loop_invalid_interval_returns(transport, dummy_cfg, caplog):
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_interval"] = 0
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
         caplog.set_level("WARNING")
@@ -2072,7 +2108,7 @@ def test_tempctrl_loop_applies_settings_once_then_stops(transport, dummy_cfg):
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_interval"] = 60  # long; only one iteration
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         apply_calls = []
 
@@ -2098,7 +2134,7 @@ def test_tempctrl_loop_does_not_reapply_after_success(transport, dummy_cfg):
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_interval"] = 0.01  # fast so we run many iterations
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         apply_calls = []
         health_calls = []
@@ -2146,7 +2182,7 @@ def test_tempctrl_loop_retries_apply_until_success(
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_interval"] = 0.01
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
         apply_calls = []
@@ -2219,7 +2255,7 @@ def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
     going dark is visible ground-side."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         caplog.set_level("WARNING")
         # Sparse fixture — see branch-test rationale above.
@@ -2243,7 +2279,7 @@ def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
     ride the status stream so the operator sees the dead sensor."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         caplog.set_level("WARNING")
         # Sparse fixture — see branch-test rationale above.
@@ -2271,7 +2307,7 @@ def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
     peltier can't keep up. Log loudly for the operator."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         caplog.set_level("WARNING")
         # Sparse fixture — see branch-test rationale above. The drive/
@@ -2328,7 +2364,7 @@ def test_panda_client_builds_coord_serialize_on_when_flag_set(
     """When the yaml flag is true, the coord serializes."""
     cfg = dict(dummy_cfg)
     cfg["serialize_motion_and_switching"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         assert client.coord.serialize is True
     finally:
@@ -2365,7 +2401,7 @@ def test_run_calibration_sequence_filters_rfant(transport, dummy_cfg):
     """
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         seen = []
         with patch.object(client, "measure_s11", lambda mode: None):
@@ -2394,7 +2430,7 @@ def test_run_calibration_sequence_vna_first_then_dwells(transport, dummy_cfg):
     """
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         order = []
         with patch.object(
@@ -2422,7 +2458,7 @@ def test_run_calibration_sequence_respects_stop_event(transport, dummy_cfg):
     """
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         with patch.object(client, "measure_s11", lambda mode: None):
             with patch.object(client, "_safe_switch", return_value=True):
@@ -2457,7 +2493,7 @@ def test_run_calibration_sequence_rejects_non_dict_schedule(
     """
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = False
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         with pytest.raises(ValueError, match="switch_schedule must be a dict"):
             client.run_calibration_sequence(schedule=["RFNOFF", 0.05])
@@ -2473,7 +2509,7 @@ def test_run_calibration_sequence_skips_invalid_modes(
     """
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         seen = []
         caplog.set_level("WARNING")

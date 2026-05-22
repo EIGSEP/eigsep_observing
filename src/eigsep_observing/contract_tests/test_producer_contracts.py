@@ -273,7 +273,7 @@ def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
         cfg = yaml.safe_load(f)
     cfg["use_vna"] = True
     transport = DummyTransport()
-    client = DummyPandaClient(transport, default_cfg=cfg)
+    client = DummyPandaClient(transport, cfg=cfg)
     try:
         client.measure_s11(mode)
         # The reader skips producer-backlog by design (see

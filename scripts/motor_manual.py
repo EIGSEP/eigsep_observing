@@ -17,7 +17,7 @@ from argparse import ArgumentParser
 import curses
 import logging
 
-from eigsep_observing import MotorZeroer
+from eigsep_observing import MotorZeroer, run_tag
 from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.utils import configure_eig_logger
 
@@ -90,7 +90,12 @@ def _parse_args():
     return parser.parse_args()
 
 
-if __name__ == "__main__":
+def main():
     args = _parse_args()
     transport = build_transport(args.dummy)
-    curses.wrapper(_curses_main, transport, args)
+    with run_tag.session(transport, "motor_manual"):
+        curses.wrapper(_curses_main, transport, args)
+
+
+if __name__ == "__main__":
+    main()

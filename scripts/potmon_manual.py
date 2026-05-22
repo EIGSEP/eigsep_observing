@@ -17,6 +17,7 @@ import time
 
 from eigsep_redis import MetadataSnapshotReader
 
+from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.utils import configure_eig_logger
 
@@ -100,11 +101,12 @@ def _parse_args():
 def main():
     args = _parse_args()
     transport = build_transport(args.dummy)
-    snapshot = MetadataSnapshotReader(transport)
-    try:
-        _render_loop(snapshot, args.interval)
-    except KeyboardInterrupt:
-        print()
+    with run_tag.session(transport, "potmon_manual"):
+        snapshot = MetadataSnapshotReader(transport)
+        try:
+            _render_loop(snapshot, args.interval)
+        except KeyboardInterrupt:
+            print()
 
 
 if __name__ == "__main__":
