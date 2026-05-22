@@ -42,8 +42,6 @@ eigsep-panda     = "eigsep_observing.scripts.panda_observe:main"
 
 [project.optional-dependencies]
 dev = [
-  "build",
-  "twine",
   "ruff",
   "fakeredis",
   "pyserial-mock",
