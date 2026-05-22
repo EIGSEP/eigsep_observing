@@ -169,13 +169,25 @@ def test_switch_loop_does_not_mutate_cfg_schedule(client):
     assert client.cfg["switch_schedule"] == original
 
 
-def test_cfg_is_get_cfg_result_without_extra_roundtrip(client):
-    """``self.cfg`` must equal what ``_get_cfg`` returns. The previous
-    ``json.loads(json.dumps(cfg))`` step was dead code — ``config.get``
-    already returns a JSON-normalized dict (via ``json.loads`` on the
-    serialized payload) — and would silently re-introduce drift if
-    re-added on top of a different storage path."""
-    assert client.cfg == client._get_cfg()
+def test_cfg_is_get_cfg_result_without_extra_roundtrip(dummy_cfg):
+    """On the ``cfg=None`` + Redis-pre-seeded path, ``self.cfg`` must
+    equal what ``_get_cfg`` returns. ``config.get`` already returns a
+    JSON-normalized dict (via ``json.loads`` on the serialized
+    payload), so the previous ``json.loads(json.dumps(cfg))`` wrapper
+    was dead code; this guards against re-introducing it on top of a
+    different storage path.
+
+    The ``client`` fixture passes ``cfg=<dict>`` and so bypasses Redis
+    entirely (per the new constructor contract); the invariant only
+    applies to the production happy path where an uploader has seeded
+    Redis first."""
+    t = DummyTransport()
+    ConfigStore(t).upload(dummy_cfg)
+    client = DummyPandaClient(t)
+    try:
+        assert client.cfg == client._get_cfg()
+    finally:
+        client.stop()
 
 
 def test_read_switch_mode_from_redis_returns_published_mode(client):
