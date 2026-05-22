@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -8,6 +9,8 @@ import numpy as np
 
 from eigsep_redis.keys import DATA_STREAMS_SET
 
+from . import obs_config_owner, run_tag
+from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .keys import VNA_STREAM
 from .vna_calibration import calibrate_s11
 
@@ -147,6 +150,139 @@ class VnaReader:
             )
             vna_data[k.decode()] = arr
         return vna_data, header, metadata
+
+
+def measure_s11(
+    vna,
+    mode,
+    *,
+    cfg,
+    transport,
+    vna_writer,
+    metadata_snapshot,
+    on_contract_violation=None,
+    logger=logger,
+):
+    """Run one VNA S11 bundle and publish it on the VNA stream.
+
+    The eigsep-side VNA producer protocol: drive the cmt_vna primitives
+    to get OSL + DUT traces, build a header with provenance overlays
+    and a metadata snapshot, validate against the schema, and publish
+    via :class:`VnaWriter`. Returns the published payload so callers
+    that want a local artifact (e.g. ``scripts/vna_manual.py``) do not
+    need to re-drain the VNA stream.
+
+    Used by :meth:`eigsep_observing.client.PandaClient.measure_s11`
+    (production observing) and ``scripts/vna_manual.py`` (interactive
+    bring-up) — the two pathways share this protocol so a future
+    contract change lands in one place.
+
+    Parameters
+    ----------
+    vna : cmt_vna.VNA
+        Configured VNA instance with ``switch_fn`` already wired.
+    mode : str
+        ``"ant"`` or ``"rec"``.
+    cfg : dict
+        Observing config. ``cfg["vna_settings"]["power_dBm"][mode]``
+        is set on ``vna.power_dBm`` before the sweep; the full ``cfg``
+        is embedded into the header as ``obs_config``.
+    transport : eigsep_redis.Transport
+        Used to read the active ``run_tag`` for the header overlay.
+    vna_writer : VnaWriter
+        Sink for the bundled S11 + header + metadata payload.
+    metadata_snapshot : eigsep_redis.MetadataSnapshotReader
+        Captures the panda-side metadata at the moment of publish.
+    on_contract_violation : callable, optional
+        ``f(msg: str) -> None``. Called once per contract violation
+        with a formatted message. Defaults to ``logger.warning``.
+        Production callers pass ``PandaClient._warn_with_status`` so
+        violations also reach the Redis status stream that the ground
+        observer relays.
+    logger : logging.Logger, optional
+        Where to log info-level progress. Defaults to this module's
+        logger.
+
+    Returns
+    -------
+    s11 : dict[str, np.ndarray]
+        Bundle published to Redis (raw DUT traces plus ``cal:VNAO`` /
+        ``cal:VNAS`` / ``cal:VNAL`` standards).
+    header : dict
+        Header published alongside the bundle (instrument header plus
+        ``mode``, ``metadata_snapshot_unix``, ``run_tag``,
+        ``run_started_at_unix``, ``obs_config_owner``,
+        ``obs_config_owner_uploaded_unix``, ``obs_config``).
+    metadata : dict
+        Panda-side metadata snapshot captured at trigger time.
+
+    Raises
+    ------
+    ValueError
+        If ``mode`` is not ``"ant"`` or ``"rec"``.
+    RuntimeError
+        If ``vna`` is ``None``.
+
+    Notes
+    -----
+    Contract validation is loud-but-non-blocking: a violation fires
+    ``on_contract_violation`` and the bundle is *still* published, so
+    a producer-side contract drift never blocks data flow. cmt_vna
+    handles all RF switching internally via its ``switch_fn``.
+    """
+    if mode not in ("ant", "rec"):
+        raise ValueError(f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'.")
+    if vna is None:
+        raise RuntimeError("VNA not initialized. Cannot execute VNA commands.")
+
+    vna.power_dBm = cfg["vna_settings"]["power_dBm"][mode]
+    osl_s11 = vna.measure_OSL()
+    if mode == "ant":
+        logger.info("Measuring antenna, noise, load S11")
+        s11 = vna.measure_ant(measure_noise=True, measure_load=True)
+    else:  # mode is rec
+        logger.info("Measuring receiver S11")
+        s11 = vna.measure_rec()
+    for k, v in osl_s11.items():
+        s11[f"cal:{k}"] = v
+
+    header = vna.header
+    header["mode"] = mode
+    header["metadata_snapshot_unix"] = time.time()
+    tag = run_tag.read(transport)
+    owner = obs_config_owner.read_owner(transport)
+    header["run_tag"] = (
+        tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
+    )
+    header["run_started_at_unix"] = (
+        tag["run_started_at_unix"]
+        if tag["run_started_at_unix"] is not None
+        else 0.0
+    )
+    header["obs_config_owner"] = (
+        owner["owner"] if owner["owner"] is not None else "UNKNOWN"
+    )
+    header["obs_config_owner_uploaded_unix"] = (
+        owner["uploaded_at_unix"]
+        if owner["uploaded_at_unix"] is not None
+        else 0.0
+    )
+    header["obs_config"] = dict(cfg)
+    metadata = metadata_snapshot.get()
+
+    violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(
+        s11, mode
+    )
+    if violations:
+        warn = on_contract_violation or logger.warning
+        warn(
+            f"VNA S11 producer contract violation (mode={mode!r}): "
+            + "; ".join(violations)
+        )
+
+    vna_writer.add(s11, header=header, metadata=metadata)
+    logger.info("Vna data added to redis")
+    return s11, header, metadata
 
 
 def save_vna_manual_h5(s11, header, metadata, *, save_dir, mode):
