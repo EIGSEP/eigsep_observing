@@ -1,5 +1,44 @@
 # Changelog
 
+## [2.5.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.4.0...v2.5.0) (2026-05-23)
+
+
+### Features
+
+* **client:** return published payload from measure_s11 ([2a27641](https://github.com/EIGSEP/eigsep_observing/commit/2a276411c3ff514c2a6d53d89fd5188fe4c57355))
+* **live status:** pane redesign ([#118](https://github.com/EIGSEP/eigsep_observing/issues/118)) ([4909c4b](https://github.com/EIGSEP/eigsep_observing/commit/4909c4b94ad4dbeca76f2c4cc7f1de6eef354842))
+* **observe:** tolerate panda outages without crashing the corr loop ([#130](https://github.com/EIGSEP/eigsep_observing/issues/130)) ([2416bcc](https://github.com/EIGSEP/eigsep_observing/commit/2416bcc103c497cbef595ceb12a44e96870bbbfb))
+* **provenance:** gate obs_config uploads + run_tag every driver ([#132](https://github.com/EIGSEP/eigsep_observing/issues/132)) ([d5ba55e](https://github.com/EIGSEP/eigsep_observing/commit/d5ba55ea21356e7e82952eb7329d3c557e8c9af9))
+* **scripts:** add record_metadata and record_vna for test-bench data collection ([09cd1b1](https://github.com/EIGSEP/eigsep_observing/commit/09cd1b1694cd45692e0d461350b9f30ec113282d))
+* **scripts:** add vna_manual bring-up tool ([f4c7246](https://github.com/EIGSEP/eigsep_observing/commit/f4c7246aa3679cc431989e3caa08013407f858fd))
+* **scripts:** promote alt-mode observers to console entry points ([0f7af99](https://github.com/EIGSEP/eigsep_observing/commit/0f7af99100406030c4e7d3751345e7134bfe8ec4))
+* **tempctrl:** expose cooling-mode guard through TempCtrlClient ([3d54b4e](https://github.com/EIGSEP/eigsep_observing/commit/3d54b4eb86fafac5ace4518c36d215ca8b0385f1))
+* **tempctrl:** expose PI gains through TempCtrlClient ([5c2f595](https://github.com/EIGSEP/eigsep_observing/commit/5c2f5955089826d2d9433764af313f8171c6dc1c))
+* **tempctrl:** surface peltier health (stall_tripped + preflight) ([fcd88d8](https://github.com/EIGSEP/eigsep_observing/commit/fcd88d8d34144e2da47b3f2e17bf3d2668a5aa0a))
+* **vna:** add save_vna_manual_h5 for bring-up artifacts ([416536c](https://github.com/EIGSEP/eigsep_observing/commit/416536c2c73997e79a224bae4d12eb3c9b3ae484))
+
+
+### Bug Fixes
+
+* **io:** add PI controller fields to tempctrl schema ([3f67e20](https://github.com/EIGSEP/eigsep_observing/commit/3f67e20d02e6c506677306717b365b64ea06edf6))
+* **logging:** make configure_eig_logger(console=False) actually silence stderr ([6e36218](https://github.com/EIGSEP/eigsep_observing/commit/6e3621881219901b924f9aa226e83041128ab55c))
+* **motor_manual:** recover integer step ladder from 0.1 floor ([e336315](https://github.com/EIGSEP/eigsep_observing/commit/e336315bd09377b37f8380f145b4a75d548be92b))
+* **motor_scripts:** require_pico before issuing motor commands ([7cbc3fa](https://github.com/EIGSEP/eigsep_observing/commit/7cbc3faf1e137571c71461264a86816fc96fb1e0))
+* **pico_preflight:** show per-channel tempctrl streams ([e2b87b0](https://github.com/EIGSEP/eigsep_observing/commit/e2b87b0bb142fc445ddbe515558202f979df9961))
+* reconfigure existing logger handlers in configure_eig_logger ([8b71472](https://github.com/EIGSEP/eigsep_observing/commit/8b7147262e226a18a595cad5ece47eb823fc4e74))
+* remove reference to old kwarg default_cfg ([93e1b1f](https://github.com/EIGSEP/eigsep_observing/commit/93e1b1f11c8e6a8cfb35b310186cf0bcde94e151))
+* **scripts:** defer DummyPandaClient import in observation scripts ([6486438](https://github.com/EIGSEP/eigsep_observing/commit/64864384e51c16e9f6b6876f31af1ab0f0516e92))
+* **scripts:** drop eager DummyPandaClient import in motor scripts ([2c66971](https://github.com/EIGSEP/eigsep_observing/commit/2c66971fa4cb3684d26cb0a92a5ff7a2b90e1d55))
+* **scripts:** log producer-contract violations at ERROR ([c87a7ba](https://github.com/EIGSEP/eigsep_observing/commit/c87a7baf0d22f568b3fdb8445d409fe41115999a))
+* **scripts:** silence console logs in repainting bring-up UIs ([041d081](https://github.com/EIGSEP/eigsep_observing/commit/041d0816376ca7f7798f3cccf47f530f49ab9d2a))
+* **tempctrl_manual:** seed setpoints from firmware T_target ([f49b3e2](https://github.com/EIGSEP/eigsep_observing/commit/f49b3e2e8bfde918f25f50f1de2732f4ddf242ce))
+* **vna_manual:** call build_vna_client helper instead of missing _build_client ([342f1b0](https://github.com/EIGSEP/eigsep_observing/commit/342f1b02baec7f91f4a7bc52beb433a16e1aff51))
+
+
+### Documentation
+
+* **tempctrl_manual:** surface picohost 3.4.0 enabled semantics ([23e6f05](https://github.com/EIGSEP/eigsep_observing/commit/23e6f05ff4db29e4a20a51d6895644912fe47591))
+
 ## [2.4.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.3.0...v2.4.0) (2026-05-17)
 
 
