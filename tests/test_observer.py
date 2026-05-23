@@ -1042,7 +1042,7 @@ def test_record_vna_data_survives_transient_connection_error(
     observer = observer_panda_only
     s11, header, metadata = _make_vna_payload(dummy_vna)
     VnaWriter(transport_panda).add(s11, header=header, metadata=metadata)
-    transport_panda._set_last_read_id("stream:vna", "0-0")
+    transport_panda.set_last_read_id("stream:vna", "0-0")
 
     real_read = observer.vna_reader.read
     raised = [False]
