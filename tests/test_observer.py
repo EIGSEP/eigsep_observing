@@ -1589,10 +1589,18 @@ def test_record_corr_data_drain_failure_error_is_throttled(
     ):
         observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
 
+    # Filter by exact logger name: the StatusStreamHandler mirrors the
+    # ERROR onto the panda status stream, and ``status_logger`` re-emits
+    # what it reads back on the ``panda_relay`` child logger. A substring
+    # match on ``rec.message`` would race-catch that relayed echo and
+    # double-count the (correctly throttled) original. The throttle lives
+    # on the original emit site, so the assertion belongs on records from
+    # that site alone.
     drain_errors = [
         rec
         for rec in caplog.records
-        if "Panda metadata drain failed" in rec.message
+        if rec.name == "eigsep_observing.observer"
+        and "Panda metadata drain failed" in rec.message
     ]
     assert read_count[0] >= 5, "loop didn't iterate enough to test throttle"
     assert len(drain_errors) == 1, (
