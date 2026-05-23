@@ -1,16 +1,20 @@
 """Observing-side file writer.
 
-Writes correlation and VNA data to disk. Corr writing starts as soon as
-the SNAP is producing — independent of any panda-side state — and the
-``obs_config`` / ``run_tag`` overlays stamped into each corr file header
-are read opportunistically per file boundary (see
-:meth:`EigObserver._with_header_overlays`). This decouples the writer
-from ``panda_observe`` so any panda-side script (or none at all) can run
-alongside it.
+Writes correlation and VNA data to disk. SNAP is required — the corr
+thread is the writer's reason to exist. The panda is fully opportunistic:
+its transport is built in lazy mode (no startup ping), so the observer
+boots whether or not the panda is reachable, and every panda-touching
+call site (``obs_config`` / ``run_tag`` overlays, the per-integration
+metadata sidecar drain in ``observer.record_corr_data``, the status
+relay, and the VNA loop) catches ``ConnectionError`` at use-time and
+falls back to empty/sentinel data. A panda that comes online *after*
+``eigsep-observe`` starts is picked up implicitly on the next read —
+no observer restart needed. Corr data is sacred; a panda failure must
+never block a SNAP-side write.
 
-The VNA thread is spawned unconditionally whenever ``--panda`` is on;
-it polls ``panda_connected`` internally and sits idle if no VNA data
-appears on the stream.
+The VNA file thread runs unconditionally — it polls ``panda_connected``
+internally and idles on an empty VNA stream or a dead panda transport,
+so it's harmless when no panda is publishing.
 
 Installed as the ``eigsep-observe`` console script and run by the
 ``eigsep-observe-writer.service`` systemd unit (see ``deploy/systemd/``).
@@ -71,20 +75,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Integrations per correlator HDF5 file.",
     )
     parser.add_argument(
-        "--snap",
-        dest="use_snap",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Read correlation data from RPi Redis in box.",
-    )
-    parser.add_argument(
-        "--panda",
-        dest="use_panda",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Connect to LattePanda in box.",
-    )
-    parser.add_argument(
         "--dummy",
         action="store_true",
         help="Run in dummy mode, using mock Redis instances.",
@@ -119,19 +109,22 @@ def main() -> int:
         rpi_ip = args.rpi_ip
         panda_ip = args.panda_ip
 
-    # initialize the Redis transports
-    if args.use_snap:
-        logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
-        transport_snap = Transport(host=rpi_ip, port=redis_port)
-    else:
-        logger.warning("Not connecting to RPi Redis instance.")
-        transport_snap = None
-    if args.use_panda:
-        logger.info(f"Connecting to LattePanda at {panda_ip}.")
-        transport_panda = Transport(host=panda_ip, port=redis_port)
-    else:
-        logger.warning("Not connecting to LattePanda")
-        transport_panda = None
+    # SNAP transport is required — there is no "observer without SNAP"
+    # mode any more (use scripts/record_metadata.py for test bench data
+    # collection that needs no correlator). A SNAP-side failure here
+    # is fatal; nothing else this script does makes sense without it.
+    logger.info(f"Connecting to RPi Redis instance at {rpi_ip}.")
+    transport_snap = Transport(host=rpi_ip, port=redis_port)
+
+    # Panda transport is opportunistic: lazy=True skips the startup
+    # ping so construction always succeeds. Every panda-touching call
+    # site in EigObserver catches ConnectionError and falls back to
+    # empty/sentinel data, which means an offline panda surfaces as
+    # missing metadata sidecars and VNA files (not a crash) and a
+    # panda that comes online mid-run is picked up implicitly on the
+    # next read.
+    logger.info(f"Connecting (lazy) to LattePanda at {panda_ip}.")
+    transport_panda = Transport(host=panda_ip, port=redis_port, lazy=True)
 
     if args.dummy:
         observer = DummyEigObserver(
@@ -164,24 +157,22 @@ def main() -> int:
             corr_crashed[0] = True
             observer.stop_event.set()
 
-    # set up file writing: corr_thd for correlation data, panda_thd for s11
-    if args.use_snap:
-        corr_thd = threading.Thread(target=_corr_target)
-        thds["corr"] = corr_thd
-        logger.info("Starting correlation file writing thread.")
-        corr_thd.start()
+    corr_thd = threading.Thread(target=_corr_target)
+    thds["corr"] = corr_thd
+    logger.info("Starting correlation file writing thread.")
+    corr_thd.start()
 
-    # VNA file writing: spawn unconditionally when --panda is on. The
-    # thread polls ``panda_connected`` internally and idles on an empty
-    # VNA stream, so it's harmless when no panda script is publishing.
-    if args.use_panda:
-        vna_thd = threading.Thread(
-            target=observer.record_vna_data,
-            args=(args.vna_save_dir,),
-        )
-        thds["vna"] = vna_thd
-        logger.info("Starting VNA file writing thread.")
-        vna_thd.start()
+    # VNA file writing: always spawn. The thread polls
+    # ``panda_connected`` internally and idles on an empty VNA stream,
+    # so it's harmless when no panda is publishing or the panda is
+    # unreachable.
+    vna_thd = threading.Thread(
+        target=observer.record_vna_data,
+        args=(args.vna_save_dir,),
+    )
+    thds["vna"] = vna_thd
+    logger.info("Starting VNA file writing thread.")
+    vna_thd.start()
 
     try:
         observer.stop_event.wait()  # wait until stop event
@@ -200,10 +191,8 @@ def main() -> int:
 
     if args.dummy:
         # reset Redis instances
-        if args.use_snap:
-            transport_snap.reset()
-        if args.use_panda:
-            transport_panda.reset()
+        transport_snap.reset()
+        transport_panda.reset()
 
     return 1 if corr_crashed[0] else 0
 

@@ -85,6 +85,34 @@ Two principles, in priority order:
    safety nets — never as a way to make tests pass or hide producer bugs. If a
    contract is wrong, fix the schema; if a producer is wrong, fix the producer.
 
+## Opportunistic panda: lazy transport + use-time fallbacks
+
+`eigsep-observe` runs corr-only when the panda is unreachable, and picks
+up panda-side data (metadata sidecar, VNA, status log, `obs_config`
+overlay) automatically as soon as the panda comes back — no observer
+restart required. The wiring:
+
+- **`scripts/observe.py`** builds `transport_panda` with
+  `Transport(..., lazy=True)` (added in `eigsep_redis` 2.3.0). The
+  lazy mode skips the eager `r.ping()` so construction succeeds even
+  when the LattePanda is offline. SNAP stays eager — corr is the
+  writer's reason to exist; fail-fast on SNAP is correct.
+- **`EigObserver`** builds all panda surfaces (`config`,
+  `metadata_stream`, `status_reader`, `heartbeat_reader`, `vna_reader`,
+  `_status_log_handler`) unconditionally against the lazy transport.
+  Both transports are now required constructor arguments; tests that
+  want a "panda is down" shape pass an unseeded `DummyTransport`.
+- **Every panda-touching call site** catches
+  `redis.exceptions.ConnectionError` and falls back to empty/sentinel
+  data: `panda_connected` returns `False`; `record_corr_data` writes
+  the integration with `metadata=None` (corr is sacred);
+  `record_vna_data` logs the disconnect and idles;
+  `_with_header_overlays` lands sentinel `"UNKNOWN"` / `0.0` / `{}`.
+- **Reconnection is implicit**: every call tries; once the panda is
+  back, the next call succeeds. On reconnect the corr loop calls
+  `metadata_stream.skip_to_latest()` to drop outage-era backlog (see
+  the existing `Metadata flow` section below for why).
+
 ## Metadata flow: streaming for corr, snapshot for VNA
 
 Two reader classes expose metadata with deliberately different semantics. They
