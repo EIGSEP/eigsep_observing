@@ -55,7 +55,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--pairs",
-    type=int,
+    type=str,
     nargs="+",
     default=None,
     help="List of antenna pair indices to capture data from.",
