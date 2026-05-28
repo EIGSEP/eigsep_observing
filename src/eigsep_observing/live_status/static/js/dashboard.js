@@ -1,6 +1,10 @@
 "use strict";
 
 const POLL_MS = 1000;
+// Per-pico heartbeat staleness threshold. Healthy picos push at ~0.2 s;
+// an age past this means the heartbeat has effectively stopped, so the
+// pane flags amber rather than implying the sensor is still live.
+const PANE_STALE_AGE_S = 10;
 const WIRING_TOGGLE_KEY = "eigsep.useWiringLabels";
 const CALIBRATED_TOGGLE_KEY = "eigsep.useCalibrated";
 const VNA_MODE_KEY = "eigsep.vnaMode";
@@ -108,27 +112,42 @@ function makeSpan(className, text, style) {
 
 // Per-sensor pane header row: display name | status tile | age.
 // Used at the top of every per-pico card (and per-stream sub-block).
-// Tile color is binary by status: an explicit "error" goes danger, any
-// other non-empty status goes ok, missing status renders unknown.
-// Per-field classify tags are reserved for the data tiles themselves
-// (today only tempctrl wires those; imu/motor/potmon/lidar have no
-// classify thresholds configured).
+// Tile color tiers, in precedence order: an explicit "error" goes
+// danger; an age past PANE_STALE_AGE_S goes warn and relabels to
+// "stale" (the heartbeat stopped, even if the last status was good);
+// any other non-empty status goes ok; missing status renders unknown.
+// The age itself also turns amber when stale so the suspicious number
+// is obvious at a glance. Per-field classify tags are reserved for the
+// data tiles themselves (today only tempctrl wires those;
+// imu/motor/potmon/lidar have no classify thresholds configured).
 function makePaneStatusHeader(displayName, entry) {
   const row = document.createElement("div");
   row.className = "pane-status";
   const status = entry && entry.status;
-  let cls;
-  if (status === "error") cls = "danger";
-  else if (status) cls = "ok";
-  else cls = "unknown";
-  const ageStr =
+  const ageS =
     entry && entry.age_s !== null && entry.age_s !== undefined
-      ? `${fmt(entry.age_s, 1)}s`
-      : "—";
+      ? entry.age_s
+      : null;
+  const stale = ageS !== null && ageS > PANE_STALE_AGE_S;
+  let cls, label;
+  if (status === "error") {
+    cls = "danger";
+    label = status;
+  } else if (stale) {
+    cls = "warn";
+    label = "stale";
+  } else if (status) {
+    cls = "ok";
+    label = status;
+  } else {
+    cls = "unknown";
+    label = "?";
+  }
+  const ageStr = ageS !== null ? `${fmt(ageS, 1)}s` : "—";
   row.append(
     makeSpan("name", displayName),
-    makeSpan(tileClass(cls), status || "?"),
-    makeSpan("age", ageStr),
+    makeSpan(tileClass(cls), label),
+    makeSpan(stale ? "age stale" : "age", ageStr),
   );
   return row;
 }

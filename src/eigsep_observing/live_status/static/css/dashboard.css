@@ -191,6 +191,13 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   font-size: 12px;
 }
 
+/* A pico heartbeat that has stalled past PANE_STALE_AGE_S: make the
+   age stand out so a frozen sensor isn't mistaken for a fresh reading. */
+.pane-status .age.stale {
+  color: var(--warn);
+  font-weight: 600;
+}
+
 /* Multi-stream cards (Tempctrl LNA/LOAD) stack sub-blocks vertically. */
 .stream-block + .stream-block {
   margin-top: 10px;
