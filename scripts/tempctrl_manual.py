@@ -23,7 +23,18 @@ Controls:
   z / Z    reset LNA / LOAD PI integrator
   w        push a 5 s watchdog (should trip if not refreshed)
   r        re-enable both channels at their last setpoint
+  p        write a temperature-vs-time PNG of the session so far
   q        quit
+
+Every loop tick records the firmware ``T_now`` / ``T_target`` /
+``drive_level`` for both channels into an in-memory history. Pressing
+``p`` renders that history to ``tempctrl_<timestamp>.png`` in the
+current directory — one row per channel, ``T_now`` and ``T_target`` on
+the left axis and ``drive_level`` on a twin right axis. The plot uses
+the Agg backend so it works headless / over SSH to the panda; the
+written path is reported in the footer rather than printed (curses owns
+the screen). ``p`` may be pressed repeatedly; each press writes a fresh
+timestamped file.
 
 Every command goes through :class:`picohost.proxy.PicoProxy` so
 behavior mirrors the production tempctrl_loop path. Setpoints and
@@ -44,7 +55,13 @@ timer but no longer clear the trip flag.
 from argparse import ArgumentParser
 import curses
 import logging
+from pathlib import Path
 import time
+
+import matplotlib
+
+matplotlib.use("Agg")  # headless: render to PNG without a display/over SSH
+import matplotlib.pyplot as plt  # noqa: E402  (must follow use("Agg"))
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
@@ -71,6 +88,11 @@ PICO_PUBLISH_INTERVAL_S = 0.2
 # one tick; 5 s of slack absorbs a slow PicoManager restart without
 # masking a stuck producer.
 SEED_TIMEOUT_S = 5.0
+
+# Streams plotted by the `p` hotkey, in render order (one row each).
+PLOT_CHANNELS = ("tempctrl_lna", "tempctrl_load")
+# Firmware fields buffered every loop tick for the history plot.
+PLOT_FIELDS = ("T_now", "T_target", "drive_level")
 
 
 class _State:
@@ -113,6 +135,96 @@ class _State:
         self.load_cooling_enabled = load_cooling_enabled
         self.clamp_idx = 2  # default 0.5
         self.last_message = ""
+
+
+class _History:
+    """Append-only buffer of firmware readings for the `p` plot.
+
+    One sample per loop tick: the elapsed seconds since the buffer was
+    created, plus each :data:`PLOT_CHANNELS` channel's
+    :data:`PLOT_FIELDS` values. A field that is missing or non-numeric
+    in the snapshot is stored as ``float("nan")`` so a sensor dropout
+    becomes a gap in the line rather than a spurious zero or a crash.
+
+    Memory is unbounded by design — a multi-hour bring-up at the ~5 Hz
+    refresh is still only ~100k floats — so there is no ring buffer.
+    """
+
+    def __init__(self):
+        self.t = []
+        # {channel: {field: [values]}}
+        self.values = {
+            ch: {field: [] for field in PLOT_FIELDS} for ch in PLOT_CHANNELS
+        }
+
+    def record(self, snapshot, *, now):
+        """Append one sample read from ``snapshot`` at monotonic ``now``.
+
+        ``now`` is passed in (rather than read here) so the loop's
+        single ``time.monotonic()`` call is reused and the elapsed-time
+        axis is consistent with the render cadence.
+        """
+        if not self.t:
+            self._t0 = now
+        self.t.append(now - self._t0)
+        snap = snapshot.get()
+        for ch in PLOT_CHANNELS:
+            data = snap.get(ch) or {}
+            for field in PLOT_FIELDS:
+                v = data.get(field)
+                ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+                self.values[ch][field].append(float(v) if ok else float("nan"))
+
+    def __len__(self):
+        return len(self.t)
+
+
+def _plot_history(history, *, outdir=".", timestamp=None):
+    """Render ``history`` to ``tempctrl_<timestamp>.png`` under ``outdir``.
+
+    One row per channel: ``T_now`` (solid) and ``T_target`` (dashed) on
+    the left axis, ``drive_level`` on a twin right axis. Returns the
+    written path, or ``None`` if there is nothing to plot yet (so the
+    caller can report "no data" instead of writing an empty figure).
+
+    ``timestamp`` is injectable for tests; production passes ``None`` and
+    gets a wall-clock ``%Y%m%d_%H%M%S`` stamp so repeated presses don't
+    clobber each other.
+    """
+    if len(history) == 0:
+        return None
+    if timestamp is None:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+    path = Path(outdir) / f"tempctrl_{timestamp}.png"
+
+    fig, axes = plt.subplots(
+        len(PLOT_CHANNELS), 1, sharex=True, figsize=(10, 7)
+    )
+    t = history.t
+    for ax, ch in zip(axes, PLOT_CHANNELS):
+        vals = history.values[ch]
+        ax.plot(t, vals["T_now"], color="C0", label="T_now")
+        ax.plot(
+            t, vals["T_target"], color="C1", linestyle="--", label="T_target"
+        )
+        ax.set_ylabel("temperature (deg C)")
+        ax.set_title(ch)
+        ax.grid(True, alpha=0.3)
+
+        drive_ax = ax.twinx()
+        drive_ax.plot(
+            t, vals["drive_level"], color="C3", alpha=0.7, label="drive_level"
+        )
+        drive_ax.set_ylabel("drive_level")
+
+        lines = ax.get_lines() + drive_ax.get_lines()
+        ax.legend(lines, [ln.get_label() for ln in lines], loc="best")
+
+    axes[-1].set_xlabel("elapsed time (s)")
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    return path
 
 
 def _snap(snapshot, name):
@@ -377,13 +489,15 @@ def _render(screen, snapshot, state):
     screen.addstr(15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
     screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
     screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
-    screen.addstr(18, 0, "w push 5s watchdog   r re-enable both   q quit")
+    screen.addstr(
+        18, 0, "w push 5s watchdog   r re-enable both   p plot PNG   q quit"
+    )
     if state.last_message:
         screen.addstr(20, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
 
 
-def _handle_key(ch, proxy, state):
+def _handle_key(ch, proxy, state, history=None, outdir="."):
     if ch in (ord("q"), 27):  # q or ESC
         return False
     if ch == ord("l"):
@@ -462,6 +576,9 @@ def _handle_key(ch, proxy, state):
         state.load_enabled = True
         _push_enables(proxy, state)
         _push_temperatures(proxy, state)
+    elif ch == ord("p"):
+        path = _plot_history(history, outdir=outdir) if history else None
+        state.last_message = f"wrote {path}" if path else "no data to plot yet"
     return True
 
 
@@ -472,13 +589,17 @@ def _curses_main(screen, transport, args):
     require_pico(proxy)
     snapshot = MetadataSnapshotReader(transport)
     state = _seed_state(snapshot)
+    history = _History()
     while True:
+        # Record every tick (including timeouts) so the `p` plot is a
+        # dense trace independent of how often the operator types.
+        history.record(snapshot, now=time.monotonic())
         _render(screen, snapshot, state)
         ch = screen.getch()
         if ch == -1:
             # timeout — re-render so the readout stays live
             continue
-        if not _handle_key(ch, proxy, state):
+        if not _handle_key(ch, proxy, state, history=history):
             return
 
 
