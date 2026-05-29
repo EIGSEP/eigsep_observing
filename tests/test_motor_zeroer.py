@@ -96,11 +96,10 @@ def test_status_text_reflects_live_metadata(client):
     )
     expected_az = zeroer._reader.get("motor")["az_pos"]
     az, _, connected = zeroer.status_text()
-    # status_text renders the raw step count plus the equivalent axis
-    # degrees, so an operator jogging in degrees can read the step
-    # counter back in the same unit.
-    steps = int(round(expected_az))
-    assert az == f"{steps} ({_CAL_MOTOR.steps_to_deg(steps):.1f} deg)"
+    # Detailed rendering behavior belongs in
+    # test_format_pos_renders_axis_degrees; here we only verify that
+    # status_text reflects the live metadata using the shared formatter.
+    assert az == _format_pos(expected_az)
     assert connected is True
 
 
