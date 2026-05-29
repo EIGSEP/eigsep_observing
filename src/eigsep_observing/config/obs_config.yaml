@@ -72,8 +72,17 @@ tempctrl_settings:
     target_C: 25.0
     hysteresis_C: 0.5
     clamp: 0.6  # max drive duty [0, 1]
+    # Asymmetric-clamp safety guard. False forbids negative (cooling)
+    # drive, clamping firmware-side to [0, +clamp]. Default false here
+    # because the field rig cannot reliably dissipate the Peltier
+    # hot-side load: a channel commanded to cool then heats and runs
+    # away (no isolation). Set true per channel only after verifying
+    # that side can shed its hot-side heat. See pico-firmware
+    # tempctrl.c (lower_clamp) for the firmware behavior.
+    cooling_enabled: false
   LOAD:
     enable: true
     target_C: 25.0
     hysteresis_C: 0.5
     clamp: 0.6
+    cooling_enabled: false

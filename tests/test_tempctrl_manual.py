@@ -73,6 +73,55 @@ def test_seed_state_uses_firmware_t_target(transport):
     assert state.load_Ki == 0.0
 
 
+def test_seed_state_reads_cooling_enabled(transport):
+    """``cooling_enabled`` is seeded from the firmware-published value
+    per channel, so the readout and the bump keys start in sync with
+    what the firmware is enforcing."""
+    mod = _load("tempctrl_manual")
+    _publish(
+        transport,
+        lna={
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
+            "T_target": 30.0,
+            "cooling_enabled": False,
+        },
+        load={
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "T_target": 30.0,
+            "cooling_enabled": True,
+        },
+    )
+    snapshot = MetadataSnapshotReader(transport)
+    state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
+    assert state.lna_cooling_enabled is False
+    assert state.load_cooling_enabled is True
+
+
+def test_seed_state_cooling_enabled_defaults_true_when_absent(transport):
+    """A firmware that predates ``cooling_enabled`` (field absent)
+    seeds True, matching the firmware default (cooling permitted)."""
+    mod = _load("tempctrl_manual")
+    _publish(
+        transport,
+        lna={
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
+            "T_target": 30.0,
+        },
+        load={
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "T_target": 30.0,
+        },
+    )
+    snapshot = MetadataSnapshotReader(transport)
+    state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
+    assert state.lna_cooling_enabled is True
+    assert state.load_cooling_enabled is True
+
+
 def test_seed_state_falls_back_to_default_gains_only(transport):
     """``T_target`` and ``enabled`` come from the pico; missing
     ``Kp`` / ``Ki`` fall back to the firmware-side defaults."""

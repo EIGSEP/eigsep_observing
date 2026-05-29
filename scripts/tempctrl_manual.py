@@ -11,6 +11,8 @@ clamp limits drive saturation as expected.
 Controls:
   l / L    enable LNA on / off
   o / O    enable LOAD on / off
+  n / N    LNA cooling (negative drive) allow / forbid
+  m / M    LOAD cooling (negative drive) allow / forbid
   + / -    LNA setpoint +/- 0.5 deg C
   ] / [    LOAD setpoint +/- 0.5 deg C
   c        cycle clamp through (0.1, 0.3, 0.5, 1.0) on both channels
@@ -92,6 +94,8 @@ class _State:
         lna_Ki,
         load_Kp,
         load_Ki,
+        lna_cooling_enabled,
+        load_cooling_enabled,
     ):
         self.lna_setpoint = lna_setpoint
         self.load_setpoint = load_setpoint
@@ -101,6 +105,12 @@ class _State:
         self.lna_Ki = lna_Ki
         self.load_Kp = load_Kp
         self.load_Ki = load_Ki
+        # Asymmetric-clamp safety setting per channel: False forbids
+        # negative (cooling) drive, clamping it to [0, +clamp]. Seeded
+        # from the firmware-published value (default True) so the UI
+        # never disagrees with what the firmware is enforcing.
+        self.lna_cooling_enabled = lna_cooling_enabled
+        self.load_cooling_enabled = load_cooling_enabled
         self.clamp_idx = 2  # default 0.5
         self.last_message = ""
 
@@ -168,6 +178,10 @@ def _seed_state(
             else default
         )
 
+    def _b(d, k, default):
+        v = d.get(k)
+        return v if isinstance(v, bool) else default
+
     return _State(
         lna_setpoint=float(lna["T_target"]),
         load_setpoint=float(load["T_target"]),
@@ -177,6 +191,10 @@ def _seed_state(
         lna_Ki=_f(lna, "Ki", DEFAULT_KI),
         load_Kp=_f(load, "Kp", DEFAULT_KP),
         load_Ki=_f(load, "Ki", DEFAULT_KI),
+        # Firmware default is True (cooling permitted); a missing field
+        # means the firmware predates the setting, so default True too.
+        lna_cooling_enabled=_b(lna, "cooling_enabled", True),
+        load_cooling_enabled=_b(load, "cooling_enabled", True),
     )
 
 
@@ -217,6 +235,24 @@ def _push_temperatures(proxy, state):
 def _push_clamp(proxy, state):
     value = CLAMPS[state.clamp_idx]
     state.last_message = _send(proxy, "set_clamp", LNA=value, LOAD=value)
+
+
+def _push_cooling(proxy, state):
+    """Push the per-channel cooling-enable (asymmetric-clamp) flag.
+
+    Both channels are pushed together to match the enable/gain pushes —
+    one round-trip per keypress, and the readout shows the
+    firmware-reported value back so the operator confirms it took. With
+    ``cooling_enabled=False`` the firmware forbids negative drive, the
+    guard against a Peltier that heats (rather than cools) when it can't
+    dissipate its hot-side load.
+    """
+    state.last_message = _send(
+        proxy,
+        "set_cooling_enabled",
+        LNA=state.lna_cooling_enabled,
+        LOAD=state.load_cooling_enabled,
+    )
 
 
 def _push_gains(proxy, state):
@@ -268,7 +304,8 @@ def _render(screen, snapshot, state):
     screen.addstr(
         1,
         0,
-        "channel  T_now    T_target  drive   clamp   enabled  armed  status",
+        "channel  T_now    T_target  drive   clamp   cooling  "
+        "enabled  armed  status",
     )
     screen.addstr(
         2,
@@ -278,6 +315,7 @@ def _render(screen, snapshot, state):
         f"{_fmt(lna.get('T_target'), '6.2f')}    "
         f"{_fmt(lna.get('drive_level'), '6.2f')}  "
         f"{_fmt(lna.get('clamp'), '6.2f')}  "
+        f"{str(lna.get('cooling_enabled')):>7}  "
         f"{str(lna.get('enabled')):>7}  "
         f"{str(_armed(lna)):>5}  {lna.get('status')!r}",
     )
@@ -289,6 +327,7 @@ def _render(screen, snapshot, state):
         f"{_fmt(load.get('T_target'), '6.2f')}    "
         f"{_fmt(load.get('drive_level'), '6.2f')}  "
         f"{_fmt(load.get('clamp'), '6.2f')}  "
+        f"{str(load.get('cooling_enabled')):>7}  "
         f"{str(load.get('enabled')):>7}  "
         f"{str(_armed(load)):>5}  {load.get('status')!r}",
     )
@@ -334,12 +373,13 @@ def _render(screen, snapshot, state):
         f"LOAD(Kp={state.load_Kp:.3f}, Ki={state.load_Ki:.3f})",
     )
     screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
-    screen.addstr(14, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
-    screen.addstr(15, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
-    screen.addstr(16, 0, "z/Z reset LNA/LOAD integral")
-    screen.addstr(17, 0, "w push 5s watchdog   r re-enable both   q quit")
+    screen.addstr(14, 0, "n/N LNA cooling on/off      m/M LOAD cooling on/off")
+    screen.addstr(15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
+    screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
+    screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
+    screen.addstr(18, 0, "w push 5s watchdog   r re-enable both   q quit")
     if state.last_message:
-        screen.addstr(19, 0, f"> {state.last_message}"[: curses.COLS - 1])
+        screen.addstr(20, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
 
 
@@ -358,6 +398,18 @@ def _handle_key(ch, proxy, state):
     elif ch == ord("O"):
         state.load_enabled = False
         _push_enables(proxy, state)
+    elif ch == ord("n"):
+        state.lna_cooling_enabled = True
+        _push_cooling(proxy, state)
+    elif ch == ord("N"):
+        state.lna_cooling_enabled = False
+        _push_cooling(proxy, state)
+    elif ch == ord("m"):
+        state.load_cooling_enabled = True
+        _push_cooling(proxy, state)
+    elif ch == ord("M"):
+        state.load_cooling_enabled = False
+        _push_cooling(proxy, state)
     elif ch in (ord("+"), ord("=")):
         state.lna_setpoint += SETPOINT_STEP_C
         _push_temperatures(proxy, state)
