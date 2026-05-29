@@ -5,6 +5,7 @@ import time
 import pytest
 
 from eigsep_observing import MotorZeroer
+from eigsep_observing.motor_zeroer import _CAL_MOTOR, _format_pos
 from eigsep_redis.keys import METADATA_HASH
 
 
@@ -95,7 +96,10 @@ def test_status_text_reflects_live_metadata(client):
     )
     expected_az = zeroer._reader.get("motor")["az_pos"]
     az, _, connected = zeroer.status_text()
-    assert az == str(expected_az)
+    # Detailed rendering behavior belongs in
+    # test_format_pos_renders_axis_degrees; here we only verify that
+    # status_text reflects the live metadata using the shared formatter.
+    assert az == _format_pos(expected_az)
     assert connected is True
 
 
@@ -197,3 +201,18 @@ def test_handle_key_directional_jogs(client):
         zeroer.handle_key(ord(key), 1.0)
         after = getter()
         assert after - before == factor * motor.deg_to_steps(1.0)
+
+
+def test_format_pos_renders_axis_degrees():
+    # The user-facing round trip: a 30 deg jog becomes deg_to_steps(30)
+    # motor steps, and reading that step count back must display
+    # "30.0 deg" — the same calibration the mover uses, not a duplicated
+    # copy. Locks the steps<->deg display contract.
+    steps = _CAL_MOTOR.deg_to_steps(30.0)
+    assert _format_pos(steps) == f"{steps} (30.0 deg)"
+    # Positions are published as floats (PicoMotor._motor_redis_handler
+    # casts the firmware's int step counts); they round to int steps.
+    assert _format_pos(float(steps)) == f"{steps} (30.0 deg)"
+    # Non-numeric sentinels (e.g. a missing position key) pass through
+    # verbatim so a partial status dict never crashes the UI.
+    assert _format_pos("?") == "?"

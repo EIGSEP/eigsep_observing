@@ -7,10 +7,12 @@ rendering, and the same logic is reachable by unit tests without a
 terminal.
 """
 
+import inspect
 import logging
 import time
 
 from eigsep_redis import MetadataSnapshotReader
+from picohost.motor import PicoMotor
 from picohost.proxy import PicoProxy
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,42 @@ logger = logging.getLogger(__name__)
 # (Ubuntu + Raspberry Pi). Other platforms may send KEY_ENTER / "\r".
 _KEY_ENTER = ord("\n")
 _REQUIRE_STATUS_RETRY_S = 0.5
+
+
+def _default_cal_motor():
+    """A serial-less :class:`PicoMotor` carrying only the calibration
+    constants, used purely to convert step counts to axis degrees for
+    display.
+
+    ``PicoManager`` constructs the real motor pico with ``PicoMotor``'s
+    constructor defaults and never overrides ``step_angle_deg`` /
+    ``gear_teeth`` / ``microstep`` (see ``picohost.manager``), so reusing
+    those defaults here makes the displayed degrees match the mover's
+    own ``deg_to_steps`` exactly instead of duplicating the gear math.
+    Pulling the values from the constructor signature keeps them in
+    lockstep with picohost. The ``__new__`` bypass (no serial I/O)
+    mirrors ``contract_tests.test_producer_contracts``.
+    """
+    sig = inspect.signature(PicoMotor.__init__)
+    cal = PicoMotor.__new__(PicoMotor)
+    for attr in ("step_angle_deg", "gear_teeth", "microstep"):
+        setattr(cal, attr, sig.parameters[attr].default)
+    return cal
+
+
+_CAL_MOTOR = _default_cal_motor()
+
+
+def _format_pos(raw):
+    """Render a raw motor step count as ``"<steps> (<deg> deg)"``.
+
+    Non-numeric values (sentinels like ``"?"`` for a missing key) are
+    returned verbatim so a partial status dict never crashes the UI.
+    """
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return str(raw)
+    steps = int(round(raw))
+    return f"{steps} ({_CAL_MOTOR.steps_to_deg(steps):.1f} deg)"
 
 
 class MotorZeroer:
@@ -107,7 +145,7 @@ class MotorZeroer:
             return "WAITING", "---", connected
         az_pos = status.get("az_pos", "?")
         el_pos = status.get("el_pos", "?")
-        return str(az_pos), str(el_pos), connected
+        return _format_pos(az_pos), _format_pos(el_pos), connected
 
     def handle_key(self, ch, deg_state):
         """Advance the zeroing state machine in response to one keystroke.
