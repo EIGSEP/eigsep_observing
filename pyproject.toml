@@ -18,6 +18,7 @@ classifiers = [
 ]
 dependencies = [
   "h5py",
+  "matplotlib",
   "numpy",
   "pyyaml",
   "flask",
@@ -57,7 +58,6 @@ dev = [
   "pytest-xdist",
 ]
 interactive = [
-  "matplotlib",
   "ipython",
 ]
 
