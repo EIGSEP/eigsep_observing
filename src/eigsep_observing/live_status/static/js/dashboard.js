@@ -160,8 +160,24 @@ async function fetchJson(path) {
 
 // ---- corr spectra ---------------------------------------------------
 
+// Shared frequency x-axis for the corr mag/phase plots. The range
+// starts just below 0 so the DC bin (0 MHz) sits inside the axis
+// rather than hidden on the left spine, and ends at 250 MHz — the
+// 500 MHz real-sampling Nyquist (data tops out at 249.76 MHz) — so
+// the highest tick is the band edge. dtick=25 from tick0=0 puts
+// ticks at 0, 25, ..., 250.
+const corrXaxis = {
+  title: "Frequency [MHz]",
+  gridcolor: "#333",
+  range: [-5, 250],
+  tick0: 0,
+  dtick: 25,
+};
+
 // Plotly log axes take ranges in log10. [-2, 9] mirrors the legacy
 // live_plotter ylim of (1e-2, 1e9); fixed range avoids autoscale jitter.
+// ``exponentformat: "e"`` renders ticks as 1e6 / 1e9 (matplotlib-style)
+// rather than plotly's default SI suffixes (1M / 1G / 1B).
 // Calibrated mode swaps to a linear y-axis in Kelvin and lets plotly
 // autorange — sky / load / on temperatures span ~1.5 orders of
 // magnitude, well within plotly's autorange comfort zone.
@@ -170,11 +186,12 @@ const magLayoutRaw = {
   paper_bgcolor: "#1a1a1a",
   plot_bgcolor: "#111",
   font: { color: "#eee" },
-  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  xaxis: corrXaxis,
   yaxis: {
     title: "Amplitude [arb. units]",
     type: "log",
     range: [-2, 9],
+    exponentformat: "e",
     gridcolor: "#333",
   },
   showlegend: true,
@@ -195,7 +212,7 @@ const phaseLayout = {
   paper_bgcolor: "#1a1a1a",
   plot_bgcolor: "#111",
   font: { color: "#eee" },
-  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  xaxis: corrXaxis,
   yaxis: {
     title: "Phase [deg]",
     range: [-180, 180],
