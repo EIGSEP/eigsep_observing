@@ -253,6 +253,16 @@ const magLayoutRaw = {
   },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
+  // Persist user-driven UI state (legend trace toggles, zoom/pan) across
+  // the per-integration ``Plotly.react`` updates. A constant ``uirevision``
+  // tells plotly "this is the same figure, keep what the user touched";
+  // without it react resets a legend-hidden trace back to visible on the
+  // next integration (~1 s). New y data still flows in each react (data
+  // arrays aren't persisted), and cal-mode autorange still applies because
+  // the user never manually edited the axes. The same value carries into
+  // ``magLayoutCal`` via the spread below, so toggling calibrated mode does
+  // not clear the user's legend selection either.
+  uirevision: "corr-mag",
 };
 const magLayoutCal = {
   ...magLayoutRaw,
@@ -272,6 +282,8 @@ const phaseLayout = {
   },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
+  // See magLayoutRaw: keep legend toggles / zoom across react updates.
+  uirevision: "corr-phase",
 };
 
 // Stamp the active theme's colors, fonts, grid, and trace colorway onto
