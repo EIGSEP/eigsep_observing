@@ -1,14 +1,48 @@
+/* Theme tiers. The default ``:root`` block is the Light theme — a
+   fresh tablet boots into it (matches getTheme()'s default in
+   dashboard.js). ``[data-theme="dark"]`` restores the original lab
+   look exactly; ``[data-theme="sun"]`` is the max-contrast tier for
+   direct sunlight. dashboard.js stamps ``data-theme`` on <html> (and a
+   tiny inline <head> script applies the persisted choice before first
+   paint to avoid a flash). Only chrome colors and the event-log text
+   colors change between tiers; the semantic status palette
+   (--ok/--warn/--danger/--stale/--unknown), used as filled tiles with
+   their own text colors, is readable on any background and stays
+   constant. --warn-text/--danger-text exist because the warn amber is
+   fine as a tile fill but too low-contrast as text on a white page. */
 :root {
-  --bg: #111;
-  --fg: #eee;
-  --muted: #999;
-  --card: #1a1a1a;
-  --border: #333;
+  --bg: #ffffff;
+  --fg: #111111;
+  --muted: #555555;
+  --card: #f4f6f8;
+  --border: #cfd4d8;
   --ok: #2d7a2d;
   --warn: #c79b00;
   --danger: #b00020;
   --stale: #555;
   --unknown: #444;
+  --warn-text: #8a6d00;
+  --danger-text: #9b001c;
+}
+
+:root[data-theme="dark"] {
+  --bg: #111;
+  --fg: #eee;
+  --muted: #999;
+  --card: #1a1a1a;
+  --border: #333;
+  --warn-text: #c79b00;
+  --danger-text: #b00020;
+}
+
+:root[data-theme="sun"] {
+  --bg: #ffffff;
+  --fg: #000000;
+  --muted: #333333;
+  --card: #ffffff;
+  --border: #333333;
+  --warn-text: #6e5500;
+  --danger-text: #7a0016;
 }
 
 html, body {
@@ -125,8 +159,8 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   border-bottom: 1px solid var(--border);
 }
 
-#status-log li.level-30 { color: var(--warn); }
-#status-log li.level-40 { color: var(--danger); }
+#status-log li.level-30 { color: var(--warn-text); }
+#status-log li.level-40 { color: var(--danger-text); }
 
 /* VNA pane: card-header lays out the title and the mode toggle on
    one row so the toggle doesn't push the plot down. */
@@ -139,9 +173,11 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
 
 .card-header h2 { margin: 0; }
 
-.vna-mode-toggle { display: inline-flex; gap: 4px; }
+/* Segmented button group. Shared by the VNA mode toggle and the
+   Sun/Light/Dark theme toggle (.seg-toggle) so both look identical. */
+.vna-mode-toggle, .seg-toggle { display: inline-flex; gap: 4px; }
 
-.vna-mode-btn {
+.vna-mode-btn, .seg-btn {
   background: var(--card);
   color: var(--muted);
   border: 1px solid var(--border);
@@ -151,7 +187,7 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   cursor: pointer;
 }
 
-.vna-mode-btn.active {
+.vna-mode-btn.active, .seg-btn.active {
   background: var(--ok);
   color: #fff;
   border-color: var(--ok);

@@ -8,6 +8,66 @@ const PANE_STALE_AGE_S = 10;
 const WIRING_TOGGLE_KEY = "eigsep.useWiringLabels";
 const CALIBRATED_TOGGLE_KEY = "eigsep.useCalibrated";
 const VNA_MODE_KEY = "eigsep.vnaMode";
+const THEME_KEY = "eigsep.theme";
+
+// Dark, saturated, glare-surviving trace colors for the Light and Sun
+// themes. Avoids Plotly's default yellow and pale green, which wash out
+// against a white background in direct sunlight. Dark mode keeps
+// Plotly's default colorway (colorway: null → Plotly decides).
+const LIGHT_COLORWAY = [
+  "#1f4e79", "#b00020", "#186a3b", "#7d3c98",
+  "#b9770e", "#117a8b", "#7a0016", "#1c2833",
+];
+
+// Per-theme Plotly styling. Plotly can't read the CSS variables that
+// drive the page chrome, so plot colors/fonts/line widths live here and
+// are stamped onto the layout objects by applyThemeToLayouts(). The
+// background hex deliberately mirror the CSS --bg/--card values for the
+// matching [data-theme] block — keep them in sync. Sunlight tiers use
+// thicker lines, larger fonts, and a firmer grid (faint grids are the
+// first thing to wash out under glare).
+const THEMES = {
+  sun: {
+    paperBg: "#ffffff", plotBg: "#ffffff", font: "#000000",
+    grid: "#999999", lineWidth: 3, fontSize: 16, colorway: LIGHT_COLORWAY,
+  },
+  light: {
+    paperBg: "#ffffff", plotBg: "#ffffff", font: "#111111",
+    grid: "#cccccc", lineWidth: 2.25, fontSize: 14, colorway: LIGHT_COLORWAY,
+  },
+  dark: {
+    paperBg: "#1a1a1a", plotBg: "#111111", font: "#eeeeee",
+    grid: "#333333", lineWidth: 1.5, fontSize: 12, colorway: null,
+  },
+};
+
+// Theme selector. Default "light" so a freshly-flashed field tablet is
+// readable outdoors without anyone touching it; OS prefers-color-scheme
+// is deliberately ignored (a tablet on a dark-at-night OS must still
+// boot light in the sun). Persisted so the operator's choice — Sun
+// outdoors, Dark in the lab — survives reloads.
+function getTheme() {
+  try {
+    const t = localStorage.getItem(THEME_KEY);
+    return t === "dark" || t === "sun" ? t : "light";
+  } catch (e) {
+    return "light";
+  }
+}
+
+function setTheme(mode) {
+  try {
+    localStorage.setItem(THEME_KEY, mode);
+  } catch (e) {
+    // localStorage unavailable (e.g. private mode); the attribute and
+    // in-memory activeTheme still apply for this session.
+  }
+}
+
+// The active theme's Plotly styling, read by applyThemeToLayouts() and
+// the trace builders. Initialized from the persisted choice; updated by
+// applyTheme() on a toggle.
+let activeTheme = THEMES[getTheme()];
 
 // Wiring-labels toggle. Persisted in localStorage so the user's
 // choice survives reloads; gracefully no-ops when no labels are
@@ -166,9 +226,10 @@ async function fetchJson(path) {
 // 500 MHz real-sampling Nyquist (data tops out at 249.76 MHz) — so
 // the highest tick is the band edge. dtick=25 from tick0=0 puts
 // ticks at 0, 25, ..., 250.
+// gridcolor (here and in every layout below) is stamped by
+// applyThemeToLayouts() from the active theme — see THEMES.
 const corrXaxis = {
   title: "Frequency [MHz]",
-  gridcolor: "#333",
   range: [-5, 250],
   tick0: 0,
   dtick: 25,
@@ -183,16 +244,12 @@ const corrXaxis = {
 // magnitude, well within plotly's autorange comfort zone.
 const magLayoutRaw = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
-  paper_bgcolor: "#1a1a1a",
-  plot_bgcolor: "#111",
-  font: { color: "#eee" },
   xaxis: corrXaxis,
   yaxis: {
     title: "Amplitude [arb. units]",
     type: "log",
     range: [-2, 9],
     exponentformat: "e",
-    gridcolor: "#333",
   },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
@@ -203,24 +260,46 @@ const magLayoutCal = {
     title: "Temperature [K]",
     type: "linear",
     autorange: true,
-    gridcolor: "#333",
   },
 };
 
 const phaseLayout = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
-  paper_bgcolor: "#1a1a1a",
-  plot_bgcolor: "#111",
-  font: { color: "#eee" },
   xaxis: corrXaxis,
   yaxis: {
     title: "Phase [deg]",
     range: [-180, 180],
-    gridcolor: "#333",
   },
   showlegend: true,
   legend: { orientation: "h", y: -0.2 },
 };
+
+// Stamp the active theme's colors, fonts, grid, and trace colorway onto
+// every Plotly layout. Called once at startup and again on each theme
+// toggle (Plotly doesn't observe CSS, so a re-render is required). Note
+// magLayoutCal was built by spreading magLayoutRaw, which shallow-copies
+// the value fields but shares the xaxis (corrXaxis) object by reference;
+// we therefore set xaxis grid once via corrXaxis and the per-layout
+// fields on each object explicitly.
+function applyThemeToLayouts() {
+  const t = activeTheme;
+  for (const L of [magLayoutRaw, magLayoutCal, phaseLayout, vnaLayout]) {
+    L.paper_bgcolor = t.paperBg;
+    L.plot_bgcolor = t.plotBg;
+    L.font = { color: t.font, size: t.fontSize };
+    if (t.colorway) {
+      L.colorway = t.colorway;
+    } else {
+      delete L.colorway;
+    }
+  }
+  corrXaxis.gridcolor = t.grid;
+  magLayoutRaw.yaxis.gridcolor = t.grid;
+  magLayoutCal.yaxis.gridcolor = t.grid;
+  phaseLayout.yaxis.gridcolor = t.grid;
+  vnaLayout.xaxis.gridcolor = t.grid;
+  vnaLayout.yaxis.gridcolor = t.grid;
+}
 
 const RAD_TO_DEG = 180 / Math.PI;
 
@@ -279,7 +358,7 @@ function updateCorr(corr) {
         type: "scatter",
         mode: "lines",
         name,
-        line: { width: 1.5 },
+        line: { width: activeTheme.lineWidth },
       });
     }
     if (p.phase) {
@@ -289,7 +368,7 @@ function updateCorr(corr) {
         type: "scatter",
         mode: "lines",
         name,
-        line: { width: 1.5 },
+        line: { width: activeTheme.lineWidth },
       });
     }
   }
@@ -322,14 +401,10 @@ function updateCorr(corr) {
 
 const vnaLayout = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
-  paper_bgcolor: "#1a1a1a",
-  plot_bgcolor: "#111",
-  font: { color: "#eee" },
-  xaxis: { title: "Frequency [MHz]", gridcolor: "#333" },
+  xaxis: { title: "Frequency [MHz]" },
   yaxis: {
     title: "|S11| [dB]",
     autorange: true,
-    gridcolor: "#333",
   },
   showlegend: false,
 };
@@ -386,7 +461,7 @@ function updateVna(vna) {
       y: vna.s11_db,
       type: "scatter",
       mode: "lines",
-      line: { width: 1.5 },
+      line: { width: activeTheme.lineWidth },
     },
   ];
   if (!vnaPlotInitialized) {
@@ -762,6 +837,7 @@ function renderStatusLog(entries) {
 // re-render immediately without waiting up to POLL_MS for the next tick.
 let lastCorr = null;
 let lastAdc = null;
+let lastVna = null;
 
 async function tick() {
   try {
@@ -779,6 +855,7 @@ async function tick() {
     ]);
     lastCorr = corr.data;
     lastAdc = adc.data;
+    lastVna = vna.data;
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
     renderTempctrlTiles(metadata.data, null);
@@ -818,6 +895,44 @@ function initCalibratedToggle() {
   });
 }
 
+// Switch the active theme: update the in-memory styling, flip the
+// <html data-theme> attribute (CSS chrome follows instantly), restamp
+// the Plotly layouts, and re-render the plots from their cached
+// payloads so the new colors/widths/fonts take effect without waiting
+// for the next poll. Plotly doesn't read CSS, so this re-render is the
+// only way the plot styling tracks the toggle.
+function applyTheme(mode) {
+  activeTheme = THEMES[mode] || THEMES.light;
+  document.documentElement.setAttribute("data-theme", mode);
+  applyThemeToLayouts();
+  if (lastCorr) updateCorr(lastCorr); // also re-renders the phase plot
+  if (lastVna) updateVna(lastVna);
+}
+
+function initThemeToggle() {
+  const buttons = document.querySelectorAll("#theme-toggle .seg-btn");
+  if (!buttons.length) return;
+  const highlight = (mode) => {
+    for (const btn of buttons) {
+      const on = btn.dataset.themeMode === mode;
+      btn.classList.toggle("active", on);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+  };
+  const current = getTheme();
+  applyThemeToLayouts(); // stamp the persisted theme before the first render
+  highlight(current);
+  for (const btn of buttons) {
+    btn.addEventListener("click", () => {
+      const mode = btn.dataset.themeMode;
+      if (!THEMES[mode]) return;
+      setTheme(mode);
+      applyTheme(mode);
+      highlight(mode);
+    });
+  }
+}
+
 function initVnaModeToggle() {
   const buttons = document.querySelectorAll(".vna-mode-btn");
   if (!buttons.length) return;
@@ -841,5 +956,6 @@ function initVnaModeToggle() {
 initWiringToggle();
 initCalibratedToggle();
 initVnaModeToggle();
+initThemeToggle();
 tick();
 setInterval(tick, POLL_MS);
