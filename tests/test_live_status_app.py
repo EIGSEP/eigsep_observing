@@ -1283,6 +1283,26 @@ def test_index_renders_with_aggregator_cfg(client):
     assert b"EIGSEP live status" in r.data
 
 
+def test_index_serves_theme_toggle(client):
+    """The Sun/Light/Dark theme control is present in the page.
+
+    A markup-presence guard: the dashboard's theming lives entirely in
+    HTML/CSS/JS (no JS test runner in this repo), so this is the cheapest
+    regression catch if the control is dropped from the template. Asserts
+    all three tier buttons plus the pre-paint theme bootstrap so a
+    returning Dark/Sun user doesn't flash the default Light theme.
+    """
+    r = client.get("/")
+    body = r.data
+    assert b'id="theme-toggle"' in body
+    for mode in (b"sun", b"light", b"dark"):
+        assert b'data-theme-mode="' + mode + b'"' in body
+    # The inline <head> bootstrap that applies the persisted theme before
+    # first paint reads this localStorage key; keep it in sync with
+    # THEME_KEY in dashboard.js.
+    assert b"eigsep.theme" in body
+
+
 def test_plotly_js_served_from_pypi_package(client):
     r = client.get("/plotly.min.js")
     assert r.status_code == 200

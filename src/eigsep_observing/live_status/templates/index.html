@@ -3,6 +3,20 @@
 <head>
 <meta charset="utf-8">
 <title>EIGSEP live status</title>
+<script>
+  // Apply the persisted display theme before first paint so returning
+  // Dark/Sun users don't see a flash of the default Light theme. This
+  // deliberately mirrors THEME_KEY / getTheme() in dashboard.js; keep
+  // the key and the allowed values in sync with that module.
+  (function () {
+    var t = "light";
+    try {
+      var saved = localStorage.getItem("eigsep.theme");
+      if (saved === "dark" || saved === "sun") t = saved;
+    } catch (e) { /* localStorage unavailable; fall back to light */ }
+    document.documentElement.setAttribute("data-theme", t);
+  })();
+</script>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
 <script src="{{ url_for('plotly_js') }}"></script>
 </head>
@@ -25,6 +39,11 @@
       <input type="checkbox" id="toggle-calibrated">
       <span>Calibrated (T_sky)</span>
     </label>
+    <div class="seg-toggle" id="theme-toggle" role="group" aria-label="Display theme" title="Display theme. Light (default) and Sun (max contrast) are for outdoor/sunlight readability; Dark is the original lab look. Your choice is remembered on this browser.">
+      <button type="button" class="seg-btn" data-theme-mode="sun" aria-pressed="false">Sun</button>
+      <button type="button" class="seg-btn" data-theme-mode="light" aria-pressed="false">Light</button>
+      <button type="button" class="seg-btn" data-theme-mode="dark" aria-pressed="false">Dark</button>
+    </div>
   </div>
   <div id="calibration-bar" class="cal-bar" hidden></div>
 </header>
