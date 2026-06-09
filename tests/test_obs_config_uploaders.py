@@ -54,6 +54,9 @@ BRING_UP_SCRIPTS = {
 #   - SNAP-side scripts (republish_header.py, adc_snapshot*.py,
 #     capture_spectrum.py, fpga_init.py): use the SNAP transport, not
 #     the panda transport that hosts the run_tag key.
+#   - clear_run_tag.py: the stale-lock recovery tool; it inspects and
+#     clears the run_tag key, and entering run_tag.session would be
+#     refused by the very stale tag it exists to clear.
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
@@ -66,6 +69,7 @@ RUN_TAG_EXEMPT = {
     "capture_spectrum.py",
     "fpga_init.py",
     "imu_manual.py",
+    "clear_run_tag.py",
 }
 
 
