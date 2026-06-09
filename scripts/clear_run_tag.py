@@ -12,8 +12,16 @@ leaving a stale tag that makes the *next* driver script refuse to start::
     run_tag='motor_manual'; refusing to start 'motor_control'.
     Stop the other script first.
 
-This tool shows the currently-held tag (and how long ago it started),
-then clears it on confirmation -- the documented one-liner recovery so an
+``run_tag.session`` already auto-reclaims a stale tag whose holder is
+*provably dead* (its process is gone or the machine rebooted since it
+started), so the common crash-on-the-same-panda case recovers with no
+operator action. This tool is the manual fallback for the cases
+``session`` deliberately will not reclaim -- a holder it cannot probe
+(e.g. one recorded on a different host) -- and for an operator who simply
+wants to inspect or force-clear the tag.
+
+It shows the currently-held tag (and how long ago it started), then
+clears it on confirmation -- the documented one-liner recovery so an
 operator never has to hand-write a ``python -c`` snippet in the field.
 
 Before clearing, confirm no driver script is *actually* running -- the
