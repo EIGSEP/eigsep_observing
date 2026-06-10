@@ -108,6 +108,11 @@ def _motor_post_handler_reading():
     motor = PicoMotor.__new__(PicoMotor)
     captured = {}
     motor._base_redis_handler = lambda d: captured.update(d)
+    # The handler also drives the position checkpoint / boot-detection
+    # path (picohost 3.7.0); a None store makes it inert. This test is
+    # about the published payload shape, not the checkpoint logic —
+    # picohost's test_motor_position.py covers that.
+    motor._motor_pos_store = None
     motor._motor_redis_handler(MotorEmulator().get_status())
 
     for field in (
