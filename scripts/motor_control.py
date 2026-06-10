@@ -48,6 +48,33 @@ def _axis_range(start, stop, step):
     return np.arange(start, stop + step / 2.0, step)
 
 
+def _prompt_go_home(motor):
+    """On a Ctrl-C interrupt, offer to drive back to (0, 0).
+
+    Defaults to *No* so an interrupt leaves the motors halted in place
+    (the safe abort) unless the operator explicitly opts in. A
+    non-interactive stdin (``EOFError``) or a second Ctrl-C
+    (``KeyboardInterrupt``) is treated as No. When confirmed, the same
+    ``MotorClient.home`` primitive ``motor_manual.py`` uses drives the
+    return; a Ctrl-C during that move aborts it.
+    """
+    try:
+        answer = input("Go home (0,0)? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        logger.info("Leaving motors in place.")
+        return
+    if answer not in ("y", "yes"):
+        logger.info("Leaving motors in place.")
+        return
+    logger.info("Returning to home (0, 0)...")
+    try:
+        motor.home()
+    except KeyboardInterrupt:
+        logger.info("Home move aborted.")
+    except (TimeoutError, RuntimeError) as exc:
+        logger.error("Home move failed: %s", exc)
+
+
 def main(transport, args):
     # Build (and validate) the grid before touching hardware so bad
     # bounds fail fast without opening a run_tag session.
@@ -87,6 +114,7 @@ def main(transport, args):
             )
         except KeyboardInterrupt:
             logger.info("Scan interrupted by user")
+            _prompt_go_home(motor)
         except (TimeoutError, RuntimeError) as exc:
             logger.error("Motor scan aborted: %s", exc)
         finally:

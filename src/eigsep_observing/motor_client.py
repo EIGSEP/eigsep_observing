@@ -108,18 +108,27 @@ class MotorClient:
         except KeyError:
             return None
 
-    def _wait_for_stop(self, timeout=None):
+    def _wait_for_stop(self, timeout=None, stop_event=None):
         """Block until the motor's position equals its target on both axes.
 
         Mirrors the progress-reset stall detection in
         ``picohost.motor.PicoMotor.wait_for_stop``: the timer resets
         whenever ``(az_pos, el_pos)`` changes, so a slow move never
         trips the stall guard.
+
+        If ``stop_event`` is supplied and set, the wait halts the motor
+        and returns mid-move — cooperative cancellation for callers that
+        drive ``home`` from a background thread (``motor_manual.py``).
+        ``scan`` does not pass an event here (it cancels between moves),
+        so its semantics are unchanged.
         """
         timeout = self.stall_timeout_s if timeout is None else timeout
         t = time.monotonic()
         last_pos = None
         while True:
+            if stop_event is not None and stop_event.is_set():
+                self.halt()
+                return
             status = self._motor_status()
             if status is None:
                 if time.monotonic() - t >= timeout:
@@ -166,18 +175,22 @@ class MotorClient:
             "is PicoManager running and the motor pico registered?"
         )
 
-    def _send_and_wait(self, action, *, label, timeout=None, **kwargs):
+    def _send_and_wait(
+        self, action, *, label, timeout=None, stop_event=None, **kwargs
+    ):
         """Send a single move command and block until the motor stops.
 
         The whole send-then-wait window is wrapped in
         ``coord.motion_section`` so per-move serialization (when
         enabled) is enforced at the lowest level — every public mover
         on this class composes from this helper, so neither callers
-        nor subclasses have to remember to take the lock.
+        nor subclasses have to remember to take the lock. ``stop_event``
+        is forwarded to :meth:`_wait_for_stop` for cooperative
+        cancellation.
         """
         with self._coord.motion_section(label=label):
             self._proxy.send_command(action, **kwargs)
-            self._wait_for_stop(timeout=timeout)
+            self._wait_for_stop(timeout=timeout, stop_event=stop_event)
 
     def move_to(
         self,
@@ -224,16 +237,32 @@ class MotorClient:
                 target_deg=target_deg,
             )
 
-    def home(self):
+    def home(self, stop_event=None):
         """Drive both axes to step position 0, one at a time.
 
         Only one motor moves at once: az homes first, then el. Running
         both simultaneously is a mechanical-safety hazard on the rig
         and matches the historical ``picohost`` script behavior.
+
+        ``stop_event`` (optional) enables cooperative cancellation: a
+        set event halts the in-flight axis and skips the next one, so a
+        background home (``motor_manual.py``) can be aborted mid-move.
         """
         self._await_initial_status()
-        self._send_and_wait("az_target_steps", label="home az", target_steps=0)
-        self._send_and_wait("el_target_steps", label="home el", target_steps=0)
+        self._send_and_wait(
+            "az_target_steps",
+            label="home az",
+            target_steps=0,
+            stop_event=stop_event,
+        )
+        if stop_event is not None and stop_event.is_set():
+            return
+        self._send_and_wait(
+            "el_target_steps",
+            label="home el",
+            target_steps=0,
+            stop_event=stop_event,
+        )
 
     def scan(
         self,

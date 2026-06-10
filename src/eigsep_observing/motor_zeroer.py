@@ -9,11 +9,14 @@ terminal.
 
 import inspect
 import logging
+import threading
 import time
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.motor import PicoMotor
 from picohost.proxy import PicoProxy
+
+from .motor_client import MotorClient
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ class MotorZeroer:
         el_up_delay_us=2400,
         el_dn_delay_us=600,
         source="motor_zeroer",
+        motor_client=None,
     ):
         self.transport = transport
         self._proxy = PicoProxy("motor", transport, source=source)
@@ -88,10 +92,28 @@ class MotorZeroer:
         self.logger = logger
         # Two-step zero guard: Enter arms this, a deliberate 'y' commits.
         self._pending_zero = False
+        # "Go home" drives both axes to step 0 via the same
+        # MotorClient.home primitive motor_control.py uses. It runs in a
+        # background thread so the curses loop keeps rendering live
+        # position; injectable for tests.
+        if motor_client is None:
+            motor_client = MotorClient(transport, source="motor_manual_home")
+        self._motor_client = motor_client
+        self._homing = False
+        self._home_thread = None
+        self._home_stop = None
 
     @property
     def is_available(self):
         return self._proxy.is_available
+
+    @property
+    def is_homing(self):
+        """True while a background "go home" move is in flight. The
+        curses layer reads this to render the homing banner and to know
+        that jog/zero keys are currently inert.
+        """
+        return self._homing
 
     @property
     def pending_zero(self):
@@ -137,6 +159,42 @@ class MotorZeroer:
         """
         self._proxy.send_command("halt")
         self._proxy.send_command("reset_step_position", az_step=0, el_step=0)
+
+    def start_home(self):
+        """Begin driving both axes back to step 0 in a background thread.
+
+        No-op if a home is already in flight or the manager is
+        unreachable. The thread runs the shared
+        :meth:`MotorClient.home` (mechanically-safe az-then-el) and
+        clears :attr:`is_homing` when it returns — normally, on a
+        :meth:`cancel_home`, or after a logged error.
+        """
+        if self._homing or not self.is_available:
+            return
+        self._home_stop = threading.Event()
+        self._homing = True
+
+        def _run():
+            try:
+                self._motor_client.home(stop_event=self._home_stop)
+            except (RuntimeError, TimeoutError) as exc:
+                self.logger.warning("home failed: %s", exc)
+            finally:
+                self._homing = False
+
+        self._home_thread = threading.Thread(
+            target=_run, name="motor-home", daemon=True
+        )
+        self._home_thread.start()
+
+    def cancel_home(self):
+        """Stop an in-flight background home: signal the thread and halt
+        the motor. :attr:`is_homing` clears once the thread unwinds.
+        Safe to call when not homing (just a best-effort halt).
+        """
+        if self._home_stop is not None:
+            self._home_stop.set()
+        self.halt()
 
     def status_text(self):
         """Return ``(az_str, el_str, connected)`` for the UI.
@@ -186,7 +244,14 @@ class MotorZeroer:
         """
         if ch == -1:
             # No keypress this tick — leave any armed prompt intact so a
-            # ~100ms idle getch() doesn't silently cancel it.
+            # ~100ms idle getch() doesn't silently cancel it, and leave a
+            # background home running.
+            return deg_state, False, False
+        if self._homing:
+            # While a background home is in flight, any real keystroke
+            # cancels it and is otherwise swallowed (it does not jog,
+            # zero, or quit). Idle (-1) ticks were handled above.
+            self.cancel_home()
             return deg_state, False, False
         if self._pending_zero:
             return self._confirm_zero(ch, deg_state)
@@ -211,6 +276,11 @@ class MotorZeroer:
             return deg_state + 1, False, False
         if key == "-":
             return max(0.1, deg_state - 1), False, False
+        if key == "h":
+            # Start driving back to step 0 in the background; start_home
+            # no-ops if the manager is unreachable.
+            self.start_home()
+            return deg_state, False, False
         if key in ("u", "d", "l", "r"):
             if not self.is_available:
                 return deg_state, False, False

@@ -16,6 +16,26 @@ def _zeroer(transport):
     return MotorZeroer(transport)
 
 
+class _BlockingHomeClient:
+    """Stand-in ``MotorClient`` whose ``home`` blocks on the stop event.
+
+    Lets a test observe ``is_homing == True`` deterministically (the
+    real emulator reaches step 0 too fast to catch the flag) and proves
+    the cancel path: ``home`` only returns once the ``stop_event`` is
+    set, so ``cancel_home`` unwinding the thread is observable.
+    """
+
+    def __init__(self):
+        self.home_calls = 0
+        self.last_stop_event = None
+
+    def home(self, stop_event=None):
+        self.home_calls += 1
+        self.last_stop_event = stop_event
+        if stop_event is not None:
+            stop_event.wait(timeout=2.0)
+
+
 def _wait_until(pred, timeout=2.0, interval=0.05):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -275,6 +295,84 @@ def test_handle_key_directional_jogs(client):
         zeroer.handle_key(ord(key), 1.0)
         after = getter()
         assert after - before == factor * motor.deg_to_steps(1.0)
+
+
+def test_handle_key_h_drives_to_home(client):
+    """Pressing 'h' drives both axes back to step 0 via the real
+    ``MotorClient.home`` path (background thread), and clears
+    ``is_homing`` when the move completes."""
+    zeroer = _zeroer(client.transport)
+    motor = client._manager.picos["motor"]
+    zeroer.jog_az(2.0)
+    zeroer.jog_el(2.0)
+    assert _wait_until(
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+            and motor._emulator.elevation.position
+            == motor._emulator.elevation.target_pos
+        ),
+        timeout=3.0,
+    )
+    assert motor._emulator.azimuth.target_pos != 0  # precondition
+
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(
+        lambda: (
+            motor._emulator.azimuth.position == 0
+            and motor._emulator.elevation.position == 0
+        ),
+        timeout=5.0,
+    )
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+
+
+def test_handle_key_h_sets_homing_and_any_key_cancels(client):
+    """'h' starts a background home (``is_homing`` True); while homing,
+    any subsequent key cancels it (stops the motor, unwinds the thread)
+    and must NOT execute as a jog."""
+    fake = _BlockingHomeClient()
+    zeroer = MotorZeroer(client.transport, motor_client=fake)
+
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
+    assert fake.home_calls == 1
+
+    motor = client._manager.picos["motor"]
+    before = motor._emulator.azimuth.target_pos
+    # 'l' is normally jog-left; while homing it must only cancel.
+    _, should_exit, zeroed = zeroer.handle_key(ord("l"), 1.0)
+    assert should_exit is False
+    assert zeroed is False
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert motor._emulator.azimuth.target_pos == before
+
+
+def test_handle_key_h_ignored_when_unavailable(client, monkeypatch):
+    """When the manager is unreachable, 'h' is a no-op — no home thread
+    is spawned."""
+    fake = _BlockingHomeClient()
+    zeroer = MotorZeroer(client.transport, motor_client=fake)
+    monkeypatch.setattr(
+        MotorZeroer, "is_available", property(lambda self: False)
+    )
+    zeroer.handle_key(ord("h"), 1.0)
+    assert zeroer.is_homing is False
+    assert fake.home_calls == 0
+
+
+def test_handle_key_noop_during_homing_preserves_state(client):
+    """A ``-1`` idle tick (getch timeout) while homing must keep the
+    home running rather than silently cancelling it."""
+    fake = _BlockingHomeClient()
+    zeroer = MotorZeroer(client.transport, motor_client=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
+    _, should_exit, zeroed = zeroer.handle_key(-1, 1.0)
+    assert zeroer.is_homing is True
+    assert should_exit is False
+    assert zeroed is False
+    zeroer.cancel_home()  # cleanup
 
 
 def test_format_pos_renders_axis_degrees():
