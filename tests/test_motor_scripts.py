@@ -127,6 +127,69 @@ def test_motor_control_parse_args_accepts_scan_bounds(monkeypatch):
     assert (args.el_start, args.el_stop, args.el_step) == (-45.0, 45.0, 15.0)
 
 
+def _patch_scan_to_interrupt(mc, monkeypatch):
+    """Make ``MotorClient.scan`` raise KeyboardInterrupt and spy on
+    ``home``. Returns the call counter dict."""
+    home_calls = {"n": 0}
+
+    def fake_scan(self, **kwargs):
+        raise KeyboardInterrupt
+
+    def fake_home(self, *a, **kw):
+        home_calls["n"] += 1
+
+    monkeypatch.setattr(mc.MotorClient, "scan", fake_scan)
+    monkeypatch.setattr(mc.MotorClient, "home", fake_home)
+    return home_calls
+
+
+def test_motor_control_interrupt_prompt_yes_homes(client, monkeypatch):
+    """A Ctrl-C during the scan prompts the operator; answering 'y'
+    drives back to (0,0) via ``MotorClient.home``."""
+    mc = _load("motor_control")
+    home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *_a: "y")
+    mc.main(client.transport, _scan_args())
+    assert home_calls["n"] == 1
+
+
+def test_motor_control_interrupt_prompt_no_skips_home(client, monkeypatch):
+    """The prompt defaults to No — an empty answer leaves the motors
+    halted in place rather than homing."""
+    mc = _load("motor_control")
+    home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
+    monkeypatch.setattr("builtins.input", lambda *_a: "")
+    mc.main(client.transport, _scan_args())
+    assert home_calls["n"] == 0
+
+
+def test_motor_control_interrupt_prompt_eof_skips_home(client, monkeypatch):
+    """A non-interactive stdin (EOFError on input) is treated as No and
+    must not crash the exit path."""
+    mc = _load("motor_control")
+    home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
+
+    def raise_eof(*_a):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", raise_eof)
+    mc.main(client.transport, _scan_args())
+    assert home_calls["n"] == 0
+
+
+def test_motor_control_second_interrupt_skips_home(client, monkeypatch):
+    """A second Ctrl-C at the prompt declines the home cleanly."""
+    mc = _load("motor_control")
+    home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
+
+    def raise_interrupt(*_a):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", raise_interrupt)
+    mc.main(client.transport, _scan_args())
+    assert home_calls["n"] == 0
+
+
 def test_motor_manual_helpers_exist():
     """``motor_manual`` should expose the curses frame and arg parser."""
     mm = _load("motor_manual")

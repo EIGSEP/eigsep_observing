@@ -363,6 +363,32 @@ def test_move_to_does_not_block_switch_when_serialize_off(client):
     t.join(timeout=1.0)
 
 
+def test_home_stop_event_bails_without_raising(client):
+    """A set ``stop_event`` makes ``home()`` halt and return promptly
+    even when the motor can't reach step 0 — mirrors ``scan()``'s
+    cooperative cancellation. Without the event this same frozen-emulator
+    state raises ``TimeoutError`` (see ``test_wait_for_stop_timeout``);
+    with it, ``home()`` must return cleanly so the manual UI's background
+    home thread can be cancelled mid-move.
+    """
+    motor = MotorClient(
+        client.transport, poll_interval_s=0.02, stall_timeout_s=5.0
+    )
+    assert _wait_until_motor_status_available(motor)
+    # Drive az off zero, then freeze mid-move so home()'s subsequent
+    # drive to step 0 can never complete on its own.
+    motor._proxy.send_command("az_target_deg", target_deg=100.0)
+    assert _wait_until_metadata_target_non_zero(motor)
+    client._manager.picos["motor"]._emulator.stop()
+
+    stop_event = threading.Event()
+    stop_event.set()
+
+    started = time.monotonic()
+    motor.home(stop_event=stop_event)  # must return, not raise or block
+    assert time.monotonic() - started < 1.0
+
+
 def test_scan_uses_send_and_wait_helper(client):
     """Sanity-check the refactor: scan() calls ``_send_and_wait``
     rather than the inline send + wait pattern. A regression that

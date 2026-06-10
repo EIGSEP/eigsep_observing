@@ -11,6 +11,7 @@ Controls:
     u / d  - jog elevation up / down
     l / r  - jog azimuth left / right
     + / -  - increase / decrease jog step size
+    h      - go home: drive both axes to step 0 (any key cancels)
     Enter  - arm zero confirmation
     y      - confirm and zero (after Enter); any other key cancels
     q      - quit without zeroing
@@ -43,9 +44,15 @@ def _render(screen, zeroer, deg):
         screen.addstr(3, 0, "AZ pos: DISCONNECTED (waiting for reconnect)")
         screen.addstr(4, 0, "EL pos: ---")
     screen.addstr(6, 0, "u/d = jog EL | l/r = jog AZ")
-    screen.addstr(7, 0, "+/- = change step size")
+    screen.addstr(7, 0, "+/- = change step size | h = go home (0,0)")
     screen.addstr(8, 0, "Enter = zero (asks to confirm) | q = quit")
-    if zeroer.pending_zero:
+    if zeroer.is_homing:
+        screen.addstr(
+            10,
+            0,
+            ">>> HOMING to (0,0)... press any key to cancel <<<",
+        )
+    elif zeroer.pending_zero:
         screen.addstr(
             10,
             0,
@@ -75,6 +82,7 @@ def _curses_main(screen, transport, args):
     except KeyboardInterrupt:
         pass
     finally:
+        zeroer.cancel_home()  # stop any in-flight background home
         zeroer.halt()
 
     if zeroed:
