@@ -203,7 +203,7 @@ directly from `SENSOR_SCHEMAS`:
 | schema type | reduction                                       | rationale |
 |-------------|-------------------------------------------------|-----------|
 | `float`     | `np.mean` over non-error survivors              | the actual averaging path; matches the integration's physical meaning |
-| `int`       | `min` over non-error survivors                  | every int field today is an invariant constant (`app_id`, `watchdog_timeout_ms`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path |
+| `int`       | `min` over non-error survivors                  | every int field today is an invariant constant (`app_id`, `watchdog_timeout_ms`, the motor's per-boot `boot_id`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path |
 | `bool`      | `any` over non-error survivors                  | bool fields are fault flags (`watchdog_tripped`); `any` preserves a fault that occurred mid-integration |
 | `str`       | first value if unanimous, else `"UNKNOWN"`      | matches the rfswitch convention |
 
@@ -221,7 +221,11 @@ least one bad raw sample, and the data fields shown are the average (or min,
 or any, etc.) of the survivors.
 
 **Invariant fields.** A few fields should be physical constants for the
-lifetime of a stream — `sensor_name`, `app_id`, `watchdog_timeout_ms`. If two
+lifetime of a stream — `sensor_name`, `app_id`, `watchdog_timeout_ms`,
+`boot_id` (the motor firmware's random per-boot constant, picohost
+3.7.0; constant per *boot* rather than per stream — a mid-integration
+disagreement means the pico power-cycled inside the window, which is
+exactly the loud-ERROR event this path exists for). If two
 raw samples in a single integration disagree on one of these, that's a
 producer-side bug (Pico misconfiguration, stream cross-talk, memory
 corruption). It's logged at ERROR, throttled to once per 60s per (stream,
