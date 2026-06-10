@@ -86,10 +86,20 @@ class MotorZeroer:
             "el_dn_delay_us": el_dn_delay_us,
         }
         self.logger = logger
+        # Two-step zero guard: Enter arms this, a deliberate 'y' commits.
+        self._pending_zero = False
 
     @property
     def is_available(self):
         return self._proxy.is_available
+
+    @property
+    def pending_zero(self):
+        """True while a zero confirmation is armed — Enter has been
+        pressed and we are awaiting a deliberate 'y'. The curses layer
+        reads this to render the confirmation prompt.
+        """
+        return self._pending_zero
 
     def set_delay(self, **overrides):
         self._delay_kwargs.update(overrides)
@@ -165,20 +175,28 @@ class MotorZeroer:
             ``new_deg`` — possibly-adjusted jog step size.
             ``should_exit`` — True when the caller should break the
             input loop.
-            ``zeroed`` — True if this keystroke triggered a successful
-            zeroing (Enter). Callers use it to choose the exit message.
+            ``zeroed`` — True if this keystroke committed a successful
+            zeroing. Callers use it to choose the exit message.
+
+        Zeroing is two-step: Enter *arms* a confirmation
+        (``pending_zero`` becomes True) but does not zero. While armed,
+        a deliberate ``y``/``Y`` commits the zero (and exits); any other
+        key cancels back to jogging. This guards an accidental Enter
+        from redefining scan home.
         """
         if ch == -1:
+            # No keypress this tick — leave any armed prompt intact so a
+            # ~100ms idle getch() doesn't silently cancel it.
             return deg_state, False, False
+        if self._pending_zero:
+            return self._confirm_zero(ch, deg_state)
         if ch == _KEY_ENTER:
             if not self.is_available:
                 return deg_state, False, False
-            try:
-                self.zero()
-            except (RuntimeError, TimeoutError) as exc:
-                self.logger.warning("zero failed: %s", exc)
-                return deg_state, False, False
-            return deg_state, True, True
+            # Arm the confirmation; the real zero happens in
+            # _confirm_zero once the operator presses 'y'.
+            self._pending_zero = True
+            return deg_state, False, False
         if not (0 <= ch < 256):
             return deg_state, False, False
         key = chr(ch).lower()
@@ -208,3 +226,25 @@ class MotorZeroer:
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("jog %s failed: %s", key, exc)
         return deg_state, False, False
+
+    def _confirm_zero(self, ch, deg_state):
+        """Resolve an armed zero prompt for one keystroke.
+
+        ``y``/``Y`` commits the zero and signals exit; any other key
+        cancels back to jogging. The prompt clears either way (callers
+        keep it armed only across ``-1`` no-input ticks, handled in
+        :meth:`handle_key`). A cancelling key is swallowed here — it is
+        not re-interpreted as a jog or step-size change.
+        """
+        key = chr(ch).lower() if 0 <= ch < 256 else None
+        self._pending_zero = False
+        if key != "y":
+            return deg_state, False, False
+        if not self.is_available:
+            return deg_state, False, False
+        try:
+            self.zero()
+        except (RuntimeError, TimeoutError) as exc:
+            self.logger.warning("zero failed: %s", exc)
+            return deg_state, False, False
+        return deg_state, True, True

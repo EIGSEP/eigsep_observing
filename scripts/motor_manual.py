@@ -1,15 +1,18 @@
 """
 Interactive motor zeroing UI.
 
-Jog the motors into the desired home position, then Enter to zero
-the step counters. After zeroing, ``motor_control.py`` treats the
-current physical position as ``(0, 0)``.
+Jog the motors into the desired home position, then Enter to begin
+zeroing the step counters. Zeroing is two-step: Enter arms a
+confirmation and 'y' commits it, so an accidental Enter can't redefine
+home. After zeroing, ``motor_control.py`` treats the current physical
+position as ``(0, 0)``.
 
 Controls:
     u / d  - jog elevation up / down
     l / r  - jog azimuth left / right
     + / -  - increase / decrease jog step size
-    Enter  - zero step counters and exit
+    Enter  - arm zero confirmation
+    y      - confirm and zero (after Enter); any other key cancels
     q      - quit without zeroing
 """
 
@@ -41,7 +44,13 @@ def _render(screen, zeroer, deg):
         screen.addstr(4, 0, "EL pos: ---")
     screen.addstr(6, 0, "u/d = jog EL | l/r = jog AZ")
     screen.addstr(7, 0, "+/- = change step size")
-    screen.addstr(8, 0, "Enter = zero and exit | q = quit")
+    screen.addstr(8, 0, "Enter = zero (asks to confirm) | q = quit")
+    if zeroer.pending_zero:
+        screen.addstr(
+            10,
+            0,
+            ">>> ZERO HERE? 'y' to confirm, any other key to cancel <<<",
+        )
     screen.refresh()
 
 
