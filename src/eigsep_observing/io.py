@@ -773,10 +773,18 @@ SENSOR_SCHEMAS = {
     # positions legitimately change within an integration during a
     # scan, so the integration row should record the mean position.
     # See picohost's _motor_redis_handler for the producer-side cast.
+    # `boot_id` (picohost 3.7.0) is the firmware's random per-boot
+    # constant, the host-side detector for "pico rebooted, step
+    # counters reset". It stays int (not coerced by the producer
+    # handler) and is in _INVARIANT_FIELDS: a mid-integration
+    # disagreement means the pico power-cycled inside the window —
+    # exactly the loud-ERROR producer event the invariant path exists
+    # for.
     "motor": {
         "sensor_name": str,
         "status": str,
         "app_id": int,
+        "boot_id": int,
         "az_pos": float,
         "az_target_pos": float,
         "el_pos": float,
@@ -1130,7 +1138,9 @@ def _avg_rfswitch_metadata(value):
 # varying int, the disagreement is silently captured by `min` rather
 # than logged.
 # ----------------------------------------------------------------------
-_INVARIANT_FIELDS = frozenset({"sensor_name", "app_id", "watchdog_timeout_ms"})
+_INVARIANT_FIELDS = frozenset(
+    {"sensor_name", "app_id", "watchdog_timeout_ms", "boot_id"}
+)
 _INVARIANT_LOG_THROTTLE_S = 60.0
 _last_invariant_log = {}  # {(app_name, field): unix_timestamp}
 
