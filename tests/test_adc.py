@@ -10,7 +10,6 @@ for the assertions below.
 """
 
 import logging
-from queue import Queue
 from threading import Event
 from unittest.mock import patch
 
@@ -19,6 +18,7 @@ import pytest
 
 from eigsep_observing import io
 from eigsep_observing.adc import AdcSnapshotReader, AdcSnapshotWriter
+from eigsep_observing.corr_health import read as read_corr_health
 from eigsep_observing.keys import ADC_SNAPSHOT_STREAM
 from eigsep_observing.testing import DummyEigsepFpga
 from eigsep_redis.keys import DATA_STREAMS_SET
@@ -251,71 +251,6 @@ class TestPublishAdcSnapshot:
         assert len(warnings) == 1
 
 
-class TestReadIntegrationsPublishesStats:
-    def test_publishes_on_each_integration_when_synced(self, fpga):
-        fpga.queue = Queue()
-        fpga.event = Event()
-        fpga.is_synchronized = True
-        pairs = ["0"]
-
-        calls = []
-
-        def read_int(reg):
-            calls.append(reg)
-            n = len(calls)
-            if n == 1:
-                return 0
-            if n == 2:
-                return 1
-            fpga.event.set()
-            return 1
-
-        publish_spy = []
-
-        def spy_publish():
-            publish_spy.append(1)
-
-        with (
-            patch.object(fpga.fpga, "read_int", side_effect=read_int),
-            patch.object(fpga, "read_data", return_value={"0": b"\x00"}),
-            patch.object(fpga, "_publish_adc_stats", side_effect=spy_publish),
-        ):
-            fpga._read_integrations(pairs, timeout=1)
-
-        assert len(publish_spy) == 1
-
-    def test_does_not_publish_when_unsynced(self, fpga):
-        fpga.queue = Queue()
-        fpga.event = Event()
-        fpga.is_synchronized = False  # key precondition
-        pairs = ["0"]
-
-        calls = []
-
-        def read_int(reg):
-            calls.append(reg)
-            n = len(calls)
-            if n == 1:
-                return 0
-            if n == 2:
-                return 1
-            fpga.event.set()
-            return 1
-
-        publish_spy = []
-        with (
-            patch.object(fpga.fpga, "read_int", side_effect=read_int),
-            patch.object(fpga, "read_data", return_value={"0": b"\x00"}),
-            patch.object(
-                fpga,
-                "_publish_adc_stats",
-                side_effect=lambda: publish_spy.append(1),
-            ),
-        ):
-            fpga._read_integrations(pairs, timeout=1)
-        assert publish_spy == []
-
-
 class TestObserveSnapshotThread:
     """``observe()`` spawns or skips the snapshot thread based on
     ``adc_snapshot_period_s``. Mocks ``Thread`` so neither the
@@ -429,3 +364,102 @@ class TestPublishSnapshotsLoopShutdown:
             fpga.event.set()
             t.join(timeout=1)
         assert calls == []
+
+
+class TestPublishCorrHealth:
+    """``_publish_corr_health`` ships the in-memory counters as the
+    ``corr_health`` Redis K/V (dashboard-only; deliberately not on the
+    metadata bus — the file records drops as acc_cnt gaps)."""
+
+    def test_publish_writes_expected_fields(self, fpga):
+        fpga._dropped_integrations = 3
+        fpga._last_readout_s = 0.05  # 50 ms
+        fpga._publish_corr_health()
+        out = read_corr_health(fpga.transport)
+        assert out["dropped_integrations"] == 3
+        assert out["readout_time_ms"] == pytest.approx(50.0)
+        assert out["published_unix"] is not None
+
+    def test_publish_with_no_readout_yet_emits_null(self, fpga):
+        """Before the first read, ``_last_readout_s`` is None; the K/V
+        ships null honestly so the dashboard omits the readout suffix
+        rather than rendering a fake 0 ms."""
+        assert fpga._last_readout_s is None
+        fpga._publish_corr_health()
+        out = read_corr_health(fpga.transport)
+        assert out["readout_time_ms"] is None
+        assert out["dropped_integrations"] == 0
+
+    def test_publish_failure_disables_publisher_with_error(self, fpga, caplog):
+        caplog.set_level(logging.ERROR)
+        with patch.object(
+            fpga.transport,
+            "add_raw",
+            side_effect=RuntimeError("redis down"),
+        ):
+            # Must not raise — corr data is sacred.
+            fpga._publish_corr_health()
+        assert fpga._corr_health_enabled is False
+        assert "Disabling corr_health publisher" in caplog.text
+        assert "redis down" in caplog.text
+
+    def test_publish_after_disable_is_no_op(self, fpga):
+        with patch.object(
+            fpga.transport,
+            "add_raw",
+            side_effect=RuntimeError("redis down"),
+        ) as add_raw:
+            fpga._publish_corr_health()  # first call: fails, disables
+            assert fpga._corr_health_enabled is False
+            assert add_raw.call_count == 1
+            fpga._publish_corr_health()
+            fpga._publish_corr_health()
+            assert add_raw.call_count == 1
+
+
+class TestDiagnosticsLoop:
+    def test_loop_publishes_both_diagnostics_when_synced(self, fpga):
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        with (
+            patch.object(fpga, "_publish_adc_stats") as adc_stats,
+            patch.object(fpga, "_publish_corr_health") as corr_health,
+        ):
+            from threading import Thread as RealThread
+
+            t = RealThread(
+                target=fpga._publish_diagnostics_loop,
+                args=(0.02,),
+                daemon=True,
+            )
+            t.start()
+            import time as _time
+
+            _time.sleep(0.1)  # let several loop iterations elapse
+            fpga.event.set()
+            t.join(timeout=1)
+        assert adc_stats.call_count >= 1
+        assert corr_health.call_count >= 1
+
+    def test_loop_skips_publish_when_unsynced(self, fpga):
+        fpga.event = Event()
+        fpga.is_synchronized = False
+        with (
+            patch.object(fpga, "_publish_adc_stats") as adc_stats,
+            patch.object(fpga, "_publish_corr_health") as corr_health,
+        ):
+            from threading import Thread as RealThread
+
+            t = RealThread(
+                target=fpga._publish_diagnostics_loop,
+                args=(0.02,),
+                daemon=True,
+            )
+            t.start()
+            import time as _time
+
+            _time.sleep(0.1)
+            fpga.event.set()
+            t.join(timeout=1)
+        adc_stats.assert_not_called()
+        corr_health.assert_not_called()

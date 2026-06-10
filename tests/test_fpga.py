@@ -46,15 +46,27 @@ def _patch_observe_thread(fpga, items):
         ``observe()`` constructed it (e.g. ``args``, ``kwargs``).
     """
     with patch("eigsep_observing.fpga.Thread") as mock_thread_class:
-        mock_thread = Mock()
-        mock_thread_class.return_value = mock_thread
+        # observe() spawns more than one thread (the producer plus the
+        # throttled diagnostics loop, and optionally the snapshot loop).
+        # Only the producer's start() should inject items — keying off
+        # the target avoids double-loading the queue when the auxiliary
+        # threads are constructed.
+        def make_thread(*args, **kwargs):
+            m = Mock()
+            target = kwargs.get("target")
+            if target is not None and target.__name__ == "_read_integrations":
 
-        def fake_start():
-            for item in items:
-                fpga.queue.put(item)
-            fpga.event.set()
+                def fake_start():
+                    for item in items:
+                        fpga.queue.put(item)
+                    fpga.event.set()
 
-        mock_thread.start = fake_start
+                m.start = fake_start
+            else:
+                m.start = lambda: None
+            return m
+
+        mock_thread_class.side_effect = make_thread
         yield mock_thread_class
 
 
@@ -607,7 +619,7 @@ class TestEigsepFpga:
     def test_read_integrations_missed_integrations(
         self, fpga_instance, caplog
     ):
-        """cnt jumps > 1 → warning log, data still read."""
+        """cnt jumps > 1 → "Dropped" warning, the latest cnt still read."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
         pairs = ["0", "1"]
@@ -641,12 +653,19 @@ class TestEigsepFpga:
         queued_item = fpga_instance.queue.get()
         assert queued_item["data"] == expected_data
         assert queued_item["cnt"] == 8
-        assert "Missed 2 integration(s)." in caplog.text
+        assert "Dropped 2 integration(s)" in caplog.text
 
-    def test_read_integrations_read_failure(self, fpga_instance, caplog):
-        """Validation read returns different cnt → error log, data still queued."""
+    def test_read_integrations_torn_read_is_dropped(
+        self, fpga_instance, caplog
+    ):
+        """Validation read returns a different cnt (the readout straddled
+        an integration boundary) → the spliced row is NOT queued, the
+        drop counter increments, and a "Dropped ... torn read" warning is
+        logged. A torn row labels itself as one clean integration, so
+        publishing it would write silently-corrupt data."""
         fpga_instance.queue = Queue()
         fpga_instance.event = Event()
+        assert fpga_instance._dropped_integrations == 0
         pairs = ["0", "1"]
         fake_data = utils.generate_data(
             ntimes=1, raw=True, reshape=False, return_time_freq=False
@@ -662,11 +681,11 @@ class TestEigsepFpga:
                 return 5
             if n == 2:
                 return 6
-            # Validation read with a different cnt → error log path
+            # Validation read returns a different cnt → torn read.
             fpga_instance.event.set()
             return 7
 
-        caplog.set_level(logging.ERROR)
+        caplog.set_level(logging.WARNING)
         with (
             patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
             patch.object(
@@ -675,14 +694,123 @@ class TestEigsepFpga:
         ):
             fpga_instance._read_integrations(pairs, timeout=1)
 
-        assert not fpga_instance.queue.empty()
-        queued_item = fpga_instance.queue.get()
-        assert queued_item["data"] == expected_data
-        assert queued_item["cnt"] == 6
-        assert (
-            "Read of acc_cnt=6 FAILED to complete before next integration."
-            in caplog.text
+        # Only the producer's None sentinel is on the queue — no data row.
+        assert fpga_instance.queue.get_nowait() is None
+        assert fpga_instance.queue.empty()
+        assert fpga_instance._dropped_integrations == 1
+        assert "Dropped integration acc_cnt=6" in caplog.text
+        assert "torn read" in caplog.text
+
+    def test_read_integrations_increments_dropped_counter(self, fpga_instance):
+        """A cnt jump > 1 accumulates into ``_dropped_integrations`` (the
+        counter the corr_health diagnostic surfaces), on top of the
+        existing warning."""
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+        assert fpga_instance._dropped_integrations == 0
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
         )
+        expected_data = {p: fake_data[p] for p in pairs}
+
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5
+            if n == 2:
+                return 8  # jumped from 5 to 8 (missed 2)
+            fpga_instance.event.set()
+            return 8
+
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ),
+        ):
+            fpga_instance._read_integrations(pairs, timeout=1)
+
+        assert fpga_instance._dropped_integrations == 2
+
+    def test_read_integrations_records_readout_time(self, fpga_instance):
+        """A completed read stamps ``_last_readout_s`` so the diagnostics
+        loop can surface the readout wall-time."""
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+        assert fpga_instance._last_readout_s is None
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        expected_data = {p: fake_data[p] for p in pairs}
+
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5
+            if n == 2:
+                return 6
+            fpga_instance.event.set()
+            return 6
+
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ),
+        ):
+            fpga_instance._read_integrations(pairs, timeout=1)
+
+        assert fpga_instance._last_readout_s is not None
+        assert fpga_instance._last_readout_s >= 0.0
+
+    def test_read_integrations_does_not_publish_adc_stats_inline(
+        self, fpga_instance
+    ):
+        """adc_stats publishing moved off the hot read path to the
+        throttled diagnostics loop — ``_read_integrations`` must not call
+        it per integration anymore (it was an FPGA register read + Redis
+        write inside the window that has to beat the BRAM overwrite)."""
+        fpga_instance.queue = Queue()
+        fpga_instance.event = Event()
+        fpga_instance.is_synchronized = True
+        pairs = ["0", "1"]
+        fake_data = utils.generate_data(
+            ntimes=1, raw=True, reshape=False, return_time_freq=False
+        )
+        expected_data = {p: fake_data[p] for p in pairs}
+
+        calls = []
+
+        def read_int(reg):
+            calls.append(reg)
+            n = len(calls)
+            if n == 1:
+                return 5
+            if n == 2:
+                return 6
+            fpga_instance.event.set()
+            return 6
+
+        with (
+            patch.object(fpga_instance.fpga, "read_int", side_effect=read_int),
+            patch.object(
+                fpga_instance, "read_data", return_value=expected_data
+            ),
+            patch.object(
+                fpga_instance, "_publish_adc_stats"
+            ) as mock_adc_stats,
+        ):
+            fpga_instance._read_integrations(pairs, timeout=1)
+
+        mock_adc_stats.assert_not_called()
 
     def test_end_observing(self, fpga_instance):
         """Test that end_observing method exists and can be called."""

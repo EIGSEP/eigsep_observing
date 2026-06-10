@@ -23,6 +23,7 @@ from eigsep_redis.testing import DummyTransport
 
 from eigsep_observing.adc import AdcSnapshotWriter
 from eigsep_observing.corr import CorrConfigStore, CorrWriter
+from eigsep_observing.corr_health import publish as publish_corr_health
 from eigsep_observing.live_status import (
     LiveStatusAggregator,
     Thresholds,
@@ -311,6 +312,22 @@ def test_snap_tick_drains_adc_stats_stream(agg, seeded):
     assert state.adc_stats_latest is not None
     assert state.adc_stats_latest["status"] == "update"
     assert state.adc_stats_last_unix is not None
+
+
+def test_snap_tick_reads_corr_health_kv(agg, seeded):
+    snap, _ = seeded
+    # corr_health is a plain K/V on the SNAP transport (published by
+    # EigsepFpga's throttled diagnostics thread), not a metadata-bus
+    # stream — same pattern as the file heartbeat.
+    publish_corr_health(snap, dropped_integrations=6, readout_time_ms=42.0)
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.corr_health["dropped_integrations"] == 6
+    assert state.corr_health["readout_time_ms"] == 42.0
+    assert state.corr_health["published_unix"] is not None
+    assert state.corr_health["seconds_since_publish"] is not None
 
 
 def test_snap_tick_ingests_adc_snapshot_and_computes_clipping(agg, seeded):

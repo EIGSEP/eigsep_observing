@@ -524,10 +524,22 @@ function updateHealth(h, fileData) {
   pandaTile.className = `tile ${pandaClass}`;
   pandaTile.textContent = `Panda observe: ${pandaLabel}`;
 
-  // Corr loop tile — old "Observing" tile, honestly named.
+  // Corr loop tile — old "Observing" tile, honestly named. When the
+  // producer is publishing corr_health, append the cumulative
+  // dropped-integration count and the latest readout wall-time so the
+  // operator can watch the drop budget as corr_acc_len is tuned down.
   const corrTile = document.getElementById("tile-corr-loop");
   corrTile.className = `tile ${h.observing_inferred ? "ok" : "warn"}`;
-  corrTile.textContent = `Corr loop: ${h.observing_inferred ? "recording" : "idle"}`;
+  let corrLabel = `Corr loop: ${h.observing_inferred ? "recording" : "idle"}`;
+  if (h.corr_dropped_integrations !== null &&
+      h.corr_dropped_integrations !== undefined) {
+    corrLabel += ` · ${h.corr_dropped_integrations} dropped`;
+  }
+  if (h.corr_readout_time_ms !== null &&
+      h.corr_readout_time_ms !== undefined) {
+    corrLabel += ` · ${fmt(h.corr_readout_time_ms, 0)}ms read`;
+  }
+  corrTile.textContent = corrLabel;
 
   const fileTile = document.getElementById("tile-file");
   if (fileData) {
