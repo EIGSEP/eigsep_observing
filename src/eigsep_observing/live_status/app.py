@@ -516,6 +516,7 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
 
 
 def _health_payload(state: StateSnapshot, now: float) -> dict:
+    corr_health = dict(state.corr_health or {})
     panda_hb_age = None
     if state.panda_heartbeat_last_check_unix is not None:
         panda_hb_age = max(0.0, now - state.panda_heartbeat_last_check_unix)
@@ -565,6 +566,14 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "run_tag": state.run_tag,
         "run_started_at_unix": state.run_started_at_unix,
         "run_age_s": run_age_s,
+        # Corr-loop health (dashboard-only K/V; see the corr_health
+        # module): cumulative dropped integrations and the latest
+        # readout wall-time, surfaced on the corr-loop tile so the
+        # operator can watch drops accumulate and see how much of the
+        # integration window the readout consumes.
+        "corr_dropped_integrations": corr_health.get("dropped_integrations"),
+        "corr_readout_time_ms": corr_health.get("readout_time_ms"),
+        "corr_health_published_unix": corr_health.get("published_unix"),
     }
 
 

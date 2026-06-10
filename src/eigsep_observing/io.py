@@ -713,10 +713,15 @@ SENSOR_SCHEMAS = {
     },
     # `adc_stats` is produced by the SNAP-side correlator (not a pico),
     # published on the SNAP transport via a second ``MetadataWriter``
-    # that lives in ``EigsepFpga``. One entry is emitted per corr
-    # integration from ``Input.get_stats(sum_cores=False)`` — mean,
-    # power, and RMS for each of the 12 ADC cores (6 SNAP inputs × 2
-    # interleaved cores). Field names are ``input{N}_core{C}_{stat}``
+    # that lives in ``EigsepFpga``. One entry is emitted per
+    # ``diagnostics_period_s`` tick (throttled off the per-integration
+    # read path; see ``_publish_diagnostics_loop``) from
+    # ``Input.get_stats(sum_cores=False)`` — mean, power, and RMS for
+    # each of the 12 ADC cores (6 SNAP inputs × 2 interleaved cores).
+    # At cadences slower than the integration rate some integration rows
+    # carry no adc_stats sample (gap-filled None); the freshness check
+    # tolerates this well within its 30 s window. Field names are
+    # ``input{N}_core{C}_{stat}``
     # where ``N`` is the snap-input index 0..5 (same label the corr
     # file uses for auto-correlations) and ``C`` is the interleaved
     # ADC core 0/1: ``get_stats`` returns 12 values where indices
@@ -726,7 +731,7 @@ SENSOR_SCHEMAS = {
     # joinable to the corr data it describes. Envelope is minimal: no
     # ``app_id`` (not a picohost app) and no invariant fields beyond
     # ``sensor_name``. The 36 floats go through the standard float→mean
-    # reduction, so each integration row in the HDF5 file carries the
+    # reduction, so an integration row that captured a sample carries the
     # per-core RMS averaged over the integration — visible to offline
     # data analysts as a flagging / quality trace alongside the corr
     # data.

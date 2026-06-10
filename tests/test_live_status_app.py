@@ -328,6 +328,32 @@ def test_health_route_surfaces_snap_reinit_count(agg_primed):
     assert data["snap_reinit"]["seconds_since_reinit"] is not None
 
 
+def test_health_route_surfaces_corr_health(agg_primed):
+    """When the producer is publishing corr_health, /api/health must
+    surface the cumulative dropped-integration count and latest readout
+    wall-time so the corr-loop tile can show the drop budget."""
+    agg_primed.state.corr_health = {
+        "dropped_integrations": 9,
+        "readout_time_ms": 73.0,
+        "published_unix": time.time(),
+        "seconds_since_publish": 0.5,
+    }
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["corr_dropped_integrations"] == 9
+    assert data["corr_readout_time_ms"] == 73.0
+    assert data["corr_health_published_unix"] is not None
+
+
+def test_health_route_corr_health_absent_returns_none(agg_primed):
+    """No corr_health published yet: the keys are present and null so the
+    dashboard renders the bare tile without drop/readout suffixes."""
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["corr_dropped_integrations"] is None
+    assert data["corr_readout_time_ms"] is None
+
+
 def test_health_route_snap_fpga_state_live_when_corr_fresh(agg_primed):
     """corr fresh → state is 'live' regardless of probe result."""
     agg_primed.state.corr_last_unix = time.time()

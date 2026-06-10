@@ -53,6 +53,7 @@ from eigsep_redis.status import StatusReader
 
 from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
+from ..corr_health import read as read_corr_health
 from ..file_heartbeat import read as read_file_heartbeat
 from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
 from ..run_tag import read as read_run_tag
@@ -102,9 +103,22 @@ class StateSnapshot:
     corr_header: Optional[dict] = None
     corr_config: Optional[dict] = None
 
-    # ADC stats stream (SNAP side, one entry per corr integration).
+    # ADC stats stream (SNAP side, one entry per diagnostics-period
+    # tick).
     adc_stats_latest: Optional[dict] = None
     adc_stats_last_unix: Optional[float] = None
+
+    # Corr-loop health (SNAP side, raw K/V): cumulative
+    # dropped-integration count and the latest read_data wall-time,
+    # published by EigsepFpga's throttled diagnostics loop.
+    corr_health: dict = field(
+        default_factory=lambda: {
+            "dropped_integrations": None,
+            "readout_time_ms": None,
+            "published_unix": None,
+            "seconds_since_publish": None,
+        }
+    )
 
     # ADC snapshot stream (SNAP side, ~1 Hz when enabled).
     adc_snapshot_data: Optional[np.ndarray] = None
@@ -403,6 +417,7 @@ class LiveStatusAggregator:
                 status_log=deque(s.status_log, maxlen=s.status_log.maxlen),
                 file_heartbeat=dict(s.file_heartbeat),
                 snap_reinit=dict(s.snap_reinit),
+                corr_health=dict(s.corr_health),
                 last_rfnoff_pairs=(
                     dict(s.last_rfnoff_pairs)
                     if s.last_rfnoff_pairs is not None
@@ -471,6 +486,17 @@ class LiveStatusAggregator:
             lambda: self.adc_metadata_stream.drain(
                 stream_keys=[_ADC_STATS_STREAM]
             ),
+            errors,
+        )
+        any_ok = any_ok or ok
+
+        # Corr-loop health (raw K/V, published by ``EigsepFpga``'s
+        # throttled diagnostics thread). Same shape contract as the
+        # file heartbeat: missing key resolves to the empty-sentinel
+        # dict.
+        corr_h, ok = self._read_benign_missing(
+            "corr_health.read",
+            lambda: read_corr_health(self.transport_snap, now=now),
             errors,
         )
         any_ok = any_ok or ok
@@ -557,6 +583,9 @@ class LiveStatusAggregator:
                 if stream_data:
                     s.adc_stats_latest = stream_data[-1]
                     s.adc_stats_last_unix = now
+
+            if corr_h is not None:
+                s.corr_health = corr_h
 
             if file_h is not None:
                 s.file_heartbeat = file_h

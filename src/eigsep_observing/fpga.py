@@ -23,6 +23,7 @@ import yaml
 
 from eigsep_redis import MetadataWriter, Transport
 
+from . import corr_health
 from .adc import AdcSnapshotWriter
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
 from .corr import CorrConfigStore, CorrWriter
@@ -217,6 +218,21 @@ class EigsepFpga:
         # ERROR spam doesn't drown the journal. Restart to retry.
         self._adc_stats_enabled = True
         self._adc_snapshot_enabled = True
+        self._corr_health_enabled = True
+
+        # Corr-loop health diagnostics. Both are mutated in the hot
+        # read loop (``_read_integrations``) via cheap, lock-free
+        # operations — an integer add and a ``perf_counter`` delta —
+        # and shipped to Redis off the critical path by the throttled
+        # diagnostics thread. ``_dropped_integrations`` is cumulative
+        # for the lifetime of the observe loop: the count of
+        # integrations the host failed to read before the FPGA
+        # overwrote the BRAM. ``_last_readout_s`` is the wall-time of
+        # the most recent ``read_data`` (including any time spent
+        # waiting on the FPGA lock proxy), i.e. the real budget the
+        # readout consumed against the integration window.
+        self._dropped_integrations = 0
+        self._last_readout_s = None
 
     def _make_fpga(self):
         """
@@ -1050,6 +1066,70 @@ class EigsepFpga:
                 e,
             )
 
+    def _publish_corr_health(self):
+        """
+        Publish corr-loop health as a plain Redis K/V (see the
+        ``corr_health`` module): the cumulative dropped-integration
+        count and the most recent ``read_data`` wall-time (ms).
+
+        Deliberately NOT on the metadata bus — the live dashboard is
+        the only consumer, and the HDF5 file already records every
+        drop as an ``acc_cnt`` gap, so routing this through
+        ``SENSOR_SCHEMAS`` and the file-averaging path would buy
+        nothing.
+
+        Called from ``_publish_diagnostics_loop`` off the critical
+        path. Unlike ``_publish_adc_stats`` this touches no FPGA
+        register — it only snapshots the in-memory counters that
+        ``_read_integrations`` maintains — so it never contends on the
+        FPGA lock proxy. Corr data is sacred: a Redis write failure
+        flips ``_corr_health_enabled`` off and logs once at ERROR
+        rather than propagating into the read loop.
+        """
+        if not self._corr_health_enabled:
+            return
+        try:
+            readout_ms = (
+                float(self._last_readout_s) * 1e3
+                if self._last_readout_s is not None
+                else None
+            )
+            corr_health.publish(
+                self.transport,
+                dropped_integrations=self._dropped_integrations,
+                readout_time_ms=readout_ms,
+            )
+        except Exception as e:
+            self._corr_health_enabled = False
+            self.logger.error(
+                "Disabling corr_health publisher for this run after "
+                "failure: %s. Restart eigsep-observe to retry.",
+                e,
+            )
+
+    def _publish_diagnostics_loop(self, period):
+        """Background thread: publish corr-loop diagnostics (the
+        adc_stats stream and the corr_health K/V) every ``period``
+        seconds until ``self.event`` is set. Gated on
+        ``is_synchronized`` so pre-sync noise doesn't fill the
+        diagnostics surfaces.
+
+        Moving these off the per-integration read path keeps the hot
+        loop — which must finish each readout before the FPGA
+        overwrites the BRAM — free of an extra FPGA register read
+        (``get_stats``) and Redis write on every cycle. That overhead
+        is fixed per integration, so it eats a growing fraction of the
+        window as ``corr_acc_len`` (and thus the integration time) is
+        lowered. ``get_stats`` still serializes against the hot loop
+        via the FPGA lock proxy when it runs, but at this throttled
+        cadence it burdens roughly one cycle per ``period`` instead of
+        every cycle."""
+        while not self.event.wait(period):
+            if not self.is_synchronized:
+                continue
+            self._publish_adc_stats()
+            self._publish_corr_health()
+
     def _publish_adc_snapshot(self):
         """
         Pull raw ADC samples for every antenna and publish one snapshot
@@ -1148,21 +1228,51 @@ class EigsepFpga:
                 if new_cnt == cnt:
                     time.sleep(0.01)
                     continue
+                # An integration can be lost two ways, both folded into
+                # one cumulative counter and one "Dropped" log because the
+                # downstream consequence is identical — that acc_cnt never
+                # makes it into the stream/file as a clean entry:
+                #   1. The host fell behind *between* reads: the counter
+                #      jumped by >1 while we were busy, so whole
+                #      integrations completed and were overwritten unread.
+                #   2. A *torn* read: the counter advanced *during*
+                #      read_data, so the ~144 KB readout straddled an
+                #      integration boundary and spliced two windows. That
+                #      row is corrupt but labels itself as one clean
+                #      integration, so we drop it rather than publish
+                #      silently-bad data — a visible acc_cnt gap is honest;
+                #      a mislabeled row is not. (corr is sacred only means
+                #      external failures must not block *good* corr; it
+                #      does not compel writing known-corrupt corr.)
                 if new_cnt > cnt + 1:
+                    missed = new_cnt - cnt - 1
+                    self._dropped_integrations += missed
                     self.logger.warning(
-                        f"Missed {new_cnt - cnt - 1} integration(s)."
+                        f"Dropped {missed} integration(s): host fell "
+                        "behind between reads."
                     )
                 cnt = new_cnt
                 self.logger.info(f"Reading acc_cnt={cnt}")
+                t_read = time.perf_counter()
                 data = self.read_data(pairs=pairs, unpack=False)
+                self._last_readout_s = time.perf_counter() - t_read
                 if cnt != self.fpga.read_int("corr_acc_cnt"):
-                    self.logger.error(
-                        f"Read of acc_cnt={cnt} FAILED to complete "
-                        "before next integration."
+                    self._dropped_integrations += 1
+                    self.logger.warning(
+                        f"Dropped integration acc_cnt={cnt}: readout "
+                        "straddled the next integration boundary (torn "
+                        "read); the spliced row is not published."
                     )
-                self.queue.put({"data": data, "cnt": cnt})
-                if self.is_synchronized:
-                    self._publish_adc_stats()
+                else:
+                    self.queue.put({"data": data, "cnt": cnt})
+                # adc_stats / corr_health are published off this critical
+                # path by ``_publish_diagnostics_loop`` — an FPGA register
+                # read (``get_stats``) and a Redis write per integration
+                # were the avoidable overhead that ate the shrinking
+                # readout window as ``corr_acc_len`` is lowered.
+                # ``t`` resets on a torn read too: the SNAP *is* producing
+                # (the counter advanced), so this is not a no-progress
+                # stall — restarting wouldn't help a too-fast config.
                 t = time.time()
             # No external stop → loop exited because the no-progress
             # window elapsed; flag so observe() raises TimeoutError.
@@ -1248,6 +1358,25 @@ class EigsepFpga:
             self.logger.info(
                 "ADC snapshot publisher disabled "
                 "(adc_snapshot_period_s is unset or 0)."
+            )
+
+        # Throttled diagnostics (adc_stats + corr_health). Defaults to
+        # 1 s when the key is absent so adc_stats keeps flowing on
+        # configs predating this knob; set to 0 to disable both.
+        diag_period = self.cfg.get("diagnostics_period_s", 1.0)
+        if diag_period and diag_period > 0:
+            diag_thd = Thread(
+                target=self._publish_diagnostics_loop,
+                args=(diag_period,),
+                daemon=True,
+            )
+            diag_thd.start()
+            self.logger.info(
+                f"Diagnostics publisher started (period={diag_period}s)."
+            )
+        else:
+            self.logger.info(
+                "Diagnostics publisher disabled (diagnostics_period_s is 0)."
             )
 
         thd = Thread(
