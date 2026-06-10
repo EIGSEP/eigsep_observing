@@ -167,7 +167,13 @@ def test_handle_key_plus_recovers_integer_steps_from_floor(client):
     assert deg == 2.0
 
 
-def test_handle_key_enter_zeroes(client):
+def test_handle_key_enter_arms_confirmation_without_zeroing(client):
+    """A single Enter must NOT zero — it arms a confirmation prompt.
+
+    Zeroing redefines scan home, so an accidental Enter (or a new
+    operator who doesn't know what Enter does) must not be able to
+    trigger it in one keystroke.
+    """
     zeroer = _zeroer(client.transport)
     motor = client._manager.picos["motor"]
     zeroer.jog_az(2.0)
@@ -178,14 +184,82 @@ def test_handle_key_enter_zeroes(client):
         ),
         timeout=3.0,
     )
+    offset = motor._emulator.azimuth.target_pos
+    assert offset != 0  # precondition: we are off-home
     _, should_exit, zeroed = zeroer.handle_key(_KEY_ENTER, 1.0)
+    assert zeroer.pending_zero is True
+    assert should_exit is False
+    assert zeroed is False
+    # No reset happened — position is untouched.
+    assert motor._emulator.azimuth.target_pos == offset
+
+
+def test_handle_key_confirm_y_zeroes_and_exits(client):
+    zeroer = _zeroer(client.transport)
+    motor = client._manager.picos["motor"]
+    zeroer.jog_az(2.0)
+    assert _wait_until(
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+        ),
+        timeout=3.0,
+    )
+    zeroer.handle_key(_KEY_ENTER, 1.0)  # arm
+    _, should_exit, zeroed = zeroer.handle_key(ord("y"), 1.0)
     assert should_exit is True
     assert zeroed is True
+    assert zeroer.pending_zero is False
     assert _wait_until(
         lambda: motor._emulator.azimuth.position == 0,
         timeout=2.0,
     )
     assert motor._emulator.azimuth.target_pos == 0
+
+
+def test_handle_key_confirm_uppercase_y_also_zeroes(client):
+    zeroer = _zeroer(client.transport)
+    zeroer.handle_key(_KEY_ENTER, 1.0)  # arm
+    _, should_exit, zeroed = zeroer.handle_key(ord("Y"), 1.0)
+    assert should_exit is True
+    assert zeroed is True
+
+
+def test_handle_key_pending_other_key_cancels_without_zeroing(client):
+    """While the prompt is armed, any non-'y' key cancels it and is
+    otherwise swallowed — it must neither zero nor execute as a jog.
+    """
+    zeroer = _zeroer(client.transport)
+    motor = client._manager.picos["motor"]
+    zeroer.jog_az(2.0)
+    assert _wait_until(
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+        ),
+        timeout=3.0,
+    )
+    offset = motor._emulator.azimuth.target_pos
+    zeroer.handle_key(_KEY_ENTER, 1.0)  # arm
+    # 'l' is normally a jog-left; while armed it must only cancel.
+    _, should_exit, zeroed = zeroer.handle_key(ord("l"), 1.0)
+    assert zeroer.pending_zero is False
+    assert should_exit is False
+    assert zeroed is False
+    # Unchanged target proves neither a zero nor a jog fired.
+    assert motor._emulator.azimuth.target_pos == offset
+
+
+def test_handle_key_pending_no_input_preserves_prompt(client):
+    """``getch()`` returns -1 every ~100ms when idle; that must keep the
+    confirmation prompt armed rather than silently cancelling it.
+    """
+    zeroer = _zeroer(client.transport)
+    zeroer.handle_key(_KEY_ENTER, 1.0)  # arm
+    _, should_exit, zeroed = zeroer.handle_key(-1, 1.0)
+    assert zeroer.pending_zero is True
+    assert should_exit is False
+    assert zeroed is False
 
 
 def test_handle_key_directional_jogs(client):
