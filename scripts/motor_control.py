@@ -5,6 +5,11 @@ Runs a beam scan through ``PicoManager`` via Redis — no direct serial
 to the motor pico, so the manager service stays up throughout. Log
 start/end boundaries to the shared status stream so the ground
 observer sees when a scan is active.
+
+The scan grid is configured per axis from the command line via
+``--az_start/--az_stop/--az_step`` and the ``--el_*`` equivalents
+(degrees). Bounds are inclusive of the stop endpoint, so e.g.
+``--az_start 0 --az_stop 180 --az_step 5`` sweeps 0..180 in 5 deg steps.
 """
 
 from argparse import ArgumentParser
@@ -24,7 +29,30 @@ configure_eig_logger(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+def _axis_range(start, stop, step):
+    """Build one scan axis from CLI bounds.
+
+    Grid points run from ``start`` to ``stop`` spaced by ``step``
+    degrees, *including* the ``stop`` endpoint when it lands on the step
+    grid (so ``0 -> 180`` reaches 180). A ``stop`` that doesn't land on
+    the grid stops at the last point ``<= stop`` rather than
+    overshooting the mechanical boundary. Direction is always ascending;
+    the serpentine traversal in ``MotorClient.scan`` handles sweep
+    direction, so an inverted ``stop < start`` is a user error.
+    """
+    if step <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+    if stop < start:
+        raise ValueError(f"stop ({stop}) must be >= start ({start})")
+    # +step/2 epsilon so an on-grid stop survives float drift.
+    return np.arange(start, stop + step / 2.0, step)
+
+
 def main(transport, args):
+    # Build (and validate) the grid before touching hardware so bad
+    # bounds fail fast without opening a run_tag session.
+    az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
+    el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
     require_pico(PicoProxy("motor", transport, source="motor_control"))
     with run_tag.session(transport, "motor_control"):
         status = StatusWriter(transport)
@@ -33,13 +61,25 @@ def main(transport, args):
         started = time.monotonic()
         status.send("motor_control started")
         logger.info("motor_control started")
+        logger.info(
+            "Scan grid: az %g..%g step %g (%d pts), "
+            "el %g..%g step %g (%d pts)",
+            args.az_start,
+            args.az_stop,
+            args.az_step,
+            len(az_range),
+            args.el_start,
+            args.el_stop,
+            args.el_step,
+            len(el_range),
+        )
 
         try:
             motor.set_delay()
             motor.halt()
             motor.scan(
-                az_range_deg=np.linspace(-180.0, 180.0, 10),
-                el_range_deg=np.linspace(-180.0, 180.0, 10),
+                az_range_deg=az_range,
+                el_range_deg=el_range,
                 el_first=args.el_first,
                 repeat_count=args.count,
                 pause_s=args.pause_s,
@@ -68,6 +108,42 @@ def _parse_args():
         "--el_first",
         action="store_true",
         help="Scan az as outer loop (el is the fast axis); default is az fast.",
+    )
+    parser.add_argument(
+        "--az_start",
+        type=float,
+        default=-180.0,
+        help="Azimuth scan start in degrees (default: -180).",
+    )
+    parser.add_argument(
+        "--az_stop",
+        type=float,
+        default=180.0,
+        help="Azimuth scan stop in degrees, inclusive (default: 180).",
+    )
+    parser.add_argument(
+        "--az_step",
+        type=float,
+        default=5.0,
+        help="Azimuth grid step size in degrees (default: 5).",
+    )
+    parser.add_argument(
+        "--el_start",
+        type=float,
+        default=-180.0,
+        help="Elevation scan start in degrees (default: -180).",
+    )
+    parser.add_argument(
+        "--el_stop",
+        type=float,
+        default=180.0,
+        help="Elevation scan stop in degrees, inclusive (default: 180).",
+    )
+    parser.add_argument(
+        "--el_step",
+        type=float,
+        default=5.0,
+        help="Elevation grid step size in degrees (default: 5).",
     )
     parser.add_argument(
         "--count",

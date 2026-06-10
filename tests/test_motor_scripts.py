@@ -10,12 +10,14 @@ the dummy transport used everywhere else.
 
 import importlib.util
 import json
+import sys
 import threading
 import time
 from argparse import Namespace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import yaml
 
 from eigsep_observing import run_tag
@@ -40,22 +42,89 @@ def _load(name):
     raise FileNotFoundError(f"{name}.py not found in {SCRIPT_DIRS}")
 
 
-def test_motor_control_main_runs_short_scan(client, monkeypatch):
-    """``motor_control.main`` runs a full scan to completion against
-    the dummy manager. Patch the hard-coded linspace to a small grid
-    so the test finishes quickly."""
-    mc = _load("motor_control")
-    small = np.array([-1.0, 0.0, 1.0])
-    orig_linspace = mc.np.linspace
-    monkeypatch.setattr(
-        mc.np,
-        "linspace",
-        lambda *a, **kw: (
-            small if a and a[0] == -180.0 else orig_linspace(*a, **kw)
-        ),
+def _scan_args(**overrides):
+    """A small-grid arg namespace for driving ``motor_control.main``
+    quickly. Grid bounds default to a 3-point az/el sweep."""
+    base = dict(
+        el_first=False,
+        count=1,
+        pause_s=None,
+        sleep_s=None,
+        az_start=-1.0,
+        az_stop=1.0,
+        az_step=1.0,
+        el_start=-1.0,
+        el_stop=1.0,
+        el_step=1.0,
     )
-    args = Namespace(el_first=False, count=1, pause_s=None, sleep_s=None)
-    mc.main(client.transport, args)
+    base.update(overrides)
+    return Namespace(**base)
+
+
+def test_motor_control_main_runs_short_scan(client):
+    """``motor_control.main`` runs a full scan to completion against the
+    dummy manager, building the grid from CLI args (no numpy patching)."""
+    mc = _load("motor_control")
+    mc.main(client.transport, _scan_args())
+
+
+def test_motor_control_axis_range_inclusive_endpoint():
+    """``_axis_range`` includes the stop endpoint when it lands on the
+    step grid, so ``0 -> 180`` actually reaches 180."""
+    mc = _load("motor_control")
+    rng = mc._axis_range(0.0, 180.0, 5.0)
+    assert rng[0] == 0.0
+    assert rng[-1] == 180.0
+    assert len(rng) == 37
+    np.testing.assert_allclose(np.diff(rng), 5.0)
+
+
+def test_motor_control_axis_range_offgrid_stop_does_not_overshoot():
+    """A stop that doesn't land on the grid stops at the last point
+    <= stop rather than overshooting the boundary."""
+    mc = _load("motor_control")
+    rng = mc._axis_range(0.0, 10.0, 3.0)
+    np.testing.assert_allclose(rng, [0.0, 3.0, 6.0, 9.0])
+
+
+def test_motor_control_axis_range_rejects_nonpositive_step():
+    mc = _load("motor_control")
+    with pytest.raises(ValueError):
+        mc._axis_range(0.0, 10.0, 0.0)
+
+
+def test_motor_control_axis_range_rejects_inverted_bounds():
+    mc = _load("motor_control")
+    with pytest.raises(ValueError):
+        mc._axis_range(180.0, 0.0, 5.0)
+
+
+def test_motor_control_parse_args_accepts_scan_bounds(monkeypatch):
+    """The new per-axis bound/step flags parse as floats into the
+    underscore namespace ``main`` consumes."""
+    mc = _load("motor_control")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "motor_control",
+            "--az_start",
+            "0",
+            "--az_stop",
+            "180",
+            "--az_step",
+            "10",
+            "--el_start",
+            "-45",
+            "--el_stop",
+            "45",
+            "--el_step",
+            "15",
+        ],
+    )
+    args = mc._parse_args()
+    assert (args.az_start, args.az_stop, args.az_step) == (0.0, 180.0, 10.0)
+    assert (args.el_start, args.el_stop, args.el_step) == (-45.0, 45.0, 15.0)
 
 
 def test_motor_manual_helpers_exist():
