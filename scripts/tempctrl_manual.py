@@ -15,7 +15,9 @@ Controls:
   m / M    LOAD cooling (negative drive) allow / forbid
   + / -    LNA setpoint +/- 0.5 deg C
   ] / [    LOAD setpoint +/- 0.5 deg C
-  c        cycle clamp through (0.1, 0.3, 0.5, 1.0) on both channels
+  c / C    clamp one step up / down through (0.1, 0.2, 0.3, 0.5, 1.0)
+           on both channels (no wraparound, so the clamp can be lowered
+           without passing through the higher values first)
   g / G    LNA Kp +/- 0.05
   h / H    LOAD Kp +/- 0.05
   i / I    LNA Ki +/- 0.005
@@ -74,7 +76,7 @@ from eigsep_observing.utils import configure_eig_logger
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
-CLAMPS = (0.1, 0.3, 0.5, 1.0)
+CLAMPS = (0.1, 0.2, 0.3, 0.5, 1.0)
 SETPOINT_STEP_C = 0.5
 KP_STEP = 0.05
 KI_STEP = 0.005  # smaller — integral accumulates over many ticks
@@ -133,7 +135,7 @@ class _State:
         # never disagrees with what the firmware is enforcing.
         self.lna_cooling_enabled = lna_cooling_enabled
         self.load_cooling_enabled = load_cooling_enabled
-        self.clamp_idx = 2  # default 0.5
+        self.clamp_idx = CLAMPS.index(0.2)  # firmware default clamp
         self.last_message = ""
 
 
@@ -486,7 +488,9 @@ def _render(screen, snapshot, state):
     )
     screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
     screen.addstr(14, 0, "n/N LNA cooling on/off      m/M LOAD cooling on/off")
-    screen.addstr(15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c cycle clamp")
+    screen.addstr(
+        15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c/C clamp up/down"
+    )
     screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
     screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
     screen.addstr(
@@ -537,7 +541,10 @@ def _handle_key(ch, proxy, state, history=None, outdir="."):
         state.load_setpoint -= SETPOINT_STEP_C
         _push_temperatures(proxy, state)
     elif ch == ord("c"):
-        state.clamp_idx = (state.clamp_idx + 1) % len(CLAMPS)
+        state.clamp_idx = min(state.clamp_idx + 1, len(CLAMPS) - 1)
+        _push_clamp(proxy, state)
+    elif ch == ord("C"):
+        state.clamp_idx = max(state.clamp_idx - 1, 0)
         _push_clamp(proxy, state)
     elif ch == ord("g"):
         state.lna_Kp = max(0.0, state.lna_Kp + KP_STEP)
