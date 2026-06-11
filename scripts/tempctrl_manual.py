@@ -488,7 +488,9 @@ def _render(screen, snapshot, state):
     )
     screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
     screen.addstr(14, 0, "n/N LNA cooling on/off      m/M LOAD cooling on/off")
-    screen.addstr(15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c/C clamp up/down")
+    screen.addstr(
+        15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c/C clamp up/down"
+    )
     screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
     screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
     screen.addstr(
