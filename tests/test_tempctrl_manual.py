@@ -323,6 +323,74 @@ def test_handle_p_key_plots_and_continues(transport, tmp_path):
     assert len(list(tmp_path.glob("tempctrl_*.png"))) == 1
 
 
+class _FakeProxy:
+    """Records send_command calls; returns a truthy result like a
+    successful PicoProxy round-trip."""
+
+    def __init__(self):
+        self.sent = []
+
+    def send_command(self, action, **kwargs):
+        self.sent.append((action, kwargs))
+        return {"action": action}
+
+
+def _make_state(mod):
+    return mod._State(
+        lna_setpoint=30.0,
+        load_setpoint=30.0,
+        lna_enabled=False,
+        load_enabled=False,
+        lna_Kp=0.2,
+        lna_Ki=0.0,
+        load_Kp=0.2,
+        load_Ki=0.0,
+        lna_cooling_enabled=True,
+        load_cooling_enabled=True,
+    )
+
+
+def test_clamp_defaults_to_firmware_default(transport):
+    """The client-side clamp starts at the firmware default (0.2), so
+    the first push is relative to what the firmware is enforcing."""
+    mod = _load("tempctrl_manual")
+    state = _make_state(mod)
+    assert mod.CLAMPS[state.clamp_idx] == 0.2
+
+
+def test_clamp_steps_down_without_wraparound(transport):
+    """`C` lowers the clamp directly — the operator never has to pass
+    through higher (higher-current) values to reach a lower one."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+
+    assert mod._handle_key(ord("C"), proxy, state) is True
+    assert mod.CLAMPS[state.clamp_idx] == 0.1
+    assert proxy.sent == [("set_clamp", {"LNA": 0.1, "LOAD": 0.1})]
+
+    # At the bottom of the table, another `C` stays put (no wrap to 1.0).
+    mod._handle_key(ord("C"), proxy, state)
+    assert mod.CLAMPS[state.clamp_idx] == 0.1
+    assert proxy.sent[-1] == ("set_clamp", {"LNA": 0.1, "LOAD": 0.1})
+
+
+def test_clamp_steps_up_and_saturates_at_max(transport):
+    """`c` raises the clamp one step at a time and saturates at the top
+    of the table instead of wrapping back to the minimum."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+
+    mod._handle_key(ord("c"), proxy, state)
+    assert mod.CLAMPS[state.clamp_idx] == 0.3
+    assert proxy.sent[-1] == ("set_clamp", {"LNA": 0.3, "LOAD": 0.3})
+
+    for _ in range(10):
+        mod._handle_key(ord("c"), proxy, state)
+    assert mod.CLAMPS[state.clamp_idx] == 1.0
+
+
 def test_handle_p_key_no_data(transport, tmp_path):
     """Pressing `p` before any sample is buffered reports 'no data'."""
     mod = _load("tempctrl_manual")
