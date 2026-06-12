@@ -24,11 +24,12 @@ the default for normal operations.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from contextlib import contextmanager
 from typing import Optional
+
+from ._redis_json_kv import publish_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,15 @@ _EMPTY = {
     "run_tag": None,
     "run_started_at_unix": None,
 }
+
+
+def _parse(obj) -> dict:
+    tag = obj["run_tag"]
+    started = obj["run_started_at_unix"]
+    return {
+        "run_tag": str(tag) if tag is not None else None,
+        "run_started_at_unix": float(started) if started is not None else None,
+    }
 
 
 def publish(transport, tag: str, started_unix: Optional[float] = None) -> None:
@@ -73,8 +83,8 @@ def publish(transport, tag: str, started_unix: Optional[float] = None) -> None:
                 f"{exc}; using 0.0."
             )
     try:
-        payload = json.dumps({"run_tag": str(tag), "run_started_at_unix": t})
-        transport.add_raw(RUN_TAG_KEY, payload)
+        payload = {"run_tag": str(tag), "run_started_at_unix": t}
+        publish_json(transport, RUN_TAG_KEY, payload)
     except Exception as exc:
         logger.warning("failed to publish run_tag: %s", exc)
 
@@ -86,9 +96,8 @@ def clear(transport) -> None:
     same shape as ``read``'s empty sentinel. ``read`` handles both
     "key absent" and "null payload" identically.
     """
-    payload = json.dumps(dict(_EMPTY))
     try:
-        transport.add_raw(RUN_TAG_KEY, payload)
+        publish_json(transport, RUN_TAG_KEY, dict(_EMPTY))
     except Exception as exc:
         logger.warning("failed to clear run_tag: %s", exc)
 
@@ -102,22 +111,13 @@ def read(transport) -> dict:
     ``run_tag is None`` as a misconfiguration signal, not the
     steady-state default.
     """
-    try:
-        raw = transport.get_raw(RUN_TAG_KEY)
-    except Exception as exc:
-        logger.warning("failed to read run_tag: %s", exc)
+    out = read_json(
+        transport, RUN_TAG_KEY, label="run_tag", logger=logger, parse=_parse
+    )
+    if out is None:
         return dict(_EMPTY)
-    if raw is None:
-        return dict(_EMPTY)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-        tag = obj["run_tag"]
-        started = obj["run_started_at_unix"]
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("malformed run_tag payload %r: %s", raw, exc)
-        return dict(_EMPTY)
+    tag = out["run_tag"]
+    started = out["run_started_at_unix"]
     if tag is None and started is None:
         return dict(_EMPTY)
     if tag is None or started is None:
@@ -127,7 +127,7 @@ def read(transport) -> dict:
             started,
         )
         return dict(_EMPTY)
-    return {"run_tag": str(tag), "run_started_at_unix": float(started)}
+    return out
 
 
 @contextmanager

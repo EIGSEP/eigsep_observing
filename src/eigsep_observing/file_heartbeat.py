@@ -16,11 +16,12 @@ publish — consumers only ever care about the most recent write.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Optional, Union
+
+from ._redis_json_kv import publish_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ _EMPTY = {
 }
 
 
+def _parse(obj) -> dict:
+    return {"path": obj["path"], "mtime_unix": float(obj["mtime_unix"])}
+
+
 def publish(transport, path: Union[str, Path], mtime_unix: float) -> None:
     """Stamp a file-write heartbeat into Redis.
 
@@ -41,9 +46,9 @@ def publish(transport, path: Union[str, Path], mtime_unix: float) -> None:
     landed on disk by the time this runs; losing a heartbeat only
     costs a dashboard tile for one cycle.
     """
-    payload = json.dumps({"path": str(path), "mtime_unix": float(mtime_unix)})
+    payload = {"path": str(path), "mtime_unix": float(mtime_unix)}
     try:
-        transport.add_raw(FILE_HEARTBEAT_KEY, payload)
+        publish_json(transport, FILE_HEARTBEAT_KEY, payload)
     except Exception as exc:
         logger.warning("failed to publish file heartbeat: %s", exc)
 
@@ -59,24 +64,17 @@ def read(transport, *, now: Optional[float] = None) -> dict:
     failing.
     """
     t_now = time.time() if now is None else now
-    try:
-        raw = transport.get_raw(FILE_HEARTBEAT_KEY)
-    except Exception as exc:
-        logger.warning("failed to read file heartbeat: %s", exc)
-        return dict(_EMPTY)
-    if raw is None:
-        return dict(_EMPTY)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-        path = obj["path"]
-        mtime = float(obj["mtime_unix"])
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("malformed file heartbeat payload %r: %s", raw, exc)
+    out = read_json(
+        transport,
+        FILE_HEARTBEAT_KEY,
+        label="file heartbeat",
+        logger=logger,
+        parse=_parse,
+    )
+    if out is None:
         return dict(_EMPTY)
     return {
-        "newest_h5_path": path,
-        "mtime_unix": mtime,
-        "seconds_since_write": max(0.0, t_now - mtime),
+        "newest_h5_path": out["path"],
+        "mtime_unix": out["mtime_unix"],
+        "seconds_since_write": max(0.0, t_now - out["mtime_unix"]),
     }
