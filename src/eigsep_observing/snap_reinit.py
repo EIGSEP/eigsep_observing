@@ -17,10 +17,11 @@ glance whether the SNAP has been thermal-cycling without checking
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Optional
+
+from ._redis_json_kv import publish_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,13 @@ _EMPTY = {
     "last_reinit_unix": None,
     "seconds_since_reinit": None,
 }
+
+
+def _parse(obj) -> dict:
+    return {
+        "count": int(obj["count"]),
+        "last_reinit_unix": float(obj["last_reinit_unix"]),
+    }
 
 
 def publish(transport) -> None:
@@ -45,29 +53,20 @@ def publish(transport) -> None:
     practice; concurrent publishers would only lose a count or two.
     """
     try:
-        raw = transport.get_raw(REINIT_KEY)
-        count = 0
-        if raw is not None:
-            if isinstance(raw, (bytes, bytearray)):
-                raw = raw.decode()
-            try:
-                count = int(json.loads(raw).get("count", 0))
-            except (
-                ValueError,
-                TypeError,
-                KeyError,
-                json.JSONDecodeError,
-            ) as exc:
-                logger.warning(
-                    "malformed snap reinit payload %r: %s; resetting count",
-                    raw,
-                    exc,
-                )
-                count = 0
-        payload = json.dumps(
-            {"count": count + 1, "last_reinit_unix": time.time()}
+        count = read_json(
+            transport,
+            REINIT_KEY,
+            label="snap reinit heartbeat",
+            logger=logger,
+            parse=lambda obj: int(obj.get("count", 0)),
         )
-        transport.add_raw(REINIT_KEY, payload)
+        if count is None:
+            count = 0  # absent or malformed payload: reset the count
+        publish_json(
+            transport,
+            REINIT_KEY,
+            {"count": count + 1, "last_reinit_unix": time.time()},
+        )
     except Exception as exc:
         logger.warning("failed to publish snap reinit heartbeat: %s", exc)
 
@@ -81,24 +80,17 @@ def read(transport, *, now: Optional[float] = None) -> dict:
     rather than failing.
     """
     t_now = time.time() if now is None else now
-    try:
-        raw = transport.get_raw(REINIT_KEY)
-    except Exception as exc:
-        logger.warning("failed to read snap reinit heartbeat: %s", exc)
-        return dict(_EMPTY)
-    if raw is None:
-        return dict(_EMPTY)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-        count = int(obj["count"])
-        last_unix = float(obj["last_reinit_unix"])
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("malformed snap reinit payload %r: %s", raw, exc)
+    out = read_json(
+        transport,
+        REINIT_KEY,
+        label="snap reinit heartbeat",
+        logger=logger,
+        parse=_parse,
+    )
+    if out is None:
         return dict(_EMPTY)
     return {
-        "count": count,
-        "last_reinit_unix": last_unix,
-        "seconds_since_reinit": max(0.0, t_now - last_unix),
+        "count": out["count"],
+        "last_reinit_unix": out["last_reinit_unix"],
+        "seconds_since_reinit": max(0.0, t_now - out["last_reinit_unix"]),
     }

@@ -28,10 +28,11 @@ Downstream trust checks:
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Optional
+
+from ._redis_json_kv import publish_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,17 @@ _EMPTY = {
     "owner": None,
     "uploaded_at_unix": None,
 }
+
+
+def _parse(obj) -> dict:
+    owner = obj["owner"]
+    uploaded = obj["uploaded_at_unix"]
+    return {
+        "owner": str(owner) if owner is not None else None,
+        "uploaded_at_unix": (
+            float(uploaded) if uploaded is not None else None
+        ),
+    }
 
 
 def publish_owner(
@@ -64,8 +76,8 @@ def publish_owner(
                 f"obs_config_owner {owner!r}: {exc}; using 0.0."
             )
     try:
-        payload = json.dumps({"owner": str(owner), "uploaded_at_unix": t})
-        transport.add_raw(OBS_CONFIG_OWNER_KEY, payload)
+        payload = {"owner": str(owner), "uploaded_at_unix": t}
+        publish_json(transport, OBS_CONFIG_OWNER_KEY, payload)
     except Exception as exc:
         logger.warning("failed to publish obs_config_owner: %s", exc)
 
@@ -79,22 +91,17 @@ def read_owner(transport) -> dict:
     None`` as a misconfiguration signal (no authorized uploader has
     seeded Redis yet), not the steady-state default.
     """
-    try:
-        raw = transport.get_raw(OBS_CONFIG_OWNER_KEY)
-    except Exception as exc:
-        logger.warning("failed to read obs_config_owner: %s", exc)
+    out = read_json(
+        transport,
+        OBS_CONFIG_OWNER_KEY,
+        label="obs_config_owner",
+        logger=logger,
+        parse=_parse,
+    )
+    if out is None:
         return dict(_EMPTY)
-    if raw is None:
-        return dict(_EMPTY)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-        owner = obj["owner"]
-        uploaded = obj["uploaded_at_unix"]
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("malformed obs_config_owner payload %r: %s", raw, exc)
-        return dict(_EMPTY)
+    owner = out["owner"]
+    uploaded = out["uploaded_at_unix"]
     if owner is None and uploaded is None:
         return dict(_EMPTY)
     if owner is None or uploaded is None:
@@ -105,4 +112,4 @@ def read_owner(transport) -> dict:
             uploaded,
         )
         return dict(_EMPTY)
-    return {"owner": str(owner), "uploaded_at_unix": float(uploaded)}
+    return out

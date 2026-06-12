@@ -82,6 +82,23 @@ def test_read_malformed_payload_returns_empty(caplog):
     )
 
 
+def test_read_non_numeric_uploaded_unix_returns_empty(caplog):
+    """Regression: float coercion used to live outside the parse
+    try-block, so a junk timestamp raised an uncaught ValueError out
+    of read_owner() (issue #149)."""
+    t = DummyTransport()
+    t.add_raw(
+        OBS_CONFIG_OWNER_KEY,
+        json.dumps({"owner": "panda_observe", "uploaded_at_unix": "abc"}),
+    )
+    with caplog.at_level("WARNING"):
+        out = read_owner(t)
+    assert out == {"owner": None, "uploaded_at_unix": None}
+    assert any(
+        "malformed obs_config_owner" in rec.message for rec in caplog.records
+    )
+
+
 def test_read_partial_null_payload_warns(caplog):
     t = DummyTransport()
     t.add_raw(

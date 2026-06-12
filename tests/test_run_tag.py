@@ -121,6 +121,22 @@ def test_read_missing_required_field_returns_empty(missing_key):
     assert out == {"run_tag": None, "run_started_at_unix": None}
 
 
+def test_read_non_numeric_started_unix_returns_empty(caplog):
+    """Regression: float coercion used to live outside the parse
+    try-block, so a junk timestamp raised an uncaught ValueError out
+    of read() — and through publish()/session(), crashing the driver
+    script (issue #149)."""
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        json.dumps({"run_tag": "panda_observe", "run_started_at_unix": "abc"}),
+    )
+    with caplog.at_level("WARNING"):
+        out = read(t)
+    assert out == {"run_tag": None, "run_started_at_unix": None}
+    assert any("malformed run_tag" in rec.message for rec in caplog.records)
+
+
 def test_read_partial_null_payload_warns(caplog):
     t = DummyTransport()
     t.add_raw(

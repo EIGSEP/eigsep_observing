@@ -26,10 +26,11 @@ consumers only ever care about the most recent write.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Optional
+
+from ._redis_json_kv import publish_json, read_json
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,15 @@ _EMPTY = {
     "published_unix": None,
     "seconds_since_publish": None,
 }
+
+
+def _parse(obj) -> dict:
+    readout = obj["readout_time_ms"]
+    return {
+        "dropped_integrations": int(obj["dropped_integrations"]),
+        "readout_time_ms": float(readout) if readout is not None else None,
+        "published_unix": float(obj["published_unix"]),
+    }
 
 
 def publish(
@@ -57,16 +67,14 @@ def publish(
     Redis would warn-spam the journal. The caller (``EigsepFpga``) owns
     the failure policy — disable-on-first-failure with a single ERROR.
     """
-    payload = json.dumps(
-        {
-            "dropped_integrations": int(dropped_integrations),
-            "readout_time_ms": (
-                float(readout_time_ms) if readout_time_ms is not None else None
-            ),
-            "published_unix": time.time() if now is None else now,
-        }
-    )
-    transport.add_raw(CORR_HEALTH_KEY, payload)
+    payload = {
+        "dropped_integrations": int(dropped_integrations),
+        "readout_time_ms": (
+            float(readout_time_ms) if readout_time_ms is not None else None
+        ),
+        "published_unix": time.time() if now is None else now,
+    }
+    publish_json(transport, CORR_HEALTH_KEY, payload)
 
 
 def read(transport, *, now: Optional[float] = None) -> dict:
@@ -77,27 +85,14 @@ def read(transport, *, now: Optional[float] = None) -> dict:
     corr-loop tile (no drop/readout suffixes) rather than failing.
     """
     t_now = time.time() if now is None else now
-    try:
-        raw = transport.get_raw(CORR_HEALTH_KEY)
-    except Exception as exc:
-        logger.warning("failed to read corr health: %s", exc)
+    out = read_json(
+        transport,
+        CORR_HEALTH_KEY,
+        label="corr health",
+        logger=logger,
+        parse=_parse,
+    )
+    if out is None:
         return dict(_EMPTY)
-    if raw is None:
-        return dict(_EMPTY)
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-        dropped = int(obj["dropped_integrations"])
-        readout = obj["readout_time_ms"]
-        readout = float(readout) if readout is not None else None
-        pub = float(obj["published_unix"])
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        logger.warning("malformed corr health payload %r: %s", raw, exc)
-        return dict(_EMPTY)
-    return {
-        "dropped_integrations": dropped,
-        "readout_time_ms": readout,
-        "published_unix": pub,
-        "seconds_since_publish": max(0.0, t_now - pub),
-    }
+    out["seconds_since_publish"] = max(0.0, t_now - out["published_unix"])
+    return out
