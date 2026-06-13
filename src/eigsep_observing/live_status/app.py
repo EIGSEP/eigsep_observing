@@ -305,18 +305,28 @@ def _corr_payload(
     return payload
 
 
-def _metadata_payload(
-    state: StateSnapshot, thresholds: Thresholds, now: float
-) -> dict:
+def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
     """Return per-sensor ``{value, ts_unix, age_s, status, classify}``.
 
     ``classify`` is the tile color tag. It uses the panda ``_ts``
     stamps that :class:`MetadataSnapshotReader` returns alongside each
     sensor's value; a stale _ts is rendered as ``"stale"`` regardless
     of the value-based band.
+
+    ``age_s`` is the producer's age *at the moment the drain read the
+    snapshot* (``metadata_snapshot_read_unix - {key}_ts``), not at the
+    moment of this request — computing against the request wallclock
+    folded the aggregator's cache staleness (up to a full tick period)
+    into every sensor's age, making healthy 200 ms picos read as ~1 s
+    old. A dead sensor still ages: successful drains keep advancing
+    the read stamp while its ``_ts`` freezes. A dead panda *bus*
+    freezes both (last-known values); that state is surfaced by
+    ``panda_connected``, not here. Clamped at zero because ``_ts`` is
+    panda-clock and the read stamp is ground-clock.
     """
     out: dict[str, dict] = {}
     snapshot = state.metadata_snapshot or {}
+    read_unix = state.metadata_snapshot_read_unix
     for sensor, value in snapshot.items():
         if sensor.endswith("_ts"):
             continue
@@ -325,7 +335,10 @@ def _metadata_payload(
             ts_unix = float(ts_unix) if ts_unix is not None else None
         except (TypeError, ValueError):
             ts_unix = None
-        age_s = (now - ts_unix) if ts_unix is not None else None
+        if ts_unix is not None and read_unix is not None:
+            age_s = max(0.0, read_unix - ts_unix)
+        else:
+            age_s = None
         status = value.get("status") if isinstance(value, dict) else None
         classify_by_sig: dict[str, str] = {}
         # For every registered signal whose "domain" matches this
@@ -649,9 +662,7 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     def api_metadata():
         state = aggregator.snapshot()
         return jsonify(
-            _envelope(
-                _metadata_payload(state, aggregator.thresholds, time.time())
-            )
+            _envelope(_metadata_payload(state, aggregator.thresholds))
         )
 
     @app.route("/api/adc")

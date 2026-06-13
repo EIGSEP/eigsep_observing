@@ -231,7 +231,6 @@ def agg_primed():
         transport_snap=snap,
         transport_panda=panda,
         obs_cfg=OBS_CFG,
-        read_timeout_s=0.05,
     )
     agg._snap_tick()
     agg._panda_tick()
@@ -462,7 +461,6 @@ def test_corr_and_adc_routes_use_wiring_labels_when_published():
         transport_snap=snap,
         transport_panda=panda,
         obs_cfg=OBS_CFG,
-        read_timeout_s=0.05,
     )
     try:
         agg._snap_tick()
@@ -494,6 +492,88 @@ def test_metadata_route_includes_classify(client):
     lna = data["tempctrl_lna"]
     # tempctrl_lna.T_now = 25.1 is inside healthy (24.0, 26.0).
     assert lna["classify"]["tempctrl_lna.T_now"] == "ok"
+
+
+# ---------------------------------------------------------------------
+# Metadata age semantics: producer age measured at drain time.
+#
+# The displayed age answers "how long before the drain's snapshot read
+# did the producer last write" — i.e. producer health. Computing it
+# against the *request* wallclock folded the aggregator's own cache
+# staleness (up to a full tick period) into every sensor's age, making
+# healthy 200 ms picos read as ~1 s old on the dashboard.
+# ---------------------------------------------------------------------
+
+
+def _payload_thresholds():
+    from eigsep_observing.live_status import Thresholds
+
+    return Thresholds.from_yaml(OBS_CFG, corr_header=None)
+
+
+def _lidar_state(ts_unix, read_unix):
+    """StateSnapshot with one lidar entry whose ``_ts`` and drain-read
+    stamp are pinned to known values. ``ts_unix`` is set deep in the
+    past so any age computed against the live wallclock (the old,
+    wrong semantics) is unmistakably huge."""
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+
+    state = StateSnapshot()
+    state.metadata_snapshot = {
+        "lidar": {
+            "sensor_name": "lidar",
+            "app_id": 5,
+            "status": "update",
+            "distance_m": 1.5,
+        },
+        "lidar_ts": ts_unix,
+    }
+    state.metadata_snapshot_read_unix = read_unix
+    return state
+
+
+def test_metadata_age_measured_at_drain_time_not_request_time():
+    from eigsep_observing.live_status.app import _metadata_payload
+
+    ts = time.time() - 3600.0
+    state = _lidar_state(ts, read_unix=ts + 0.1)
+    payload = _metadata_payload(state, _payload_thresholds())
+    assert payload["lidar"]["age_s"] == pytest.approx(0.1, abs=1e-3)
+
+
+def test_metadata_age_grows_when_producer_stops():
+    """A dead pico stops bumping ``_ts`` while successful drains keep
+    advancing the read stamp — the age must keep growing so the stale
+    relabel still fires."""
+    from eigsep_observing.live_status.app import _metadata_payload
+
+    ts = time.time() - 3600.0
+    state = _lidar_state(ts, read_unix=ts + 45.0)
+    payload = _metadata_payload(state, _payload_thresholds())
+    assert payload["lidar"]["age_s"] == pytest.approx(45.0, abs=1e-3)
+
+
+def test_metadata_age_clamped_at_zero_on_clock_skew():
+    """``_ts`` is panda-clock, the read stamp is ground-clock; modest
+    skew must not render a negative age."""
+    from eigsep_observing.live_status.app import _metadata_payload
+
+    ts = time.time() - 3600.0
+    state = _lidar_state(ts, read_unix=ts - 0.05)
+    payload = _metadata_payload(state, _payload_thresholds())
+    assert payload["lidar"]["age_s"] == 0.0
+
+
+def test_metadata_age_none_without_read_stamp():
+    """A snapshot with no recorded drain read (only possible by direct
+    state seeding) has an unknown age, not one invented from the
+    request wallclock."""
+    from eigsep_observing.live_status.app import _metadata_payload
+
+    ts = time.time() - 3600.0
+    state = _lidar_state(ts, read_unix=None)
+    payload = _metadata_payload(state, _payload_thresholds())
+    assert payload["lidar"]["age_s"] is None
 
 
 def test_adc_route_lists_per_input_with_clip_frac(client):
@@ -637,7 +717,6 @@ def test_rfswitch_payload_no_countdown_without_observed_transition():
         transport_snap=snap,
         transport_panda=panda,
         obs_cfg=OBS_CFG,
-        read_timeout_s=0.05,
     )
     try:
         agg._panda_tick()
@@ -686,7 +765,6 @@ def test_rfswitch_payload_no_countdown_without_schedule_in_redis():
         transport_snap=snap,
         transport_panda=panda,
         obs_cfg=OBS_CFG,
-        read_timeout_s=0.05,
     )
     try:
         # First tick: drain seeds metadata_latest["rfswitch"] = RFNOFF,
@@ -773,7 +851,6 @@ def test_config_route_schedule_empty_when_no_config_in_redis():
         transport_snap=snap,
         transport_panda=panda,
         obs_cfg=OBS_CFG,
-        read_timeout_s=0.05,
     )
     try:
         agg._panda_tick()

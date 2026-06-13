@@ -108,7 +108,6 @@ def agg(seeded):
         obs_cfg=OBS_CFG,
         snap_tick_s=0.01,
         panda_tick_s=0.01,
-        read_timeout_s=0.05,
     )
     yield a
     a.stop(timeout=1.0)
@@ -159,17 +158,6 @@ def test_aggregator_double_start_raises(agg):
             agg.start()
     finally:
         agg.stop()
-
-
-def test_aggregator_rejects_zero_timeout(seeded):
-    snap, panda = seeded
-    with pytest.raises(ValueError):
-        LiveStatusAggregator(
-            transport_snap=snap,
-            transport_panda=panda,
-            obs_cfg=OBS_CFG,
-            read_timeout_s=0,
-        )
 
 
 # ---------------------------------------------------------------------
@@ -359,13 +347,15 @@ def test_snap_tick_ingests_adc_snapshot_and_computes_clipping(agg, seeded):
 
 def test_snap_tick_no_corr_data_yet_does_not_block(agg):
     """A freshly-started aggregator with no corr publisher should
-    complete its tick quickly (finite timeout) and record
-    snap_connected=True thanks to get_header/config succeeding."""
+    complete its tick quickly (never-registered streams short-circuit
+    to the absent-sentinel) and record snap_connected=True thanks to
+    get_header/config succeeding."""
     t0 = time.time()
     agg._snap_tick()
     dt = time.time() - t0
-    # read_timeout_s=0.05, so the tick shouldn't take more than ~0.3 s
-    # even with both corr and adc_snapshot reads timing out.
+    # Generous bound: fakeredis pays a one-off setup cost on the first
+    # read; the registered-but-quiet timing contract is pinned tightly
+    # by test_snap_tick_completes_quickly_when_streams_quiet.
     assert dt < 1.0
     state = agg.snapshot()
     # Header + config were seeded; snap_connected should still flip True.
@@ -426,6 +416,130 @@ def test_panda_tick_captures_snapshot_hash(agg, seeded):
     assert state.metadata_snapshot["lidar"]["distance_m"] == 1.5
     # _ts bookkeeping key is included in the raw snapshot.
     assert "lidar_ts" in state.metadata_snapshot
+
+
+def test_panda_tick_stamps_snapshot_read_unix(agg, seeded):
+    """Each successful snapshot-hash read stamps the wallclock it
+    happened at. The /api/metadata age computation uses this stamp
+    (drain-time semantics) so a healthy 200 ms producer doesn't get
+    the dashboard's own cache staleness folded into its displayed
+    age."""
+    _, panda = seeded
+    MetadataWriter(panda).add(
+        "lidar",
+        {
+            "sensor_name": "lidar",
+            "app_id": 5,
+            "status": "update",
+            "distance_m": 1.5,
+        },
+    )
+
+    t0 = time.time()
+    agg._panda_tick()
+    t1 = time.time()
+
+    state = agg.snapshot()
+    assert state.metadata_snapshot_read_unix is not None
+    assert t0 <= state.metadata_snapshot_read_unix <= t1
+
+
+def test_panda_tick_read_stamp_frozen_when_snapshot_read_fails(
+    agg, seeded, monkeypatch
+):
+    """When the snapshot read fails (panda bus down), the read stamp
+    must not advance — the cached ages freeze at their last-known
+    values and the bus-down state is surfaced by ``panda_connected``,
+    not by artificially aging every sensor tile."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    _, panda = seeded
+    MetadataWriter(panda).add(
+        "lidar",
+        {
+            "sensor_name": "lidar",
+            "app_id": 5,
+            "status": "update",
+            "distance_m": 1.5,
+        },
+    )
+    agg._panda_tick()
+    stamp = agg.snapshot().metadata_snapshot_read_unix
+    assert stamp is not None
+
+    def _down(*args, **kwargs):
+        raise RedisConnectionError("panda unreachable")
+
+    monkeypatch.setattr(agg.metadata_snapshot, "get", _down)
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert state.metadata_snapshot_read_unix == stamp
+    # The cached snapshot itself is also retained (last-known values).
+    assert "lidar" in state.metadata_snapshot
+
+
+def test_panda_tick_completes_quickly_with_empty_streams(seeded):
+    """Regression: the status drain used to exit its loop only via a
+    blocking ``XREAD block=200ms`` timing out, so every steady-state
+    tick (status stream quiet) carried a hidden +0.2 s — inflating the
+    effective tick period ~40% past ``panda_tick_s`` and with it the
+    metadata cache staleness. Tick-loop reads must poll, not wait."""
+    snap, panda = seeded
+    a = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+    try:
+        # Warm-up tick: fakeredis pays a one-off ~300 ms setup cost on
+        # the first blocking read, which would swamp the measurement.
+        a._panda_tick()
+        t0 = time.time()
+        a._panda_tick()
+        dt = time.time() - t0
+        assert dt < 0.15, f"panda tick took {dt:.3f} s on empty streams"
+    finally:
+        a.stop(timeout=1.0)
+
+
+def test_snap_tick_completes_quickly_when_streams_quiet(seeded):
+    """Same poll-don't-wait contract for the SNAP tick.
+
+    The corr and adc_snapshot streams must exist (be registered) but
+    have no pending entries — that's the steady state between
+    integrations, and the one where the reads used to block
+    ``read_timeout_s`` each (0.4 s combined per tick). A
+    never-registered stream short-circuits to the absent-sentinel
+    without blocking, which would not exercise the regression."""
+    snap, panda = seeded
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=1, sync_time=1000.0, dtype=DTYPE
+    )
+    AdcSnapshotWriter(snap).add(
+        np.zeros((2, 2, 100), dtype=np.int8),
+        unix_ts=time.time(),
+        sync_time=1000.0,
+        corr_acc_cnt=1,
+        wiring={"ants": {}},
+    )
+    _rewind_streams(snap, ["stream:corr", "stream:adc_snapshot"])
+    a = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+    try:
+        # Warm-up tick consumes the seeded entries (and absorbs the
+        # one-off fakeredis setup cost); the measured tick then sees
+        # registered-but-quiet streams.
+        a._snap_tick()
+        t0 = time.time()
+        a._snap_tick()
+        dt = time.time() - t0
+        assert dt < 0.15, f"snap tick took {dt:.3f} s with quiet streams"
+    finally:
+        a.stop(timeout=1.0)
 
 
 def test_panda_tick_reads_status_log(agg, seeded):
