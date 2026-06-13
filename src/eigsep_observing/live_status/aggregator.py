@@ -14,10 +14,15 @@ Design notes
   surfaces. It holds no ``Writer`` of any kind. Enforced by
   ``tests/test_redis.py::test_consumer_role_surfaces_are_structural``.
 
-- **Blocking reads use finite timeouts.** Redis ``XREAD block=0`` means
-  "block forever"; a drain thread that parked inside Redis would ignore
-  ``stop_event.set()`` and never join on shutdown. Every blocking reader
-  call here passes a finite timeout and loops on the stop event.
+- **Tick-loop reads poll, they don't wait.** The drain loops already
+  pace themselves on ``snap_tick_s`` / ``panda_tick_s``; a stream read
+  inside a tick only needs to consume what's already in Redis, so every
+  tick-loop read passes :data:`_POLL_TIMEOUT_S` (~1 ms — the smallest
+  finite block this API can express; ``timeout=None`` maps to ``XREAD
+  block=0``, which is "block forever" and would ignore
+  ``stop_event.set()``). The one deliberate blocker is the dedicated
+  VNA thread (:data:`_VNA_BLOCK_S`), which parks inside Redis between
+  ~1/hour sweeps and wakes for the stop check on each timeout.
 
 - **Threshold recompute.** When ``corr_header["integration_time"]``
   changes (re-sync), :meth:`_recompute_thresholds` rebuilds
@@ -82,6 +87,14 @@ _ADC_STATS_STREAM = f"stream:{_ADC_STATS_KEY}"
 # ~1/hour producer.
 _VNA_BLOCK_S = 1.0
 
+# Effective "don't wait" timeout for stream reads inside the tick
+# loops. The reader API maps ``timeout=None`` to ``XREAD block=0``
+# (block forever), so a 1 ms block is the closest expressible thing to
+# a non-blocking read: it consumes entries already in Redis and
+# returns immediately when a stream is quiet, keeping the tick period
+# pinned to snap_tick_s / panda_tick_s.
+_POLL_TIMEOUT_S = 0.001
+
 
 @dataclass
 class StateSnapshot:
@@ -130,6 +143,14 @@ class StateSnapshot:
     metadata_latest: dict[str, dict] = field(default_factory=dict)
     metadata_last_stream_unix: dict[str, float] = field(default_factory=dict)
     metadata_snapshot: dict[str, Any] = field(default_factory=dict)
+    # Wallclock of the last *successful* snapshot-hash read. The
+    # /api/metadata age computation is ``read_unix - {key}_ts`` —
+    # producer age at drain time — so the dashboard's own cache
+    # staleness never inflates a healthy sensor's displayed age. Does
+    # not advance on failed reads: a downed panda bus freezes the
+    # cached ages (last-known values) and is surfaced via
+    # ``panda_connected``, not by aging every tile.
+    metadata_snapshot_read_unix: Optional[float] = None
 
     # Wallclock at which the current rfswitch ``sw_state_name`` first
     # appeared. Distinct from ``metadata_last_stream_unix["rfswitch"]``
@@ -268,10 +289,10 @@ class LiveStatusAggregator:
         Optional pre-built :class:`Thresholds`. If ``None``, one is
         built from the bundled YAML and the first corr header seen.
     snap_tick_s, panda_tick_s
-        Loop cadence for the drain threads.
-    read_timeout_s
-        Finite timeout for blocking stream reads (``CorrReader``,
-        ``AdcSnapshotReader``, ``StatusReader``). Must be > 0.
+        Loop cadence for the drain threads. Stream reads inside a tick
+        are ~1 ms polls (see :data:`_POLL_TIMEOUT_S`), so the tick
+        cadence is the single knob controlling how stale the cached
+        state can be.
     stop_event
         External stop event; one is created if not supplied.
     """
@@ -283,24 +304,17 @@ class LiveStatusAggregator:
         obs_cfg: dict,
         *,
         thresholds: Optional[Thresholds] = None,
-        snap_tick_s: float = 0.5,
-        panda_tick_s: float = 0.5,
-        read_timeout_s: float = 0.2,
+        snap_tick_s: float = 0.25,
+        panda_tick_s: float = 0.25,
         snap_fpga_probe_interval_s: float = 5.0,
         snap_fpga_host_override: Optional[str] = None,
         stop_event: Optional[threading.Event] = None,
     ):
-        if read_timeout_s <= 0:
-            raise ValueError(
-                "read_timeout_s must be > 0; "
-                "zero means block-forever in Redis semantics"
-            )
         self.transport_snap = transport_snap
         self.transport_panda = transport_panda
         self.obs_cfg = dict(obs_cfg)
         self._snap_tick_s = snap_tick_s
         self._panda_tick_s = panda_tick_s
-        self._read_timeout_s = read_timeout_s
         self._snap_fpga_probe_interval_s = snap_fpga_probe_interval_s
         self._snap_fpga_host_override = snap_fpga_host_override
         self._stop_event = stop_event or threading.Event()
@@ -649,14 +663,15 @@ class LiveStatusAggregator:
     def _read_corr(self) -> tuple[Optional[tuple], bool]:
         """Drain the corr stream to the latest entry; reshape the tail.
 
-        ``CorrReader.read`` consumes one stream entry per call. The
-        producer publishes at the integration cadence (~4 Hz at the
-        default ``corr_acc_len``); this drain ticks at
-        ``1/snap_tick_s`` (~2 Hz). Reading one entry per tick falls
-        behind by ~2 entries/sec, which surfaces as a growing display
-        lag — the legacy ``live_plotter`` polls faster than the
-        producer (FuncAnimation at 20 Hz) and therefore never lags.
-        Drain to the tail so the plot always reflects the most recent
+        ``CorrReader.read`` consumes one stream entry per call, and
+        the producer publishes at the integration cadence (~4 Hz at
+        the default ``corr_acc_len``) — comparable to the drain's
+        ``1/snap_tick_s``. Reading one entry per tick would therefore
+        fall behind whenever the producer outpaces the drain, which
+        surfaces as a growing display lag — the legacy
+        ``live_plotter`` polls faster than the producer
+        (FuncAnimation at 20 Hz) and therefore never lags. Drain to
+        the tail so the plot always reflects the most recent
         integration; intermediate entries are discarded because the
         dashboard renders current state, not history.
 
@@ -669,16 +684,16 @@ class LiveStatusAggregator:
         """
         last_acc_cnt: Optional[int] = None
         last_pairs: Optional[dict] = None
-        # First read waits up to read_timeout_s for *any* new entry;
-        # subsequent reads use a tiny timeout so the drain only consumes
-        # entries already in Redis at this moment and never blocks
-        # waiting for the producer's next push (which would let a
-        # fast producer starve _snap_tick from ever returning).
-        timeout = self._read_timeout_s
+        # Poll, don't wait: the drain only consumes entries already in
+        # Redis at this moment and never blocks waiting for the
+        # producer's next push (which would let a fast producer starve
+        # _snap_tick from ever returning, and a quiet one inflate the
+        # tick period). A new integration is picked up at worst one
+        # snap_tick_s later.
         while True:
             try:
                 acc_cnt, pairs_data = self.corr_reader.read(
-                    timeout=timeout, unpack=True
+                    timeout=_POLL_TIMEOUT_S, unpack=True
                 )
             except TimeoutError:
                 break
@@ -692,7 +707,6 @@ class LiveStatusAggregator:
                 break
             last_acc_cnt = acc_cnt
             last_pairs = pairs_data
-            timeout = 0.001
         if last_acc_cnt is None:
             return None, True
         try:
@@ -703,13 +717,14 @@ class LiveStatusAggregator:
         return (last_acc_cnt, reshaped), True
 
     def _read_adc_snapshot(self) -> tuple[Optional[tuple], bool]:
-        """One AdcSnapshotReader.read call with a finite timeout.
+        """One AdcSnapshotReader.read poll (no waiting; ~1 Hz producer
+        entries are picked up at worst one snap_tick_s after arrival).
 
         Returns ``(result, ok)`` — see :meth:`_read_corr` for semantics.
         """
         try:
             data, sidecar = self.adc_snapshot_reader.read(
-                timeout=self._read_timeout_s
+                timeout=_POLL_TIMEOUT_S
             )
         except TimeoutError:
             return None, True
@@ -897,6 +912,7 @@ class LiveStatusAggregator:
 
             if snap is not None:
                 s.metadata_snapshot = snap
+                s.metadata_snapshot_read_unix = now
 
             if hb is not None:
                 s.panda_heartbeat = bool(hb)
@@ -930,22 +946,23 @@ class LiveStatusAggregator:
                     s.panda_config_upload_unix = None
 
     def _drain_status(self) -> tuple[list[tuple[int, str]], bool]:
-        """Drain StatusReader until the next call times out.
+        """Drain StatusReader until the next poll comes back empty.
 
-        Each read is capped at :attr:`_read_timeout_s` so shutdown is
-        prompt. Returns ``(entries, ok)`` where ``ok`` is True unless a
-        transport-level exception fired; a clean timeout (``level is
-        None`` on the first read) is treated as a successful empty
-        drain because the round-trip to Redis completed.
+        Each read is a :data:`_POLL_TIMEOUT_S` poll — the loop-exit
+        read must not wait for the producer, or every steady-state
+        tick (status stream quiet) carries the full timeout as a
+        hidden tail-block on the tick period. Returns ``(entries,
+        ok)`` where ``ok`` is True unless a transport-level exception
+        fired; an empty poll (``level is None`` on the first read) is
+        treated as a successful empty drain because the round-trip to
+        Redis completed.
         """
         out: list[tuple[int, str]] = []
         # Safety bound: never loop more than N times per tick in
         # case the producer is hosing the stream.
         for _ in range(100):
             try:
-                level, msg = self.status_reader.read(
-                    timeout=self._read_timeout_s
-                )
+                level, msg = self.status_reader.read(timeout=_POLL_TIMEOUT_S)
             except Exception as exc:
                 logger.error("status_reader.read failed: %s", exc)
                 return out, False
