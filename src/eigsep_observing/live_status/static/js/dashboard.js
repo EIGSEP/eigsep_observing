@@ -1,6 +1,9 @@
 "use strict";
 
-const POLL_MS = 1000;
+// 2 Hz repaint matches the aggregator's 0.25 s drain ticks closely
+// enough that lab operators see sensor wiggles near-live; field
+// operation tolerates anything slower, so this is sized for the lab.
+const POLL_MS = 500;
 // Per-pico heartbeat staleness threshold. Healthy picos push at ~0.2 s;
 // an age past this means the heartbeat has effectively stopped, so the
 // pane flags amber rather than implying the sensor is still live.
