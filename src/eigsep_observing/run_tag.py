@@ -20,11 +20,28 @@ Steady-state runs publish ``"panda_observe"`` so downstream's
 scripts that own the panda. A ``None`` then signals a misconfiguration
 (broken publish, panda not running, transport unavailable) rather than
 the default for normal operations.
+
+``session`` auto-reclaims a stale tag whose holder is *provably dead*.
+An unclean shutdown (power loss, ``SIGKILL``, a hard reboot mid-run)
+skips the ``finally`` clear, stranding a tag that would otherwise make
+the next driver script refuse to start forever. Because every publisher
+is a panda-side script sharing the panda's localhost Redis, the holder
+and the script checking the lock are always co-located, so the staleness
+check is a local liveness probe: a recorded ``boot_id`` differing from
+the current one (the machine rebooted since the holder started) or a
+recorded ``pid`` that no longer exists both prove the holder is gone, and
+``session`` overwrites the stale tag with a WARNING instead of refusing.
+The probe is conservative — a holder on another host, or one that cannot
+otherwise be probed, is assumed alive and the refusal stands.
+``scripts/clear_run_tag.py`` is the manual fallback for those
+unverifiable cases.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import socket
 import time
 from contextlib import contextmanager
 from typing import Optional
@@ -50,21 +67,99 @@ def _parse(obj) -> dict:
     }
 
 
+def _boot_id() -> Optional[str]:
+    """Return this machine's boot id, or ``None`` if unavailable.
+
+    On Linux ``/proc/sys/kernel/random/boot_id`` is a UUID regenerated on
+    every boot. A recorded boot_id that differs from the current one
+    proves the recording process did not survive a reboot — and that PID
+    reuse after the reboot makes a PID probe untrustworthy, so the boot_id
+    comparison takes precedence. Returns ``None`` on platforms without the
+    file (the liveness check then leans on the PID probe alone).
+    """
+    try:
+        with open("/proc/sys/kernel/random/boot_id") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def _pid_alive(pid) -> bool:
+    """True if a process with ``pid`` currently exists on this machine."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    except OSError:
+        return False
+    return True
+
+
+def _holder_is_dead(transport) -> bool:
+    """True if the current run_tag holder is provably dead.
+
+    Reads the holder's full payload (``pid`` / ``hostname`` / ``boot_id``)
+    through the shared :func:`~eigsep_observing._redis_json_kv.read_json`
+    reader, which maps every unreadable case — transport error, missing
+    key, malformed JSON — to ``None``; a non-dict payload is likewise
+    unprobeable. Returns ``False`` whenever liveness cannot be established
+    — a holder we cannot probe (different host, missing metadata,
+    unreadable payload) is assumed alive so a live lock is never stolen.
+    Callers invoke this only after :func:`read` has reported a different,
+    non-empty holder, so a malformed payload here is effectively
+    unreachable outside a read-to-read race.
+    """
+    obj = read_json(
+        transport,
+        RUN_TAG_KEY,
+        label="run_tag",
+        logger=logger,
+        parse=lambda payload: payload,
+    )
+    if not isinstance(obj, dict):
+        return False
+    if obj.get("hostname") != socket.gethostname():
+        return False
+    boot = obj.get("boot_id")
+    my_boot = _boot_id()
+    if boot is not None and my_boot is not None and boot != my_boot:
+        return True
+    pid = obj.get("pid")
+    if pid is None:
+        return False
+    return not _pid_alive(pid)
+
+
 def publish(transport, tag: str, started_unix: Optional[float] = None) -> None:
     """Stamp the active script's tag into Redis.
 
-    Logs a WARNING if an existing non-empty tag with a different name
-    is being overwritten — catches the "two driver scripts started
-    concurrently" race that ``session``'s pre-publish refuse check
-    can lose. The publish still proceeds (provenance is best-effort);
-    the WARNING is the second-line audit trail.
+    Logs a WARNING if an existing non-empty tag with a different name —
+    whose holder is still *alive* — is being overwritten, catching the
+    "two driver scripts started concurrently" race that ``session``'s
+    pre-publish refuse check can lose. Overwriting a provably-dead holder
+    is a deliberate stale-lock reclaim (``session`` logs that separately),
+    so it does not trip this warning. The publish still proceeds either
+    way (provenance is best-effort); the WARNING is the second-line audit
+    trail.
 
     Any exception is logged at WARNING and swallowed. ``run_tag`` is
     provenance, not correctness — losing it must never block the
     script's main work.
     """
     existing = read(transport)
-    if existing["run_tag"] is not None and existing["run_tag"] != str(tag):
+    if (
+        existing["run_tag"] is not None
+        and existing["run_tag"] != str(tag)
+        and not _holder_is_dead(transport)
+    ):
         logger.warning(
             "run_tag %r is overwriting existing %r — two driver scripts "
             "may be running concurrently.",
@@ -83,7 +178,13 @@ def publish(transport, tag: str, started_unix: Optional[float] = None) -> None:
                 f"{exc}; using 0.0."
             )
     try:
-        payload = {"run_tag": str(tag), "run_started_at_unix": t}
+        payload = {
+            "run_tag": str(tag),
+            "run_started_at_unix": t,
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "boot_id": _boot_id(),
+        }
         publish_json(transport, RUN_TAG_KEY, payload)
     except Exception as exc:
         logger.warning("failed to publish run_tag: %s", exc)
@@ -134,10 +235,12 @@ def read(transport) -> dict:
 def session(transport, tag: str):
     """Publish ``tag`` for the duration of the with-block.
 
-    Refuses to enter if a different non-empty tag is already published
-    (raises ``RuntimeError``). On exit, clears only if our tag is still
-    the active one — a later script that overwrote it (in violation of
-    the refuse-on-conflict policy) is not trampled.
+    If a different non-empty tag is already published, refuses to enter
+    (raises ``RuntimeError``) unless that holder is *provably dead*
+    (:func:`_holder_is_dead`) — a tag stranded by an unclean shutdown is
+    reclaimed with a WARNING instead. On exit, clears only if our tag is
+    still the active one — a later script that overwrote it (in violation
+    of the refuse-on-conflict policy) is not trampled.
 
     The pre-publish refuse check is best-effort: there is no atomic
     compare-and-set between ``read`` and ``publish``, so two scripts
@@ -146,12 +249,22 @@ def session(transport, tag: str):
     collision in that case.
     """
     existing = read(transport)
-    if existing["run_tag"] not in (None, str(tag)):
-        raise RuntimeError(
-            f"Another driver script is already publishing run_tag="
-            f"{existing['run_tag']!r}; refusing to start {str(tag)!r}. "
-            f"Stop the other script first."
-        )
+    held = existing["run_tag"]
+    if held not in (None, str(tag)):
+        if _holder_is_dead(transport):
+            logger.warning(
+                "Reclaiming stale run_tag=%r left by an unclean shutdown "
+                "(holder process is gone); starting %r.",
+                held,
+                str(tag),
+            )
+        else:
+            raise RuntimeError(
+                f"Another driver script is already publishing run_tag="
+                f"{held!r}; refusing to start {str(tag)!r}. Stop the other "
+                f"script first, or clear a stale lock with "
+                f"scripts/clear_run_tag.py."
+            )
     publish(transport, tag)
     try:
         yield

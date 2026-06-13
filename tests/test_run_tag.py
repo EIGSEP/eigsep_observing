@@ -8,17 +8,33 @@ fakeredis-backed ``DummyTransport``.
 from __future__ import annotations
 
 import json
+import os
+import socket
 
 import pytest
 from eigsep_redis.testing import DummyTransport
 
 from eigsep_observing.run_tag import (
     RUN_TAG_KEY,
+    _holder_is_dead,
     clear,
     publish,
     read,
     session,
 )
+
+
+def _holder_payload(tag, *, pid, hostname, boot_id, started=1.0):
+    """Craft a raw run_tag payload with explicit liveness metadata."""
+    return json.dumps(
+        {
+            "run_tag": tag,
+            "run_started_at_unix": started,
+            "pid": pid,
+            "hostname": hostname,
+            "boot_id": boot_id,
+        }
+    )
 
 
 def test_read_empty_returns_none_fields():
@@ -216,3 +232,142 @@ def test_session_clears_even_when_block_raises():
             assert read(t)["run_tag"] == "panda_observe"
             raise ValueError("work failed")
     assert read(t) == {"run_tag": None, "run_started_at_unix": None}
+
+
+# --- stale-lock auto-reclaim (provably-dead holder) -----------------------
+
+
+def test_publish_stamps_pid_hostname_boot_id():
+    """publish records the producer's liveness metadata in the payload."""
+    import eigsep_observing.run_tag as rt
+
+    t = DummyTransport()
+    publish(t, "motor_manual", started_unix=1.0)
+    raw = t.get_raw(RUN_TAG_KEY)
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode()
+    obj = json.loads(raw)
+    assert obj["pid"] == os.getpid()
+    assert obj["hostname"] == socket.gethostname()
+    assert obj["boot_id"] == rt._boot_id()
+
+
+def test_session_reclaims_stale_lock_after_reboot(monkeypatch, caplog):
+    """A tag stamped under a different boot_id (the machine rebooted since
+    the holder started) is provably dead and gets reclaimed."""
+    monkeypatch.setattr(
+        "eigsep_observing.run_tag._boot_id", lambda: "current-boot"
+    )
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        _holder_payload(
+            "motor_manual",
+            pid=os.getpid(),  # locally alive, but boot_id proves it's stale
+            hostname=socket.gethostname(),
+            boot_id="pre-reboot-boot",
+        ),
+    )
+    with caplog.at_level("WARNING"):
+        with session(t, "motor_control"):
+            assert read(t)["run_tag"] == "motor_control"
+    assert read(t) == {"run_tag": None, "run_started_at_unix": None}
+    assert any("Reclaiming stale run_tag" in r.message for r in caplog.records)
+
+
+def test_session_reclaims_stale_lock_when_pid_dead(monkeypatch, caplog):
+    """Same boot, but the holder PID no longer exists -> reclaim."""
+    monkeypatch.setattr(
+        "eigsep_observing.run_tag._boot_id", lambda: "current-boot"
+    )
+    monkeypatch.setattr(
+        "eigsep_observing.run_tag._pid_alive", lambda pid: False
+    )
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        _holder_payload(
+            "motor_manual",
+            pid=999999,
+            hostname=socket.gethostname(),
+            boot_id="current-boot",
+        ),
+    )
+    with caplog.at_level("WARNING"):
+        with session(t, "motor_control"):
+            assert read(t)["run_tag"] == "motor_control"
+    assert any("Reclaiming stale run_tag" in r.message for r in caplog.records)
+
+
+def test_session_refuses_when_holder_pid_alive(monkeypatch):
+    """Same host and boot, PID still alive -> refuse (do not steal)."""
+    monkeypatch.setattr(
+        "eigsep_observing.run_tag._boot_id", lambda: "current-boot"
+    )
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        _holder_payload(
+            "motor_manual",
+            pid=os.getpid(),  # this very test process: definitely alive
+            hostname=socket.gethostname(),
+            boot_id="current-boot",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="motor_manual"):
+        with session(t, "motor_control"):
+            pass
+    assert read(t)["run_tag"] == "motor_manual"
+
+
+def test_session_refuses_when_holder_on_other_host():
+    """A holder on a different machine cannot be probed -> assume alive."""
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        _holder_payload(
+            "motor_manual",
+            pid=os.getpid(),  # alive locally, but irrelevant: other host
+            hostname="some-other-host",
+            boot_id="whatever",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="motor_manual"):
+        with session(t, "motor_control"):
+            pass
+    assert read(t)["run_tag"] == "motor_manual"
+
+
+def test_holder_is_dead_missing_payload_is_false():
+    t = DummyTransport()
+    assert _holder_is_dead(t) is False
+
+
+def test_holder_is_dead_malformed_payload_is_false():
+    t = DummyTransport()
+    t.add_raw(RUN_TAG_KEY, b"not-json")
+    assert _holder_is_dead(t) is False
+
+
+def test_publish_no_overwrite_warning_for_dead_holder(monkeypatch, caplog):
+    """Overwriting a provably-dead holder is a silent reclaim, not the
+    live-concurrency WARNING."""
+    monkeypatch.setattr(
+        "eigsep_observing.run_tag._boot_id", lambda: "current-boot"
+    )
+    t = DummyTransport()
+    t.add_raw(
+        RUN_TAG_KEY,
+        _holder_payload(
+            "motor_manual",
+            pid=os.getpid(),
+            hostname=socket.gethostname(),
+            boot_id="pre-reboot-boot",
+        ),
+    )
+    with caplog.at_level("WARNING"):
+        publish(t, "motor_control", started_unix=2.0)
+    assert read(t)["run_tag"] == "motor_control"
+    assert not any(
+        "is overwriting existing" in r.message for r in caplog.records
+    )
