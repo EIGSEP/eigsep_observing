@@ -65,6 +65,8 @@ def _parse(obj) -> dict:
         "run_tag": str(tag) if tag is not None else None,
         "run_started_at_unix": float(started) if started is not None else None,
     }
+
+
 def _boot_id() -> Optional[str]:
     """Return this machine's boot id, or ``None`` if unavailable.
 
@@ -104,25 +106,24 @@ def _pid_alive(pid) -> bool:
 def _holder_is_dead(transport) -> bool:
     """True if the current run_tag holder is provably dead.
 
-    Reads the raw payload for the holder's ``pid`` / ``hostname`` /
-    ``boot_id`` and applies a conservative liveness probe. Returns
-    ``False`` whenever liveness cannot be established — a holder we cannot
-    probe (different host, missing metadata, unreadable payload) is
-    assumed alive so a live lock is never stolen. Callers invoke this only
-    after :func:`read` has reported a different, non-empty holder.
+    Reads the holder's full payload (``pid`` / ``hostname`` / ``boot_id``)
+    through the shared :func:`~eigsep_observing._redis_json_kv.read_json`
+    reader, which maps every unreadable case — transport error, missing
+    key, malformed JSON — to ``None``; a non-dict payload is likewise
+    unprobeable. Returns ``False`` whenever liveness cannot be established
+    — a holder we cannot probe (different host, missing metadata,
+    unreadable payload) is assumed alive so a live lock is never stolen.
+    Callers invoke this only after :func:`read` has reported a different,
+    non-empty holder, so a malformed payload here is effectively
+    unreachable outside a read-to-read race.
     """
-    try:
-        raw = transport.get_raw(RUN_TAG_KEY)
-    except Exception:
-        return False
-    if raw is None:
-        return False
-    if isinstance(raw, (bytes, bytearray)):
-        raw = raw.decode()
-    try:
-        obj = json.loads(raw)
-    except (ValueError, json.JSONDecodeError):
-        return False
+    obj = read_json(
+        transport,
+        RUN_TAG_KEY,
+        label="run_tag",
+        logger=logger,
+        parse=lambda payload: payload,
+    )
     if not isinstance(obj, dict):
         return False
     if obj.get("hostname") != socket.gethostname():
