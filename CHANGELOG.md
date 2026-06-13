@@ -1,5 +1,28 @@
 # Changelog
 
+## [2.6.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.5.0...v2.6.0) (2026-06-13)
+
+
+### Features
+
+* **corr:** surface corr-loop health (dropped integrations + readout time) ([fcfd16b](https://github.com/EIGSEP/eigsep_observing/commit/fcfd16b82438ea8cd888090178f998577b19027f))
+* **live-status:** flag stale picos with an amber tile and age ([e796c15](https://github.com/EIGSEP/eigsep_observing/commit/e796c15eb696ff1bcc0f3f4c5569c5c69d45367c))
+* **live-status:** sci-notation y-axis, visible DC bin, 25 MHz ticks to 250 ([6a169c9](https://github.com/EIGSEP/eigsep_observing/commit/6a169c91179268200085f456eda2cac7e751c998))
+* **live-status:** sunlight-readable themes (Sun/Light/Dark toggle) ([4f7cd9b](https://github.com/EIGSEP/eigsep_observing/commit/4f7cd9b35dd10adf4d51619339808413faa1d566))
+* **motor-control:** configurable per-axis scan grid via CLI ([9286fba](https://github.com/EIGSEP/eigsep_observing/commit/9286fbaaa797ebae7147870a914e03c4d61c300e))
+* **motor-manual:** require 'y' confirmation before zeroing ([c196cfa](https://github.com/EIGSEP/eigsep_observing/commit/c196cfaea23b8f58575d036b5bda57015b032650))
+* **motor-manual:** show axis degrees alongside raw step counts ([#138](https://github.com/EIGSEP/eigsep_observing/issues/138)) ([c844d3b](https://github.com/EIGSEP/eigsep_observing/commit/c844d3b78df8005e9b2ed7d34f2766d3b06127b7))
+* **motor:** go-home control in motor_manual + Ctrl-C home prompt in scan ([08ce226](https://github.com/EIGSEP/eigsep_observing/commit/08ce22672ef6d81c79533da9fc995b18d5c40356))
+* **tempctrl_manual:** step clamp up/down with c/C instead of cycling ([#151](https://github.com/EIGSEP/eigsep_observing/issues/151)) ([24f3b55](https://github.com/EIGSEP/eigsep_observing/commit/24f3b5566bba742664ae56d547f9ba656373a30e))
+* **tempctrl-manual:** add `p` hotkey to plot temperature vs time ([c5f2af8](https://github.com/EIGSEP/eigsep_observing/commit/c5f2af8316747601415d3f8af2c779cea1e0dfc0))
+* **tempctrl:** wire cooling_enabled runaway guard into config + manual script ([63b760d](https://github.com/EIGSEP/eigsep_observing/commit/63b760df46b4475bee85492b87941eb2d6b545f8))
+
+
+### Bug Fixes
+
+* changed argument pairs type int to str ([df0855e](https://github.com/EIGSEP/eigsep_observing/commit/df0855e87f8feb9dc41bf3831b067630e2451a3c))
+* **live-status:** persist corr legend toggles across integrations ([4ea26c7](https://github.com/EIGSEP/eigsep_observing/commit/4ea26c75d736fb411c2e9153d835e21c440d6e06))
+
 ## [2.5.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.4.0...v2.5.0) (2026-05-23)
 
 
