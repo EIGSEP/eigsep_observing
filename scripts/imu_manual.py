@@ -29,7 +29,6 @@ from eigsep_redis import MetadataSnapshotReader
 import matplotlib
 import matplotlib.pyplot as plt
 
-from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import build_transport
 from eigsep_observing.io import _IMU_SCHEMA
 from eigsep_observing.utils import configure_eig_logger
@@ -293,20 +292,27 @@ def main():
     transport = build_transport(
         args.dummy, host=args.redis_host, real_port=args.redis_port
     )
-    with run_tag.session(transport, "imu_manual"):
-        snapshot = MetadataSnapshotReader(transport)
-        if args.which == "both":
-            names = ["imu_el", "imu_az"]
-        else:
-            names = [f"imu_{args.which}"]
-        plot = None
-        if args.plot:
-            _require_interactive_backend()
-            plot = _LivePlot(names)
-        try:
-            _render_loop(snapshot, names, args.interval, plot=plot)
-        except KeyboardInterrupt:
-            print()
+    # No run_tag.session here, by design. run_tag is exclusive provenance
+    # for the script *driving* the run (it refuses to start if another
+    # tag is published, and is stamped into corr/VNA file headers). This
+    # readout is read-only — MetadataSnapshotReader.get() and nothing
+    # else, no commands, no files — so it has no provenance to record and
+    # must coexist with the driver it's watching (e.g. motor_manual).
+    # Claiming the tag would only block that coexistence and falsely
+    # attribute a concurrent observer's file to "imu_manual".
+    snapshot = MetadataSnapshotReader(transport)
+    if args.which == "both":
+        names = ["imu_el", "imu_az"]
+    else:
+        names = [f"imu_{args.which}"]
+    plot = None
+    if args.plot:
+        _require_interactive_backend()
+        plot = _LivePlot(names)
+    try:
+        _render_loop(snapshot, names, args.interval, plot=plot)
+    except KeyboardInterrupt:
+        print()
 
 
 if __name__ == "__main__":
