@@ -254,6 +254,19 @@ def _parse_args():
         help="Run against a fakeredis-backed DummyPandaClient",
     )
     parser.add_argument(
+        "--redis-host",
+        default="localhost",
+        help="Redis host (default: localhost). Set to the panda's IP to "
+        "run this readout from another computer on the rig network.",
+    )
+    parser.add_argument(
+        "--redis-port",
+        type=int,
+        default=6379,
+        help="Redis port (default: 6379). Ignored in --dummy mode, which "
+        "always targets the local fakeredis on 6380.",
+    )
+    parser.add_argument(
         "--which",
         choices=("el", "az", "both"),
         default="both",
@@ -277,7 +290,9 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    transport = build_transport(args.dummy)
+    transport = build_transport(
+        args.dummy, host=args.redis_host, real_port=args.redis_port
+    )
     with run_tag.session(transport, "imu_manual"):
         snapshot = MetadataSnapshotReader(transport)
         if args.which == "both":
