@@ -362,9 +362,13 @@ class EigObserver:
         cached_header = None
         cached_sync_time = None
         last_write_deadline = None
-        # Track panda drops so we can skip metadata stream positions to
+        # Track metadata-stream drops so we can skip stream positions to
         # the current tail on reconnect via metadata_stream.skip_to_latest().
-        panda_was_down = False
+        # This tracks the metadata pipeline's reachability, NOT the
+        # autonomous driver's heartbeat: the picos publish metadata via
+        # the always-on pico-manager service, so a manual session (with
+        # panda_observe stopped) still drains live sensor metadata.
+        metadata_stream_down = False
         last_drain_warn_monotonic = 0.0
         try:
             while not self.stop_event.is_set():
@@ -458,72 +462,73 @@ class EigObserver:
                         return
                     continue
                 self.logger.info(f"{acc_cnt=}")
-                if self.panda_connected:
-                    if panda_was_down:
-                        # On reconnect, jump every metadata stream
-                        # past the outage backlog so the next drain
-                        # picks up the producer's "now". Keeps the
-                        # metadata cadence aligned with corr
-                        # integrations instead of smearing historical
-                        # readings into the current row.
-                        try:
-                            self.metadata_stream.skip_to_latest()
-                        except redis.exceptions.ConnectionError:
-                            # Bounced again between panda_connected
-                            # and the skip; treat as still-down and
-                            # try again next iteration.
-                            metadata = {}
-                            adc = self.adc_metadata_stream.drain()
-                            if adc:
-                                metadata.update(adc)
-                            if not metadata:
-                                metadata = None
-                            file.add_data(
-                                acc_cnt,
-                                cached_sync_time,
-                                data,
-                                metadata=metadata,
-                            )
-                            last_write_deadline = None
-                            continue
+                # Drain the metadata sidecar whenever the panda Redis is
+                # reachable, independent of the autonomous driver's
+                # heartbeat. The picos publish via the always-on
+                # pico-manager service, so a manual session (panda_observe
+                # stopped, heartbeat gone) still has live sensor metadata.
+                # ConnectionError is the real "panda unreachable" signal;
+                # corr stays sacred (metadata=None).
+                if metadata_stream_down:
+                    # On reconnect, jump every metadata stream past the
+                    # outage backlog so the next drain picks up the
+                    # producer's "now". Keeps the metadata cadence aligned
+                    # with corr integrations instead of smearing
+                    # historical readings into the current row.
                     try:
-                        metadata = self.metadata_stream.drain()
-                    except redis.exceptions.ConnectionError as exc:
-                        # Safety net for the corr-is-sacred contract:
-                        # ERROR (not WARNING) per CLAUDE.md, throttled
-                        # to one emit per ``_DRAIN_WARN_INTERVAL_S``
-                        # window so a long outage doesn't flood the log.
-                        panda_was_down = True
-                        now_mono = time.monotonic()
-                        if (
-                            now_mono - last_drain_warn_monotonic
-                            >= _DRAIN_WARN_INTERVAL_S
-                        ):
-                            self.logger.error(
-                                "Panda metadata drain failed: %s. "
-                                "Continuing corr writes with empty "
-                                "metadata until panda is back.",
-                                exc,
-                            )
-                            last_drain_warn_monotonic = now_mono
+                        self.metadata_stream.skip_to_latest()
+                    except redis.exceptions.ConnectionError:
+                        # Bounced again between the skip attempt and the
+                        # drain; treat as still-down and try next
+                        # iteration.
                         metadata = {}
-                    else:
-                        # Only signal "reconnected" once the drain
-                        # actually succeeds. If skip_to_latest() passes
-                        # but drain immediately raises (flapping panda:
-                        # heartbeat ok, single op fails), the INFO
-                        # would otherwise fire at ~4 Hz for the length
-                        # of the flap. Tying it to drain success makes
-                        # the INFO mean "metadata pipeline is back."
-                        if panda_was_down:
-                            self.logger.info(
-                                "Panda reconnected; metadata stream "
-                                "positions reset to current tails."
-                            )
-                            panda_was_down = False
-                else:
-                    panda_was_down = True
+                        adc = self.adc_metadata_stream.drain()
+                        if adc:
+                            metadata.update(adc)
+                        if not metadata:
+                            metadata = None
+                        file.add_data(
+                            acc_cnt,
+                            cached_sync_time,
+                            data,
+                            metadata=metadata,
+                        )
+                        last_write_deadline = None
+                        continue
+                try:
+                    metadata = self.metadata_stream.drain()
+                except redis.exceptions.ConnectionError as exc:
+                    # Safety net for the corr-is-sacred contract:
+                    # ERROR (not WARNING) per CLAUDE.md, throttled
+                    # to one emit per ``_DRAIN_WARN_INTERVAL_S``
+                    # window so a long outage doesn't flood the log.
+                    metadata_stream_down = True
+                    now_mono = time.monotonic()
+                    if (
+                        now_mono - last_drain_warn_monotonic
+                        >= _DRAIN_WARN_INTERVAL_S
+                    ):
+                        self.logger.error(
+                            "Panda metadata drain failed: %s. "
+                            "Continuing corr writes with empty "
+                            "metadata until panda is back.",
+                            exc,
+                        )
+                        last_drain_warn_monotonic = now_mono
                     metadata = {}
+                else:
+                    # Only signal "reconnected" once the drain actually
+                    # succeeds. If skip_to_latest() passes but drain
+                    # immediately raises, the INFO would otherwise fire
+                    # at ~4 Hz for the length of the flap. Tying it to
+                    # drain success makes the INFO mean "metadata
+                    # pipeline is back."
+                    if metadata_stream_down:
+                        self.logger.info(
+                            "Panda metadata pipeline back; stream "
+                            "positions reset to current tails."
+                        )
+                        metadata_stream_down = False
                 # adc_stats lives on the SNAP transport,
                 # merge into the same metadata dict
                 adc = self.adc_metadata_stream.drain()

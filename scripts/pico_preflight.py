@@ -30,7 +30,6 @@ import argparse
 import sys
 import time
 
-from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import add_redis_args
 from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_redis import HeartbeatReader, MetadataSnapshotReader, Transport
@@ -205,24 +204,27 @@ def parse_args():
 def main():
     args = parse_args()
     transport = Transport(host=args.redis_host, port=args.redis_port)
-    with run_tag.session(transport, "pico_preflight"):
-        if args.watch is None:
+    # Passive readout: no run_tag.session, by design. Snapshot-only
+    # (MetadataSnapshotReader), no commands or files, so it changes no
+    # physical state and must coexist with the active driver it watches.
+    # See imu_manual.py / scripts/CLAUDE.md for the active-vs-passive rule.
+    if args.watch is None:
+        render(transport)
+        return 0
+    try:
+        while True:
+            # ANSI clear + home so the table redraws in place.
+            sys.stdout.write("\x1b[2J\x1b[H")
+            print(
+                f"pico_preflight @ {args.redis_host}  "
+                f"({time.strftime('%H:%M:%S')})"
+            )
+            print()
             render(transport)
-            return 0
-        try:
-            while True:
-                # ANSI clear + home so the table redraws in place.
-                sys.stdout.write("\x1b[2J\x1b[H")
-                print(
-                    f"pico_preflight @ {args.redis_host}  "
-                    f"({time.strftime('%H:%M:%S')})"
-                )
-                print()
-                render(transport)
-                sys.stdout.flush()
-                time.sleep(args.watch)
-        except KeyboardInterrupt:
-            return 0
+            sys.stdout.flush()
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        return 0
 
 
 if __name__ == "__main__":

@@ -787,10 +787,13 @@ def test_record_corr_data_read_timeout_then_success_resets_deadline(
 def test_record_corr_data_panda_connected_drains_metadata(
     mock_file_class, observer_both, transport_panda
 ):
-    """When the panda is connected, the metadata stream is drained and
-    forwarded to ``file.add_data``; when not, ``metadata=None`` is passed
-    (covered by ``test_record_corr_data``). This exercises the only
-    success-path branch that touches cross-class logic.
+    """With the panda metadata stream reachable, the drained readings
+    are forwarded to ``file.add_data``. This exercises the success-path
+    branch that touches cross-class logic. The drain is gated on stream
+    reachability, not the heartbeat — see
+    ``test_record_corr_data_drains_metadata_without_heartbeat`` for the
+    no-heartbeat case and ``test_record_corr_data`` for the empty-stream
+    → ``metadata=None`` case.
     """
     observer = observer_both
     sync_time = 1713200000.0
@@ -822,6 +825,55 @@ def test_record_corr_data_panda_connected_drains_metadata(
 
     # add_data received the drained metadata, keyed by the stream name
     # MetadataWriter.add uses (``stream:<key>``).
+    mock_file.add_data.assert_called_once()
+    call_kwargs = mock_file.add_data.call_args.kwargs
+    assert call_kwargs["metadata"] == {"stream:sensor_a": [sample]}
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_drains_metadata_without_heartbeat(
+    mock_file_class, observer_snap_only, transport_panda_down
+):
+    """The metadata sidecar is drained whenever the panda Redis is
+    reachable, even with no heartbeat.
+
+    A manual session stops ``panda_observe`` (so the heartbeat goes away
+    and ``panda_connected`` is False), but the picos keep publishing
+    metadata via the always-on pico-manager service. The corr loop must
+    still attach that metadata: the drain is gated on Redis reachability
+    (``ConnectionError``), not on ``panda_connected``. Regression guard
+    for the heartbeat-decoupling fix — under the old heartbeat gate this
+    integration would have been written with ``metadata=None``.
+    """
+    observer = observer_snap_only
+    assert observer.panda_connected is False  # no heartbeat seeded
+
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    # Picos publish metadata via pico-manager even with panda_observe
+    # stopped. Push one reading and rewind the read pointer so drain()
+    # picks it up (mirrors test_..._panda_connected_drains_metadata, but
+    # against the no-heartbeat transport).
+    sample = {"temp_c": 23.5, "status": "update"}
+    MetadataWriter(transport_panda_down).add("sensor_a", sample)
+    transport_panda_down.set_last_read_id("stream:sensor_a", "0-0")
+
+    def read_side_effect(*a, **kw):
+        observer.stop_event.set()
+        return (123, mock_data)
+
+    with patch.object(
+        observer.corr_reader, "read", side_effect=read_side_effect
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
     mock_file.add_data.assert_called_once()
     call_kwargs = mock_file.add_data.call_args.kwargs
     assert call_kwargs["metadata"] == {"stream:sensor_a": [sample]}
@@ -1687,9 +1739,9 @@ def test_record_corr_data_skip_to_tail_on_panda_recover(
 
     # Confirm we actually exercised the recover-and-resume path.
     assert len(drain_calls) >= 2
-    assert any("Panda reconnected" in rec.message for rec in caplog.records), [
-        r.message for r in caplog.records
-    ]
+    assert any(
+        "metadata pipeline back" in rec.message for rec in caplog.records
+    ), [r.message for r in caplog.records]
 
     # No call to add_data carried the stale backlog reading.
     seen_metadata = [
