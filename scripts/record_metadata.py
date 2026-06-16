@@ -34,8 +34,9 @@ import h5py
 import numpy as np
 import redis.exceptions
 
-from eigsep_redis import MetadataStreamReader, Transport, entry_id_to_unix
+from eigsep_redis import MetadataStreamReader, entry_id_to_unix
 
+from eigsep_observing._scripts_util import add_redis_args, build_transport
 from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_observing.utils import configure_eig_logger
 
@@ -151,15 +152,11 @@ def _schema_for(stream):
     return SENSOR_SCHEMAS.get(_group_name(stream))
 
 
-def _build_transport(panda_ip, dummy):
-    if dummy:
-        # Match the convention used by other manual scripts: fakeredis
-        # on port 6380 with a DummyPandaClient attached so the dummy
-        # picos publish to the same transport.
-        from eigsep_observing._scripts_util import build_transport
-
-        return build_transport(dummy=True)
-    return Transport(host=panda_ip, port=6379)
+def _build_transport(host, port, dummy):
+    # build_transport attaches a DummyPandaClient in dummy mode (fakeredis
+    # on 6380) so the dummy picos publish to the same transport; real mode
+    # is a plain Transport at host:port.
+    return build_transport(dummy, host=host, real_port=port)
 
 
 def _parse_args():
@@ -170,7 +167,7 @@ def _parse_args():
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--panda-ip", default="10.10.10.11")
+    add_redis_args(p, default_host="10.10.10.11")
     p.add_argument(
         "--save-dir",
         type=Path,
@@ -245,12 +242,14 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        transport = _build_transport(args.panda_ip, args.dummy)
+        transport = _build_transport(
+            args.redis_host, args.redis_port, args.dummy
+        )
     except redis.exceptions.ConnectionError as exc:
         logger.error(
             "Cannot connect to panda Redis at %s: %s. "
             "Is the panda up and reachable?",
-            args.panda_ip,
+            args.redis_host,
             exc,
         )
         return 1

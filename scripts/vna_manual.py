@@ -34,7 +34,10 @@ import numpy as np
 import yaml
 
 from eigsep_observing import run_tag
-from eigsep_observing._scripts_util import build_transport_bare
+from eigsep_observing._scripts_util import (
+    add_redis_args,
+    build_transport_bare,
+)
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 from eigsep_observing.vna import (
     build_vna_subsystem,
@@ -147,6 +150,7 @@ def _parse_args():
         action="store_true",
         help="Run against a fakeredis-backed DummyVNA + dummy PicoManager.",
     )
+    add_redis_args(parser)
     parser.add_argument(
         "--save-dir",
         type=Path,
@@ -181,7 +185,9 @@ def main():
     if not args.save_dir.is_dir():
         raise SystemExit(f"save-dir is not a directory: {args.save_dir}")
 
-    transport = build_transport_bare(args.dummy)
+    transport = build_transport_bare(
+        args.dummy, host=args.redis_host, real_port=args.redis_port
+    )
     subsystem = build_vna_subsystem(
         transport, cfg, source="vna_manual", dummy=args.dummy
     )

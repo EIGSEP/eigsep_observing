@@ -21,7 +21,11 @@ from eigsep_redis import StatusWriter
 from picohost.proxy import PicoProxy
 
 from eigsep_observing import MotorClient, run_tag
-from eigsep_observing._scripts_util import build_transport, require_pico
+from eigsep_observing._scripts_util import (
+    add_redis_args,
+    build_transport,
+    require_pico,
+)
 from eigsep_observing.utils import configure_eig_logger
 
 
@@ -132,6 +136,7 @@ def _parse_args():
         action="store_true",
         help="Run against a fakeredis-backed DummyPandaClient",
     )
+    add_redis_args(parser)
     parser.add_argument(
         "--el_first",
         action="store_true",
@@ -196,5 +201,7 @@ def _parse_args():
 
 if __name__ == "__main__":
     args = _parse_args()
-    transport = build_transport(args.dummy)
+    transport = build_transport(
+        args.dummy, host=args.redis_host, real_port=args.redis_port
+    )
     main(transport, args)
