@@ -43,7 +43,7 @@ def _load(name):
 
 
 def _scan_args(**overrides):
-    """A small-grid arg namespace for driving ``motor_control.main``
+    """A small-grid arg namespace for driving ``motor_scan.main``
     quickly. Grid bounds default to a 3-point az/el sweep."""
     base = dict(
         el_first=False,
@@ -61,17 +61,17 @@ def _scan_args(**overrides):
     return Namespace(**base)
 
 
-def test_motor_control_main_runs_short_scan(client):
-    """``motor_control.main`` runs a full scan to completion against the
+def test_motor_scan_main_runs_short_scan(client):
+    """``motor_scan.main`` runs a full scan to completion against the
     dummy manager, building the grid from CLI args (no numpy patching)."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     mc.main(client.transport, _scan_args())
 
 
-def test_motor_control_axis_range_inclusive_endpoint():
+def test_motor_scan_axis_range_inclusive_endpoint():
     """``_axis_range`` includes the stop endpoint when it lands on the
     step grid, so ``0 -> 180`` actually reaches 180."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     rng = mc._axis_range(0.0, 180.0, 5.0)
     assert rng[0] == 0.0
     assert rng[-1] == 180.0
@@ -79,35 +79,35 @@ def test_motor_control_axis_range_inclusive_endpoint():
     np.testing.assert_allclose(np.diff(rng), 5.0)
 
 
-def test_motor_control_axis_range_offgrid_stop_does_not_overshoot():
+def test_motor_scan_axis_range_offgrid_stop_does_not_overshoot():
     """A stop that doesn't land on the grid stops at the last point
     <= stop rather than overshooting the boundary."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     rng = mc._axis_range(0.0, 10.0, 3.0)
     np.testing.assert_allclose(rng, [0.0, 3.0, 6.0, 9.0])
 
 
-def test_motor_control_axis_range_rejects_nonpositive_step():
-    mc = _load("motor_control")
+def test_motor_scan_axis_range_rejects_nonpositive_step():
+    mc = _load("motor_scan")
     with pytest.raises(ValueError):
         mc._axis_range(0.0, 10.0, 0.0)
 
 
-def test_motor_control_axis_range_rejects_inverted_bounds():
-    mc = _load("motor_control")
+def test_motor_scan_axis_range_rejects_inverted_bounds():
+    mc = _load("motor_scan")
     with pytest.raises(ValueError):
         mc._axis_range(180.0, 0.0, 5.0)
 
 
-def test_motor_control_parse_args_accepts_scan_bounds(monkeypatch):
+def test_motor_scan_parse_args_accepts_scan_bounds(monkeypatch):
     """The new per-axis bound/step flags parse as floats into the
     underscore namespace ``main`` consumes."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     monkeypatch.setattr(
         sys,
         "argv",
         [
-            "motor_control",
+            "motor_scan",
             "--az_start",
             "0",
             "--az_stop",
@@ -143,30 +143,30 @@ def _patch_scan_to_interrupt(mc, monkeypatch):
     return home_calls
 
 
-def test_motor_control_interrupt_prompt_yes_homes(client, monkeypatch):
+def test_motor_scan_interrupt_prompt_yes_homes(client, monkeypatch):
     """A Ctrl-C during the scan prompts the operator; answering 'y'
     drives back to (0,0) via ``MotorClient.home``."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *_a: "y")
     mc.main(client.transport, _scan_args())
     assert home_calls["n"] == 1
 
 
-def test_motor_control_interrupt_prompt_no_skips_home(client, monkeypatch):
+def test_motor_scan_interrupt_prompt_no_skips_home(client, monkeypatch):
     """The prompt defaults to No — an empty answer leaves the motors
     halted in place rather than homing."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
     monkeypatch.setattr("builtins.input", lambda *_a: "")
     mc.main(client.transport, _scan_args())
     assert home_calls["n"] == 0
 
 
-def test_motor_control_interrupt_prompt_eof_skips_home(client, monkeypatch):
+def test_motor_scan_interrupt_prompt_eof_skips_home(client, monkeypatch):
     """A non-interactive stdin (EOFError on input) is treated as No and
     must not crash the exit path."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
 
     def raise_eof(*_a):
@@ -177,9 +177,9 @@ def test_motor_control_interrupt_prompt_eof_skips_home(client, monkeypatch):
     assert home_calls["n"] == 0
 
 
-def test_motor_control_second_interrupt_skips_home(client, monkeypatch):
+def test_motor_scan_second_interrupt_skips_home(client, monkeypatch):
     """A second Ctrl-C at the prompt declines the home cleanly."""
-    mc = _load("motor_control")
+    mc = _load("motor_scan")
     home_calls = _patch_scan_to_interrupt(mc, monkeypatch)
 
     def raise_interrupt(*_a):

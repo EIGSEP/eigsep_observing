@@ -37,7 +37,7 @@ stays up during scans.
 
 ```bash
 # Az/el beam scan
-python scripts/motor_control.py [--dummy] [--el_first] [--count N] \
+python scripts/motor_scan.py [--dummy] [--el_first] [--count N] \
                                 [--pause_s S] [--sleep_s S]
 
 # Interactive zeroing UI (curses)

@@ -1,7 +1,7 @@
 # Bring-up scripts contract
 
 The scripts in this directory (`*_manual.py`, `record_*.py`,
-`motor_control.py`, `pico_preflight.py`, etc.) are operator tools
+`motor_scan.py`, `pico_preflight.py`, etc.) are operator tools
 for **field verification, lab bring-up, and ad-hoc debugging**. The
 production observing path is in `src/eigsep_observing/scripts/`
 (`fpga_init`, `observe`, `panda_observe`) and is *not* governed by
