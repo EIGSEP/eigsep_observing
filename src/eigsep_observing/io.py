@@ -370,6 +370,45 @@ def write_hdf5(fname, data, header, metadata=None):
                     )
 
 
+def write_metadata_hdf5(fname, metadata):
+    """
+    Write standalone metadata streams to HDF5.
+
+    Produces the *same* on-disk shape as the ``metadata`` group of a corr
+    file (see :func:`write_hdf5`): each stream's value — a list of
+    per-sample dicts — is JSON-encoded under a top-level ``metadata``
+    group via the shared :func:`_write_header_item` path, so a ``None``
+    field survives as JSON ``null`` rather than a typed zero/empty
+    sentinel.
+
+    Used by ``scripts/record_metadata.py`` to save pico metadata when no
+    correlator loop is running (the corr-side
+    ``EigObserver.record_corr_data`` path is unavailable). Read it back
+    with :func:`read_metadata_hdf5`.
+
+    Parameters
+    ----------
+    fname : str or Path
+        Output filename.
+    metadata : dict
+        ``{stream_name: [sample_dict, ...]}``. Each sample dict is one
+        Redis stream entry (raw payload plus a folded-in ``_ts_unix``).
+        A per-stream safety net mirrors :func:`write_hdf5`: a contract
+        violation on one stream is logged at ERROR and skipped.
+    """
+    with h5py.File(fname, "w") as f:
+        metadata_grp = f.create_group("metadata")
+        for key, value in metadata.items():
+            try:
+                _write_header_item(metadata_grp, key, value)
+            except (TypeError, ValueError) as e:
+                logger.error(
+                    f"Metadata contract violation: failed to write key "
+                    f"'{key}' ({type(e).__name__}: {e}). Skipping this "
+                    f"stream. Producer must be fixed."
+                )
+
+
 def read_hdf5(fname):
     """
     Read data from an HDF5 file.
@@ -423,6 +462,38 @@ def read_hdf5(fname):
                 else:
                     metadata[name] = _read_dataset(obj)
     return data, header, metadata
+
+
+def read_metadata_hdf5(fname):
+    """
+    Read a metadata file written by :func:`write_metadata_hdf5` (e.g. by
+    ``scripts/record_metadata.py``).
+
+    Returns ``{stream_name: [sample_dict, ...]}`` — the same shape and
+    None-faithful JSON decoding :func:`read_hdf5` returns for a corr
+    file's ``metadata`` group, so a dropped reading reads back as ``None``
+    rather than a zero/empty sentinel. Each recorder sample dict carries a
+    folded-in ``_ts_unix`` (float unix seconds) for joining across streams,
+    e.g. ``np.array([d["_ts_unix"] for d in rows])``.
+
+    Parameters
+    ----------
+    fname : str or Path
+        Path to a ``metadata_*.h5`` file produced by the recorder.
+
+    Returns
+    -------
+    dict
+        ``{stream_name: [sample_dict, ...]}``; empty if the file holds no
+        ``metadata`` group.
+    """
+    out = {}
+    with h5py.File(fname, "r") as f:
+        if "metadata" not in f:
+            return out
+        for name, obj in f["metadata"].items():
+            out[name] = _read_dataset(obj)
+    return out
 
 
 def write_s11_file(
