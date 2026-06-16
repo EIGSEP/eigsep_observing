@@ -48,7 +48,10 @@ eigsep-observe --dummy        # terminal 2
 # Test-bench data collection (no SNAP): save pico metadata while you
 # exercise actuators with motor_manual / tempctrl_manual / etc. The
 # panda's PicoManager service must already be running; record_metadata
-# is a consumer that drains the streams to its own HDF5 file.
+# is a consumer that drains the streams to its own HDF5 file (same JSON
+# metadata format as a corr file's sidecar). Read it back with
+# eigsep_observing.io.read_metadata_hdf5(fname), which returns
+# {stream: [sample_dict, ...]} (each dict carries _ts_unix for joining).
 python scripts/record_metadata.py --save-dir /tmp/runs
 
 # Same idea for VNA: loop ant/rec bundles at a fixed interval and

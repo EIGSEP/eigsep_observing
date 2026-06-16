@@ -1,20 +1,27 @@
 """Standalone metadata recorder.
 
-Drains all registered panda metadata streams and writes raw entries
-(no averaging) to an HDF5 file. Designed for hardware tests where the
-SNAP correlator is not in the loop, so the corr-side metadata-to-disk
-pipeline (``EigObserver.record_corr_data``) is unavailable.
+Drains all registered panda metadata streams and writes the raw entries
+(no averaging) to an HDF5 file, using the *same* on-disk format as a corr
+file's metadata sidecar (:func:`eigsep_observing.io.write_metadata_hdf5`):
+one JSON list-of-dicts per stream under a ``metadata`` group. Designed for
+hardware tests where the SNAP correlator is not in the loop, so the
+corr-side metadata-to-disk pipeline (``EigObserver.record_corr_data``) is
+unavailable.
 
-Each Redis stream becomes one HDF5 group named after the metadata key
-(e.g. ``imu_el``, ``tempctrl_lna``). Inside the group:
+Each drained Redis entry becomes one dict in its stream's list — the raw
+payload plus a folded-in ``_ts_unix`` (float unix seconds, from the Redis
+stream entry ID's millisecond prefix, the most accurate per-sample
+timestamp available since the picos do not embed wall-clock timestamps in
+their payloads). Because the format matches io.py's JSON serialization, a
+``None`` field (a nulled sensor reading) round-trips as ``None`` rather
+than a zero/empty sentinel. Read it back with
+:func:`eigsep_observing.io.read_metadata_hdf5`.
 
-- one 1-D resizable dataset per payload field, typed via
-  :data:`eigsep_observing.io.SENSOR_SCHEMAS` where the key is known
-  (with lazy per-sample inference for fields outside the schema), and
-- a ``_ts_unix`` dataset (float64) populated from the Redis stream
-  entry ID's millisecond prefix — the most accurate per-sample
-  timestamp available, since the picos do not embed wall-clock
-  timestamps in their payloads.
+Samples accumulate in memory and the file is written once on exit; the
+SIGINT/SIGTERM handlers stop the loop so a normal Ctrl-C still saves. A
+hard crash (SIGKILL / power loss) loses the run — acceptable for the
+attended bring-up runs this tool is for, and it keeps the format identical
+to the corr sidecar so the two can be changed together later.
 
 Coexists safely with ``eigsep-observe``: each consumer has its own
 ``Transport`` with an independent local read pointer (same pattern
@@ -23,119 +30,21 @@ Coexists safely with ``eigsep-observe``: each consumer has its own
 
 import argparse
 import datetime as dt
-import json
 import logging
 import signal
 import sys
 import threading
 from pathlib import Path
 
-import h5py
-import numpy as np
 import redis.exceptions
 
 from eigsep_redis import MetadataStreamReader, entry_id_to_unix
 
 from eigsep_observing._scripts_util import add_redis_args, build_transport
-from eigsep_observing.io import SENSOR_SCHEMAS
+from eigsep_observing.io import write_metadata_hdf5
 from eigsep_observing.utils import configure_eig_logger
 
 logger = logging.getLogger(__name__)
-
-
-_SCHEMA_DTYPES = {
-    str: h5py.string_dtype(encoding="utf-8"),
-    bool: np.dtype(np.uint8),
-    int: np.dtype(np.int64),
-    float: np.dtype(np.float64),
-}
-
-
-def _dtype_for_value(value):
-    """Lazy dtype pick for a single sample value (used for fields not
-    declared in :data:`SENSOR_SCHEMAS`). Booleans must be checked
-    before ints — Python ``bool`` is a subclass of ``int``."""
-    if isinstance(value, bool):
-        return _SCHEMA_DTYPES[bool]
-    if isinstance(value, int):
-        return _SCHEMA_DTYPES[int]
-    if isinstance(value, float):
-        return _SCHEMA_DTYPES[float]
-    if isinstance(value, str):
-        return _SCHEMA_DTYPES[str]
-    return _SCHEMA_DTYPES[str]
-
-
-class _StreamWriter:
-    """Per-stream HDF5 group with per-field resizable datasets.
-
-    Pre-creates datasets for every field in ``schema`` so a stream
-    with declared fields produces a uniform file even if some samples
-    omit a field. Unknown fields encountered later are added lazily
-    with a per-sample dtype inference and back-filled with default
-    sentinels for prior rows.
-    """
-
-    _CHUNK = 256
-
-    def __init__(self, h5file, group_name, schema=None):
-        self.group = h5file.create_group(group_name)
-        self.count = 0
-        self._dsets = {}
-        self._make_dset("_ts_unix", np.dtype(np.float64))
-        if schema:
-            for field, py_type in schema.items():
-                dtype = _SCHEMA_DTYPES.get(py_type, _SCHEMA_DTYPES[str])
-                self._make_dset(field, dtype)
-
-    def _make_dset(self, name, dtype):
-        dset = self.group.create_dataset(
-            name,
-            shape=(self.count,),
-            maxshape=(None,),
-            dtype=dtype,
-            chunks=(self._CHUNK,),
-        )
-        self._dsets[name] = dset
-
-    def _ensure_dset(self, name, value):
-        if name in self._dsets:
-            return self._dsets[name]
-        self._make_dset(name, _dtype_for_value(value))
-        return self._dsets[name]
-
-    def append(self, ts_unix, payload):
-        new_count = self.count + 1
-        for dset in self._dsets.values():
-            dset.resize((new_count,))
-        self._dsets["_ts_unix"][self.count] = ts_unix
-        for field, value in payload.items():
-            dset = self._ensure_dset(field, value)
-            # Re-resize in case _ensure_dset just created a dataset
-            # that was sized at the pre-append count.
-            if dset.shape[0] < new_count:
-                dset.resize((new_count,))
-            if value is None:
-                continue  # leave default sentinel (0 / "")
-            try:
-                if h5py.check_string_dtype(dset.dtype):
-                    dset[self.count] = (
-                        value if isinstance(value, str) else json.dumps(value)
-                    )
-                elif dset.dtype == np.uint8:
-                    dset[self.count] = np.uint8(bool(value))
-                else:
-                    dset[self.count] = value
-            except (TypeError, ValueError) as exc:
-                logger.warning(
-                    "Cannot write %s=%r (dtype=%s) to %s: %s",
-                    field,
-                    value,
-                    dset.dtype,
-                    self.group.name,
-                    exc,
-                )
-        self.count = new_count
 
 
 def _group_name(stream):
@@ -147,9 +56,40 @@ def _group_name(stream):
     )
 
 
-def _schema_for(stream):
-    """Return the SENSOR_SCHEMAS entry matching this stream, or None."""
-    return SENSOR_SCHEMAS.get(_group_name(stream))
+def _drain_into(reader, collected):
+    """Drain all registered streams once, accumulating into ``collected``.
+
+    Each Redis entry becomes one dict appended to ``collected[stream]``:
+    the raw payload plus a folded-in ``_ts_unix`` (from the entry ID).
+    The ``stream:`` prefix is stripped. Non-dict payloads are logged at
+    ERROR and skipped — the producer is at fault, not the recorder.
+    """
+    drained = reader.drain(with_ids=True)
+    for stream, entries in drained.items():
+        bucket = collected.setdefault(_group_name(stream), [])
+        for entry_id, payload in entries:
+            if not isinstance(payload, dict):
+                logger.error(
+                    "Skipping non-dict payload on %s: %r", stream, payload
+                )
+                continue
+            bucket.append({"_ts_unix": entry_id_to_unix(entry_id), **payload})
+
+
+def _collect(transport, collected, interval, stop_event):
+    """Drain into ``collected`` until ``stop_event`` is set.
+
+    ``drain`` is non-blocking, so the loop is paced by ``stop_event.wait``
+    (which also keeps SIGINT responsive). Picos publish at ~5 Hz; a 1 s
+    default batches ~5 entries per drain.
+    """
+    reader = MetadataStreamReader(transport)
+    while not stop_event.is_set():
+        try:
+            _drain_into(reader, collected)
+        except redis.exceptions.ConnectionError as exc:
+            logger.warning("drain failed: %s", exc)
+        stop_event.wait(interval)
 
 
 def _build_transport(host, port, dummy):
@@ -163,7 +103,8 @@ def _parse_args():
     p = argparse.ArgumentParser(
         description=(
             "Record panda metadata streams to HDF5. No averaging — "
-            "every Redis stream entry becomes one HDF5 row."
+            "every Redis stream entry becomes one row, in the same "
+            "format as a corr file's metadata sidecar."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
@@ -179,9 +120,9 @@ def _parse_args():
         type=float,
         default=1.0,
         help=(
-            "Drain block timeout, in seconds. The recorder will return "
-            "from xread as soon as any entry arrives, so this is the "
-            "maximum stall between SIGINT and exit."
+            "Drain pacing, in seconds — the maximum stall between SIGINT "
+            "and exit. Samples accumulate between drains and are written "
+            "once on exit."
         ),
     )
     p.add_argument(
@@ -190,48 +131,6 @@ def _parse_args():
         help="Connect to fakeredis on localhost:6380 with dummy picos.",
     )
     return p.parse_args()
-
-
-def _run(transport, out_path, interval, stop_event):
-    reader = MetadataStreamReader(transport)
-    writers = {}  # stream_name -> _StreamWriter
-
-    with h5py.File(out_path, "w") as h5file:
-        while not stop_event.is_set():
-            try:
-                drained = reader.drain(with_ids=True)
-            except redis.exceptions.ConnectionError as exc:
-                logger.warning("drain failed: %s", exc)
-                stop_event.wait(interval)
-                continue
-
-            for stream, entries in drained.items():
-                writer = writers.get(stream)
-                if writer is None:
-                    writer = _StreamWriter(
-                        h5file,
-                        _group_name(stream),
-                        schema=_schema_for(stream),
-                    )
-                    writers[stream] = writer
-
-                for entry_id, payload in entries:
-                    if not isinstance(payload, dict):
-                        logger.error(
-                            "Skipping non-dict payload on %s: %r",
-                            stream,
-                            payload,
-                        )
-                        continue
-                    writer.append(entry_id_to_unix(entry_id), payload)
-
-            h5file.flush()
-            # drain() is non-blocking, so pace the loop here. Picos
-            # publish at ~5 Hz; a 1 s default batches ~5 entries per
-            # drain. stop_event.wait keeps SIGINT responsiveness.
-            stop_event.wait(interval)
-
-    return writers
 
 
 def main():
@@ -269,12 +168,15 @@ def main():
     signal.signal(signal.SIGINT, _handle)
     signal.signal(signal.SIGTERM, _handle)
 
+    collected = {}
     try:
-        writers = _run(transport, out_path, args.interval, stop_event)
+        _collect(transport, collected, args.interval, stop_event)
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt, stopping.")
-        writers = {}
     finally:
+        # Write whatever we captured, even on an uncaught exit, so a run
+        # is never lost to a missed signal.
+        write_metadata_hdf5(out_path, collected)
         if args.dummy:
             dummy_client = getattr(transport, "_dummy_client", None)
             if dummy_client is not None:
@@ -284,7 +186,7 @@ def main():
     logger.info(
         "Closed %s with %d stream(s).",
         out_path,
-        len(writers),
+        len(collected),
     )
     return 0
 
