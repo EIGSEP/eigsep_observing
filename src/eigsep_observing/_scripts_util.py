@@ -3,7 +3,7 @@
 Three responsibilities, all deliberately small:
 
 - :func:`build_transport` mirrors the ``--dummy`` bootstrap used by
-  the multi-pico manual scripts (``motor_manual.py`` / ``motor_control.py``
+  the multi-pico manual scripts (``motor_manual.py`` / ``motor_scan.py``
   / ``potmon_manual.py`` / ...) so every per-app manual script can
   share one well-tested transport path.
 - :func:`build_transport_bare` is the equivalent for bring-up scripts

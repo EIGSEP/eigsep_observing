@@ -93,7 +93,7 @@ class MotorZeroer:
         # Two-step zero guard: Enter arms this, a deliberate 'y' commits.
         self._pending_zero = False
         # "Go home" drives both axes to step 0 via the same
-        # MotorClient.home primitive motor_control.py uses. It runs in a
+        # MotorClient.home primitive motor_scan.py uses. It runs in a
         # background thread so the curses loop keeps rendering live
         # position; injectable for tests.
         if motor_client is None:
@@ -133,25 +133,31 @@ class MotorZeroer:
         except (RuntimeError, TimeoutError) as exc:
             self.logger.warning("halt skipped: %s", exc)
 
-    def _jog(self, action, delta_deg):
-        """Invoke a delta-degree move, retrying once if the firmware
-        complains about missing status (can happen immediately after a
-        reconnect — the reader thread hasn't populated ``last_status``
-        yet).
+    def _jog(self, jog_fn, delta_deg):
+        """Run a blocking jog through the shared :class:`MotorClient`,
+        retrying once if the firmware complains about missing status
+        (can happen immediately after a reconnect — the reader thread
+        hasn't populated ``last_status`` yet).
+
+        The jog blocks until the move stops, and that is what serializes
+        jogs: the curses loop cannot read the next keystroke until the
+        move completes, so a cross-axis jog can never overlap the
+        previous one (mechanical one-motor-at-a-time). See
+        :meth:`MotorClient.jog_az`.
         """
         try:
-            self._proxy.send_command(action, delta_deg=float(delta_deg))
+            jog_fn(delta_deg)
         except RuntimeError as exc:
             if "No status" not in str(exc):
                 raise
             time.sleep(_REQUIRE_STATUS_RETRY_S)
-            self._proxy.send_command(action, delta_deg=float(delta_deg))
+            jog_fn(delta_deg)
 
     def jog_az(self, delta_deg):
-        self._jog("az_move_deg", delta_deg)
+        self._jog(self._motor_client.jog_az, delta_deg)
 
     def jog_el(self, delta_deg):
-        self._jog("el_move_deg", delta_deg)
+        self._jog(self._motor_client.jog_el, delta_deg)
 
     def zero(self):
         """Halt, then set both step counters to 0. After this call the

@@ -38,12 +38,19 @@ class MotorClient:
     stall_timeout_s : float
         Seconds without position progress before
         :meth:`_wait_for_stop` raises :class:`TimeoutError`.
+    start_timeout_s : float
+        Seconds to wait for a just-issued move to register in the
+        metadata snapshot (target acknowledged or motion observed)
+        before :meth:`_send_and_wait` treats it as a no-op and proceeds.
+        Must exceed the producer status cadence (~200 ms) so a real move
+        is never mistaken for a no-op — this start phase is what keeps a
+        move reliably one-axis-at-a-time.
     source : str
         Identifier stamped on proxy command stream entries.
     coord : MotionSwitchCoordinator or None
         Optional coordinator. When ``None``, the client builds an
         internal coordinator with ``serialize=False`` so standalone use
-        (e.g. ``scripts/motor_control.py``) is unchanged.
+        (e.g. ``scripts/motor_scan.py``) is unchanged.
         :class:`PandaClient` passes its own coordinator so the panda's
         ``serialize_motion_and_switching`` flag flows through.
     """
@@ -58,6 +65,7 @@ class MotorClient:
         el_dn_delay_us=600,
         poll_interval_s=0.1,
         stall_timeout_s=30.0,
+        start_timeout_s=1.0,
         source="motor_client",
         coord=None,
     ):
@@ -72,6 +80,7 @@ class MotorClient:
         }
         self.poll_interval_s = poll_interval_s
         self.stall_timeout_s = stall_timeout_s
+        self.start_timeout_s = start_timeout_s
         self.logger = logger
         if coord is None:
             coord = MotionSwitchCoordinator(
@@ -108,6 +117,57 @@ class MotorClient:
         except KeyError:
             return None
 
+    @staticmethod
+    def _is_moving(status):
+        """True if either axis has not reached its target in *status*.
+
+        The negation of the at-rest condition. Mirrors
+        :meth:`picohost.motor.PicoMotor.is_moving`, but reads a Redis
+        metadata snapshot dict rather than an in-process ``last_status``.
+        """
+        return status.get("az_pos") != status.get(
+            "az_target_pos"
+        ) or status.get("el_pos") != status.get("el_target_pos")
+
+    def _wait_for_start(self, axis, before_target, stop_event=None):
+        """Block until a just-issued move registers, bounded by
+        :attr:`start_timeout_s`.
+
+        After ``send_command`` returns, the metadata snapshot can still
+        show the pre-command at-rest state (``pos == target``) for up to
+        one producer status cadence. Returning from the move's wait on
+        that stale frame is the home double-move bug — the next axis
+        command fires while this one is still moving. So before handing
+        off to :meth:`_wait_for_stop`, wait until the snapshot reflects
+        the command, via either:
+
+        * **acknowledgement** — ``{axis}_target_pos`` changed from
+          ``before_target`` (captured before the send). This fires even
+          for moves that complete faster than one status tick, so a
+          quick jog is not penalised by ``start_timeout_s``.
+        * **motion** — either axis is observed off-target.
+
+        A move whose target never changes and never moves is a genuine
+        no-op (e.g. homing an axis already at step 0); the
+        ``start_timeout_s`` bound returns instead of hanging.
+        ``axis``/``before_target`` may be ``None`` (unknown action or no
+        prior status) — the motion check carries it in that case.
+        """
+        deadline = time.monotonic() + self.start_timeout_s
+        while time.monotonic() < deadline:
+            if stop_event is not None and stop_event.is_set():
+                return
+            status = self._motor_status()
+            if status is not None:
+                acknowledged = (
+                    axis is not None
+                    and before_target is not None
+                    and status.get(f"{axis}_target_pos") != before_target
+                )
+                if acknowledged or self._is_moving(status):
+                    return
+            time.sleep(self.poll_interval_s)
+
     def _wait_for_stop(self, timeout=None, stop_event=None):
         """Block until the motor's position equals its target on both axes.
 
@@ -137,13 +197,9 @@ class MotorClient:
                     )
                 time.sleep(self.poll_interval_s)
                 continue
-            az_pos = status.get("az_pos")
-            el_pos = status.get("el_pos")
-            az_target = status.get("az_target_pos")
-            el_target = status.get("el_target_pos")
-            if az_pos == az_target and el_pos == el_target:
+            if not self._is_moving(status):
                 return
-            pos = (az_pos, el_pos)
+            pos = (status.get("az_pos"), status.get("el_pos"))
             if pos != last_pos:
                 last_pos = pos
                 t = time.monotonic()
@@ -184,13 +240,44 @@ class MotorClient:
         ``coord.motion_section`` so per-move serialization (when
         enabled) is enforced at the lowest level — every public mover
         on this class composes from this helper, so neither callers
-        nor subclasses have to remember to take the lock. ``stop_event``
-        is forwarded to :meth:`_wait_for_stop` for cooperative
-        cancellation.
+        nor subclasses have to remember to take the lock.
+
+        The wait is two phases: :meth:`_wait_for_start` blocks until the
+        command is reflected in the metadata snapshot, then
+        :meth:`_wait_for_stop` blocks until motion ends. The start phase
+        is what makes a move reliably one-axis-at-a-time: without it a
+        stale at-rest snapshot read immediately after the send would let
+        the next axis command fire mid-move (the home double-move bug).
+        ``stop_event`` is forwarded to both for cooperative cancellation.
         """
+        axis = (
+            "az"
+            if action.startswith("az_")
+            else "el"
+            if action.startswith("el_")
+            else None
+        )
         with self._coord.motion_section(label=label):
+            before_target = self._axis_target(axis)
             self._proxy.send_command(action, **kwargs)
+            self._wait_for_start(axis, before_target, stop_event=stop_event)
+            if stop_event is not None and stop_event.is_set():
+                self.halt()
+                return
             self._wait_for_stop(timeout=timeout, stop_event=stop_event)
+
+    def _axis_target(self, axis):
+        """Current ``{axis}_target_pos`` from the snapshot, or ``None``.
+
+        Captured before a send so :meth:`_wait_for_start` can detect the
+        firmware acknowledging the new target.
+        """
+        if axis is None:
+            return None
+        status = self._motor_status()
+        if status is None:
+            return None
+        return status.get(f"{axis}_target_pos")
 
     def move_to(
         self,
@@ -261,6 +348,33 @@ class MotorClient:
             "el_target_steps",
             label="home el",
             target_steps=0,
+            stop_event=stop_event,
+        )
+
+    def jog_az(self, delta_deg, *, stop_event=None):
+        """Jog az by ``delta_deg`` degrees, blocking until the move stops.
+
+        Relative to the current az target. Routes through
+        :meth:`_send_and_wait`, so the move is serialized start->stop the
+        same way absolute moves are: a cross-axis jog issued after this
+        returns cannot overlap it. Backs the interactive jogger in
+        :class:`~eigsep_observing.motor_zeroer.MotorZeroer` — blocking is
+        what enforces one-motor-at-a-time there.
+        """
+        self._jog("az_move_deg", delta_deg, stop_event=stop_event)
+
+    def jog_el(self, delta_deg, *, stop_event=None):
+        """Jog el by ``delta_deg`` degrees, blocking until the move stops.
+
+        See :meth:`jog_az`.
+        """
+        self._jog("el_move_deg", delta_deg, stop_event=stop_event)
+
+    def _jog(self, action, delta_deg, *, stop_event=None):
+        self._send_and_wait(
+            action,
+            label=action,
+            delta_deg=float(delta_deg),
             stop_event=stop_event,
         )
 

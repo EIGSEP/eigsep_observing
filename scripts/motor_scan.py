@@ -84,14 +84,14 @@ def main(transport, args):
     # bounds fail fast without opening a run_tag session.
     az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
     el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
-    require_pico(PicoProxy("motor", transport, source="motor_control"))
-    with run_tag.session(transport, "motor_control"):
+    require_pico(PicoProxy("motor", transport, source="motor_scan"))
+    with run_tag.session(transport, "motor_scan"):
         status = StatusWriter(transport)
         motor = MotorClient(transport)
 
         started = time.monotonic()
-        status.send("motor_control started")
-        logger.info("motor_control started")
+        status.send("motor_scan started")
+        logger.info("motor_scan started")
         logger.info(
             "Scan grid: az %g..%g step %g (%d pts), "
             "el %g..%g step %g (%d pts)",
@@ -124,7 +124,7 @@ def main(transport, args):
         finally:
             motor.halt()
             elapsed = time.monotonic() - started
-            msg = f"motor_control ended (duration={elapsed:.1f}s)"
+            msg = f"motor_scan ended (duration={elapsed:.1f}s)"
             status.send(msg)
             logger.info(msg)
 

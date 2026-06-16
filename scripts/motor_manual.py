@@ -4,7 +4,7 @@ Interactive motor zeroing UI.
 Jog the motors into the desired home position, then Enter to begin
 zeroing the step counters. Zeroing is two-step: Enter arms a
 confirmation and 'y' commits it, so an accidental Enter can't redefine
-home. After zeroing, ``motor_control.py`` treats the current physical
+home. After zeroing, ``motor_scan.py`` treats the current physical
 position as ``(0, 0)``.
 
 Controls:

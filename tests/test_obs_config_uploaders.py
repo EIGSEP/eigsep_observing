@@ -37,7 +37,7 @@ ACTIVE_DRIVER_SCRIPTS = {
     "rfswitch_manual.py",
     "tempctrl_manual.py",
     "motor_manual.py",
-    "motor_control.py",
+    "motor_scan.py",
     "record_vna.py",
 }
 

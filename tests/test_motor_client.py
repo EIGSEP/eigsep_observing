@@ -9,6 +9,7 @@ few ticks.
 
 import threading
 import time
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -25,6 +26,11 @@ def _motor(transport, *, coord=None):
         transport,
         poll_interval_s=0.02,
         stall_timeout_s=LONG_TIMEOUT,
+        # A true no-op move (e.g. homing an axis already at step 0, or a
+        # serpentine turnaround that repeats a target) waits out the
+        # start window before concluding nothing moved. Keep it short so
+        # the emulator-backed scan tests don't pay 1 s per no-op.
+        start_timeout_s=0.3,
         coord=coord,
     )
 
@@ -217,7 +223,7 @@ def test_scan_el_first_swaps_axes(client):
 def test_default_coord_is_serialize_off(client):
     """Standalone ``MotorClient`` (no ``coord=`` kwarg) must build an
     internal coordinator with ``serialize=False``. Otherwise existing
-    callers (``scripts/motor_control.py``, the ``motor_loop`` path
+    callers (``scripts/motor_scan.py``, the ``motor_loop`` path
     when ``serialize_motion_and_switching`` is unset) would silently
     start serializing against switching.
     """
@@ -387,6 +393,77 @@ def test_home_stop_event_bails_without_raising(client):
     started = time.monotonic()
     motor.home(stop_event=stop_event)  # must return, not raise or block
     assert time.monotonic() - started < 1.0
+
+
+def test_send_and_wait_waits_for_move_to_start(transport):
+    """Regression for the home double-move bug.
+
+    After issuing a move, ``_send_and_wait`` must keep polling until the
+    commanded axis is actually *moving* before it concludes the move has
+    *stopped*. The failure mode it guards is the snapshot-propagation
+    race: the just-sent command has not yet been reflected in the
+    metadata hash, so the first stop-poll reads a stale at-rest snapshot
+    (``pos == target``) and returns immediately — letting ``home`` fire
+    the el command while az is still moving.
+
+    The injected sequence mirrors real motor status fields (``az_pos`` /
+    ``az_target_pos`` / ``el_pos`` / ``el_target_pos``): a stale at-rest
+    frame, then the move registering and progressing, then arrival.
+    """
+    motor = MotorClient(transport, poll_interval_s=0.001, stall_timeout_s=2.0)
+    seq = [
+        # [0] command not yet reflected — looks at-rest (the trap)
+        {"az_pos": 0, "az_target_pos": 0, "el_pos": 0, "el_target_pos": 0},
+        # [1] target now registered, az under way
+        {"az_pos": 0, "az_target_pos": 100, "el_pos": 0, "el_target_pos": 0},
+        # [2] still moving
+        {"az_pos": 60, "az_target_pos": 100, "el_pos": 0, "el_target_pos": 0},
+        # [3] arrived
+        {"az_pos": 100, "az_target_pos": 100, "el_pos": 0, "el_target_pos": 0},
+    ]
+    idx = {"n": 0}
+
+    def fake_status():
+        i = min(idx["n"], len(seq) - 1)
+        idx["n"] += 1
+        return seq[i]
+
+    with (
+        patch.object(motor._proxy, "send_command", return_value=None),
+        patch.object(motor, "_motor_status", side_effect=fake_status),
+    ):
+        motor._send_and_wait(
+            "az_target_steps", label="home az", target_steps=100
+        )
+    # If it had returned on the stale at-rest frame [0] it would have read
+    # exactly once. Reaching arrival proves it waited through start->stop.
+    assert idx["n"] >= 4
+
+
+def test_send_and_wait_noop_returns_after_start_timeout(transport):
+    """A move that is already at its target (no motion ever observed)
+    must return after ``start_timeout_s`` rather than racing straight
+    through the wait. This is the genuine no-op path (e.g. ``home`` when
+    an axis is already at step 0); it must not hang, and must not return
+    instantly the way the old stop-only wait did.
+    """
+    motor = MotorClient(transport, poll_interval_s=0.005, stall_timeout_s=2.0)
+    motor.start_timeout_s = 0.15
+    at_rest = {
+        "az_pos": 0,
+        "az_target_pos": 0,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }
+    with (
+        patch.object(motor._proxy, "send_command", return_value=None),
+        patch.object(motor, "_motor_status", return_value=at_rest),
+    ):
+        started = time.monotonic()
+        motor._send_and_wait("az_target_steps", label="noop", target_steps=0)
+        elapsed = time.monotonic() - started
+    assert elapsed >= 0.15
+    assert elapsed < 1.0
 
 
 def test_scan_uses_send_and_wait_helper(client):

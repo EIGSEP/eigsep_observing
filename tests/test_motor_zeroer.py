@@ -90,6 +90,40 @@ def test_zero_halts_and_resets(client):
     assert motor._emulator.elevation.target_pos == 0
 
 
+def test_jogs_block_until_move_completes(client):
+    """Serialized jogs (the 'up then left moves both' fix).
+
+    Each jog keystroke must block until its move finishes, so a
+    cross-axis jog issued on the very next keystroke cannot run while the
+    previous axis is still moving.
+
+    The emulator advances 60 steps per ~1 ms tick (only *status* is
+    throttled to 50 ms), so a normal jog finishes faster than the
+    manager's ``wait_for_start`` returns — which would mask the
+    non-blocking bug. Slowing the steppers to one step per tick makes the
+    move outlast ``wait_for_start``, so the old fire-and-forget jog would
+    return with the emulator still far from target (the fail-first).
+    """
+    zeroer = _zeroer(client.transport)
+    motor = client._manager.picos["motor"]
+    el = motor._emulator.elevation
+    az = motor._emulator.azimuth
+    el.max_pulses = 1
+    az.max_pulses = 1
+
+    zeroer.handle_key(ord("u"), 10.0)  # jog el up — must block until done
+    assert el.target_pos != 0  # precondition: a real move was commanded
+    assert el.position == el.target_pos  # blocked until el actually stopped
+    el_target = el.target_pos
+
+    zeroer.handle_key(ord("l"), 10.0)  # jog az left — must block until done
+    assert az.target_pos != 0
+    assert az.position == az.target_pos
+    # el never moved during the az jog: no concurrent two-axis motion.
+    assert el.target_pos == el_target
+    assert el.position == el_target
+
+
 def test_status_text_waiting_when_no_metadata(client):
     zeroer = _zeroer(client.transport)
     # Clear the motor metadata row so the reader raises KeyError.
@@ -125,10 +159,12 @@ def test_status_text_reflects_live_metadata(client):
 
 def test_jog_retries_on_require_status(client, monkeypatch):
     """If the firmware raises because ``last_status`` is empty, we
-    retry once after a short sleep."""
+    retry once after a short sleep. Jogs now route through the shared
+    MotorClient, so the flaky send is patched on its proxy.
+    """
     zeroer = _zeroer(client.transport)
     calls = {"n": 0}
-    real = zeroer._proxy.send_command
+    real = zeroer._motor_client._proxy.send_command
 
     def flaky(action, **kw):
         calls["n"] += 1
@@ -136,7 +172,7 @@ def test_jog_retries_on_require_status(client, monkeypatch):
             raise RuntimeError("No status from motor yet")
         return real(action, **kw)
 
-    monkeypatch.setattr(zeroer._proxy, "send_command", flaky)
+    monkeypatch.setattr(zeroer._motor_client._proxy, "send_command", flaky)
     # No exception means the retry worked.
     zeroer.jog_az(1.0)
     assert calls["n"] == 2
@@ -148,7 +184,7 @@ def test_jog_propagates_unrelated_runtime_error(client, monkeypatch):
     def boom(*_a, **_k):
         raise RuntimeError("unrelated firmware error")
 
-    monkeypatch.setattr(zeroer._proxy, "send_command", boom)
+    monkeypatch.setattr(zeroer._motor_client._proxy, "send_command", boom)
     with pytest.raises(RuntimeError, match="unrelated"):
         zeroer.jog_az(1.0)
 
