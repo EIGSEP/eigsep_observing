@@ -94,6 +94,37 @@ Redis transport is reachable.
   or at the operator level (terminal-orchestrated motion before
   VNA, like `vna_sweep`).
 
+## run_tag: active drivers claim it, passive readouts don't
+
+`run_tag` (`eigsep_observing.run_tag`) is the single Redis key naming
+which driver owns the panda's physical state right now; it is stamped
+into every corr / VNA file header for offline provenance. Bring-up
+scripts split into two classes by whether they change that state:
+
+- **Active drivers** — send commands or write VNA files
+  (`motor_manual`, `motor_control`, `rfswitch_manual`,
+  `tempctrl_manual`, `vna_manual`, `record_vna`). They **claim**
+  `run_tag.session(...)`. Because the ground PC is always recording
+  corr, the tag flags the spectra captured during a hand-driven
+  session as "not autonomous science." `run_tag.session` is
+  refuse-on-conflict, which here is a **safety feature**: it refuses to
+  start while another driver (the autonomous `panda_observe`, or
+  another active tool) owns the state, forcing the operator to stop the
+  autonomous driver before hand-driving shared hardware. One active
+  driver of the physical state at a time; combined motor+VNA runs use
+  the dedicated alt-mode `vna_position_sweep` in
+  `src/eigsep_observing/scripts/`.
+- **Passive readouts** — `MetadataSnapshotReader`-only, no commands, no
+  files (`imu_manual`, `monitor_meta`, `potmon_manual`, `lidar_manual`,
+  `pico_preflight`). They **never** claim `run_tag`: they change no
+  physical state, have no provenance to record, and must coexist with
+  whatever active driver is running. Claiming would block that
+  coexistence and misattribute a concurrent driver's files.
+
+`tests/test_obs_config_uploaders.py` enforces the split both ways:
+active drivers (plus the autonomous uploaders) must enter
+`run_tag.session`; exempt (passive / coexisting) scripts must not.
+
 ## Cross-process coordination is YAGNI
 
 If a future workflow genuinely needs "pause the production

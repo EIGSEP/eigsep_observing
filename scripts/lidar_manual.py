@@ -16,7 +16,6 @@ import time
 
 from eigsep_redis import MetadataSnapshotReader
 
-from eigsep_observing import run_tag
 from eigsep_observing._scripts_util import add_redis_args, build_transport
 from eigsep_observing.utils import configure_eig_logger
 
@@ -105,12 +104,15 @@ def main():
     transport = build_transport(
         args.dummy, host=args.redis_host, real_port=args.redis_port
     )
-    with run_tag.session(transport, "lidar_manual"):
-        snapshot = MetadataSnapshotReader(transport)
-        try:
-            _render_loop(snapshot, args.interval, args.max_range)
-        except KeyboardInterrupt:
-            print()
+    # Passive readout: no run_tag.session, by design. Snapshot-only
+    # (MetadataSnapshotReader), no commands or files, so it changes no
+    # physical state and must coexist with the active driver it watches.
+    # See imu_manual.py / scripts/CLAUDE.md for the active-vs-passive rule.
+    snapshot = MetadataSnapshotReader(transport)
+    try:
+        _render_loop(snapshot, args.interval, args.max_range)
+    except KeyboardInterrupt:
+        print()
 
 
 if __name__ == "__main__":

@@ -1,9 +1,10 @@
 """Structural guards on the obs_config upload + run_tag.session contract.
 
-Three AST-level invariants on the ``scripts/`` and
+AST-level invariants on the ``scripts/`` and
 ``src/eigsep_observing/scripts/`` directories. They fail closed so a
-future PR can't quietly add a fourth uploader, drop a session wrap, or
-let an uploader stop publishing its owner.
+future PR can't quietly add an uploader, drop a session wrap from an
+active driver, let an exempt (passive/coexisting) script start claiming
+the tag, or let an uploader stop publishing its owner.
 """
 
 import ast
@@ -22,33 +23,38 @@ UPLOADER_SCRIPTS = {
     "vna_position_sweep.py",
 }
 
-# Panda-side bring-up scripts that must enter run_tag.session so corr
-# and VNA files written during their run carry the active driver's
-# identity in the run_tag overlay.
-BRING_UP_SCRIPTS = {
+# Panda-side ACTIVE driver scripts that must enter run_tag.session.
+# These send commands or write VNA files, so they change physical state
+# that affects the always-recording corr/VNA data; the run_tag overlay
+# flags those files with the active driver's identity ("hand-driven, not
+# autonomous science"). refuse-on-conflict makes them mutually exclusive
+# with the autonomous driver and each other — one active driver of the
+# physical state at a time (combined motor+VNA runs use the dedicated
+# alt-mode vna_position_sweep). Passive readouts are NOT here; they only
+# read snapshots and must coexist, so they live in RUN_TAG_EXEMPT.
+ACTIVE_DRIVER_SCRIPTS = {
     "vna_manual.py",
     "rfswitch_manual.py",
     "tempctrl_manual.py",
     "motor_manual.py",
     "motor_control.py",
-    "potmon_manual.py",
-    "lidar_manual.py",
-    "pico_preflight.py",
-    "monitor_meta.py",
+    "record_vna.py",
 }
 
-# Scripts explicitly exempt from publishing run_tag:
+# Scripts explicitly exempt from publishing run_tag, with the reason:
+#   - Passive readouts (imu_manual.py, monitor_meta.py,
+#     potmon_manual.py, lidar_manual.py, pico_preflight.py):
+#     MetadataSnapshotReader-only — no commands, no files — so they
+#     change no physical state and have no provenance to record. They
+#     must coexist with whatever active driver is running, so they must
+#     NOT claim the refuse-on-conflict tag. See imu_manual.py /
+#     scripts/CLAUDE.md for the active-vs-passive rule.
 #   - live_status.py / live_plotter.py: long-running dashboards that
 #     may run alongside any driver; publishing would trample or be
 #     refused by the session check.
-#   - record_metadata.py / record_vna.py: test-bench recorders that
-#     run alongside the active driver(s); same trample/refuse concern
-#     as the dashboards.
-#   - imu_manual.py: read-only IMU readout (MetadataSnapshotReader
-#     only, no commands, no files) that must coexist with the driver
-#     it watches; claiming the tag would block that coexistence and
-#     misattribute a concurrent observer's files. See its main() for
-#     the full rationale.
+#   - record_metadata.py: test-bench metadata recorder that runs
+#     alongside the active driver(s); it only reads/relays metadata and
+#     drives no hardware, so it coexists like the dashboards.
 #   - observe.py: ground-PC eigsep-observe writer, a consumer of the
 #     panda transport (it reads obs_config but never publishes run_tag).
 #   - SNAP-side scripts (republish_header.py, adc_snapshot*.py,
@@ -61,7 +67,6 @@ RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
     "record_metadata.py",
-    "record_vna.py",
     "observe.py",
     "republish_header.py",
     "adc_snapshot.py",
@@ -69,6 +74,10 @@ RUN_TAG_EXEMPT = {
     "capture_spectrum.py",
     "fpga_init.py",
     "imu_manual.py",
+    "monitor_meta.py",
+    "potmon_manual.py",
+    "lidar_manual.py",
+    "pico_preflight.py",
     "clear_run_tag.py",
 }
 
@@ -145,15 +154,16 @@ def test_obs_config_upload_whitelist():
     )
 
 
-def test_bring_up_scripts_use_run_tag_session():
-    """Every panda-side driver script enters ``run_tag.session``.
+def test_active_driver_scripts_use_run_tag_session():
+    """Every active panda-side driver enters ``run_tag.session``.
 
-    Together with the refuse-on-conflict policy in
+    The active manual drivers plus the autonomous uploaders. Together
+    with the refuse-on-conflict policy in
     :func:`eigsep_observing.run_tag.session`, this means corr / VNA
     files written during a driver's run always carry that driver's
     identity in the ``run_tag`` overlay.
     """
-    must_publish = BRING_UP_SCRIPTS | UPLOADER_SCRIPTS
+    must_publish = ACTIVE_DRIVER_SCRIPTS | UPLOADER_SCRIPTS
     missing = []
     for path in _iter_script_files():
         if path.name not in must_publish:
@@ -163,6 +173,30 @@ def test_bring_up_scripts_use_run_tag_session():
             missing.append(str(path.relative_to(_REPO_ROOT)))
     assert not missing, (
         f"Scripts must wrap their main work in run_tag.session(...): {missing}"
+    )
+
+
+def test_exempt_scripts_do_not_claim_run_tag():
+    """Exempt scripts must NOT enter ``run_tag.session``.
+
+    The bidirectional partner to
+    :func:`test_active_driver_scripts_use_run_tag_session`: a script is
+    in ``RUN_TAG_EXEMPT`` *because* it must coexist (passive readout,
+    dashboard, recorder, or SNAP-side tool), so claiming the
+    refuse-on-conflict tag would block that coexistence. Fails closed —
+    would have caught ``record_vna`` sitting in ``RUN_TAG_EXEMPT`` while
+    still calling ``run_tag.session``.
+    """
+    offenders = []
+    for path in _iter_script_files():
+        if path.name not in RUN_TAG_EXEMPT:
+            continue
+        tree = _parse(path)
+        if _has_call_named(tree, "run_tag.session"):
+            offenders.append(str(path.relative_to(_REPO_ROOT)))
+    assert not offenders, (
+        "Exempt scripts must not call run_tag.session (they must coexist "
+        f"with the active driver): {offenders}"
     )
 
 
@@ -196,12 +230,13 @@ def test_script_directory_partition_is_total():
     silently bypass the previous two guards. This check forces the
     author to update the partition.
     """
-    known = BRING_UP_SCRIPTS | UPLOADER_SCRIPTS | RUN_TAG_EXEMPT
+    known = ACTIVE_DRIVER_SCRIPTS | UPLOADER_SCRIPTS | RUN_TAG_EXEMPT
     orphans = []
     for path in _iter_script_files():
         if path.name not in known:
             orphans.append(str(path.relative_to(_REPO_ROOT)))
     assert not orphans, (
-        "New scripts must be added to BRING_UP_SCRIPTS, UPLOADER_SCRIPTS, "
-        f"or RUN_TAG_EXEMPT in {Path(__file__).name}: {orphans}"
+        "New scripts must be added to ACTIVE_DRIVER_SCRIPTS, "
+        "UPLOADER_SCRIPTS, or RUN_TAG_EXEMPT in "
+        f"{Path(__file__).name}: {orphans}"
     )

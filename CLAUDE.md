@@ -113,6 +113,34 @@ restart required. The wiring:
   `metadata_stream.skip_to_latest()` to drop outage-era backlog (see
   the existing `Metadata flow` section below for why).
 
+## Manual sessions: the autonomous driver vs the always-on pico-manager
+
+An operator doing bring-up (e.g. `motor_manual`, `rfswitch_manual`)
+stops the autonomous driver `panda_observe` first — `run_tag.session`'s
+refuse-on-conflict enforces this (see `scripts/CLAUDE.md`). Stopping
+`panda_observe` is not all-or-nothing; know what actually goes quiet:
+
+- **Stops** (these are `panda_observe` threads): RF switch-schedule
+  cycling (`switch_loop` — the switch *freezes* in its last state, no
+  reset to RFANT), periodic VNA / motor scans (`vna_loop` / `motor_loop`),
+  and the `panda:hb*` heartbeat (so `panda_connected` reads `False`).
+- **Keeps running**: Peltier temperature control — the PI loop lives in
+  pico firmware and the connection/replay is owned by the always-on
+  `pico-manager.service`, not `panda_observe`. It only trips off (via
+  the firmware watchdog) if the pico loses its connection entirely.
+- **Keeps recording**: corr (ground PC, independent) and, now, its
+  sensor-metadata sidecar. The picos keep publishing metadata via
+  `pico-manager` even with `panda_observe` stopped, so
+  `record_corr_data` gates the metadata drain on **metadata-stream
+  reachability (`ConnectionError`)**, not on the heartbeat (the local
+  `metadata_stream_down` flag, not `panda_connected`). Corr files
+  written during a manual session therefore stay metadata-complete and
+  carry the active tool's `run_tag` flag.
+
+So "full functionality" (autonomous switching + periodic scans +
+heartbeat) only holds when `panda_observe` is running; manual debugging
+is a deliberate, flagged degraded mode, not a silent data gap.
+
 ## Metadata flow: streaming for corr, snapshot for VNA
 
 Two reader classes expose metadata with deliberately different semantics. They

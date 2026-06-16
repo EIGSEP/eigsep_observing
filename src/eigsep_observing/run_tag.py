@@ -1,13 +1,27 @@
-"""Cross-process tag identifying which panda script is driving the run.
+"""Cross-process tag identifying which driver owns the panda's state.
 
-Published by the panda-side entry-points
-(``eigsep-panda`` console script,
-``src/eigsep_observing/scripts/no_switch_observation.py``,
-``src/eigsep_observing/scripts/vna_position_sweep.py``) when they
-start, cleared in their ``finally`` blocks. Consumed by ``EigObserver.record_corr_data`` (corr
-file headers) and ``PandaClient.measure_s11`` (VNA file headers) so
-the active script's identity is captured per-file for offline
-provenance.
+Published (via :func:`session`) by the autonomous panda drivers — the
+``eigsep-panda`` console script (``panda_observe``),
+``no_switch_observation``, ``vna_position_sweep`` — and by the active
+manual bring-up drivers that send commands or write VNA files
+(``motor_manual``, ``motor_control``, ``rfswitch_manual``,
+``tempctrl_manual``, ``vna_manual``, ``record_vna``). The tag is
+cleared in their ``finally`` blocks. Consumed by
+``EigObserver.record_corr_data`` (corr file headers) and
+``PandaClient.measure_s11`` (VNA file headers) so each file records
+which driver owned the physical state when the data was captured — and
+in particular flags data taken during a hand-driven manual session
+rather than autonomous observing.
+
+Passive readouts (``imu_manual``, ``monitor_meta``, ``potmon_manual``,
+``lidar_manual``, ``pico_preflight``) deliberately do NOT publish: they
+change no physical state and must coexist with the active driver. See
+``scripts/CLAUDE.md`` for the active-vs-passive rule.
+
+:func:`session` is refuse-on-conflict: it refuses to start while a
+different driver owns the tag. Among these mutually-exclusive drivers
+that is the "stop the autonomous driver before hand-driving shared
+hardware" guard.
 
 Mirrors :mod:`eigsep_observing.file_heartbeat` and
 :mod:`eigsep_observing.snap_reinit`: a single Redis key holds a small
@@ -15,11 +29,10 @@ JSON blob, overwritten on each publish — consumers only ever care
 about the most recent value. ``clear`` overwrites with a null payload
 rather than deleting the key (Transport doesn't expose ``delete``).
 
-Steady-state runs publish ``"panda_observe"`` so downstream's
-``run_tag`` field is uniformly populated by exactly one of the three
-scripts that own the panda. A ``None`` then signals a misconfiguration
-(broken publish, panda not running, transport unavailable) rather than
-the default for normal operations.
+Steady-state runs publish ``"panda_observe"``. A ``None`` signals that
+no driver is active — a misconfiguration if something is recording
+(broken publish, panda not running, transport unavailable), not the
+default for normal operations.
 
 ``session`` auto-reclaims a stale tag whose holder is *provably dead*.
 An unclean shutdown (power loss, ``SIGKILL``, a hard reboot mid-run)
