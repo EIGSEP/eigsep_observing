@@ -32,7 +32,6 @@ BRING_UP_SCRIPTS = {
     "motor_manual.py",
     "motor_control.py",
     "potmon_manual.py",
-    "imu_manual.py",
     "lidar_manual.py",
     "pico_preflight.py",
     "monitor_meta.py",
@@ -45,6 +44,11 @@ BRING_UP_SCRIPTS = {
 #   - record_metadata.py / record_vna.py: test-bench recorders that
 #     run alongside the active driver(s); same trample/refuse concern
 #     as the dashboards.
+#   - imu_manual.py: read-only IMU readout (MetadataSnapshotReader
+#     only, no commands, no files) that must coexist with the driver
+#     it watches; claiming the tag would block that coexistence and
+#     misattribute a concurrent observer's files. See its main() for
+#     the full rationale.
 #   - observe.py: ground-PC eigsep-observe writer, a consumer of the
 #     panda transport (it reads obs_config but never publishes run_tag).
 #   - SNAP-side scripts (republish_header.py, adc_snapshot*.py,
@@ -61,6 +65,7 @@ RUN_TAG_EXEMPT = {
     "adc_snapshot_bench.py",
     "capture_spectrum.py",
     "fpga_init.py",
+    "imu_manual.py",
 }
 
 
