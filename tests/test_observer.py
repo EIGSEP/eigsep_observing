@@ -808,6 +808,14 @@ def test_record_corr_data_panda_connected_drains_metadata(
 
     # Push one sensor reading onto the panda metadata stream via the
     # real MetadataWriter (runs against fakeredis in DummyTransport).
+    #
+    # Fixture deviation: stream ``sensor_a`` and field ``temp_c`` are
+    # synthetic — neither is in ``SENSOR_SCHEMAS``. Intentional: this
+    # test exercises the drain → ``file.add_data`` forwarding path,
+    # which runs below the schema layer (``add_data`` is mocked, so the
+    # ``_avg_sensor_values`` reduction never runs). A real producer
+    # payload would add no coverage; see ``tests/test_io.py`` for the
+    # end-to-end producer→avg→write→read fixture round-trip.
     sample = {"temp_c": 23.5, "status": "update"}
     MetadataWriter(transport_panda).add("sensor_a", sample)
     # Rewind last-read-id so drain() picks up the entry we just pushed
@@ -861,6 +869,14 @@ def test_record_corr_data_drains_metadata_without_heartbeat(
     # stopped. Push one reading and rewind the read pointer so drain()
     # picks it up (mirrors test_..._panda_connected_drains_metadata, but
     # against the no-heartbeat transport).
+    #
+    # Fixture deviation: stream ``sensor_a`` and field ``temp_c`` are
+    # synthetic — neither is in ``SENSOR_SCHEMAS``. Intentional: this
+    # test exercises the ConnectionError-gated drain → ``file.add_data``
+    # forwarding path, which runs below the schema layer (``add_data`` is
+    # mocked, so the ``_avg_sensor_values`` reduction never runs). A real
+    # producer payload would add no coverage; see ``tests/test_io.py``
+    # for the end-to-end producer→avg→write→read fixture round-trip.
     sample = {"temp_c": 23.5, "status": "update"}
     MetadataWriter(transport_panda_down).add("sensor_a", sample)
     transport_panda_down.set_last_read_id("stream:sensor_a", "0-0")
