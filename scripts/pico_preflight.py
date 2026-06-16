@@ -31,6 +31,7 @@ import sys
 import time
 
 from eigsep_observing import run_tag
+from eigsep_observing._scripts_util import add_redis_args
 from eigsep_observing.io import SENSOR_SCHEMAS
 from eigsep_redis import HeartbeatReader, MetadataSnapshotReader, Transport
 from picohost.buses import PicoConfigStore
@@ -190,11 +191,7 @@ def _positive_float(value):
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument(
-        "--host",
-        default="10.10.10.11",
-        help="Redis host (default: panda IP 10.10.10.11)",
-    )
+    add_redis_args(p, default_host="10.10.10.11")
     p.add_argument(
         "--watch",
         type=_positive_float,
@@ -207,7 +204,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    transport = Transport(args.host)
+    transport = Transport(host=args.redis_host, port=args.redis_port)
     with run_tag.session(transport, "pico_preflight"):
         if args.watch is None:
             render(transport)
@@ -217,7 +214,7 @@ def main():
                 # ANSI clear + home so the table redraws in place.
                 sys.stdout.write("\x1b[2J\x1b[H")
                 print(
-                    f"pico_preflight @ {args.host}  "
+                    f"pico_preflight @ {args.redis_host}  "
                     f"({time.strftime('%H:%M:%S')})"
                 )
                 print()

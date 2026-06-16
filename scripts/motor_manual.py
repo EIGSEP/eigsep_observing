@@ -24,7 +24,11 @@ import logging
 from picohost.proxy import PicoProxy
 
 from eigsep_observing import MotorZeroer, run_tag
-from eigsep_observing._scripts_util import build_transport, require_pico
+from eigsep_observing._scripts_util import (
+    add_redis_args,
+    build_transport,
+    require_pico,
+)
 from eigsep_observing.utils import configure_eig_logger
 
 
@@ -100,6 +104,7 @@ def _parse_args():
         action="store_true",
         help="Run against a fakeredis-backed DummyPandaClient",
     )
+    add_redis_args(parser)
     parser.add_argument(
         "--deg",
         type=float,
@@ -111,7 +116,9 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    transport = build_transport(args.dummy)
+    transport = build_transport(
+        args.dummy, host=args.redis_host, real_port=args.redis_port
+    )
     require_pico(PicoProxy("motor", transport, source="motor_manual"))
     with run_tag.session(transport, "motor_manual"):
         curses.wrapper(_curses_main, transport, args)

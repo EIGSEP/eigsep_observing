@@ -29,7 +29,7 @@ from eigsep_redis import MetadataSnapshotReader
 import matplotlib
 import matplotlib.pyplot as plt
 
-from eigsep_observing._scripts_util import build_transport
+from eigsep_observing._scripts_util import add_redis_args, build_transport
 from eigsep_observing.io import _IMU_SCHEMA
 from eigsep_observing.utils import configure_eig_logger
 
@@ -252,19 +252,7 @@ def _parse_args():
         action="store_true",
         help="Run against a fakeredis-backed DummyPandaClient",
     )
-    parser.add_argument(
-        "--redis-host",
-        default="localhost",
-        help="Redis host (default: localhost). Set to the panda's IP to "
-        "run this readout from another computer on the rig network.",
-    )
-    parser.add_argument(
-        "--redis-port",
-        type=int,
-        default=6379,
-        help="Redis port (default: 6379). Ignored in --dummy mode, which "
-        "always targets the local fakeredis on 6380.",
-    )
+    add_redis_args(parser)
     parser.add_argument(
         "--which",
         choices=("el", "az", "both"),

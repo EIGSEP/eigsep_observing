@@ -18,7 +18,7 @@ import time
 from eigsep_redis import MetadataSnapshotReader
 
 from eigsep_observing import run_tag
-from eigsep_observing._scripts_util import build_transport
+from eigsep_observing._scripts_util import add_redis_args, build_transport
 from eigsep_observing.utils import configure_eig_logger
 
 
@@ -89,6 +89,7 @@ def _parse_args():
         action="store_true",
         help="Run against a fakeredis-backed DummyPandaClient",
     )
+    add_redis_args(parser)
     parser.add_argument(
         "--interval",
         type=float,
@@ -100,7 +101,9 @@ def _parse_args():
 
 def main():
     args = _parse_args()
-    transport = build_transport(args.dummy)
+    transport = build_transport(
+        args.dummy, host=args.redis_host, real_port=args.redis_port
+    )
     with run_tag.session(transport, "potmon_manual"):
         snapshot = MetadataSnapshotReader(transport)
         try:

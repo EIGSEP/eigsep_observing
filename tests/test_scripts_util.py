@@ -14,12 +14,17 @@ operator running a manual script depends on:
 
 from __future__ import annotations
 
+from argparse import ArgumentParser
 from unittest.mock import patch
 
 import pytest
 from eigsep_redis.testing import DummyTransport
 
-from eigsep_observing._scripts_util import build_transport, require_pico
+from eigsep_observing._scripts_util import (
+    add_redis_args,
+    build_transport,
+    require_pico,
+)
 from eigsep_observing.testing import DummyPandaClient
 
 
@@ -35,6 +40,35 @@ class _FakeProxy:
     def __init__(self, name, available):
         self.name = name
         self.is_available = available
+
+
+def test_add_redis_args_defaults_to_localhost():
+    parser = ArgumentParser()
+    add_redis_args(parser)
+    args = parser.parse_args([])
+    assert args.redis_host == "localhost"
+    assert args.redis_port == 6379
+
+
+def test_add_redis_args_overrides_parse():
+    parser = ArgumentParser()
+    add_redis_args(parser)
+    args = parser.parse_args(
+        ["--redis-host", "10.10.10.11", "--redis-port", "7000"]
+    )
+    assert args.redis_host == "10.10.10.11"
+    assert args.redis_port == 7000
+
+
+def test_add_redis_args_custom_default_host():
+    """Group B scripts (record_metadata, pico_preflight) keep their
+    rig-IP default while sharing the same flag names."""
+    parser = ArgumentParser()
+    add_redis_args(parser, default_host="10.10.10.11")
+    args = parser.parse_args([])
+    assert args.redis_host == "10.10.10.11"
+    # Port default is unaffected by a custom host default.
+    assert args.redis_port == 6379
 
 
 def test_require_pico_passes_when_available():

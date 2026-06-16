@@ -95,6 +95,41 @@ def build_transport_bare(
     return Transport(host=host, port=real_port)
 
 
+def add_redis_args(
+    parser,
+    *,
+    default_host: str = "localhost",
+    default_port: int = 6379,
+) -> None:
+    """Add the standard ``--redis-host`` / ``--redis-port`` flags.
+
+    Single source of truth for how every bring-up script under
+    ``scripts/`` exposes the Redis location, so an operator running any
+    of them from a remote machine uses the same flag names everywhere.
+    Pair with ``build_transport(args.dummy, host=args.redis_host,
+    real_port=args.redis_port)`` (or ``build_transport_bare``).
+
+    ``default_host`` is a parameter rather than hardcoded ``localhost``
+    because a few scripts (``record_metadata.py``, ``pico_preflight.py``)
+    are normally run from the ground computer *against* the panda and so
+    default to the rig IP; they get the same flag names without
+    regressing their no-arg behavior.
+    """
+    parser.add_argument(
+        "--redis-host",
+        default=default_host,
+        help=f"Redis host (default: {default_host}). Set to the panda's "
+        "IP to run from another computer on the rig network.",
+    )
+    parser.add_argument(
+        "--redis-port",
+        type=int,
+        default=default_port,
+        help=f"Redis port (default: {default_port}). Ignored in --dummy "
+        "mode, which always targets the local fakeredis on 6380.",
+    )
+
+
 def require_pico(proxy, *, hint_script: str = "pico_preflight.py") -> None:
     """Exit with a clear message if ``proxy``'s heartbeat is missing.
 
