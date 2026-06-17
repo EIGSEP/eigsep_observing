@@ -224,15 +224,23 @@ async function fetchJson(path) {
 // starts just below 0 so the DC bin (0 MHz) sits inside the axis
 // rather than hidden on the left spine, and ends at 250 MHz — the
 // 500 MHz real-sampling Nyquist (data tops out at 249.76 MHz) — so
-// the highest tick is the band edge. dtick=25 from tick0=0 puts
-// ticks at 0, 25, ..., 250.
+// the highest tick is the band edge.
+//
+// Ticks are left in Plotly's automatic ("nice number") tickmode, which
+// is matplotlib-style: it draws evenly-rounded labels for whatever span
+// is in view and recomputes them on zoom. So the full band shows ~6
+// round labels (0, 50, ..., 250) and zooming in automatically densifies
+// them — zoom into a 10 MHz window and you get 2 MHz ticks, etc. The old
+// fixed dtick=25 defeated this: it pinned 25 MHz spacing at every zoom
+// level, so labels vanished when you zoomed inside a 25 MHz window.
+// nticks caps the full-band density so a wide monitor doesn't creep back
+// toward a cluttered grid.
 // gridcolor (here and in every layout below) is stamped by
 // applyThemeToLayouts() from the active theme — see THEMES.
 const corrXaxis = {
   title: "Frequency [MHz]",
   range: [-5, 250],
-  tick0: 0,
-  dtick: 25,
+  nticks: 8,
 };
 
 // Plotly log axes take ranges in log10. [-2, 9] mirrors the legacy
