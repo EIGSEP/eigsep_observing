@@ -706,6 +706,12 @@ _PELTIER_SCHEMA = {
     "watchdog_tripped": bool,
     "watchdog_timeout_ms": int,
     "T_now": float,
+    # Analog-thermistor diagnostics added by pico-firmware #109: the Pico
+    # reports the raw ADC voltage at the divider node and the derived
+    # thermistor resistance alongside the converted temperature. Scalar
+    # floats, so they reduce via the standard float->mean path.
+    "voltage": float,
+    "resistance": float,
     "timestamp": float,
     "T_target": float,
     "drive_level": float,
