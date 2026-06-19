@@ -1115,18 +1115,24 @@ def _avg_rfswitch_metadata(value):
 # ----------------------------------------------------------------------
 # Categorical-disagreement detection for invariant fields.
 #
-# A handful of fields in SENSOR_SCHEMAS should be physical constants for
-# the lifetime of a stream: a Pico's app_id is hardcoded in firmware, a
-# stream's sensor_name is fixed, the tempctrl watchdog timeout is config.
-# If two readings inside a single integration disagree on one of these,
-# something is wrong upstream — Pico misconfiguration, stream cross-talk,
-# memory corruption, etc.
+# A handful of fields in SENSOR_SCHEMAS should be constant within a
+# single integration: a Pico's app_id is hardcoded in firmware, a
+# stream's sensor_name is fixed, the tempctrl watchdog timeout is config,
+# and the motor's boot_id is constant for the life of a boot. If two
+# readings inside one integration disagree, what it means depends on the
+# field: for sensor_name / app_id / watchdog_timeout_ms something is
+# wrong upstream (Pico misconfiguration, stream cross-talk, memory
+# corruption), whereas a boot_id disagreement is a legitimate hardware
+# event — the Pico power-cycled inside the window and its step counters
+# reset. `_log_invariant_disagreement` is field-aware so the operator
+# gets the right diagnosis either way.
 #
-# We log this as ERROR (not WARNING) because it should never happen and
-# always wants attention. We throttle per (stream, field) at 60s so a
-# persistent producer bug doesn't drown the log file: the corr loop runs
-# at ~4 Hz, so an unthrottled log of every disagreement could emit
-# ~14k events/hour for a chronically-broken sensor.
+# We log this as ERROR (not WARNING) in both cases because it always
+# wants attention — a producer bug must be fixed, and a mid-integration
+# power-cycle means the motor lost its zero. We throttle per (stream,
+# field) at 60s so a persistent disagreement doesn't drown the log file:
+# the corr loop runs at ~4 Hz, so an unthrottled log of every
+# disagreement could emit ~14k events/hour for a chronic case.
 #
 # Non-invariant fields that legitimately change inside an integration
 # (the tempctrl `watchdog_tripped` fault flag, the
@@ -1165,11 +1171,27 @@ def _log_invariant_disagreement(app_name, field, observed):
     if now - last < _INVARIANT_LOG_THROTTLE_S:
         return
     _last_invariant_log[key] = now
+    observed_repr = sorted(set(observed), key=str)
+    if field == "boot_id":
+        # A boot_id change within one integration is a real hardware
+        # event, not a producer bug: the Pico power-cycled inside the
+        # ~0.25 s window and its firmware drew a fresh per-boot id (the
+        # motor step counters reset with it). Still ERROR — it always
+        # wants attention — but the diagnosis points at the hardware.
+        diagnosis = (
+            "the Pico power-cycled mid-integration and re-seeded its "
+            "per-boot id (motor step counters reset). This is a hardware "
+            "event, not a producer bug."
+        )
+    else:
+        diagnosis = (
+            "This should never happen; check the producer for "
+            "misconfiguration or stream cross-talk."
+        )
     logger.error(
         f"Invariant metadata field '{field}' for stream '{app_name}' "
-        f"disagreed within an integration: observed "
-        f"{sorted(set(observed), key=str)}. This should never happen; "
-        f"check the producer for misconfiguration or stream cross-talk."
+        f"disagreed within an integration: observed {observed_repr}. "
+        f"{diagnosis}"
     )
 
 
@@ -1200,9 +1222,12 @@ def _avg_sensor_values(value, schema=None, *, app_name=""):
     ``status: "update"`` for the row.
 
     For ``int``/``str`` fields in :data:`_INVARIANT_FIELDS`
-    (``sensor_name``, ``app_id``, ``watchdog_timeout_ms``), a
-    disagreement also emits a throttled ERROR log via
-    :func:`_log_invariant_disagreement`. ``app_name`` is the stream
+    (``sensor_name``, ``app_id``, ``watchdog_timeout_ms``, ``boot_id``),
+    a disagreement also emits a throttled ERROR log via
+    :func:`_log_invariant_disagreement`. That log is field-aware: for the
+    true producer-side invariants the message points at misconfiguration,
+    while a ``boot_id`` disagreement is reported as the hardware event it
+    is (a Pico power-cycle mid-integration). ``app_name`` is the stream
     name used as log context.
 
     Without a *schema*, falls back to type-sniffing from the first
