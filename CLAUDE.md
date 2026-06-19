@@ -248,17 +248,20 @@ with `status: "update"` is fully clean; a row with `status: "error"` had at
 least one bad raw sample, and the data fields shown are the average (or min,
 or any, etc.) of the survivors.
 
-**Invariant fields.** A few fields should be physical constants for the
-lifetime of a stream — `sensor_name`, `app_id`, `watchdog_timeout_ms`,
+**Invariant fields.** A few fields should be constant within a single
+integration — `sensor_name`, `app_id`, `watchdog_timeout_ms`, and
 `boot_id` (the motor firmware's random per-boot constant, picohost
-3.7.0; constant per *boot* rather than per stream — a mid-integration
-disagreement means the pico power-cycled inside the window, which is
-exactly the loud-ERROR event this path exists for). If two
-raw samples in a single integration disagree on one of these, that's a
+3.7.0; constant per *boot* rather than per stream). A disagreement
+between two raw samples in one integration means different things by
+field: for `sensor_name` / `app_id` / `watchdog_timeout_ms` it's a
 producer-side bug (Pico misconfiguration, stream cross-talk, memory
-corruption). It's logged at ERROR, throttled to once per 60s per (stream,
-field) so a chronic bug doesn't drown the log file at the corr loop's ~4 Hz.
-The reduction itself still produces a value (`min` for int, `"UNKNOWN"` for
+corruption); for `boot_id` it's a legitimate hardware event — the pico
+power-cycled inside the window and its step counters reset. Both are
+logged at ERROR — `_log_invariant_disagreement` is field-aware, so the
+operator gets the right diagnosis instead of chasing a producer bug
+after a reboot — and throttled to once per 60s per (stream, field) so a
+chronic case doesn't drown the log file at the corr loop's ~4 Hz. The
+reduction itself still produces a value (`min` for int, `"UNKNOWN"` for
 str), so the file stays well-formed and the row doesn't get dropped.
 
 **What is *not* logged.** Disagreement on non-invariant fields (cal levels,

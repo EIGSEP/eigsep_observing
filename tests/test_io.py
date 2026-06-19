@@ -988,6 +988,33 @@ def test_avg_metadata_invariant_disagreement_throttled(caplog):
     )
 
 
+def test_invariant_disagreement_message_is_field_aware(caplog):
+    """`boot_id` is an invariant field, but a mid-integration change is a
+    real hardware event (the Pico power-cycled), not a producer bug. The
+    ERROR message must reflect that so an operator doesn't chase phantom
+    misconfiguration after a reboot, while the true producer-side
+    invariants keep the "check the producer" diagnosis."""
+    with caplog.at_level(logging.ERROR, logger="eigsep_observing.io"):
+        io._last_invariant_log.clear()
+        io._log_invariant_disagreement("motor", "boot_id", [11, 22])
+        io._last_invariant_log.clear()
+        io._log_invariant_disagreement("imu_el", "app_id", [3, 99])
+
+    msgs = [
+        r.getMessage() for r in caplog.records if r.levelno == logging.ERROR
+    ]
+    boot_msg = next(m for m in msgs if "'boot_id'" in m)
+    app_msg = next(m for m in msgs if "'app_id'" in m)
+
+    # boot_id: hardware-event diagnosis, NOT producer misconfiguration.
+    assert "power-cycle" in boot_msg
+    assert "hardware event" in boot_msg
+    assert "misconfiguration" not in boot_msg
+    # app_id: the true-invariant producer-bug diagnosis is unchanged.
+    assert "misconfiguration" in app_msg
+    assert "power-cycle" not in app_msg
+
+
 def test_gap_fill_acc_cnts_linear():
     """Verify gap-filled acc_cnts are sequential (not exponential)."""
     with tempfile.TemporaryDirectory() as tmpdir:
