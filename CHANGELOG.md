@@ -1,5 +1,43 @@
 # Changelog
 
+## [2.6.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.5.0...v2.6.0) (2026-06-19)
+
+
+### Features
+
+* **corr:** surface corr-loop health (dropped integrations + readout time) ([fcfd16b](https://github.com/EIGSEP/eigsep_observing/commit/fcfd16b82438ea8cd888090178f998577b19027f))
+* **imu_manual:** add --plot live yaw/pitch/roll window ([be8853e](https://github.com/EIGSEP/eigsep_observing/commit/be8853e4901510a486c0ca3784beaf3d0bafa057))
+* **imu_manual:** add --redis-host/--redis-port for remote readout ([cc71e94](https://github.com/EIGSEP/eigsep_observing/commit/cc71e94575eae6db818ace0c0c937cf425ae839f))
+* **io:** add motor boot_id to schema and invariant fields ([5ce72f8](https://github.com/EIGSEP/eigsep_observing/commit/5ce72f83b799608bb44dd911f04be86aaae2e52e))
+* **io:** add tempctrl voltage/resistance to _PELTIER_SCHEMA ([ea7f20a](https://github.com/EIGSEP/eigsep_observing/commit/ea7f20a58b6756f63f043855bc233f3debb258e6))
+* **io:** add write/read_metadata_hdf5; align recorder with corr metadata format ([3076e0f](https://github.com/EIGSEP/eigsep_observing/commit/3076e0f2be775853d96fec40352b1f41c72394f0))
+* **live_status:** matplotlib-style tick density on corr plot zoom ([7f2382b](https://github.com/EIGSEP/eigsep_observing/commit/7f2382b26d47554d4c596ffeeb0258fb8894e22b))
+* **live-status:** flag stale picos with an amber tile and age ([e796c15](https://github.com/EIGSEP/eigsep_observing/commit/e796c15eb696ff1bcc0f3f4c5569c5c69d45367c))
+* **live-status:** sci-notation y-axis, visible DC bin, 25 MHz ticks to 250 ([6a169c9](https://github.com/EIGSEP/eigsep_observing/commit/6a169c91179268200085f456eda2cac7e751c998))
+* **live-status:** sunlight-readable themes (Sun/Light/Dark toggle) ([4f7cd9b](https://github.com/EIGSEP/eigsep_observing/commit/4f7cd9b35dd10adf4d51619339808413faa1d566))
+* **motor-control:** configurable per-axis scan grid via CLI ([9286fba](https://github.com/EIGSEP/eigsep_observing/commit/9286fbaaa797ebae7147870a914e03c4d61c300e))
+* **motor-manual:** require 'y' confirmation before zeroing ([c196cfa](https://github.com/EIGSEP/eigsep_observing/commit/c196cfaea23b8f58575d036b5bda57015b032650))
+* **motor-manual:** show axis degrees alongside raw step counts ([#138](https://github.com/EIGSEP/eigsep_observing/issues/138)) ([c844d3b](https://github.com/EIGSEP/eigsep_observing/commit/c844d3b78df8005e9b2ed7d34f2766d3b06127b7))
+* **motor:** go-home control in motor_manual + Ctrl-C home prompt in scan ([08ce226](https://github.com/EIGSEP/eigsep_observing/commit/08ce22672ef6d81c79533da9fc995b18d5c40356))
+* **run_tag:** active/passive driver split + manual-session metadata completeness ([#157](https://github.com/EIGSEP/eigsep_observing/issues/157)) ([f2e5340](https://github.com/EIGSEP/eigsep_observing/commit/f2e5340523c6d8b459531d214a2e6dea41efce26))
+* **run_tag:** auto-reclaim stale locks from provably-dead holders ([024e7db](https://github.com/EIGSEP/eigsep_observing/commit/024e7db00ec501f1586077713a201c0b9dc25ff9))
+* **scripts:** add clear_run_tag.py recovery tool for stale locks ([f6647a6](https://github.com/EIGSEP/eigsep_observing/commit/f6647a69335678b854f3b4c746fac49945b77710))
+* **tempctrl_manual:** step clamp up/down with c/C instead of cycling ([#151](https://github.com/EIGSEP/eigsep_observing/issues/151)) ([24f3b55](https://github.com/EIGSEP/eigsep_observing/commit/24f3b5566bba742664ae56d547f9ba656373a30e))
+* **tempctrl-manual:** add `p` hotkey to plot temperature vs time ([c5f2af8](https://github.com/EIGSEP/eigsep_observing/commit/c5f2af8316747601415d3f8af2c779cea1e0dfc0))
+* **tempctrl:** wire cooling_enabled runaway guard into config + manual script ([63b760d](https://github.com/EIGSEP/eigsep_observing/commit/63b760df46b4475bee85492b87941eb2d6b545f8))
+
+
+### Bug Fixes
+
+* changed argument pairs type int to str ([df0855e](https://github.com/EIGSEP/eigsep_observing/commit/df0855e87f8feb9dc41bf3831b067630e2451a3c))
+* don't claim run tag for imu manual ([cb553f4](https://github.com/EIGSEP/eigsep_observing/commit/cb553f4a33a56b0521c52c30bdcda844cf364c50))
+* **io:** field-aware invariant-disagreement log for boot_id ([e9b107d](https://github.com/EIGSEP/eigsep_observing/commit/e9b107d4430cb83f5d94051d724c9cfb0ee01b51))
+* **live_status:** bound transport connect timeout so Ctrl-C is snappy ([064de1d](https://github.com/EIGSEP/eigsep_observing/commit/064de1d7244a1be837bcd4ab6d047ced2994de43))
+* **live_status:** drain-time age semantics + poll-don't-wait ticks ([bc141b3](https://github.com/EIGSEP/eigsep_observing/commit/bc141b37638415312bb163706e3b0fa8dbea4868))
+* **live-status:** persist corr legend toggles across integrations ([4ea26c7](https://github.com/EIGSEP/eigsep_observing/commit/4ea26c75d736fb411c2e9153d835e21c440d6e06))
+* **motor:** serialize axis moves so home/jog never drive both motors ([5821e81](https://github.com/EIGSEP/eigsep_observing/commit/5821e8176052f9aacd33f0c0365760f9687afc99))
+* **run_tag:** route _holder_is_dead through shared read_json helper ([38c3ef8](https://github.com/EIGSEP/eigsep_observing/commit/38c3ef8612d3ed41e65b9f25df457cebdb9c6fbe))
+
 ## [2.5.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.4.0...v2.5.0) (2026-05-23)
 
 
