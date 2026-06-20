@@ -115,7 +115,7 @@ scripts split into two classes by whether they change that state:
   the dedicated alt-mode `vna_position_sweep` in
   `src/eigsep_observing/scripts/`.
 - **Passive readouts** — `MetadataSnapshotReader`-only, no commands, no
-  files (`imu_manual`, `monitor_meta`, `potmon_manual`, `lidar_manual`,
+  files (`imu_manual`, `watch_sensors`, `potmon_manual`, `lidar_manual`,
   `pico_preflight`). They **never** claim `run_tag`: they change no
   physical state, have no provenance to record, and must coexist with
   whatever active driver is running. Claiming would block that
