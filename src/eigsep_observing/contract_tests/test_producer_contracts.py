@@ -82,7 +82,6 @@ def _potmon_post_handler_reading():
     """
     pot = PicoPotentiometer.__new__(PicoPotentiometer)
     pot._cal = {
-        "pot_el": (100.0, -50.0),
         "pot_az": (200.0, -100.0),
     }
     captured = {}

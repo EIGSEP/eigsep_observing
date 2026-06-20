@@ -40,8 +40,6 @@ corr.auto_mag_median:
 # Site-geometry signals — operator fills these in after deployment.
 lidar.distance_m:
   healthy: null  # TODO: set from site geometry
-potmon.pot_el_angle:
-  healthy: null  # TODO
 potmon.pot_az_angle:
   healthy: null  # TODO
 

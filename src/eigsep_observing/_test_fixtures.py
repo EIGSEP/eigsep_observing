@@ -161,11 +161,11 @@ def _tempctrl_channel_entry(sensor_name, t_now, timestamp):
     return entry
 
 
-def _potmon_avg_entry(pot_el_voltage):
+def _potmon_avg_entry(pot_az_voltage):
     """One per-sample potmon entry as avg_metadata would emit it.
 
     Mirrors the post-``_pot_redis_handler`` shape that lands in Redis:
-    raw voltages plus the flattened cal slope/intercept and the derived
+    raw voltage plus the flattened cal slope/intercept and the derived
     angle. All-scalar per the picohost scalar-only contract; the cal
     fields are de-facto invariants for the lifetime of a stream.
 
@@ -185,14 +185,10 @@ def _potmon_avg_entry(pot_el_voltage):
         "sensor_name": "potmon",
         "status": "update",
         "app_id": 2,
-        "pot_el_voltage": pot_el_voltage,
-        "pot_az_voltage": 1.5,
-        "pot_el_cal_slope": 100.0,
-        "pot_el_cal_intercept": -50.0,
+        "pot_az_voltage": pot_az_voltage,
         "pot_az_cal_slope": 200.0,
         "pot_az_cal_intercept": -100.0,
-        "pot_el_angle": 100.0 * pot_el_voltage - 50.0,
-        "pot_az_angle": 200.0 * 1.5 - 100.0,
+        "pot_az_angle": 200.0 * pot_az_voltage - 100.0,
     }
 
 
@@ -259,13 +255,9 @@ VNA_METADATA = {
         "sensor_name": "potmon",
         "status": "update",
         "app_id": 2,
-        "pot_el_voltage": 1.5,
         "pot_az_voltage": 1.5,
-        "pot_el_cal_slope": 100.0,
-        "pot_el_cal_intercept": -50.0,
         "pot_az_cal_slope": 200.0,
         "pot_az_cal_intercept": -100.0,
-        "pot_el_angle": 100.0,
         "pot_az_angle": 200.0,
     },
     "potmon_ts": _SNAPSHOT_TS,

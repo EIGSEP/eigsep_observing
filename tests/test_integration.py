@@ -135,11 +135,7 @@ def test_metadata_has_expected_fields(client, transport):
 
     # Check potmon (uncalibrated — cal/angle fields are None)
     potmon = metadata.get("potmon", {})
-    assert isinstance(potmon["pot_el_voltage"], float)
     assert isinstance(potmon["pot_az_voltage"], float)
-    assert potmon["pot_el_cal_slope"] is None
-    assert potmon["pot_el_cal_intercept"] is None
-    assert potmon["pot_el_angle"] is None
     assert potmon["pot_az_cal_slope"] is None
     assert potmon["pot_az_cal_intercept"] is None
     assert potmon["pot_az_angle"] is None

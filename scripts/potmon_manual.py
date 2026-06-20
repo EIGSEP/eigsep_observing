@@ -1,11 +1,11 @@
 """Live potentiometer monitor readout for bring-up.
 
-Displays raw voltages and (calibration-derived) angles for both axes
-from the ``potmon`` metadata snapshot. Rotate the elevation / azimuth
-pots by hand and verify the values move smoothly through their range.
+Displays raw voltage and (calibration-derived) angle for the azimuth axis
+from the ``potmon`` metadata snapshot. Rotate the az pot by hand and verify
+the values move smoothly through their range.
 
 Read-only — calibration is a separate concern. Run the picohost
-``calibrate_pot.py`` script first if the angle columns show ``--``
+``calibrate_pot.py`` script first if the angle column shows ``--``
 (uncalibrated streams publish ``None`` for the cal/angle fields, which
 this script renders as ``--`` per the SENSOR_SCHEMAS contract).
 """
@@ -47,27 +47,19 @@ def _render(snapshot):
         print("Ctrl-C to exit.")
         sys.stdout.flush()
         return
-    el_v = _fmt(snap.get("pot_el_voltage"), "6.3f")
-    el_a = _fmt(snap.get("pot_el_angle"), "7.2f")
     az_v = _fmt(snap.get("pot_az_voltage"), "6.3f")
     az_a = _fmt(snap.get("pot_az_angle"), "7.2f")
     print("  axis     voltage      angle")
     print("  ----    --------    --------")
-    print(f"  el      {el_v} V   {el_a} deg")
     print(f"  az      {az_v} V   {az_a} deg")
     print()
     print(f"  status: {snap.get('status')!r}")
-    cal_el = snap.get("pot_el_cal_slope")
-    cal_az = snap.get("pot_az_cal_slope")
-    if cal_el is None or cal_az is None:
+    if snap.get("pot_az_cal_slope") is None:
         # Uncalibrated streams emit None for all cal/angle fields. Tell
         # the operator how to fix it instead of leaving them to wonder
         # why the angle column is blank.
         print()
-        print(
-            "  one or both axes uncalibrated — run picohost's "
-            "calibrate_pot.py first."
-        )
+        print("  az uncalibrated — run picohost's calibrate_pot.py first.")
     print()
     print("Ctrl-C to exit.")
     sys.stdout.flush()

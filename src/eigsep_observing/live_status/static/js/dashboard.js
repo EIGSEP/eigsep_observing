@@ -737,7 +737,6 @@ function renderPotmon(meta) {
   const v = entry.value || {};
   container.appendChild(makePaneStatusHeader("potmon", entry));
   const rows = [
-    ["el", `${fmt(v.pot_el_angle, 2)}° (${fmt(v.pot_el_voltage, 3)} V)`],
     ["az", `${fmt(v.pot_az_angle, 2)}° (${fmt(v.pot_az_voltage, 3)} V)`],
   ];
   for (const [lab, txt] of rows) {

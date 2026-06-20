@@ -1261,14 +1261,10 @@ def test_metadata_end_to_end_round_trip():
                     "sensor_name": "potmon",
                     "status": "update",
                     "app_id": 2,
-                    "pot_el_voltage": 1.5 + 0.001 * i,
-                    "pot_az_voltage": 1.5,
-                    "pot_el_cal_slope": 100.0,
-                    "pot_el_cal_intercept": -50.0,
+                    "pot_az_voltage": 1.5 + 0.001 * i,
                     "pot_az_cal_slope": 200.0,
                     "pot_az_cal_intercept": -100.0,
-                    "pot_el_angle": 100.0 * (1.5 + 0.001 * i) - 50.0,
-                    "pot_az_angle": 200.0 * 1.5 - 100.0,
+                    "pot_az_angle": 200.0 * (1.5 + 0.001 * i) - 100.0,
                 },
             ],
             "stream:tempctrl_lna": [
@@ -1418,13 +1414,9 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
                     "sensor_name": "potmon",
                     "status": "update",
                     "app_id": 2,
-                    "pot_el_voltage": 1.5 + 0.001 * i,
-                    "pot_az_voltage": 1.5,
-                    "pot_el_cal_slope": None,
-                    "pot_el_cal_intercept": None,
+                    "pot_az_voltage": 1.5 + 0.001 * i,
                     "pot_az_cal_slope": None,
                     "pot_az_cal_intercept": None,
-                    "pot_el_angle": None,
                     "pot_az_angle": None,
                 },
             ],
@@ -1469,18 +1461,14 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
         potmon_rows = read_meta["potmon"]
         assert len(potmon_rows) == n
         for i, row in enumerate(potmon_rows):
-            # Voltages averaged from a single survivor → that survivor's
+            # Voltage averaged from a single survivor → that survivor's
             # value, preserved as float across the JSON round trip.
-            assert row["pot_el_voltage"] == pytest.approx(1.5 + 0.001 * i)
-            assert row["pot_az_voltage"] == pytest.approx(1.5)
+            assert row["pot_az_voltage"] == pytest.approx(1.5 + 0.001 * i)
             # Cal/angle survivors were all None → reduction returns None
             # → JSON encode + decode preserves None (not 0.0, not "None",
             # not missing key).
-            assert row["pot_el_cal_slope"] is None
-            assert row["pot_el_cal_intercept"] is None
             assert row["pot_az_cal_slope"] is None
             assert row["pot_az_cal_intercept"] is None
-            assert row["pot_el_angle"] is None
             assert row["pot_az_angle"] is None
             # The integration is clean — no errored samples.
             assert row["status"] == "update"
