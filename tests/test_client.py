@@ -211,17 +211,24 @@ def test_read_switch_mode_from_redis_no_rfswitch_data(client):
     """Returns ``None`` if the rfswitch hasn't published yet — caller
     decides the fallback (``vna_loop`` falls back to RFANT with a
     warning)."""
-    # Wipe the rfswitch entry from the metadata snapshot.
-    client.transport.r.hdel("metadata", "rfswitch")
-    assert client._read_switch_mode_from_redis() is None
+    # Patch the snapshot reader rather than writing to Redis: the live
+    # DummyPicoRFSwitch emulator publishes every 50 ms and would
+    # overwrite any direct hset/hdel before the assertion under xdist.
+    with patch.object(
+        client.metadata_snapshot, "get", side_effect=KeyError("rfswitch")
+    ):
+        assert client._read_switch_mode_from_redis() is None
 
 
 def test_read_switch_mode_from_redis_unmapped_sw_state(client):
     """Returns ``None`` if the published ``sw_state`` doesn't map to a
     known mode — guards against firmware drift."""
-    bogus = json.dumps({"sensor_name": "rfswitch", "sw_state": 99999}).encode()
-    client.transport.r.hset("metadata", "rfswitch", bogus)
-    assert client._read_switch_mode_from_redis() is None
+    # Patch the snapshot reader rather than writing to Redis: the live
+    # DummyPicoRFSwitch emulator publishes every 50 ms and would
+    # overwrite bogus Redis data before the assertion under xdist.
+    bogus = {"sensor_name": "rfswitch", "sw_state": 99999}
+    with patch.object(client.metadata_snapshot, "get", return_value=bogus):
+        assert client._read_switch_mode_from_redis() is None
 
 
 def test_vna_loop_uses_redis_published_mode_for_switch_back(
