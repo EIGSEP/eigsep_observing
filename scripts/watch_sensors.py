@@ -39,13 +39,13 @@ _PANDA_STREAMS = [s for s in SENSOR_SCHEMAS if s != "adc_stats"]
 # derived angles rather than calibration constants.  Streams absent from this
 # dict fall back to all float fields in their SENSOR_SCHEMAS entry.
 _PLOT_FIELDS = {
-    "imu_el":        ("yaw", "pitch", "roll"),
-    "imu_az":        ("yaw", "pitch", "roll"),
-    "tempctrl_lna":  ("T_now", "T_target", "drive_level"),
+    "imu_el": ("yaw", "pitch", "roll"),
+    "imu_az": ("yaw", "pitch", "roll"),
+    "tempctrl_lna": ("T_now", "T_target", "drive_level"),
     "tempctrl_load": ("T_now", "T_target", "drive_level"),
-    "potmon":        ("pot_el_angle", "pot_az_angle"),
-    "motor":         ("az_pos", "el_pos"),
-    "lidar":         ("distance_m",),
+    "potmon": ("pot_el_angle", "pot_az_angle"),
+    "motor": ("az_pos", "el_pos"),
+    "lidar": ("distance_m",),
 }
 
 # Shown in the stream header line instead; redundant in the field list.
