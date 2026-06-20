@@ -48,7 +48,6 @@ _SUMMARY_FIELD_PRIORITY = (
     "el_pos",
     "T_now",
     "drive_level",
-    "pot_el_angle",
     "pot_az_angle",
     "yaw",
     "pitch",

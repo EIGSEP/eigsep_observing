@@ -149,11 +149,6 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "Lidar distance",
         unit="m",
     ),
-    "potmon.pot_el_angle": Signal(
-        "potmon.pot_el_angle",
-        "Potmon elevation angle",
-        unit="deg",
-    ),
     "potmon.pot_az_angle": Signal(
         "potmon.pot_az_angle",
         "Potmon azimuth angle",
