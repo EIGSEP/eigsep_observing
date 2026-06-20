@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.7.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.6.0...v2.7.0) (2026-06-20)
+
+
+### Features
+
+* **potmon:** drop el channel, az only ([9f162f4](https://github.com/EIGSEP/eigsep_observing/commit/9f162f441d4eb93a5374dd8199a9864cc2e4dc75))
+* **scripts:** add watch_sensors, --no-save on record_metadata, drop monitor_meta ([#161](https://github.com/EIGSEP/eigsep_observing/issues/161)) ([643917e](https://github.com/EIGSEP/eigsep_observing/commit/643917e7d8e1bf7be23ee56b633f3d1f2571f71d))
+
 ## [2.6.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.5.0...v2.6.0) (2026-06-19)
 
 
