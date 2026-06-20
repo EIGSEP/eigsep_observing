@@ -42,7 +42,7 @@ ACTIVE_DRIVER_SCRIPTS = {
 }
 
 # Scripts explicitly exempt from publishing run_tag, with the reason:
-#   - Passive readouts (imu_manual.py, monitor_meta.py,
+#   - Passive readouts (imu_manual.py, watch_sensors.py,
 #     potmon_manual.py, lidar_manual.py, pico_preflight.py):
 #     MetadataSnapshotReader-only — no commands, no files — so they
 #     change no physical state and have no provenance to record. They
@@ -74,7 +74,7 @@ RUN_TAG_EXEMPT = {
     "capture_spectrum.py",
     "fpga_init.py",
     "imu_manual.py",
-    "monitor_meta.py",
+    "watch_sensors.py",
     "potmon_manual.py",
     "lidar_manual.py",
     "pico_preflight.py",

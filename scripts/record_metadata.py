@@ -116,6 +116,14 @@ def _parse_args():
         help="Directory for the output HDF5 file.",
     )
     p.add_argument(
+        "--no-save",
+        action="store_true",
+        help=(
+            "Drain streams without writing a file — useful for monitoring "
+            "stream activity in the lab without accumulating output."
+        ),
+    )
+    p.add_argument(
         "--interval",
         type=float,
         default=1.0,
@@ -137,8 +145,9 @@ def main():
     configure_eig_logger(level=logging.INFO)
     args = _parse_args()
 
-    save_dir = args.save_dir
-    save_dir.mkdir(parents=True, exist_ok=True)
+    if not args.no_save:
+        save_dir = args.save_dir
+        save_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         transport = _build_transport(
@@ -153,11 +162,20 @@ def main():
         )
         return 1
 
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_path = save_dir / f"metadata_{timestamp}.h5"
-    logger.info(
-        "Recording metadata to %s (interval %.1fs)", out_path, args.interval
-    )
+    if args.no_save:
+        out_path = None
+        logger.info(
+            "Monitoring metadata streams (no file output, interval %.1fs)",
+            args.interval,
+        )
+    else:
+        timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        out_path = args.save_dir / f"metadata_{timestamp}.h5"
+        logger.info(
+            "Recording metadata to %s (interval %.1fs)",
+            out_path,
+            args.interval,
+        )
 
     stop_event = threading.Event()
 
@@ -174,20 +192,22 @@ def main():
     except KeyboardInterrupt:
         logger.info("KeyboardInterrupt, stopping.")
     finally:
-        # Write whatever we captured, even on an uncaught exit, so a run
-        # is never lost to a missed signal.
-        write_metadata_hdf5(out_path, collected)
+        if out_path is not None:
+            # Write whatever we captured, even on an uncaught exit, so a
+            # run is never lost to a missed signal.
+            write_metadata_hdf5(out_path, collected)
         if args.dummy:
             dummy_client = getattr(transport, "_dummy_client", None)
             if dummy_client is not None:
                 dummy_client.stop()
             transport.reset()
 
-    logger.info(
-        "Closed %s with %d stream(s).",
-        out_path,
-        len(collected),
-    )
+    if out_path is not None:
+        logger.info(
+            "Closed %s with %d stream(s).",
+            out_path,
+            len(collected),
+        )
     return 0
 
 
