@@ -3326,3 +3326,60 @@ def test_rfswitch_consecutive_transitions_reset_window(caplog):
         assert f.metadata["rfswitch"][8] == "RFNON"
 
         f.close()
+
+
+# Wiring for the 2-primary + 2-channel-aux deployment: primaries at
+# inputs 0/2, aux channels at 4/5, inputs 1/3 left open (filled by mux).
+_MUX_WIRING = {
+    "snap_id": "C000069",
+    "ants": {
+        "primA": {"snap": {"input": 0}},
+        "primB": {"snap": {"input": 2}},
+        "aux-ch1": {"snap": {"input": 4}},
+        "aux-ch2": {"snap": {"input": 5}},
+    },
+}
+
+
+def test_effective_input_to_ant_identity():
+    """mux=0: effective map is just the physical wiring inversion."""
+    out = io.effective_input_to_ant(_MUX_WIRING, 0)
+    assert out == {"0": "primA", "2": "primB", "4": "aux-ch1", "5": "aux-ch2"}
+
+
+def test_effective_input_to_ant_deployment_case():
+    """mux=3 ([T,T,F]): inputs 1,3 copy inputs 0,2; input 5 keeps own."""
+    out = io.effective_input_to_ant(_MUX_WIRING, 3)
+    assert out == {
+        "0": "primA",
+        "1": "primA",
+        "2": "primB",
+        "3": "primB",
+        "4": "aux-ch1",
+        "5": "aux-ch2",
+    }
+
+
+def test_effective_input_to_ant_open_input_no_copy_is_absent():
+    """An open input with its bit clear has no physical meaning -> absent."""
+    out = io.effective_input_to_ant(_MUX_WIRING, 0)
+    assert "1" not in out and "3" not in out
+
+
+def test_effective_input_to_ant_copy_source_unwired_is_absent():
+    """bit0 set but input 0 unwired -> nothing to copy -> input 1 absent."""
+    wiring = {"ants": {"primB": {"snap": {"input": 2}}}}
+    out = io.effective_input_to_ant(wiring, 1)  # bit0 set
+    assert "1" not in out
+
+
+def test_effective_input_to_ant_all_copies():
+    """mux=7: every odd input copies the even input below it."""
+    out = io.effective_input_to_ant(_MUX_WIRING, 7)
+    assert (
+        out["1"] == "primA" and out["3"] == "primB" and out["5"] == "aux-ch1"
+    )
+
+
+def test_effective_input_to_ant_empty_wiring():
+    assert io.effective_input_to_ant(None, 3) == {}

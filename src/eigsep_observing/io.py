@@ -138,6 +138,40 @@ def reshape_data(data, acc_bins=2, avg_even_odd=True):
     return reshaped
 
 
+def effective_input_to_ant(wiring, adc_mux_sel):
+    """Effective ``{input_str: antenna}`` map given the wiring and mux.
+
+    The correlator emits a fixed set of products keyed by digital input
+    position; ``adc_mux_sel`` (a 3-bit int) decides which physical
+    antenna actually feeds each odd input position. ``bit0`` routes
+    input 0's antenna into input 1, ``bit1`` routes input 2 into input
+    3, ``bit2`` routes input 4 into input 5; a clear bit leaves the odd
+    input on its own wired antenna.
+
+    Even inputs (0, 2, 4) always map to their wired antenna. The result
+    is sparse: an odd input that is open (un-wired) and not filled by a
+    copy — or a copy whose source input is itself un-wired — is omitted,
+    so a downstream label renderer falls back to the raw digital key
+    rather than inventing an antenna. ``wiring`` is the hardware manifest
+    (``{"ants": {name: {"snap": {"input": n}}}}``); ``None``/empty -> {}.
+    """
+    base = {}
+    for ant, spec in ((wiring or {}).get("ants") or {}).items():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        if inp is not None:
+            base[int(inp)] = ant
+    out = {}
+    for p in range(6):
+        if p % 2 == 1 and (adc_mux_sel >> (p // 2)) & 1:
+            src = p - 1  # the even input this odd input copies
+            if src in base:
+                out[str(p)] = base[src]
+        elif p in base:
+            out[str(p)] = base[p]
+    return out
+
+
 def append_corr_header(header, acc_cnts, sync_times):
     """
     Append header for correlation files with useful computed
