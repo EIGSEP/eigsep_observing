@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 from contextlib import contextmanager
+from copy import deepcopy
 from queue import Queue
 from threading import Event
 
@@ -9,7 +10,7 @@ import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing import corr as corr_mod
-from eigsep_observing.fpga import _FpgaLockProxy
+from eigsep_observing.fpga import _FpgaLockProxy, default_config
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing import DummyEigsepFpga, utils
 
@@ -125,6 +126,65 @@ _WIRING_WITH_PAMS = {
 def fpga_with_pams():
     """DummyEigsepFpga whose wiring declares PAMs on every antenna."""
     return DummyEigsepFpga(wiring=_WIRING_WITH_PAMS, program=False)
+
+
+def _cfg_for_version(major, minor, **overrides):
+    """A corr config declaring firmware ``major.minor``.
+
+    ``DummyEigsepFpga._make_fpga`` derives the dummy's
+    ``version_version`` register from ``cfg["fpg_version"]``, so the
+    dummy's "hardware" matches the declared firmware and the
+    version->acc_bins derivation can be exercised for either firmware.
+    """
+    cfg = deepcopy(default_config)
+    cfg["fpg_version"] = [major, minor]
+    cfg.update(overrides)
+    return cfg
+
+
+class TestFirmwareVersionLayout:
+    """acc_bins is derived from the firmware version register, not the
+    yaml config (the bitstream determines the data layout)."""
+
+    def test_acc_bins_v24_is_one(self):
+        """Firmware >= 2.4 emits a single spectrum -> acc_bins == 1."""
+        fpga = DummyEigsepFpga(cfg=_cfg_for_version(2, 4), program=False)
+        assert fpga.acc_bins == 1
+
+    def test_acc_bins_v23_is_two(self):
+        """Firmware < 2.4 emits even/odd -> acc_bins == 2."""
+        fpga = DummyEigsepFpga(cfg=_cfg_for_version(2, 3), program=False)
+        assert fpga.acc_bins == 2
+
+    def test_reconcile_stamps_layout_into_cfg_v24(self):
+        """The version-derived layout is written onto self.cfg so the
+        published config + header reflect the silicon."""
+        fpga = DummyEigsepFpga(cfg=_cfg_for_version(2, 4), program=False)
+        assert fpga.cfg["acc_bins"] == 1
+        assert fpga.cfg["avg_even_odd"] is False
+
+    def test_reconcile_stamps_layout_into_cfg_v23(self):
+        fpga = DummyEigsepFpga(cfg=_cfg_for_version(2, 3), program=False)
+        assert fpga.cfg["acc_bins"] == 2
+        assert fpga.cfg["avg_even_odd"] is True
+
+    def test_header_acc_bins_from_version(self):
+        fpga = DummyEigsepFpga(cfg=_cfg_for_version(2, 4), program=False)
+        header = fpga.header
+        assert header["acc_bins"] == 1
+        assert header["avg_even_odd"] is False
+
+    def test_reconcile_warns_on_stale_yaml_acc_bins(self, caplog):
+        """A yaml acc_bins that disagrees with the firmware is
+        auto-corrected with a WARNING (emergency-revert ergonomics)."""
+        cfg = _cfg_for_version(2, 4, acc_bins=2, avg_even_odd=True)
+        with caplog.at_level(logging.WARNING):
+            fpga = DummyEigsepFpga(cfg=cfg, program=False)
+        assert fpga.acc_bins == 1
+        assert any(
+            "acc_bins" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
 
 
 class TestEigsepFpga:

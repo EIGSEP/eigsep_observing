@@ -59,7 +59,9 @@ def compare_dicts(dict1, dict2):
             )
 
 
-def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
+def generate_data(
+    ntimes=60, raw=False, reshape=True, return_time_freq=False, acc_bins=1
+):
     """
     Generate random data for the tests.
 
@@ -73,6 +75,10 @@ def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
         Use the `io.reshape_data` function to reshape the data.
     return_time_freq : bool
         Return the number of time and frequency bins in the data.
+    acc_bins : int
+        Accumulation bins per integration the raw layout mimics. Default
+        1 matches the v2.4 single-spectrum firmware (production default);
+        pass 2 to generate even/odd raw data for the legacy firmware.
 
     Returns
     -------
@@ -97,12 +103,12 @@ def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
     cross = ["02", "04", "13", "15", "24", "35"]
     data = {}
     for k in autos:
-        shape = io.data_shape(ntimes, 2, nchan)
+        shape = io.data_shape(ntimes, acc_bins, nchan)
         data[k] = rng.integers(
             0, high=data_max, size=shape, dtype=native_dtype
         )
     for k in cross:
-        shape = io.data_shape(ntimes, 2, nchan, cross=True)
+        shape = io.data_shape(ntimes, acc_bins, nchan, cross=True)
         data[k] = rng.integers(
             data_min, high=data_max, size=shape, dtype=native_dtype
         )
@@ -110,7 +116,7 @@ def generate_data(ntimes=60, raw=False, reshape=True, return_time_freq=False):
     for k in data:
         data[k] = data[k].astype(dtype)
     if reshape:
-        data = io.reshape_data(data)
+        data = io.reshape_data(data, acc_bins=acc_bins)
     if raw:
         data = {k: v.tobytes() for k, v in data.items()}
     if return_time_freq:

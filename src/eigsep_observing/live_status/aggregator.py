@@ -709,8 +709,19 @@ class LiveStatusAggregator:
             last_pairs = pairs_data
         if last_acc_cnt is None:
             return None, True
+        # Data layout follows the firmware version the producer stamped
+        # on the corr header/config (acc_bins 1 for v2.4 single-spectrum,
+        # 2 for legacy even/odd).
+        corr_header = self.state.corr_header or {}
+        corr_config = self.state.corr_config or {}
+        acc_bins = corr_header.get("acc_bins", corr_config.get("acc_bins", 2))
+        avg_even_odd = corr_header.get(
+            "avg_even_odd", corr_config.get("avg_even_odd", True)
+        )
         try:
-            reshaped = reshape_data(last_pairs, avg_even_odd=True)
+            reshaped = reshape_data(
+                last_pairs, acc_bins=acc_bins, avg_even_odd=avg_even_odd
+            )
         except Exception as exc:
             logger.error("reshape_data failed: %s", exc)
             return None, True
