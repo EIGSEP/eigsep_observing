@@ -1,8 +1,10 @@
+import itertools
 import logging
 import pytest
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from cmt_vna.testing import DummyVNA
@@ -533,6 +535,50 @@ def test_record_corr_data_transient_header_blip_uses_cache(
     assert "Using cached corr header" in caplog.text
 
 
+@contextmanager
+def _deterministic_watchdog(observer):
+    """Make ``record_corr_data``'s liveness watchdog fire deterministically.
+
+    ``_tick_liveness_deadline`` arms a deadline on its first call and
+    only logs once ``time.monotonic()`` passes it — so the watchdog
+    needs at least two loop iterations to emit. These tests used to race
+    a real ``threading.Timer(1.5, stop_event.set)`` against a real
+    ``liveness_timeout`` window; on a loaded CI runner the wall-clock
+    stop could land before the second tick, the ERROR never logged, and
+    the ``any(...)`` assertion failed (observed flaking the 3.10 job).
+
+    This removes every real-time dependency:
+
+    - ``time.monotonic`` is replaced with a fake clock that advances a
+      full second per call, so the deadline (a sub-second
+      ``liveness_timeout``) is always exceeded by the second tick.
+      ``_tick_liveness_deadline`` is the only ``monotonic`` caller on
+      these watchdog paths, but the stop is driven separately (below),
+      so the clock only has to be monotonically increasing — exact
+      call-to-iteration alignment is not relied on.
+    - ``stop_event.wait`` is made non-blocking (returns the current
+      ``is_set()``), so the ``stop_event.wait(1)`` calls in the
+      header / stream-absent branches don't sleep.
+
+    The caller still drives ``stop_event`` from a counting closure on
+    whichever producer method the test exercises (``read`` or
+    ``get_header``), so the loop exits on its real control variable.
+    """
+    clock = itertools.count(1.0, 1.0)
+    with (
+        patch(
+            "eigsep_observing.observer.time.monotonic",
+            side_effect=lambda: next(clock),
+        ),
+        patch.object(
+            observer.stop_event,
+            "wait",
+            side_effect=lambda timeout=None: observer.stop_event.is_set(),
+        ),
+    ):
+        yield
+
+
 @patch("eigsep_observing.io.File")
 def test_record_corr_data_unsynced_watchdog_logs_and_waits(
     mock_file_class, observer_snap_only, caplog
@@ -551,17 +597,29 @@ def test_record_corr_data_unsynced_watchdog_logs_and_waits(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    observer.corr_config.upload_header({"sync_time": 0})
+    # Persistent sync_time=0 (SNAP not synchronized); stop the loop once
+    # the watchdog has ticked twice. get_header is the per-iteration hook
+    # on this path (read is never reached), so it doubles as the stop
+    # driver — deterministic, no wall-clock Timer.
+    calls = itertools.count(1)
 
-    stop_after = threading.Timer(1.5, observer.stop_event.set)
-    stop_after.start()
+    def get_header_side_effect():
+        if next(calls) >= 3:
+            observer.stop_event.set()
+        return {"sync_time": 0}
+
     caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
-    try:
+    with (
+        _deterministic_watchdog(observer),
+        patch.object(
+            observer.corr_config,
+            "get_header",
+            side_effect=get_header_side_effect,
+        ),
+    ):
         observer.record_corr_data(
             "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
         )
-    finally:
-        stop_after.cancel()
 
     # No data should have been read or written — no sync anchor.
     mock_file.add_data.assert_not_called()
@@ -586,20 +644,27 @@ def test_record_corr_data_no_header_ever_logs_and_waits(
     mock_file.__len__ = Mock(return_value=0)
     mock_file_class.return_value = mock_file
 
-    stop_after = threading.Timer(1.5, observer.stop_event.set)
-    stop_after.start()
+    # get_header raises every iteration (no cached header); count the
+    # calls and stop once the watchdog has ticked twice.
+    calls = itertools.count(1)
+
+    def get_header_side_effect():
+        if next(calls) >= 3:
+            observer.stop_event.set()
+        raise ValueError("no header")
+
     caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
-    try:
-        with patch.object(
+    with (
+        _deterministic_watchdog(observer),
+        patch.object(
             observer.corr_config,
             "get_header",
-            side_effect=ValueError("no header"),
-        ):
-            observer.record_corr_data(
-                "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
-            )
-    finally:
-        stop_after.cancel()
+            side_effect=get_header_side_effect,
+        ),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
+        )
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
@@ -681,20 +746,25 @@ def test_record_corr_data_read_timeout_watchdog_logs_and_waits(
 
     observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
-    stop_after = threading.Timer(1.5, observer.stop_event.set)
-    stop_after.start()
+    # read raises TimeoutError every iteration; count the calls and stop
+    # once the watchdog has ticked twice.
+    calls = itertools.count(1)
+
+    def read_side_effect(*a, **k):
+        if next(calls) >= 3:
+            observer.stop_event.set()
+        raise TimeoutError("no data")
+
     caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
-    try:
-        with patch.object(
-            observer.corr_reader,
-            "read",
-            side_effect=TimeoutError("no data"),
-        ):
-            observer.record_corr_data(
-                "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.2
-            )
-    finally:
-        stop_after.cancel()
+    with (
+        _deterministic_watchdog(observer),
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=0.05, liveness_timeout=0.2
+        )
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
@@ -720,18 +790,25 @@ def test_record_corr_data_read_stream_absent_watchdog_logs_and_waits(
 
     observer.corr_config.upload_header({"sync_time": 1713200000.0})
 
-    stop_after = threading.Timer(1.5, observer.stop_event.set)
-    stop_after.start()
+    # read returns (None, {}) every iteration (stream not created yet);
+    # count the calls and stop once the watchdog has ticked twice.
+    calls = itertools.count(1)
+
+    def read_side_effect(*a, **k):
+        if next(calls) >= 3:
+            observer.stop_event.set()
+        return (None, {})
+
     caplog.set_level(logging.ERROR, logger="eigsep_observing.observer")
-    try:
-        with patch.object(
-            observer.corr_reader, "read", return_value=(None, {})
-        ):
-            observer.record_corr_data(
-                "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
-            )
-    finally:
-        stop_after.cancel()
+    with (
+        _deterministic_watchdog(observer),
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+    ):
+        observer.record_corr_data(
+            "/tmp/test", ntimes=1, timeout=5, liveness_timeout=0.2
+        )
 
     mock_file.add_data.assert_not_called()
     mock_file.close.assert_called()
