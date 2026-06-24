@@ -3385,6 +3385,20 @@ def test_effective_input_to_ant_empty_wiring():
     assert io.effective_input_to_ant(None, 3) == {}
 
 
+def test_effective_input_to_ant_set_bit_overrides_wired_odd_input():
+    """A set bit copies the even input even when the odd input is itself
+    physically wired — the mux replaces the odd input's own antenna, so
+    the copy branch wins over the odd input's own wiring."""
+    wiring = {
+        "ants": {
+            "primA": {"snap": {"input": 0}},
+            "ownA1": {"snap": {"input": 1}},  # input 1 is wired...
+        }
+    }
+    # ...but bit0 set routes input 0's antenna into input 1, overriding it.
+    assert io.effective_input_to_ant(wiring, 1)["1"] == "primA"
+
+
 def test_pair_label_auto_mapped_has_digital_suffix():
     assert io.pair_label("0", {"0": "primA"}) == "primA [0]"
 

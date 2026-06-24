@@ -1303,6 +1303,26 @@ class TestAdcMuxSel:
         fpga.fpga.write_int("adc_mux_sel", 3)
         fpga.validate_config()  # must not raise
 
+    def test_initialize_fpga_then_header_chain(self):
+        """init writes the register and the header reads back that exact
+        value, deriving the matching input_to_ant — the producer seam
+        end to end (not the manual-write shortcut the unit tests use)."""
+        cfg = _cfg_for_version(2, 4, adc_mux_sel=[True, True, False])
+        fpga = DummyEigsepFpga(
+            cfg=cfg, wiring=_MUX_DEPLOY_WIRING, program=False
+        )
+        fpga.initialize_fpga(verify=True)
+        header = fpga.header
+        assert header["adc_mux_sel"] == 3
+        assert header["input_to_ant"] == {
+            "0": "primA",
+            "1": "primA",
+            "2": "primB",
+            "3": "primB",
+            "4": "aux-ch1",
+            "5": "aux-ch2",
+        }
+
 
 class TestInputSnapSelCache:
     """``Input.get_adc_snapshot`` caches the ``snap_sel`` listdev
