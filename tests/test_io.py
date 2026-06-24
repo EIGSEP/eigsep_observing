@@ -3383,3 +3383,49 @@ def test_effective_input_to_ant_all_copies():
 
 def test_effective_input_to_ant_empty_wiring():
     assert io.effective_input_to_ant(None, 3) == {}
+
+
+def test_pair_label_auto_mapped_has_digital_suffix():
+    assert io.pair_label("0", {"0": "primA"}) == "primA [0]"
+
+
+def test_pair_label_auto_unmapped_is_none():
+    assert io.pair_label("1", {"0": "primA"}) is None
+
+
+def test_pair_label_cross_mapped():
+    m = {"0": "primA", "2": "primB"}
+    assert io.pair_label("02", m) == "primA / primB [02]"
+
+
+def test_pair_label_cross_half_unmapped_is_none():
+    assert io.pair_label("13", {"3": "primB"}) is None
+
+
+def test_corr_pair_labels_uses_header_input_to_ant():
+    header = {
+        "input_to_ant": {
+            "0": "primA",
+            "1": "primA",
+            "2": "primB",
+            "3": "primB",
+        }
+    }
+    out = io.corr_pair_labels(header, ["0", "02", "13"])
+    assert out == {
+        "0": "primA [0]",
+        "02": "primA / primB [02]",
+        "13": "primA / primB [13]",
+    }
+
+
+def test_corr_pair_labels_falls_back_to_wiring_and_mux():
+    """Old-style header without input_to_ant: derive from wiring + mux."""
+    header = {"wiring": _MUX_WIRING, "adc_mux_sel": 3}
+    out = io.corr_pair_labels(header, ["13"])
+    assert out["13"] == "primA / primB [13]"
+
+
+def test_corr_pair_labels_unmappable_pair_is_none():
+    header = {"input_to_ant": {"0": "primA"}}
+    assert io.corr_pair_labels(header, ["02"]) == {"02": None}
