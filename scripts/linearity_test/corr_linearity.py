@@ -10,7 +10,7 @@ import numpy as np
 
 from eigsep_redis import Transport
 
-from eigsep_observing.corr import CorrReader
+from eigsep_observing.corr import CorrConfigStore, CorrReader
 from eigsep_observing.io import reshape_data
 
 parser = argparse.ArgumentParser(
@@ -36,6 +36,13 @@ args = parser.parse_args()
 transport = Transport(host=args.redis_host, port=args.redis_port)
 corr_reader = CorrReader(transport)
 print(f"Connected to Redis at {args.redis_host}:{args.redis_port}")
+
+# Data layout follows the firmware version the producer stamped on the
+# corr config (acc_bins 1 for v2.4 single-spectrum, 2 for legacy
+# even/odd). Read it once; the firmware does not change mid-run.
+_corr_cfg = CorrConfigStore(transport).get()
+acc_bins = _corr_cfg.get("acc_bins", 2)
+avg_even_odd = _corr_cfg.get("avg_even_odd", True)
 
 pairs = ["0", "1"]
 attens = []
@@ -69,7 +76,7 @@ while True:
             continue
         last_cnt = acc_cnt
         data = {k: v for k, v in data.items() if k in pairs}
-        data = reshape_data(data, avg_even_odd=True)
+        data = reshape_data(data, acc_bins=acc_bins, avg_even_odd=avg_even_odd)
         for p in pairs:
             pwr[p].append(np.sum(data[p]))
         collected += 1

@@ -33,9 +33,12 @@ from eigsep_observing.testing.utils import (
 
 
 def test_reshape_data():
-    # generate data like it is received from the SNAP
-    data, ntimes, nchan = generate_data(reshape=False, return_time_freq=True)
-    reshaped_data = io.reshape_data(data, avg_even_odd=False)
+    """Legacy even/odd firmware (acc_bins=2): split, optionally average."""
+    # generate even/odd data like the legacy SNAP firmware emits
+    data, ntimes, nchan = generate_data(
+        reshape=False, return_time_freq=True, acc_bins=2
+    )
+    reshaped_data = io.reshape_data(data, acc_bins=2, avg_even_odd=False)
     for k in data:
         assert k in reshaped_data
         assert reshaped_data[k].shape == (ntimes, nchan, 2)
@@ -56,7 +59,7 @@ def test_reshape_data():
                 cdata = real + 1j * imag
                 np.testing.assert_array_equal(cdata, reshaped_data[k][:, :, i])
     # test with averaging even and odd time steps — returns int32
-    reshaped_data = io.reshape_data(data, avg_even_odd=True)
+    reshaped_data = io.reshape_data(data, acc_bins=2, avg_even_odd=True)
     for k in data:
         assert k in reshaped_data
         if len(k) == 1:  # autocorrelations
@@ -76,6 +79,37 @@ def test_reshape_data():
             imag = avg[:, 1::2]
             np.testing.assert_array_equal(real, reshaped_data[k][:, :, 0])
             np.testing.assert_array_equal(imag, reshaped_data[k][:, :, 1])
+
+
+def test_reshape_data_single_spectrum():
+    """v2.4 firmware emits one spectrum per integration (no even/odd).
+
+    ``reshape_data(acc_bins=1)`` must NOT split/average an even/odd
+    axis: autos pass through as ``(ntimes, nchan)`` int32, and crosses
+    only split the interleaved real/imag into ``(ntimes, nchan, 2)``
+    int32.
+    """
+    ntimes, nchan = 3, 8
+    rng = np.random.default_rng(0)
+    dtype = np.dtype(">i4")
+    # Raw v2.4 layout: autos are nchan words; crosses are 2*nchan words
+    # (real/imag interleaved). No leading even/odd doubling.
+    auto = rng.integers(0, 2**30, size=(ntimes, nchan)).astype(dtype)
+    cross = rng.integers(-(2**30), 2**30, size=(ntimes, 2 * nchan)).astype(
+        dtype
+    )
+    data = {"0": auto.copy(), "02": cross.copy()}
+
+    reshaped = io.reshape_data(data, acc_bins=1)
+
+    assert reshaped["0"].shape == (ntimes, nchan)
+    assert reshaped["0"].dtype == np.int32
+    np.testing.assert_array_equal(reshaped["0"], auto)
+
+    assert reshaped["02"].shape == (ntimes, nchan, 2)
+    assert reshaped["02"].dtype == np.int32
+    np.testing.assert_array_equal(reshaped["02"][:, :, 0], cross[:, ::2])
+    np.testing.assert_array_equal(reshaped["02"][:, :, 1], cross[:, 1::2])
 
 
 def test_int32_rounding_unbiased():
@@ -442,9 +476,9 @@ def test_file():
     dtype = HEADER["dtype"]
     for p in pairs:
         if len(p) == 1:
-            shape = io.data_shape(ntimes, 2, 1024)
+            shape = io.data_shape(ntimes, HEADER["acc_bins"], 1024)
         else:
-            shape = io.data_shape(ntimes, 2, 1024, cross=True)
+            shape = io.data_shape(ntimes, HEADER["acc_bins"], 1024, cross=True)
         d = test_file.data[p]
         assert d.shape == shape
         assert d.dtype == dtype
@@ -471,9 +505,9 @@ def test_file():
     assert test_file.counter == 0
     for p in pairs:
         if len(p) == 1:
-            shape = io.data_shape(ntimes, 2, 1024)
+            shape = io.data_shape(ntimes, HEADER["acc_bins"], 1024)
         else:
-            shape = io.data_shape(ntimes, 2, 1024, cross=True)
+            shape = io.data_shape(ntimes, HEADER["acc_bins"], 1024, cross=True)
         d = test_file.data[p]
         assert d.shape == shape
         assert d.dtype == dtype
@@ -488,7 +522,13 @@ def test_file():
     fname = files[0]
     # check that the data is written correctly
     read_data, read_header, read_meta = io.read_hdf5(fname)
-    expected = _as_read_back(io.reshape_data(data, avg_even_odd=True))
+    expected = _as_read_back(
+        io.reshape_data(
+            data,
+            acc_bins=HEADER["acc_bins"],
+            avg_even_odd=HEADER["avg_even_odd"],
+        )
+    )
     compare_dicts(expected, read_data)
     # can't compare header with read_header since extra keys are added
     for key in HEADER:
