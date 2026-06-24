@@ -27,6 +27,13 @@ pol_delay:
 redis:
   host: localhost
   port: 6379
+# Input multiplexing (firmware >= 2.4 only). Copies an even input's
+# digitized stream into the odd input above it, filling otherwise-dead
+# odd-triad cross slots. Entries are [bit0, bit1, bit2] =
+# [input1<-ant0, input3<-ant2, input5<-ant4]; register int = b0+2*b1+4*b2.
+# All-false = no mux (identity, pre-v2.4 behavior). Likely field case:
+# [true, true, false] (register value 3). Ignored on firmware < 2.4.
+adc_mux_sel: [false, false, false]
 pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
 # Cadence for raw ADC snapshot publishing to Redis (seconds between
 # frames). Set to null or 0 to disable. This period only controls the
