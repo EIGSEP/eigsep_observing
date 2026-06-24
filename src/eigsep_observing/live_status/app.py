@@ -260,7 +260,7 @@ def _corr_payload(
             if arr is None or arr.size == 0:
                 continue
             label = _pair_label(pair, input_to_ant)
-            # Aggregator stores the output of reshape_data(avg_even_odd=True):
+            # Aggregator stores the output of reshape_data:
             #   autos   → shape (ntimes=1, nchan) int32
             #   crosses → shape (ntimes=1, nchan, 2) int32
             if arr.ndim == 3 and arr.shape[-1] == 2:

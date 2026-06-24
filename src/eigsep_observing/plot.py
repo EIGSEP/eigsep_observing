@@ -183,7 +183,11 @@ class LivePlotter:
         """Update plot data (called by animation)."""
         data = self.corr_reader.read(pairs=self.pairs, timeout=0)[-1]
         data = {k: v for k, v in data.items() if k in self.pairs}
-        data = reshape_data(data, avg_even_odd=True)
+        data = reshape_data(
+            data,
+            acc_bins=self.corr_cfg.get("acc_bins", 2),
+            avg_even_odd=self.corr_cfg.get("avg_even_odd", True),
+        )
         # Update magnitude plot
         for p, d in data.items():
             if len(p) == 1:  # Auto-correlation
