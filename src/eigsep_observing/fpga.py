@@ -35,6 +35,7 @@ from . import corr_health
 from .adc import AdcSnapshotWriter
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
 from .corr import CorrConfigStore, CorrWriter
+from .io import effective_input_to_ant
 from .utils import (
     calc_inttime,
     get_config_path,
@@ -314,6 +315,15 @@ class EigsepFpga:
         """
         return self._acc_bins
 
+    def _adc_mux_sel_int(self):
+        """Convert the cfg ``adc_mux_sel`` bool list to the register int.
+
+        Entries are [bit0, bit1, bit2]; value = b0 + 2*b1 + 4*b2. An
+        absent key (configs predating the feature) means no mux -> 0.
+        """
+        bits = self.cfg.get("adc_mux_sel", [False, False, False])
+        return sum(int(bool(b)) << i for i, b in enumerate(bits))
+
     def _reconcile_layout_from_firmware(self):
         """Derive the even/odd layout from the running firmware version
         and stamp it onto ``self.cfg``.
@@ -331,6 +341,8 @@ class EigsepFpga:
         major, minor = self.version
         acc_bins = 1 if (major, minor) >= (2, 4) else 2
         self._acc_bins = acc_bins
+        # adc_mux_sel register exists only on firmware >= 2.4.
+        self._adc_mux_supported = (major, minor) >= (2, 4)
         declared = self.cfg.get("acc_bins")
         if declared is not None and declared != acc_bins:
             self.logger.warning(
@@ -401,6 +413,11 @@ class EigsepFpga:
 
         corr_acc_len = self.fpga.read_uint("corr_acc_len")
         acc_bins = self.cfg["acc_bins"]
+        adc_mux_sel = (
+            self.fpga.read_uint("adc_mux_sel")
+            if self._adc_mux_supported
+            else 0
+        )
         t_int = calc_inttime(
             sample_rate * 1e6,  # in Hz
             corr_acc_len,
@@ -421,6 +438,8 @@ class EigsepFpga:
             "corr_word": self.cfg["corr_word"],
             "acc_bins": acc_bins,
             "avg_even_odd": self.cfg["avg_even_odd"],
+            "adc_mux_sel": adc_mux_sel,
+            "input_to_ant": effective_input_to_ant(wiring, adc_mux_sel),
             "dtype": self.cfg["dtype"],
             "pol_delay": {
                 "01": self.fpga.read_uint("pfb_pol01_delay"),
@@ -466,15 +485,20 @@ class EigsepFpga:
         fails = []
         for key, value in self.header.items():
             cfg_value = self.cfg.get(key)
-            if key in ("sync_time", "wiring"):
-                # sync_time is runtime-only; wiring lives in
-                # self.wiring, not self.cfg, so there's nothing in
-                # cfg to compare against.
+            if key in ("sync_time", "wiring", "input_to_ant"):
+                # sync_time is runtime-only; wiring lives in self.wiring;
+                # input_to_ant is derived from wiring + the mux register,
+                # not a cfg field.
                 continue
             if key == "pol_delay":
                 if set(value.keys()) != set(cfg_value.keys()):
                     fails.append(key)
                 elif any(value[k] != cfg_value[k] for k in value.keys()):
+                    fails.append(key)
+            elif key == "adc_mux_sel":
+                # header carries the int read from silicon; cfg carries
+                # the [b0,b1,b2] bool list. Compare on the int.
+                if value != self._adc_mux_sel_int():
                     fails.append(key)
             elif value != cfg_value:
                 fails.append(key)
@@ -750,6 +774,21 @@ class EigsepFpga:
         if verify:
             assert self.fpga.read_uint("corr_acc_len") == corr_acc_len
             assert self.fpga.read_uint("corr_scalar") == corr_scalar
+        mux = self._adc_mux_sel_int()
+        if self._adc_mux_supported:
+            self.logger.info(f"Setting ADC_MUX_SEL: {mux} (0b{mux:03b})")
+            self.fpga.write_int("adc_mux_sel", mux)
+            if verify:
+                assert self.fpga.read_uint("adc_mux_sel") == mux
+        elif mux != 0:
+            self.logger.warning(
+                "Config requests adc_mux_sel=%s (value %d) but firmware "
+                "v%d.%d has no adc_mux_sel register; input multiplexing is "
+                "unavailable. Inputs follow the physical wiring.",
+                self.cfg.get("adc_mux_sel"),
+                mux,
+                *self.version,
+            )
         self.set_pol_delay(pol_delay, verify=verify)
 
     def set_input(self):

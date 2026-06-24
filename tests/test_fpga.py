@@ -1243,6 +1243,67 @@ class TestFpgaLockProxy:
         assert fpga_instance.fpga.snap_ip == fpga_instance.fpga._fpga.snap_ip
 
 
+_MUX_DEPLOY_WIRING = {
+    "snap_id": "C000069",
+    "ants": {
+        "primA": {"snap": {"input": 0}},
+        "primB": {"snap": {"input": 2}},
+        "aux-ch1": {"snap": {"input": 4}},
+        "aux-ch2": {"snap": {"input": 5}},
+    },
+}
+
+
+class TestAdcMuxSel:
+    def test_initialize_fpga_writes_register(self):
+        cfg = _cfg_for_version(2, 4, adc_mux_sel=[True, True, False])
+        fpga = DummyEigsepFpga(cfg=cfg, program=False)
+        fpga.initialize_fpga(verify=True)
+        assert fpga.fpga.read_uint("adc_mux_sel") == 3
+
+    def test_header_carries_value_and_mapping(self):
+        cfg = _cfg_for_version(2, 4, adc_mux_sel=[True, True, False])
+        fpga = DummyEigsepFpga(
+            cfg=cfg, wiring=_MUX_DEPLOY_WIRING, program=False
+        )
+        fpga.fpga.write_int("adc_mux_sel", 3)
+        header = fpga.header
+        assert header["adc_mux_sel"] == 3
+        assert header["input_to_ant"] == {
+            "0": "primA",
+            "1": "primA",
+            "2": "primB",
+            "3": "primB",
+            "4": "aux-ch1",
+            "5": "aux-ch2",
+        }
+
+    def test_v23_nonzero_mux_warns_and_skips_write(self, caplog):
+        cfg = _cfg_for_version(2, 3, adc_mux_sel=[True, False, False])
+        fpga = DummyEigsepFpga(cfg=cfg, program=False)
+        with caplog.at_level(logging.WARNING):
+            fpga.initialize_fpga()
+        assert fpga.fpga.read_uint("adc_mux_sel") == 0
+        assert fpga.header["adc_mux_sel"] == 0
+        assert any(
+            "adc_mux_sel" in r.message and r.levelno == logging.WARNING
+            for r in caplog.records
+        )
+
+    def test_validate_config_detects_mux_mismatch(self):
+        cfg = _cfg_for_version(2, 4, adc_mux_sel=[True, True, False])
+        fpga = DummyEigsepFpga(cfg=cfg, program=False)
+        # register still 0, cfg asks for 3 -> mismatch
+        with pytest.raises(RuntimeError, match="adc_mux_sel"):
+            fpga.validate_config()
+
+    def test_validate_config_passes_when_register_matches(self):
+        cfg = _cfg_for_version(2, 4, adc_mux_sel=[True, True, False])
+        fpga = DummyEigsepFpga(cfg=cfg, program=False)
+        fpga.fpga.write_int("adc_mux_sel", 3)
+        fpga.validate_config()  # must not raise
+
+
 class TestInputSnapSelCache:
     """``Input.get_adc_snapshot`` caches the ``snap_sel`` listdev
     dispatch instead of probing the FPGA on every call. Saves one UDP
