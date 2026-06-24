@@ -1,5 +1,5 @@
 snap_ip: "10.10.10.12"
-fpg_file: "eigsep_fengine_1g_v_2_4.fpg"  # path to fpg file
+fpg_file: "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg"  # path to fpg file
 fpg_version: [2, 4]  # major, minor
 sample_rate: 500.0  # in MHz
 nchan: 1024

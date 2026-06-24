@@ -55,7 +55,7 @@ HEADER = {
     "acc_bins": 1,
     "avg_even_odd": False,
     "nchan": 1024,
-    "fpg_file": "eigsep_fengine_1g_v_2_4.fpg",
+    "fpg_file": "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg",
     "fpg_version": [2, 4],
     "corr_acc_len": 2**28,
     "corr_scalar": 2**9,
