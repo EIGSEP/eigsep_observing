@@ -3429,3 +3429,9 @@ def test_corr_pair_labels_falls_back_to_wiring_and_mux():
 def test_corr_pair_labels_unmappable_pair_is_none():
     header = {"input_to_ant": {"0": "primA"}}
     assert io.corr_pair_labels(header, ["02"]) == {"02": None}
+
+
+def test_corr_pair_labels_coerces_int_keys():
+    """input_to_ant with int keys (e.g. from some readers) still labels."""
+    header = {"input_to_ant": {0: "primA", 2: "primB"}}
+    assert io.corr_pair_labels(header, ["02"]) == {"02": "primA / primB [02]"}

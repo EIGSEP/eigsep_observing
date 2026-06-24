@@ -179,7 +179,8 @@ def pair_label(pair, input_to_ant):
     ``"primA [0]"``) so that mux-induced redundant baselines — the same
     physical pair measured on two input positions — stay distinguishable
     in a legend. Returns ``None`` if any input in the pair is unmapped,
-    letting the caller fall back to the raw key.
+    letting the caller fall back to the raw key. Pairs longer than two
+    characters are not valid corr keys and also return ``None``.
     """
     if len(pair) == 1:
         a = input_to_ant.get(pair)
@@ -203,7 +204,7 @@ def corr_pair_labels(header, pairs):
     """
     header = header or {}
     input_to_ant = header.get("input_to_ant")
-    if input_to_ant:
+    if input_to_ant is not None:
         input_to_ant = {str(k): v for k, v in input_to_ant.items()}
     else:
         input_to_ant = effective_input_to_ant(
