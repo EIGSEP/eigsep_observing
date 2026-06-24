@@ -417,10 +417,14 @@ def test_corr_route_has_pairs_and_freqs(client):
 
 def test_corr_and_adc_routes_use_wiring_labels_when_published():
     """When the corr header carries a wiring manifest, the API should
-    expose ``label`` on each pair (autos as the antenna name, crosses
-    as ``"{a} / {b}"``) and on each ADC per-input entry. Lab/test setups
-    that publish no wiring fall back to ``label=None`` — covered by the
-    base ``test_corr_route_has_pairs_and_freqs`` above.
+    expose ``label`` on each pair (autos as ``"{ant} [{pair}]"``,
+    crosses as ``"{a} / {b} [{pair}]"``) and on each ADC per-input
+    entry. Lab/test setups that publish no wiring fall back to
+    ``label=None`` — covered by the base
+    ``test_corr_route_has_pairs_and_freqs`` above.
+
+    Labels carry a ``[pair]`` suffix (from ``io.pair_label``) so that
+    mux-induced redundant baselines stay distinguishable in legends.
     """
     snap = DummyTransport()
     panda = DummyTransport()
@@ -467,8 +471,8 @@ def test_corr_and_adc_routes_use_wiring_labels_when_published():
         client = create_app(agg).test_client()
 
         corr = client.get("/api/corr").get_json()["data"]
-        assert corr["pairs"]["0"]["label"] == "ant0"
-        assert corr["pairs"]["02"]["label"] == "ant0 / ant2"
+        assert corr["pairs"]["0"]["label"] == "ant0 [0]"
+        assert corr["pairs"]["02"]["label"] == "ant0 / ant2 [02]"
 
         adc = client.get("/api/adc").get_json()["data"]
         per_input = {
@@ -1414,3 +1418,31 @@ def test_plotly_js_served_from_pypi_package(client):
     # leading banner comment — a crude but stable integrity check.
     assert b"plotly.js" in r.data[:200]
     assert len(r.data) > 1_000_000
+
+
+# ---- Task 5: mux-aware pair labeling from header --------------------
+
+
+def test_header_input_to_ant_prefers_header_field():
+    from eigsep_observing.live_status.app import _header_input_to_ant
+
+    header = {
+        "input_to_ant": {"0": "primA", "1": "primA"},
+        "wiring": {"ants": {"primA": {"snap": {"input": 0}}}},
+    }
+    assert _header_input_to_ant(header) == {"0": "primA", "1": "primA"}
+
+
+def test_header_input_to_ant_falls_back_to_wiring():
+    from eigsep_observing.live_status.app import _header_input_to_ant
+
+    header = {"wiring": {"ants": {"primB": {"snap": {"input": 2}}}}}
+    assert _header_input_to_ant(header) == {"2": "primB"}
+
+
+def test_app_pair_label_is_io_pair_label():
+    """app re-uses io.pair_label (suffixed, mux-aware)."""
+    from eigsep_observing.live_status import app
+    from eigsep_observing import io
+
+    assert app.pair_label is io.pair_label
