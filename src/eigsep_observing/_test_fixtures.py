@@ -54,6 +54,11 @@ HEADER = {
     # carry acc_bins=2 / avg_even_odd=True instead.
     "acc_bins": 1,
     "avg_even_odd": False,
+    # No input multiplexing in this golden file (mux off). input_to_ant
+    # is the producer-derived effective map; with this single-antenna
+    # wiring (input 2 only) and mux 0 it is the plain wiring inversion.
+    "adc_mux_sel": 0,
+    "input_to_ant": {"2": "viv1-N"},
     "nchan": 1024,
     "fpg_file": "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg",
     "fpg_version": [2, 4],

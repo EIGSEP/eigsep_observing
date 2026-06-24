@@ -138,6 +138,81 @@ def reshape_data(data, acc_bins=2, avg_even_odd=True):
     return reshaped
 
 
+def effective_input_to_ant(wiring, adc_mux_sel):
+    """Effective ``{input_str: antenna}`` map given the wiring and mux.
+
+    The correlator emits a fixed set of products keyed by digital input
+    position; ``adc_mux_sel`` (a 3-bit int) decides which physical
+    antenna actually feeds each odd input position. ``bit0`` routes
+    input 0's antenna into input 1, ``bit1`` routes input 2 into input
+    3, ``bit2`` routes input 4 into input 5; a clear bit leaves the odd
+    input on its own wired antenna.
+
+    Even inputs (0, 2, 4) always map to their wired antenna. The result
+    is sparse: an odd input that is open (un-wired) and not filled by a
+    copy — or a copy whose source input is itself un-wired — is omitted,
+    so a downstream label renderer falls back to the raw digital key
+    rather than inventing an antenna. ``wiring`` is the hardware manifest
+    (``{"ants": {name: {"snap": {"input": n}}}}``); ``None``/empty -> {}.
+    """
+    base = {}
+    for ant, spec in ((wiring or {}).get("ants") or {}).items():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        if inp is not None:
+            base[int(inp)] = ant
+    out = {}
+    for p in range(6):
+        if p % 2 == 1 and (adc_mux_sel >> (p // 2)) & 1:
+            src = p - 1  # the even input this odd input copies
+            if src in base:
+                out[str(p)] = base[src]
+        elif p in base:
+            out[str(p)] = base[p]
+    return out
+
+
+def pair_label(pair, input_to_ant):
+    """Physical-antenna label for a digital corr pair, or ``None``.
+
+    The raw digital pair is suffixed (``"primA / primB [02]"``,
+    ``"primA [0]"``) so that mux-induced redundant baselines — the same
+    physical pair measured on two input positions — stay distinguishable
+    in a legend. Returns ``None`` if any input in the pair is unmapped,
+    letting the caller fall back to the raw key. Pairs longer than two
+    characters are not valid corr keys and also return ``None``.
+    """
+    if len(pair) == 1:
+        a = input_to_ant.get(pair)
+        return None if a is None else f"{a} [{pair}]"
+    if len(pair) == 2:
+        a = input_to_ant.get(pair[0])
+        b = input_to_ant.get(pair[1])
+        if a is None or b is None:
+            return None
+        return f"{a} / {b} [{pair}]"
+    return None
+
+
+def corr_pair_labels(header, pairs):
+    """Map each digital corr pair to its physical-antenna label.
+
+    Sources the effective input->antenna map from ``header`` —
+    preferring the producer-written ``input_to_ant`` field, falling back
+    to ``effective_input_to_ant(wiring, adc_mux_sel)`` for files that
+    predate the field. Returns ``{pair: label_or_None}``.
+    """
+    header = header or {}
+    input_to_ant = header.get("input_to_ant")
+    if input_to_ant is not None:
+        input_to_ant = {str(k): v for k, v in input_to_ant.items()}
+    else:
+        input_to_ant = effective_input_to_ant(
+            header.get("wiring"), header.get("adc_mux_sel", 0)
+        )
+    return {p: pair_label(p, input_to_ant) for p in pairs}
+
+
 def append_corr_header(header, acc_cnts, sync_times):
     """
     Append header for correlation files with useful computed

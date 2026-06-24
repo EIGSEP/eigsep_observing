@@ -31,6 +31,7 @@ from .calibration import (
     apply_calibration_cross_mag,
     compute_gain_trx,
 )
+from ..io import pair_label
 from ..vna_calibration import VnaCache, calibrate_s11
 from .signals import enabled_signals
 from .thresholds import Thresholds
@@ -67,22 +68,18 @@ def _input_to_ant(wiring: Optional[dict]) -> dict[str, str]:
     return out
 
 
-def _pair_label(pair: str, input_to_ant: dict[str, str]) -> Optional[str]:
-    """Antenna-friendly label for a corr pair, or ``None`` if unmappable.
+def _header_input_to_ant(header: Optional[dict]) -> dict[str, str]:
+    """Effective ``{input_str: antenna}`` map for a corr header.
 
-    Crosses use the ``"{a} / {b}"`` convention. A pair with any input
-    not in the map yields ``None`` so the front-end can fall back to
-    the raw key rather than rendering a half-mapped label.
+    Prefers the producer-written ``input_to_ant`` (mux-aware); falls
+    back to inverting the physical ``wiring`` for headers that predate
+    the field (mux was effectively off then).
     """
-    if len(pair) == 1:
-        return input_to_ant.get(pair)
-    if len(pair) == 2:
-        a = input_to_ant.get(pair[0])
-        b = input_to_ant.get(pair[1])
-        if a is None or b is None:
-            return None
-        return f"{a} / {b}"
-    return None
+    header = header or {}
+    mapping = header.get("input_to_ant")
+    if mapping:
+        return {str(k): v for k, v in mapping.items()}
+    return _input_to_ant(header.get("wiring"))
 
 
 def _solve_calibration(
@@ -246,7 +243,7 @@ def _corr_payload(
 ) -> dict:
     pairs_out: dict[str, dict] = {}
     freqs = state.corr_freqs
-    input_to_ant = _input_to_ant((state.corr_header or {}).get("wiring"))
+    input_to_ant = _header_input_to_ant(state.corr_header)
     coeffs: Optional[dict] = None
     cal_meta: Optional[dict] = None
     if calibrated:
@@ -259,7 +256,7 @@ def _corr_payload(
         for pair, arr in state.corr_pairs.items():
             if arr is None or arr.size == 0:
                 continue
-            label = _pair_label(pair, input_to_ant)
+            label = pair_label(pair, input_to_ant)
             # Aggregator stores the output of reshape_data:
             #   autos   → shape (ntimes=1, nchan) int32
             #   crosses → shape (ntimes=1, nchan, 2) int32
@@ -366,13 +363,16 @@ def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
 
 def _adc_payload(state: StateSnapshot) -> dict:
     adc_stats = state.adc_stats_latest or {}
-    # Prefer the corr header's wiring (canonical, written on every
-    # state-changing FPGA call); fall back to the ADC sidecar so
-    # standalone ADC snapshots still carry labels even when corr
+    # Prefer the corr header's effective input->antenna map (mux-aware,
+    # written on every state-changing FPGA call); fall back to the ADC
+    # sidecar wiring so standalone snapshots still carry labels when corr
     # publishing is paused.
-    sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
-    header_wiring = (state.corr_header or {}).get("wiring")
-    input_to_ant = _input_to_ant(header_wiring or sidecar_wiring)
+    header = state.corr_header or {}
+    if header.get("input_to_ant"):
+        input_to_ant = _header_input_to_ant(header)
+    else:
+        sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
+        input_to_ant = _input_to_ant(header.get("wiring") or sidecar_wiring)
     per_input = []
     for n in range(6):
         for c in range(2):
