@@ -43,7 +43,7 @@ _PLOT_FIELDS = {
     "imu_az": ("yaw", "pitch", "roll"),
     "tempctrl_lna": ("T_now", "T_target", "drive_level"),
     "tempctrl_load": ("T_now", "T_target", "drive_level"),
-    "potmon": ("pot_el_angle", "pot_az_angle"),
+    "potmon": ("pot_az_angle",),
     "motor": ("az_pos", "el_pos"),
     "lidar": ("distance_m",),
 }
