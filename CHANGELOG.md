@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.1](https://github.com/EIGSEP/eigsep_observing/compare/v2.7.0...v2.7.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **watch_sensors:** drop pot_el_angle from potmon plot fields ([afee564](https://github.com/EIGSEP/eigsep_observing/commit/afee5644f3f59dacfc6e07da2a63c6b3e02b9b64))
+
 ## [2.7.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.6.0...v2.7.0) (2026-06-20)
 
 
