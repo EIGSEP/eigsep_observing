@@ -102,6 +102,7 @@ except ValueError:
         "No corr header found in Redis. Run fpga_init.py --reinit to "
         "initialize the SNAP and publish the header first."
     )
+acc_bins = header["acc_bins"]
 avg_even_odd = header["avg_even_odd"]
 
 snapshot_reader = None
@@ -142,6 +143,7 @@ for i in range(args.num_spec):
 
 all_data = reshape_data(
     {k: np.array(v) for k, v in all_data.items()},
+    acc_bins=acc_bins,
     avg_even_odd=avg_even_odd,
 )
 header = append_corr_header(header, np.array(acc_cnts), header["sync_time"])

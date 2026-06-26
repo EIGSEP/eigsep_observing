@@ -53,36 +53,51 @@ def data_shape(ntimes, acc_bins, nchan, cross=False):
     return (ntimes, spec_len)
 
 
-def reshape_data(data, avg_even_odd=True):
+def reshape_data(data, acc_bins=2, avg_even_odd=True):
     """
-    Reshape data to the form (ntimes, nchan). From the SNAP, the
-    even and odd spectra follow each other, here we split them
-    and optionally average them.
+    Reshape raw correlator spectra to the file/consumer layout.
 
-    When ``avg_even_odd=True`` (the production/file-write path),
-    the even/odd average uses banker's rounding
-    (``np.rint``, round-half-to-even) and returns **int32** arrays:
+    The reshape depends on how many accumulation bins the running
+    firmware emits per integration (``acc_bins``), which the producer
+    derives from the SNAP firmware version and stamps on the corr
+    header / config (see :class:`eigsep_observing.fpga.EigsepFpga`):
+
+    - ``acc_bins == 2`` (firmware < 2.4): even and odd spectra follow
+      each other in the raw buffer. They are split onto a trailing
+      length-2 axis (Fortran order: first half even, second half odd).
+      When ``avg_even_odd=True`` (the production/file-write path) the
+      pair is averaged with banker's rounding (``np.rint``,
+      round-half-to-even) and returned as **int32**; when ``False`` the
+      even/odd axis is preserved and crosses are returned as complex128.
+      The float64 intermediate in ``mean()`` is exact for int32 inputs
+      (sum of two int32 values ≤ 2^32, within float64's 2^53
+      exact-integer range). The ±0.5 LSB rounding error is ~5 orders of
+      magnitude below the radiometric noise floor for typical EIGSEP
+      integration depths.
+
+    - ``acc_bins == 1`` (firmware ≥ 2.4): a single spectrum per
+      integration — no even/odd jackknifing, so there is nothing to
+      split or average. ``avg_even_odd`` is ignored.
+
+    Both modes return the same consumer-facing layout:
 
     - Auto-correlations: ``(ntimes, nchan)`` int32.
-    - Cross-correlations: ``(ntimes, nchan, 2)`` int32, where
-      ``[..., 0]`` is real and ``[..., 1]`` is imaginary.
-
-    The float64 intermediate in ``mean()`` is exact for int32
-    inputs (sum of two int32 values ≤ 2^32, within float64's
-    2^53 exact-integer range). The ±0.5 LSB rounding error is
-    ~5 orders of magnitude below the radiometric noise floor
-    for typical EIGSEP integration depths.
-
-    When ``avg_even_odd=False``, the even/odd axis is preserved
-    and cross-correlations are returned as complex128.
+    - Cross-correlations: ``(ntimes, nchan, 2)`` int32 (``[..., 0]``
+      real, ``[..., 1]`` imaginary) — except the legacy
+      ``acc_bins == 2, avg_even_odd=False`` path, which returns
+      complex128.
 
     Parameters
     ----------
     data : dict
         Dictionary of data arrays to be reshaped. Keys specify the
         correlation pairs.
+    acc_bins : int
+        Accumulation bins per integration (2 for even/odd firmware,
+        1 for single-spectrum firmware).
     avg_even_odd : bool
-        If True, average the even and odd spectra.
+        If True, average the even and odd spectra. Only meaningful when
+        ``acc_bins == 2``.
 
     Returns
     -------
@@ -93,24 +108,109 @@ def reshape_data(data, avg_even_odd=True):
     reshaped = {}
     for p, arr in data.items():
         arr = np.atleast_2d(arr)  # ensure at least 2D if no times
-        # place even/odd on last axis
         ntimes = arr.shape[0]
-        arr = arr.reshape(ntimes, -1, 2, order="F")
-        if avg_even_odd:
-            # Unbiased integer average via banker's rounding.
-            # mean(axis=2) goes through float64, which is exact for
-            # int32 inputs (sum ≤ 2^32 < 2^53). rint uses
-            # round-half-to-even (no systematic bias on crosses).
-            arr = np.rint(arr.mean(axis=2)).astype(np.int32)
-        if len(p) > 1:  # cross-correlation
-            real = arr[:, ::2]
-            imag = arr[:, 1::2]
+        if acc_bins == 2:
+            # place even/odd on last axis
+            arr = arr.reshape(ntimes, -1, 2, order="F")
             if avg_even_odd:
+                # Unbiased integer average via banker's rounding.
+                # mean(axis=2) goes through float64, which is exact for
+                # int32 inputs (sum ≤ 2^32 < 2^53). rint uses
+                # round-half-to-even (no systematic bias on crosses).
+                arr = np.rint(arr.mean(axis=2)).astype(np.int32)
+            if len(p) > 1:  # cross-correlation
+                real = arr[:, ::2]
+                imag = arr[:, 1::2]
+                if avg_even_odd:
+                    arr = np.stack([real, imag], axis=-1)
+                else:
+                    arr = real + 1j * imag
+        else:
+            # Single spectrum per integration (no even/odd). Nothing to
+            # average; autos pass through, crosses only split the
+            # interleaved real/imag onto a trailing length-2 axis.
+            arr = arr.astype(np.int32)
+            if len(p) > 1:  # cross-correlation
+                real = arr[:, ::2]
+                imag = arr[:, 1::2]
                 arr = np.stack([real, imag], axis=-1)
-            else:
-                arr = real + 1j * imag
         reshaped[p] = arr
     return reshaped
+
+
+def effective_input_to_ant(wiring, adc_mux_sel):
+    """Effective ``{input_str: antenna}`` map given the wiring and mux.
+
+    The correlator emits a fixed set of products keyed by digital input
+    position; ``adc_mux_sel`` (a 3-bit int) decides which physical
+    antenna actually feeds each odd input position. ``bit0`` routes
+    input 0's antenna into input 1, ``bit1`` routes input 2 into input
+    3, ``bit2`` routes input 4 into input 5; a clear bit leaves the odd
+    input on its own wired antenna.
+
+    Even inputs (0, 2, 4) always map to their wired antenna. The result
+    is sparse: an odd input that is open (un-wired) and not filled by a
+    copy — or a copy whose source input is itself un-wired — is omitted,
+    so a downstream label renderer falls back to the raw digital key
+    rather than inventing an antenna. ``wiring`` is the hardware manifest
+    (``{"ants": {name: {"snap": {"input": n}}}}``); ``None``/empty -> {}.
+    """
+    base = {}
+    for ant, spec in ((wiring or {}).get("ants") or {}).items():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        if inp is not None:
+            base[int(inp)] = ant
+    out = {}
+    for p in range(6):
+        if p % 2 == 1 and (adc_mux_sel >> (p // 2)) & 1:
+            src = p - 1  # the even input this odd input copies
+            if src in base:
+                out[str(p)] = base[src]
+        elif p in base:
+            out[str(p)] = base[p]
+    return out
+
+
+def pair_label(pair, input_to_ant):
+    """Physical-antenna label for a digital corr pair, or ``None``.
+
+    The raw digital pair is suffixed (``"primA / primB [02]"``,
+    ``"primA [0]"``) so that mux-induced redundant baselines — the same
+    physical pair measured on two input positions — stay distinguishable
+    in a legend. Returns ``None`` if any input in the pair is unmapped,
+    letting the caller fall back to the raw key. Pairs longer than two
+    characters are not valid corr keys and also return ``None``.
+    """
+    if len(pair) == 1:
+        a = input_to_ant.get(pair)
+        return None if a is None else f"{a} [{pair}]"
+    if len(pair) == 2:
+        a = input_to_ant.get(pair[0])
+        b = input_to_ant.get(pair[1])
+        if a is None or b is None:
+            return None
+        return f"{a} / {b} [{pair}]"
+    return None
+
+
+def corr_pair_labels(header, pairs):
+    """Map each digital corr pair to its physical-antenna label.
+
+    Sources the effective input->antenna map from ``header`` —
+    preferring the producer-written ``input_to_ant`` field, falling back
+    to ``effective_input_to_ant(wiring, adc_mux_sel)`` for files that
+    predate the field. Returns ``{pair: label_or_None}``.
+    """
+    header = header or {}
+    input_to_ant = header.get("input_to_ant")
+    if input_to_ant is not None:
+        input_to_ant = {str(k): v for k, v in input_to_ant.items()}
+    else:
+        input_to_ant = effective_input_to_ant(
+            header.get("wiring"), header.get("adc_mux_sel", 0)
+        )
+    return {p: pair_label(p, input_to_ant) for p in pairs}
 
 
 def append_corr_header(header, acc_cnts, sync_times):
@@ -1759,7 +1859,9 @@ class File:
         metadata = {k: v[:counter] for k, v in metadata.items()}
 
         reshaped = reshape_data(
-            data, avg_even_odd=header.get("avg_even_odd", True)
+            data,
+            acc_bins=header.get("acc_bins", 2),
+            avg_even_odd=header.get("avg_even_odd", True),
         )
         full_header = append_corr_header(header, acc_cnts, sync_times)
 

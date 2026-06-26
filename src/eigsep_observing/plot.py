@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 from .corr import CorrConfigStore, CorrReader
-from .io import reshape_data
+from .io import corr_pair_labels, reshape_data
 from .utils import calc_freqs_dfreq
 
 
@@ -62,6 +62,13 @@ class LivePlotter:
 
         # Get configuration from Redis
         self.corr_cfg = self.corr_config.get()
+        # Header carries the effective input->antenna map (mux-aware).
+        # Absent on a cold Redis -> fall back to raw digital labels.
+        try:
+            self.corr_header = self.corr_config.get_header()
+        except ValueError:
+            self.corr_header = {}
+        self.labels = corr_pair_labels(self.corr_header, self.pairs)
         self.nchan = self.corr_cfg.get("n_chans", 1024)
         self.sample_rate = self.corr_cfg.get("sample_rate", 500)
 
@@ -146,7 +153,7 @@ class LivePlotter:
         for p in self.pairs:
             line_kwargs = {
                 "color": self.colors[p],
-                "label": p,
+                "label": self.labels.get(p) or p,
                 "linewidth": 1.5,
             }
 
@@ -183,7 +190,11 @@ class LivePlotter:
         """Update plot data (called by animation)."""
         data = self.corr_reader.read(pairs=self.pairs, timeout=0)[-1]
         data = {k: v for k, v in data.items() if k in self.pairs}
-        data = reshape_data(data, avg_even_odd=True)
+        data = reshape_data(
+            data,
+            acc_bins=self.corr_cfg.get("acc_bins", 2),
+            avg_even_odd=self.corr_cfg.get("avg_even_odd", True),
+        )
         # Update magnitude plot
         for p, d in data.items():
             if len(p) == 1:  # Auto-correlation

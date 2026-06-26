@@ -34,8 +34,13 @@ class DummyFpga:
         self.transport = transport
         self.sync_time = time.time()
         self.cnt_period = kwargs.pop("cnt_period", 2**28 / (500 * 1e6))
+        # version_version encodes (major << 16) | minor. Default 0x20004
+        # (firmware 2.4, single-spectrum) matches the shipped
+        # corr_config.yaml; tests select the even/odd path by passing
+        # version_version=0x20003.
+        version_version = kwargs.pop("version_version", 0x20004)
         self.regs = defaultdict(int)
-        self.regs["version_version"] = 0x20003
+        self.regs["version_version"] = version_version
         self.regs["corr_acc_len"] = kwargs.get("corr_acc_len", 67108864)
         self.regs["corr_scalar"] = kwargs.get("corr_scalar", 512)
 
@@ -178,11 +183,16 @@ class DummyEigsepFpga(EigsepFpga):
         corr_acc_len = self.cfg["corr_acc_len"]
         sample_rate = self.cfg["sample_rate"]
         cnt_period = corr_acc_len / (sample_rate * 1e6)
+        # Make the dummy's version register match the declared firmware
+        # so version->acc_bins derivation and validate_config agree.
+        major, minor = self.cfg["fpg_version"]
+        version_version = (major << 16) | minor
         return DummyFpga(
             snap_ip=self.cfg["snap_ip"],
             cnt_period=cnt_period,
             corr_acc_len=corr_acc_len,
             corr_scalar=self.cfg["corr_scalar"],
+            version_version=version_version,
         )
 
     def _make_adc(self, ref):

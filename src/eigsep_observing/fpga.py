@@ -1,9 +1,17 @@
 """
 Module for interfacing to a 6-antpol xx/yy correlator for EIGSEP.
 This is nominally uses a 4-tap, 2048 real sample (1024 ch) PFB,
-with a direct correlation and vector accumulation of 2048 samples,
-producing odd/even data sets that are jackknifed every spectrum
-(which is faster than ideal: the PFB correlates adjacent spectra).
+with a direct correlation and vector accumulation of 2048 samples.
+
+The data layout depends on the flashed firmware and is detected at
+runtime from the version register (see ``EigsepFpga.acc_bins`` /
+``_reconcile_layout_from_firmware``):
+
+- Firmware < 2.4 (``acc_bins == 2``) produces odd/even data sets that
+  are jackknifed every spectrum (faster than ideal: the PFB correlates
+  adjacent spectra). The even and odd spectra are concatenated per pair.
+- Firmware >= 2.4 (``acc_bins == 1``) drops the even/odd jackknife and
+  emits a single spectrum per integration.
 
 The important bit widths are:
 (ADC) 8_7 (PFB_FIR) 18_17 (FFT) 18_17 (CORR) 18_17 (SCALAR) 18_7 (VACC) 32_7
@@ -27,6 +35,7 @@ from . import corr_health
 from .adc import AdcSnapshotWriter
 from .blocks import Input, NoiseGen, Pam, Pfb, Sync
 from .corr import CorrConfigStore, CorrWriter
+from .io import effective_input_to_ant
 from .utils import (
     calc_inttime,
     get_config_path,
@@ -194,6 +203,15 @@ class EigsepFpga:
             force = program == "force"
             self.fpga.upload_to_ram_and_program(self.fpg_file, force=force)
 
+        # The even/odd vs single-spectrum data layout is fixed by the
+        # flashed bitstream, not the yaml. Derive it from the firmware
+        # version register and stamp it onto self.cfg now — before any
+        # header is built or config published — so every downstream
+        # consumer (File buffer sizing, reshape_data) sees the silicon's
+        # true layout regardless of what the yaml declared.
+        self._acc_bins = None
+        self._reconcile_layout_from_firmware()
+
         if cfg["use_ref"]:
             ref = 10
         else:
@@ -287,6 +305,64 @@ class EigsepFpga:
         return [major, minor]
 
     @property
+    def acc_bins(self):
+        """Accumulation bins per integration the running firmware emits.
+
+        Firmware >= 2.4 emits a single spectrum per integration
+        (``acc_bins == 1``); earlier firmware emits even+odd spectra
+        (``acc_bins == 2``). Derived from the hardware version register
+        and cached by :meth:`_reconcile_layout_from_firmware`.
+        """
+        return self._acc_bins
+
+    def _adc_mux_sel_int(self):
+        """Convert the cfg ``adc_mux_sel`` bool list to the register int.
+
+        Entries are [bit0, bit1, bit2]; value = b0 + 2*b1 + 4*b2. An
+        absent key (configs predating the feature) means no mux -> 0.
+        """
+        bits = self.cfg.get("adc_mux_sel", [False, False, False])
+        return sum(int(bool(b)) << i for i, b in enumerate(bits))
+
+    def _reconcile_layout_from_firmware(self):
+        """Derive the even/odd layout from the running firmware version
+        and stamp it onto ``self.cfg``.
+
+        The bitstream — not the yaml — determines whether the correlator
+        emits even/odd spectra (firmware < 2.4, ``acc_bins == 2``) or a
+        single spectrum (firmware >= 2.4, ``acc_bins == 1``). Deriving it
+        from the version register here means the published config and
+        header (and therefore ``File`` buffer sizing and
+        ``reshape_data``) always reflect the silicon. A yaml-declared
+        ``acc_bins`` that disagrees is auto-corrected with a WARNING, so
+        an emergency firmware revert that only swaps ``fpg_file`` /
+        ``fpg_version`` still produces correctly-shaped data.
+        """
+        major, minor = self.version
+        acc_bins = 1 if (major, minor) >= (2, 4) else 2
+        self._acc_bins = acc_bins
+        # adc_mux_sel register exists only on firmware >= 2.4.
+        self._adc_mux_supported = (major, minor) >= (2, 4)
+        declared = self.cfg.get("acc_bins")
+        if declared is not None and declared != acc_bins:
+            self.logger.warning(
+                "Config declared acc_bins=%s but firmware v%d.%d emits "
+                "acc_bins=%d; using the firmware value. Update "
+                "corr_config.yaml to match the flashed bitstream.",
+                declared,
+                major,
+                minor,
+                acc_bins,
+            )
+        self.cfg["acc_bins"] = acc_bins
+        self.cfg["avg_even_odd"] = acc_bins == 2
+        self.cfg["integration_time"] = calc_inttime(
+            self.cfg["sample_rate"] * 1e6,
+            self.cfg["corr_acc_len"],
+            acc_bins=acc_bins,
+        )
+
+    @property
     def header(self):
         """
         Generate a file header. This is a copy of the configuration
@@ -337,6 +413,11 @@ class EigsepFpga:
 
         corr_acc_len = self.fpga.read_uint("corr_acc_len")
         acc_bins = self.cfg["acc_bins"]
+        adc_mux_sel = (
+            self.fpga.read_uint("adc_adc_mux_sel")
+            if self._adc_mux_supported
+            else 0
+        )
         t_int = calc_inttime(
             sample_rate * 1e6,  # in Hz
             corr_acc_len,
@@ -357,6 +438,8 @@ class EigsepFpga:
             "corr_word": self.cfg["corr_word"],
             "acc_bins": acc_bins,
             "avg_even_odd": self.cfg["avg_even_odd"],
+            "adc_mux_sel": adc_mux_sel,
+            "input_to_ant": effective_input_to_ant(wiring, adc_mux_sel),
             "dtype": self.cfg["dtype"],
             "pol_delay": {
                 "01": self.fpga.read_uint("pfb_pol01_delay"),
@@ -402,15 +485,20 @@ class EigsepFpga:
         fails = []
         for key, value in self.header.items():
             cfg_value = self.cfg.get(key)
-            if key in ("sync_time", "wiring"):
-                # sync_time is runtime-only; wiring lives in
-                # self.wiring, not self.cfg, so there's nothing in
-                # cfg to compare against.
+            if key in ("sync_time", "wiring", "input_to_ant"):
+                # sync_time is runtime-only; wiring lives in self.wiring;
+                # input_to_ant is derived from wiring + the mux register,
+                # not a cfg field.
                 continue
             if key == "pol_delay":
                 if set(value.keys()) != set(cfg_value.keys()):
                     fails.append(key)
                 elif any(value[k] != cfg_value[k] for k in value.keys()):
+                    fails.append(key)
+            elif key == "adc_mux_sel":
+                # header carries the int read from silicon; cfg carries
+                # the [b0,b1,b2] bool list. Compare on the int.
+                if value != self._adc_mux_sel_int():
                     fails.append(key)
             elif value != cfg_value:
                 fails.append(key)
@@ -686,6 +774,21 @@ class EigsepFpga:
         if verify:
             assert self.fpga.read_uint("corr_acc_len") == corr_acc_len
             assert self.fpga.read_uint("corr_scalar") == corr_scalar
+        mux = self._adc_mux_sel_int()
+        if self._adc_mux_supported:
+            self.logger.info(f"Setting ADC_MUX_SEL: {mux} (0b{mux:03b})")
+            self.fpga.write_int("adc_adc_mux_sel", mux)
+            if verify:
+                assert self.fpga.read_uint("adc_adc_mux_sel") == mux
+        elif mux != 0:
+            self.logger.warning(
+                "Config requests adc_mux_sel=%s (value %d) but firmware "
+                "v%d.%d has no adc_mux_sel register; input multiplexing is "
+                "unavailable. Inputs follow the physical wiring.",
+                self.cfg.get("adc_mux_sel"),
+                mux,
+                *self.version,
+            )
         self.set_pol_delay(pol_delay, verify=verify)
 
     def set_input(self):
@@ -929,8 +1032,9 @@ class EigsepFpga:
             i = [i]
         if len(i) == 0:
             return {}
-        # total number of bytes to read, factor of 2 is for odd/even
-        nbytes = self.cfg["corr_word"] * 2 * self.cfg["nchan"]
+        # Total bytes per pair: acc_bins spectra (2 for even/odd
+        # firmware, 1 for single-spectrum v2.4+) of nchan channels.
+        nbytes = self.cfg["corr_word"] * self.acc_bins * self.cfg["nchan"]
         if spec_type == "cross":
             nbytes *= 2  # real/imag for cross correlations
         spec = {}
@@ -964,8 +1068,10 @@ class EigsepFpga:
 
         Notes
         -----
-        The first half of the data is the 'even' integration, and the
-        second half is the 'odd' integration.
+        On even/odd firmware (``acc_bins == 2``) the first half of the
+        data is the 'even' integration and the second half is the 'odd'
+        integration. On single-spectrum firmware (``acc_bins == 1``)
+        there is one spectrum and no even/odd halves.
 
         """
         return self._read_spec("auto", i, unpack)
@@ -992,17 +1098,19 @@ class EigsepFpga:
 
         Notes
         -----
-        The first half of the data is the 'even' integration, and the
-        second half is the 'odd' integration. Real and imaginary parts
-        are interleaved, with every other sample being the real part
-        and the following sample being the imaginary part.
+        Real and imaginary parts are interleaved, with every other
+        sample being the real part and the following sample the
+        imaginary part. On even/odd firmware (``acc_bins == 2``) the
+        first half is the 'even' integration and the second half the
+        'odd'; on single-spectrum firmware (``acc_bins == 1``) there is
+        one spectrum.
 
         """
         return self._read_spec("cross", ij, unpack)
 
     def read_data(self, pairs=None, unpack=False):
         """
-        Read even/odd spectra for correlations specified in pairs.
+        Read the raw spectra for correlations specified in pairs.
 
         Parameters
         ----------

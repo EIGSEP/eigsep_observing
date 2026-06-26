@@ -1,18 +1,24 @@
 snap_ip: "10.10.10.12"
-fpg_file: "eigsep_fengine_1g_v2_3_2024-07-08_1858.fpg"  # path to fpg file
-fpg_version: [2, 3]  # major, minor
+fpg_file: "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg"  # path to fpg file
+fpg_version: [2, 4]  # major, minor
 sample_rate: 500.0  # in MHz
 nchan: 1024
 use_ref: false  # use synth on snap to generate adc clock from 10 MHz ref
 use_noise: false  # use digital noise instead of ADC data
 adc_gain: 4
 fft_shift: 0x015F
-corr_acc_len: 0x10000000  # 2**28 - increment corr_acc_cnt by ~1/second
-#corr_acc_len: 0x04000000  # 2**26 - increment corr_acc_cnt by ~4/second
+corr_acc_len: 0x10000000  # 2**28 - increment corr_acc_cnt by ~2/second (v2.4)
+#corr_acc_len: 0x04000000  # 2**26 - increment corr_acc_cnt by ~8/second
 corr_scalar: 512  # 2**9 - 8 bits after binary point so 2**9 = 1
 corr_word: 4  # 4 bytes per word
-acc_bins: 2
-avg_even_odd: true  # average even/odd spectra at file-write time
+# acc_bins / avg_even_odd are DECLARED defaults only. The producer
+# derives the true data layout from the firmware version register and
+# overwrites these at runtime (firmware >= 2.4 emits one spectrum =>
+# acc_bins 1; earlier firmware emits even/odd => acc_bins 2). On an
+# emergency revert to a v2.3 bitstream, swap fpg_file + fpg_version and
+# the layout follows automatically (with a WARNING if these disagree).
+acc_bins: 1
+avg_even_odd: false
 dtype: ">i4"  # big-endian int32
 pol_delay:
   "01": 0
@@ -21,6 +27,13 @@ pol_delay:
 redis:
   host: localhost
   port: 6379
+# Input multiplexing (firmware >= 2.4 only). Copies an even input's
+# digitized stream into the odd input above it, filling otherwise-dead
+# odd-triad cross slots. Entries are [bit0, bit1, bit2] =
+# [input1<-ant0, input3<-ant2, input5<-ant4]; register int = b0+2*b1+4*b2.
+# All-false = no mux (identity, pre-v2.4 behavior). Likely field case:
+# [true, true, false] (register value 3). Ignored on firmware < 2.4.
+adc_mux_sel: [false, false, false]
 pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
 # Cadence for raw ADC snapshot publishing to Redis (seconds between
 # frames). Set to null or 0 to disable. This period only controls the

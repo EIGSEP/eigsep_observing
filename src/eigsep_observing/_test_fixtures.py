@@ -48,11 +48,20 @@ FILE_TIME = NTIMES * INTEGRATION_TIME  # seconds
 # included so consumers exercise the PAM-absent code path.
 HEADER = {
     "dtype": ">i4",
-    "acc_bins": 2,
-    "avg_even_odd": True,
+    # v2.4 firmware: one spectrum per integration (no even/odd). The
+    # producer derives these from the firmware version register; this
+    # golden fixture pins the production default. A v2.3 file would
+    # carry acc_bins=2 / avg_even_odd=True instead.
+    "acc_bins": 1,
+    "avg_even_odd": False,
+    # No input multiplexing in this golden file (mux off). input_to_ant
+    # is the producer-derived effective map; with this single-antenna
+    # wiring (input 2 only) and mux 0 it is the plain wiring inversion.
+    "adc_mux_sel": 0,
+    "input_to_ant": {"2": "viv1-N"},
     "nchan": 1024,
-    "fpg_file": "fpg_files/eigsep_fengine.fpg",
-    "fpg_version": [0, 0],
+    "fpg_file": "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg",
+    "fpg_version": [2, 4],
     "corr_acc_len": 2**28,
     "corr_scalar": 2**9,
     "pol_delay": {"01": 0, "23": 0, "45": 0},
