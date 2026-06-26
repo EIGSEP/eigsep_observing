@@ -414,7 +414,7 @@ class EigsepFpga:
         corr_acc_len = self.fpga.read_uint("corr_acc_len")
         acc_bins = self.cfg["acc_bins"]
         adc_mux_sel = (
-            self.fpga.read_uint("adc_mux_sel")
+            self.fpga.read_uint("adc_adc_mux_sel")
             if self._adc_mux_supported
             else 0
         )
@@ -777,9 +777,9 @@ class EigsepFpga:
         mux = self._adc_mux_sel_int()
         if self._adc_mux_supported:
             self.logger.info(f"Setting ADC_MUX_SEL: {mux} (0b{mux:03b})")
-            self.fpga.write_int("adc_mux_sel", mux)
+            self.fpga.write_int("adc_adc_mux_sel", mux)
             if verify:
-                assert self.fpga.read_uint("adc_mux_sel") == mux
+                assert self.fpga.read_uint("adc_adc_mux_sel") == mux
         elif mux != 0:
             self.logger.warning(
                 "Config requests adc_mux_sel=%s (value %d) but firmware "
