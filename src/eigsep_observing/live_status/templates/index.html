@@ -28,6 +28,7 @@
     <span class="tile" id="tile-backend-redis" title="Backend Redis (rpi_ip) liveness. Any successful read on the SNAP-side Redis flips this green.">Backend Redis: ?</span>
     <span class="tile" id="tile-panda-observe" title="Panda observe script. 'running' = fresh heartbeat from panda_observe (or sibling script). 'script idle' = panda Redis is up but no script is publishing the heartbeat. 'panda offline' = panda Redis itself is unreachable.">Panda observe: ?</span>
     <span class="tile" id="tile-corr-loop" title="Corr loop. 'recording' = a new corr integration arrived within 2.5x the integration cadence — eigsep-fpga-init is publishing data. 'idle' = no new integration in that window. 'N dropped' = cumulative integrations the host failed to read before the FPGA overwrote the BRAM (since the observe loop started). 'Nms read' = wall-time of the most recent readout; watch it against the integration time as corr_acc_len is lowered.">Corr loop: ?</span>
+    <span class="tile" id="tile-system-current" title="Whole-system current draw (ACS724 on the lidar Pico). Colored by the system_current.current_a band in live_status_thresholds.yaml.">Current: ?</span>
     <span class="tile" id="tile-file">Last file: ?</span>
     <span class="tile" id="tile-reinit" title="SNAP --reinit count since the last Redis flush. Bumps on every supervised crash-recovery.">Reinits: ?</span>
     <span class="tile" id="tile-run" title="Active panda script (panda_observe / no_switch_observation / vna_position_sweep). 'idle' means no script is currently driving the run.">Run: ?</span>
@@ -49,6 +50,11 @@
 </header>
 
 <main class="grid">
+  <section class="card">
+    <h2>System current</h2>
+    <div id="system-current-block"></div>
+  </section>
+
   <section class="card wide">
     <h2>Correlation spectra</h2>
     <div id="plot-mag" class="plot"></div>
