@@ -3284,5 +3284,54 @@ def test_rfswitch_consecutive_transitions_reset_window(caplog):
             )
         # Index 8: back to raw state RFNON.
         assert f.metadata["rfswitch"][8] == "RFNON"
-
         f.close()
+
+
+def test_system_current_schema_registered_and_validates():
+    """system_current is a fanned-out stream (no app_id, like adc_stats).
+    The schema's job is loud validation: current_a/current_voltage must be
+    real floats so the float->mean reducer doesn't silently drop an
+    int-emitting producer to None."""
+    schema = io.SENSOR_SCHEMAS["system_current"]
+    assert schema == {
+        "sensor_name": str,
+        "status": str,
+        "current_voltage": float,
+        "current_a": float,
+    }
+    good = {
+        "sensor_name": "system_current",
+        "status": "update",
+        "current_voltage": 1.70,
+        "current_a": 2.0,
+    }
+    assert io._validate_metadata(good, schema) == []
+    # int current_a violates the strict float check (would be dropped to
+    # None by the float reducer) -> must surface as a contract violation.
+    bad = {**good, "current_a": 2}
+    violations = io._validate_metadata(bad, schema)
+    assert any("current_a" in v for v in violations)
+
+
+def test_avg_metadata_system_current():
+    """Both floats reduce via the generic float->mean path; the
+    producer-fixed status='update' row stays clean."""
+    data = [
+        {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 1.70,
+            "current_a": 2.0,
+        },
+        {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 1.74,
+            "current_a": 4.0,
+        },
+    ]
+    result = io.avg_metadata(data)
+    assert result["sensor_name"] == "system_current"
+    assert result["status"] == "update"
+    assert result["current_a"] == pytest.approx(3.0)
+    assert result["current_voltage"] == pytest.approx(1.72)
