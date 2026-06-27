@@ -59,6 +59,7 @@ from picohost.testing import LidarEmulator
 assert hasattr(PicoLidar, '_lidar_redis_handler'), 'no fan-out handler'
 captured = []
 lidar = PicoLidar.__new__(PicoLidar)
+lidar._current_cal = None  # bypass __init__: nominal conversion
 lidar._base_redis_handler = lambda d: captured.append(dict(d))
 lidar._lidar_redis_handler(LidarEmulator().get_status())
 assert len(captured) == 2, captured
@@ -231,10 +232,14 @@ def _lidar_post_handler_readings():
     derived current_a). The contract these tests enforce is the
     post-handler shape of each, so compose ``LidarEmulator.get_status()``
     through the real handler and capture both publishes in order. Mirrors
-    ``_rfswitch_post_handler_reading``; conversion constants live on the
-    class so a ``__new__``-built instance's ``_v_to_current`` works.
+    ``_rfswitch_post_handler_reading`` / ``_motor_post_handler_reading``.
+    ``_current_cal`` is normally set in ``PicoLidar.__init__`` (two-point
+    current cal, picohost); ``__new__`` bypasses that, so set it to ``None``
+    to select the nominal ACS724 conversion — same pattern as
+    ``_motor_post_handler_reading`` setting ``_motor_pos_store = None``.
     """
     lidar = PicoLidar.__new__(PicoLidar)
+    lidar._current_cal = None  # bypass __init__: nominal conversion
     captured = []
     lidar._base_redis_handler = lambda d: captured.append(dict(d))
     lidar._lidar_redis_handler(LidarEmulator().get_status())
