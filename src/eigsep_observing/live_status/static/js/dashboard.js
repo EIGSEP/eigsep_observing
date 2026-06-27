@@ -770,6 +770,45 @@ function renderLidar(meta) {
   container.appendChild(row);
 }
 
+// Whole-system current. Updates both the glanceable header tile and the
+// detail card from the same /api/metadata entry (the value comes from
+// metadata, not /api/health, so the header tile is driven here rather
+// than in updateHealth). Colored by the current_a classify band.
+function renderSystemCurrent(meta) {
+  const entry = meta["system_current"];
+  const cls = entry && entry.classify
+    ? entry.classify["system_current.current_a"]
+    : undefined;
+  const value = (entry && entry.value) || {};
+
+  const tile = document.getElementById("tile-system-current");
+  if (tile) {
+    if (!entry) {
+      tile.className = "tile unknown";
+      tile.textContent = "Current: —";
+    } else {
+      tile.className = tileClass(cls);
+      tile.textContent = `Current: ${fmt(value.current_a, 2)} A`;
+    }
+  }
+
+  const container = document.getElementById("system-current-block");
+  if (container) {
+    container.replaceChildren();
+    if (!entry) {
+      container.textContent = "no system_current data";
+    } else {
+      container.appendChild(makePaneStatusHeader("system current", entry));
+      appendTileRow(
+        container, "current", tileClass(cls), `${fmt(value.current_a, 2)} A`,
+      );
+      appendValueRow(
+        container, "voltage", `${fmt(value.current_voltage, 3)} V`,
+      );
+    }
+  }
+}
+
 // ADC stats live as a sub-section of the corr-spectra card so the
 // clipping/RMS diagnostic sits right under the spectrum it describes.
 // Two-column grid, 12 cells (6 inputs x 2 cores).
@@ -897,6 +936,7 @@ async function tick() {
     renderMotor(metadata.data);
     renderPotmon(metadata.data);
     renderLidar(metadata.data);
+    renderSystemCurrent(metadata.data);
     renderRfswitch(rfswitch.data, metadata.data["rfswitch"]);
     renderAdcInCorr(adc.data);
     renderStatusLog(status.data);
