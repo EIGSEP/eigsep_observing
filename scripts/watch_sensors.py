@@ -46,6 +46,7 @@ _PLOT_FIELDS = {
     "potmon": ("pot_az_angle",),
     "motor": ("az_pos", "el_pos"),
     "lidar": ("distance_m",),
+    "system_current": ("current_a",),
 }
 
 # Shown in the stream header line instead; redundant in the field list.
