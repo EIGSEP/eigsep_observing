@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoRFSwitch
+from picohost.base import PicoLidar, PicoRFSwitch
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -157,6 +157,33 @@ def _rfswitch_post_handler_reading():
     return captured
 
 
+def _lidar_post_handler_readings():
+    """Return (lidar_dict, system_current_dict) after _lidar_redis_handler.
+
+    The lidar Pico's firmware emits one merged line (distance +
+    current_voltage); ``PicoLidar._lidar_redis_handler`` splits it into
+    two metadata publishes — ``metadata['lidar']`` (distance, current
+    stripped) and ``metadata['system_current']`` (current_voltage +
+    derived current_a). The contract these tests enforce is the
+    post-handler shape of each, so compose ``LidarEmulator.get_status()``
+    through the real handler and capture both publishes in order. Mirrors
+    ``_rfswitch_post_handler_reading`` / ``_motor_post_handler_reading``.
+    ``_current_cal`` is normally set in ``PicoLidar.__init__`` (two-point
+    current cal, picohost); ``__new__`` bypasses that, so set it to ``None``
+    to select the nominal ACS724 conversion — same pattern as
+    ``_motor_post_handler_reading`` setting ``_motor_pos_store = None``.
+    """
+    lidar = PicoLidar.__new__(PicoLidar)
+    lidar._current_cal = None  # bypass __init__: nominal conversion
+    captured = []
+    lidar._base_redis_handler = lambda d: captured.append(dict(d))
+    lidar._lidar_redis_handler(LidarEmulator().get_status())
+    assert len(captured) == 2, (
+        f"expected lidar + system_current publishes, got {len(captured)}"
+    )
+    return captured[0], captured[1]
+
+
 def _adc_stats_post_publish_reading():
     """Return an adc_stats reading after EigsepFpga._publish_adc_stats.
 
@@ -199,10 +226,11 @@ SENSOR_EMULATORS = {
     "rfswitch": _rfswitch_post_handler_reading,
     "tempctrl_lna": lambda: _peltier_post_handler_reading("tempctrl_lna"),
     "tempctrl_load": lambda: _peltier_post_handler_reading("tempctrl_load"),
-    "lidar": lambda: LidarEmulator().get_status(),
+    "lidar": lambda: _lidar_post_handler_readings()[0],
     "potmon": _potmon_post_handler_reading,
     "motor": _motor_post_handler_reading,
     "adc_stats": _adc_stats_post_publish_reading,
+    "system_current": lambda: _lidar_post_handler_readings()[1],
 }
 
 

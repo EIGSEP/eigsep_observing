@@ -768,6 +768,19 @@ SENSOR_SCHEMAS = {
         "app_id": int,
         "distance_m": float,
     },
+    # `system_current`: whole-system current draw, fanned out from the
+    # lidar Pico's ACS724 by picohost's PicoLidar._lidar_redis_handler.
+    # Like `adc_stats`, it is a derived stream with no `app_id` (not a
+    # 1:1 pico app). `status` is producer-fixed to "update" (the ADC read
+    # is decoupled from lidar's I2C result). `current_a` is the meaningful
+    # value (amps); `current_voltage` is the raw ADC-pin voltage diagnostic.
+    # Both floats reduce via the standard float->mean path.
+    "system_current": {
+        "sensor_name": str,
+        "status": str,
+        "current_voltage": float,
+        "current_a": float,
+    },
     # Motor positions are stepper counts. The C firmware emits them
     # as ints, but `PicoMotor._motor_redis_handler` coerces to float
     # at the Redis-publish boundary so they go through the float→mean

@@ -37,6 +37,13 @@ corr.auto_mag_median:
   healthy: null  # TODO: set from a healthy run
   danger:  null
 
+# Whole-system current (ACS724-10AB inline on the shared 5 V feed).
+# Nominal bands: panda + both Peltiers draws ~3 A; the sensor saturates
+# ~12.5 A. Tune against a measured baseline — these are starting values.
+system_current.current_a:
+  healthy: [0.0, 5.0]
+  danger:  [0.0, 8.0]
+
 # Site-geometry signals — operator fills these in after deployment.
 lidar.distance_m:
   healthy: null  # TODO: set from site geometry
