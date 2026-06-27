@@ -1377,6 +1377,31 @@ def test_vna_drain_drops_payload_with_unknown_mode(agg_primed, caplog):
     )
 
 
+def test_metadata_payload_classifies_system_current():
+    """A system_current snapshot entry is classified against the
+    current_a band by the existing /api/metadata projection (no app.py
+    change needed — the route is generic over snapshot-hash streams)."""
+    from eigsep_observing.live_status.app import _metadata_payload
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+
+    now = 1000.0
+    state = StateSnapshot()
+    state.metadata_snapshot = {
+        "system_current": {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 1.70,
+            "current_a": 3.0,
+        },
+        "system_current_ts": now,
+    }
+    state.metadata_snapshot_read_unix = now
+    payload = _metadata_payload(state, _payload_thresholds())
+    entry = payload["system_current"]
+    assert entry["classify"]["system_current.current_a"] == "ok"
+    assert entry["status"] == "update"
+
+
 def client_for(agg):
     """Helper: build a Flask test_client for a primed aggregator."""
     app = create_app(agg)
