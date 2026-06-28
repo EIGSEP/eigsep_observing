@@ -400,7 +400,7 @@ requires-dist = [
     { name = "ipython", marker = "extra == 'interactive'" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "picohost", specifier = ">=3.8.0" },
+    { name = "picohost", specifier = ">=3.9.0" },
     { name = "plotly" },
     { name = "pyserial-mock", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
@@ -1289,7 +1289,7 @@ wheels = [
 
 [[package]]
 name = "picohost"
-version = "3.8.0"
+version = "3.9.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eigsep-redis" },
@@ -1298,9 +1298,9 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyserial" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/23/52/a4ad229268361d28103cc356efdb043518b51e6f022d06dda47b8ffdb9ae/picohost-3.8.0.tar.gz", hash = "sha256:7ff3dbe7ff62b4af80d81a185024da168f8f0f306c217a05028e91b770fa8134", size = 133026, upload-time = "2026-06-20T23:11:42.035Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/82/92/404af5665a9386b34595676a395a4a47f61d5055786de782f88adf8ed691/picohost-3.9.0.tar.gz", hash = "sha256:ad5a8baeeab01557b851c53ada4ba2fead92fdb3df4ca495cc6b59412aa7d7b0", size = 146500, upload-time = "2026-06-28T16:50:39.738Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8b/5a/04dcfbb00453a45e62d0e9de1c950b092bfebdee25988d5877e6d2716a14/picohost-3.8.0-py3-none-any.whl", hash = "sha256:529ff167d6619d5e89b81892c8b996d12e1d57b9326591e6c55914e97b01253e", size = 77729, upload-time = "2026-06-20T23:11:41.07Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/ca/282bee7d4db12fce29646199e8ac76421240e9742a076a22b193342b84c8/picohost-3.9.0-py3-none-any.whl", hash = "sha256:2164dcefaec3cafc6d96d48e68e87349970751f19219d701be9ddf78999cb4df", size = 87795, upload-time = "2026-06-28T16:50:38.712Z" },
 ]
 
 [[package]]

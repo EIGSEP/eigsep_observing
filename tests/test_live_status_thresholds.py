@@ -312,3 +312,26 @@ def test_thresholds_invalid_band_raises():
                 "adc.rms": {"healthy": [20.0, 10.0]},  # lo > hi
             },
         )
+
+
+# ---------------------------------------------------------------------
+# system_current signal + threshold band
+# ---------------------------------------------------------------------
+
+
+def test_system_current_signal_registered_and_always_enabled():
+    sig = SIGNAL_REGISTRY["system_current.current_a"]
+    assert sig.unit == "A"
+    assert sig.enabled_by is None  # system-wide vital, never gated
+    assert sig.max_age_s == 30.0
+    # Present even when tempctrl (and other optional subsystems) are off.
+    assert "system_current.current_a" in enabled_signals(OBS_CFG_TEMPCTRL_OFF)
+
+
+def test_system_current_band_from_bundled_yaml():
+    th = Thresholds.from_yaml(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
+    assert th.bands["system_current.current_a"]["healthy"] == [0.0, 5.0]
+    assert th.bands["system_current.current_a"]["danger"] == [0.0, 8.0]
+    assert th.classify("system_current.current_a", 3.0) == "ok"
+    assert th.classify("system_current.current_a", 6.0) == "warn"
+    assert th.classify("system_current.current_a", 9.0) == "danger"

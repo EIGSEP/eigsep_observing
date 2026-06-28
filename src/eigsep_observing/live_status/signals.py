@@ -143,6 +143,15 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "LOAD integral",
         enabled_by="use_tempctrl",
     ),
+    # Whole-system current draw (ACS724 on the lidar Pico, fanned out to
+    # the system_current stream). Always enabled — a system-wide vital,
+    # not gated by a subsystem flag. current_voltage is a raw ADC
+    # diagnostic shown on the card but not a classified signal.
+    "system_current.current_a": Signal(
+        "system_current.current_a",
+        "System current",
+        unit="A",
+    ),
     # Site-geometry signals — YAML override only (TODO after deploy).
     "lidar.distance_m": Signal(
         "lidar.distance_m",
