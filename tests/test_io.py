@@ -3449,6 +3449,7 @@ def test_corr_pair_labels_coerces_int_keys():
     header = {"input_to_ant": {0: "primA", 2: "primB"}}
     assert io.corr_pair_labels(header, ["02"]) == {"02": "primA / primB [02]"}
 
+
 def test_system_current_schema_registered_and_validates():
     """system_current is a fanned-out stream (no app_id, like adc_stats).
     The schema's job is loud validation: current_a/current_voltage must be
