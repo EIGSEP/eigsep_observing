@@ -490,9 +490,6 @@ def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
     """If the rfswitch hasn't published on entry, the session has no
     mode to restore to. Skip the restore and log a warning — auto-
     guessing RFANT would be surprising at the REPL."""
-    client.transport.r.hdel("metadata", "rfswitch")
-    assert client._read_switch_mode_from_redis() is None
-
     switch_calls = []
     original_safe_switch = client._safe_switch
 
@@ -501,9 +498,17 @@ def test_switch_session_unknown_entry_mode_skips_restore(client, caplog):
         return original_safe_switch(state)
 
     caplog.set_level("WARNING")
-    with patch.object(client, "_safe_switch", side_effect=recording):
-        with client.switch_session() as sw:
-            assert sw("RFNOFF") is True
+    # Patch the snapshot reader rather than hdel-ing Redis: the live
+    # DummyPicoRFSwitch emulator republishes sw_state_name every ~50 ms
+    # and would overwrite a raw hdel before switch_session reads the
+    # entry mode (flaky under load/xdist). Same technique as
+    # test_read_switch_mode_from_redis_no_rfswitch_data.
+    with patch.object(
+        client, "_read_switch_mode_from_redis", return_value=None
+    ):
+        with patch.object(client, "_safe_switch", side_effect=recording):
+            with client.switch_session() as sw:
+                assert sw("RFNOFF") is True
 
     assert switch_calls == ["RFNOFF"], (
         f"unknown-entry-mode session must not restore; got {switch_calls}"
