@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.8.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.7.0...v2.8.0) (2026-06-28)
+
+
+### Features
+
+* **fpga:** support v2.4 firmware (single-spectrum), auto-detected ([0a6c9a3](https://github.com/EIGSEP/eigsep_observing/commit/0a6c9a367be669ce050f91c46196942d9fcf89e0))
+* set adc_mux_sel register and record mapping ([abe3247](https://github.com/EIGSEP/eigsep_observing/commit/abe3247e360f287261ef73ea074d735b20ea0776))
+* wire system_current into schemas, live status, and watch_sensors ([#169](https://github.com/EIGSEP/eigsep_observing/issues/169)) ([5707e9e](https://github.com/EIGSEP/eigsep_observing/commit/5707e9e4a9b8bddb681532f755e0101e5c54822a))
+
+
+### Bug Fixes
+
+* **watch_sensors:** drop pot_el_angle from potmon plot fields ([afee564](https://github.com/EIGSEP/eigsep_observing/commit/afee5644f3f59dacfc6e07da2a63c6b3e02b9b64))
+
 ## [2.7.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.6.0...v2.7.0) (2026-06-20)
 
 
