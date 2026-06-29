@@ -725,6 +725,40 @@ function renderMotor(meta) {
   }
 }
 
+function renderOrientation(meta) {
+  const container = document.getElementById("orientation-block");
+  if (!container) return;
+  container.replaceChildren();
+  const entry = meta["orientation"];
+  if (!entry) {
+    container.textContent = "no orientation data";
+    return;
+  }
+  const v = entry.value || { az: {}, el: {} };
+  const cls = entry.classify || {};
+  for (const [axis, key] of [
+    ["az", "orientation.az_spread_deg"],
+    ["el", "orientation.el_spread_deg"],
+  ]) {
+    const d = v[axis] || {};
+    for (const s of ["motor", "potmon", "imu_az", "imu_el"]) {
+      if (d[s] === undefined) continue;
+      appendValueRow(container, `${axis} ${s}`, fmt(d[s], 1) + "°");
+    }
+    if (d.consensus !== undefined) {
+      appendValueRow(
+        container, `${axis} consensus`, fmt(d.consensus, 1) + "°"
+      );
+    }
+    const spreadCls = cls[key] || "unknown";
+    const spreadTxt =
+      d.spread === null || d.spread === undefined
+        ? "—"
+        : fmt(d.spread, 1) + "°";
+    appendTileRow(container, `${axis} spread`, tileClass(spreadCls), spreadTxt);
+  }
+}
+
 function renderPotmon(meta) {
   const container = document.getElementById("potmon-block");
   if (!container) return;
@@ -934,6 +968,7 @@ async function tick() {
     renderTempctrlTiles(metadata.data, null);
     renderImu(metadata.data);
     renderMotor(metadata.data);
+    renderOrientation(metadata.data);
     renderPotmon(metadata.data);
     renderLidar(metadata.data);
     renderSystemCurrent(metadata.data);
