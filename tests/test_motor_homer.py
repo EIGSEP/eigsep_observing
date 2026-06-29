@@ -1,6 +1,10 @@
+import logging
+
 import pytest
 from eigsep_redis.testing import DummyTransport
-from eigsep_observing.motor_homer import MotorHomer, HomeResult
+
+from eigsep_observing.home_ref import publish_home_ref
+from eigsep_observing.motor_homer import HomeResult, MotorHomer
 
 
 def _homer(**kw):
@@ -59,3 +63,103 @@ def test_home_result_constructible():
         reset_count=True,
     )
     assert r.converged is True
+
+
+# ---------------------------------------------------------------------------
+# Task C5: home() loop tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeMotor:
+    """In-process motor whose jogs move a simulated pot voltage / el toward
+    home, so the homer's loop actually converges. gain matches the homer's
+    az gain so a damped jog shrinks the residual."""
+
+    def __init__(self, pot=1.30, el=10.0, deg_per_volt=100.0):
+        self.pot = pot
+        self.el = el
+        self.dpv = deg_per_volt
+        self.homed = 0
+        self.reset = []
+
+    def home(self, stop_event=None):
+        self.homed += 1
+
+    def jog_az(self, delta_deg, stop_event=None):
+        self.pot += delta_deg / self.dpv  # +deg lowers residual toward v0
+
+    def jog_el(self, delta_deg, stop_event=None):
+        self.el += delta_deg  # +deg moves el toward home(0)
+
+    def reset_step_position(self, az_step=0, el_step=0):
+        self.reset.append((az_step, el_step))
+
+
+def _homer_with_fake(t, fake, **kw):
+    h = MotorHomer(
+        t,
+        motor_client=fake,
+        az_gain_deg_per_volt=fake.dpv,
+        settle_s=0.0,
+        damping=1.0,
+        max_iters=10,
+        **kw,
+    )
+    # snapshot reflects the fake's live state
+    h.snapshot.get = lambda key: (
+        {"pot_az_voltage": fake.pot}
+        if key == "potmon"
+        else {"el_deg": fake.el}
+        if key == "imu_el"
+        else {}
+    )
+    return h
+
+
+def test_home_raises_without_reference():
+    h = MotorHomer(DummyTransport(), motor_client=_FakeMotor())
+    with pytest.raises(RuntimeError, match="home"):
+        h.home()
+
+
+def test_home_converges_and_resets_count():
+    t = DummyTransport()
+    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    fake = _FakeMotor(pot=1.30, el=10.0)
+    h = _homer_with_fake(t, fake)
+    res = h.home()
+    assert res.converged is True
+    assert abs(res.residual_az_deg) <= h.tol_az_deg
+    assert abs(res.residual_el_deg) <= h.tol_el_deg
+    assert fake.reset == [(0, 0)]  # re-zeroed on convergence
+    assert fake.homed >= 1  # coarse approach happened
+
+
+def test_home_degrades_when_sensors_down(caplog):
+    t = DummyTransport()
+    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    fake = _FakeMotor()
+    h = MotorHomer(t, motor_client=fake)
+    h.snapshot.get = lambda key: {}  # nothing published
+    with caplog.at_level(logging.WARNING):
+        res = h.home()
+    assert res.degraded is True
+    assert res.converged is False
+    assert fake.homed == 1  # open-loop fallback park
+    assert any("open-loop" in r.message for r in caplog.records)
+
+
+def test_az_sign_autodetect_flips_when_residual_grows():
+    # fake where +az jog INCREASES the residual (wrong initial sign) until
+    # the homer flips; convergence proves the flip happened.
+    t = DummyTransport()
+    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+
+    class _Reversed(_FakeMotor):
+        def jog_az(self, delta_deg, stop_event=None):
+            self.pot -= delta_deg / self.dpv  # opposite sign
+
+    fake = _Reversed(pot=1.20, el=0.0)
+    h = _homer_with_fake(t, fake)
+    res = h.home()
+    assert res.converged is True
