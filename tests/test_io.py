@@ -3498,3 +3498,35 @@ def test_avg_metadata_system_current():
     assert result["status"] == "update"
     assert result["current_a"] == pytest.approx(3.0)
     assert result["current_voltage"] == pytest.approx(1.72)
+
+
+def test_imu_schemas_field_sets():
+    from eigsep_observing import io
+
+    base = {
+        "sensor_name",
+        "status",
+        "app_id",
+        "yaw",
+        "pitch",
+        "roll",
+        "accel_x",
+        "accel_y",
+        "accel_z",
+    }
+    assert set(io._IMU_EL_SCHEMA) == base | {"el_deg"}
+    assert set(io._IMU_AZ_SCHEMA) == base | {
+        "el_deg",
+        "az_deg",
+        "az_from_accel_deg",
+        "az_from_yaw_deg",
+        "az_blend_weight",
+    }
+    for k in (
+        "el_deg",
+        "az_deg",
+        "az_from_accel_deg",
+        "az_from_yaw_deg",
+        "az_blend_weight",
+    ):
+        assert io._IMU_AZ_SCHEMA[k] is float

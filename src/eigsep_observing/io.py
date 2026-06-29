@@ -773,13 +773,15 @@ def _validate_corr_header(header):
 #   str   → first value if unanimous, else "UNKNOWN"
 # See _avg_sensor_values for details and the rationale per type.
 #
-# IMU schema reflects the BNO085 UART RVC mode introduced in picohost
+# IMU schemas reflect the BNO085 UART RVC mode introduced in picohost
 # 1.0.0: only yaw/pitch/roll orientation and acceleration are reported.
-# All numeric fields are float so the standard float→mean reduction
-# applies cleanly across an integration. The schema is shared between
-# the two physical IMU picos: `imu_el` (panda elevation, app_id 3) and
-# `imu_az` (antenna azimuth, app_id 6).
-_IMU_SCHEMA = {
+# The two physical IMU picos now emit different field sets:
+# imu_el (panda elevation, app_id 3) adds gravity-derived signed elevation;
+# imu_az (antenna azimuth, app_id 6) adds |theta| elevation plus the azimuth
+# blend (accel-based + yaw-based, registered to the pot).
+# All derived fields are float->float (mean reduction); all are None when
+# uncalibrated.
+_IMU_BASE = {
     "sensor_name": str,
     "status": str,
     "app_id": int,
@@ -790,6 +792,25 @@ _IMU_SCHEMA = {
     "accel_y": float,
     "accel_z": float,
 }
+
+# imu_el (panda elevation, app_id 3): gravity-derived signed elevation.
+_IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
+
+# imu_az (antenna azimuth, app_id 6): |theta| elevation plus the azimuth
+# blend (accel-based + yaw-based, registered to the pot). All float ->
+# float->mean reduction; all None when uncalibrated.
+_IMU_AZ_SCHEMA = {
+    **_IMU_BASE,
+    "el_deg": float,
+    "az_deg": float,
+    "az_from_accel_deg": float,
+    "az_from_yaw_deg": float,
+    "az_blend_weight": float,
+}
+
+# Temporary alias: SENSOR_SCHEMAS still references _IMU_SCHEMA for both
+# imu_el and imu_az. A later task remaps SENSOR_SCHEMAS and removes this.
+_IMU_SCHEMA = _IMU_EL_SCHEMA
 
 # tempctrl publishes two flat streams (one per Peltier channel), each
 # matching this schema. The producer is
