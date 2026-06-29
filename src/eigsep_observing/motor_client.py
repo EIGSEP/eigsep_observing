@@ -202,7 +202,7 @@ class MotorClient:
                     return
             time.sleep(self.poll_interval_s)
 
-    def _wait_for_stop(self, timeout=None, stop_event=None):
+    def _wait_for_stop(self, timeout=None, stop_event=None, axis=None):
         """Block until the motor's position equals its target on both axes.
 
         Mirrors the progress-reset stall detection in
@@ -215,6 +215,11 @@ class MotorClient:
         drive ``home`` from a background thread (``motor_manual.py``).
         ``scan`` does not pass an event here (it cancels between moves),
         so its semantics are unchanged.
+
+        If ``axis`` is supplied, the sensor fence is polled on every
+        iteration. A breach calls :meth:`halt` and re-raises
+        :class:`MotorLimitError` immediately, aborting the move
+        mid-flight.
         """
         timeout = self.stall_timeout_s if timeout is None else timeout
         t = time.monotonic()
@@ -223,6 +228,12 @@ class MotorClient:
             if stop_event is not None and stop_event.is_set():
                 self.halt()
                 return
+            if axis is not None:
+                try:
+                    self._check_sensor_fence(axis)
+                except MotorLimitError:
+                    self.halt()
+                    raise
             status = self._motor_status()
             if status is None:
                 if time.monotonic() - t >= timeout:
@@ -300,7 +311,7 @@ class MotorClient:
             if stop_event is not None and stop_event.is_set():
                 self.halt()
                 return
-            self._wait_for_stop(timeout=timeout, stop_event=stop_event)
+            self._wait_for_stop(timeout=timeout, stop_event=stop_event, axis=axis)
 
     def _axis_target(self, axis):
         """Current ``{axis}_target_pos`` from the snapshot, or ``None``.
