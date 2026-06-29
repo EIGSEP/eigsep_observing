@@ -36,6 +36,18 @@ use_motor: false
 motor_interval: 3600  # seconds between scans
 motor_failure_retry_s: 60  # shorter wait after a failed scan to home
 motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
+# Motor safe-travel limits (passed to MotorClient via motor_client_kwargs).
+# Commanded-target window in degrees about home (home = 0); ±180 = one turn.
+# Narrow el below ±180 if the elevation mechanism has a tighter range.
+motor_client_kwargs:
+  az_limits_deg: [-180.0, 180.0]
+  el_limits_deg: [-180.0, 180.0]
+  # Raw-sensor fence (slope-independent). Measure pot V at the safe az
+  # extremes and the IMU el at the safe el extremes, then fill these in.
+  # Leave null to disable that axis's sensor fence (commanded guard still
+  # applies).
+  pot_az_v_limits: null
+  imu_el_limits_deg: [-180.0, 180.0]
 
 # motion-switch coordination
 # When true, motor moves and RF switching mutually exclude each other

@@ -1329,6 +1329,21 @@ def test_use_motor_true_builds_motor_client(transport, dummy_cfg):
         client.stop()
 
 
+def test_motor_client_receives_limit_kwargs(transport, dummy_cfg):
+    """Limit kwargs in ``motor_client_kwargs`` flow through
+    ``init_motor_client`` into the ``MotorClient`` constructor verbatim.
+    Verifies that the ``**kwargs`` splat in ``init_motor_client`` does
+    not filter travel-limit keys."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_client_kwargs"] = {"el_limits_deg": [-30.0, 30.0]}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert tuple(client.motor_client.el_limits_deg) == (-30.0, 30.0)
+    finally:
+        client.stop()
+
+
 def test_motor_loop_returns_when_motor_client_is_none(caplog, client):
     """motor_loop must return promptly when ``motor_client`` is None —
     no polling, no silent spin. The warning must ride both channels
