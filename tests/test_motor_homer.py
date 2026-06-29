@@ -3,6 +3,7 @@ import logging
 import pytest
 from eigsep_redis.testing import DummyTransport
 
+from eigsep_observing.el_sensor import ElEstimate
 from eigsep_observing.home_ref import publish_home_ref
 from eigsep_observing.motor_homer import HomeResult, MotorHomer
 
@@ -147,6 +148,36 @@ def test_home_degrades_when_sensors_down(caplog):
     assert res.converged is False
     assert fake.homed == 1  # open-loop fallback park
     assert any("open-loop" in r.message for r in caplog.records)
+
+
+def test_mid_loop_sensor_loss_aborts_without_rezero(caplog):
+    """If all sensors go silent inside the loop, abort with degraded=True and
+    no re-zero — re-zeroing at an unverified position is a silent wrong-success."""
+    t = DummyTransport()
+    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    fake = _FakeMotor(pot=1.30, el=10.0)
+    h = _homer_with_fake(t, fake)
+    # Override _read_sensors so it returns valid data on the first pre-loop
+    # call (which happens before the main loop) and then all-None thereafter,
+    # triggering the mid-loop guard on iteration 1.
+    call_count = 0
+
+    def _read_sensors_stub():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            # first call: pre-loop check — sensors look fine, proceed to loop
+            return fake.pot, ElEstimate(fake.el, False, "imu_el")
+        # subsequent calls (inside loop): all sensors lost
+        return None, ElEstimate(None, False, "none")
+
+    h._read_sensors = _read_sensors_stub
+    with caplog.at_level(logging.WARNING):
+        result = h.home()
+    assert result.converged is False
+    assert result.degraded is True
+    assert fake.reset == []  # step counter must NOT be re-zeroed
+    assert any("mid-loop" in r.message for r in caplog.records)
 
 
 def test_az_sign_autodetect_flips_when_residual_grows():
