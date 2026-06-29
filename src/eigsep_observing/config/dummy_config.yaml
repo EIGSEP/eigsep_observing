@@ -36,6 +36,8 @@ motor_client_kwargs:
   el_limits_deg: [-180.0, 180.0]
   pot_az_v_limits: null
   imu_el_limits_deg: null
+home_after_scan: false
+motor_homer_kwargs: {settle_s: 0.0, max_iters: 3}
 
 # motion-switch coordination (default off; tests opt in per-fixture)
 serialize_motion_and_switching: false

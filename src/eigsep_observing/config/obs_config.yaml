@@ -48,6 +48,14 @@ motor_client_kwargs:
   # applies).
   pot_az_v_limits: null
   imu_el_limits_deg: [-180.0, 180.0]
+home_after_scan: false  # closed-loop return-to-home after each scan
+motor_homer_kwargs:     # forwarded to MotorHomer (only used when home_after_scan: true)
+  tol_az_deg: 3.0
+  tol_el_deg: 2.0
+  settle_s: 10.0
+  damping: 0.5
+  max_iters: 6
+  reset_count: true
 
 # motion-switch coordination
 # When true, motor moves and RF switching mutually exclude each other
