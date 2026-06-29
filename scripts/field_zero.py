@@ -7,6 +7,8 @@ add the interactive zeroing and the pot re-pin; this task is the pure
 slip-verdict helper.
 """
 
+from picohost.buses import PotCalStore
+
 
 def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
     """Classify how well the pot tracked a known motor move.
@@ -23,3 +25,27 @@ def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
     if frac >= warn:
         return "warn"
     return "ok"
+
+
+def rezero_pot(transport, pot_proxy, v0):
+    """Re-pin the pot intercept at home voltage v0, keeping the stored slope.
+
+    angle = m*V + b, with b chosen so angle(v0) = 0  ->  b = -m*v0.
+    Persists (BGSAVE) and pushes the new cal to the live pico.
+    Returns (m, b).
+    """
+    store = PotCalStore(transport)
+    cal = store.get()
+    if not cal or "pot_az" not in cal:
+        raise RuntimeError(
+            "No stored pot calibration; run "
+            "calibrate-pot --mode azimuth first."
+        )
+    m = float(cal["pot_az"][0])
+    b = -m * float(v0)
+    cal["pot_az"] = [m, b]
+    cal.setdefault("metadata", {})["mode"] = "field_zero_rezero"
+    store.upload(cal)
+    transport.r.bgsave()
+    pot_proxy.send_command("set_calibration", pot_az_params=[m, b])
+    return m, b
