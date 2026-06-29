@@ -67,7 +67,13 @@ def rezero_pot(transport, pot_proxy, v0):
     cal.setdefault("metadata", {})["mode"] = "field_zero_rezero"
     store.upload(cal)
     transport.r.bgsave()
-    pot_proxy.send_command("set_calibration", pot_az_params=[m, b])
+    try:
+        pot_proxy.send_command("set_calibration", pot_az_params=[m, b])
+    except (TimeoutError, RuntimeError):
+        logger.warning(
+            "Live push of pot cal failed; cal is stored in Redis and "
+            "will apply on the next PicoManager restart."
+        )
     return m, b
 
 
@@ -113,7 +119,10 @@ def _render(screen, zeroer, snapshot, deg):
         f"pot: {pot.get('pot_az_angle')} deg ({pot.get('pot_az_voltage')} V)",
     )
     screen.addstr(
-        5, 0, f"imu_az: az={imu.get('az_deg')} el={imu.get('el_deg')}"
+        5,
+        0,
+        f"imu_az: yaw={imu.get('yaw')} az={imu.get('az_deg')} "
+        f"el={imu.get('el_deg')}",
     )
     screen.addstr(
         7,
@@ -137,14 +146,22 @@ def _curses_main(screen, zeroer, snapshot, pot_proxy, transport, deg):
             if should_exit:
                 if zeroed:
                     v0 = _pot_voltage(snapshot)
-                    m, b = rezero_pot(transport, pot_proxy, v0)
-                    logger.info(
-                        "Zeroed: motor origin reset; pot re-pinned "
-                        "m=%.3f b=%.3f at v0=%.4f",
-                        m,
-                        b,
-                        v0,
-                    )
+                    if v0 is None:
+                        logger.warning(
+                            "Motor origin reset, but pot re-pin SKIPPED: "
+                            "potmon not publishing pot_az_voltage. Re-pin "
+                            "once potmon is back (calibrate-pot --mode "
+                            "rezero)."
+                        )
+                    else:
+                        m, b = rezero_pot(transport, pot_proxy, v0)
+                        logger.info(
+                            "Zeroed: motor origin reset; pot re-pinned "
+                            "m=%.3f b=%.3f at v0=%.4f",
+                            m,
+                            b,
+                            v0,
+                        )
                 break
     finally:
         zeroer.cancel_home()
