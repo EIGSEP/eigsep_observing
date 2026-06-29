@@ -3,6 +3,21 @@
 from eigsep_observing.live_status import orientation
 
 
+def test_orientation_signals_registered():
+    from eigsep_observing.live_status.signals import SIGNAL_REGISTRY
+
+    for name in (
+        "orientation.az_consensus_deg",
+        "orientation.el_consensus_deg",
+        "orientation.az_spread_deg",
+        "orientation.el_spread_deg",
+    ):
+        assert name in SIGNAL_REGISTRY
+    # spread signals disable staleness (recomputed each tick)
+    assert SIGNAL_REGISTRY["orientation.az_spread_deg"].max_age_s is None
+    assert SIGNAL_REGISTRY["orientation.el_spread_deg"].max_age_s is None
+
+
 def test_compute_orientation_consensus_and_spread():
     meta = {
         "motor": {"value": {"az_pos": 8000.0, "el_pos": 960.0}},

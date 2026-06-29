@@ -50,6 +50,15 @@ lidar.distance_m:
 potmon.pot_az_angle:
   healthy: null  # TODO
 
+# Antenna orientation — motor/pot/IMU sensor spread (consensus is
+# display-only, no band).
+orientation.az_spread_deg:
+  healthy: [0.0, 3.0]
+  danger:  [0.0, 10.0]
+orientation.el_spread_deg:
+  healthy: [0.0, 3.0]
+  danger:  [0.0, 10.0]
+
 # Escape hatch: any entry here overrides the derived default for that
 # signal. Example:
 # tempctrl_lna.T_now:
