@@ -19,9 +19,15 @@ import numpy as np
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
 
+from .motor_cal import cal_motor
 from .motion_switch import MotionSwitchCoordinator
 
 logger = logging.getLogger(__name__)
+
+
+class MotorLimitError(ValueError):
+    """Raised when a commanded move or a live sensor reading would take an
+    axis outside its configured safe-travel window."""
 
 
 class MotorClient:
@@ -66,6 +72,10 @@ class MotorClient:
         poll_interval_s=0.1,
         stall_timeout_s=30.0,
         start_timeout_s=1.0,
+        az_limits_deg=(-180.0, 180.0),
+        el_limits_deg=(-180.0, 180.0),
+        pot_az_v_limits=None,
+        imu_el_limits_deg=None,
         source="motor_client",
         coord=None,
     ):
@@ -81,6 +91,11 @@ class MotorClient:
         self.poll_interval_s = poll_interval_s
         self.stall_timeout_s = stall_timeout_s
         self.start_timeout_s = start_timeout_s
+        self.az_limits_deg = az_limits_deg
+        self.el_limits_deg = el_limits_deg
+        self.pot_az_v_limits = pot_az_v_limits
+        self.imu_el_limits_deg = imu_el_limits_deg
+        self._cal = cal_motor()
         self.logger = logger
         if coord is None:
             coord = MotionSwitchCoordinator(
