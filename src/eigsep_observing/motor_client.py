@@ -311,7 +311,9 @@ class MotorClient:
             if stop_event is not None and stop_event.is_set():
                 self.halt()
                 return
-            self._wait_for_stop(timeout=timeout, stop_event=stop_event, axis=axis)
+            self._wait_for_stop(
+                timeout=timeout, stop_event=stop_event, axis=axis
+            )
 
     def _axis_target(self, axis):
         """Current ``{axis}_target_pos`` from the snapshot, or ``None``.
@@ -367,16 +369,21 @@ class MotorClient:
         """(pot_az_voltage, imu_el_deg) from the snapshot; each None if
         unavailable. ConnectionError (panda down) yields (None, None) so a
         sensor-less move is allowed rather than crashing — the commanded
-        guard still applies."""
+        guard still applies.
+
+        The elevation reading comes from :func:`.el_sensor.read_el_estimate`:
+        ``imu_el`` (signed) is the primary; ``imu_az`` (|θ|) is the
+        magnitude-only failover when ``imu_el`` is absent.  Both absent or a
+        connection error yields ``None``.  The fence treats ``el`` as a
+        magnitude vs a symmetric window, so the magnitude-only failover is
+        handled correctly without sign."""
+        from .el_sensor import read_el_estimate
+
         try:
-            snap = self._reader.get("potmon") or {}
-            pot_v = snap.get("pot_az_voltage")
+            pot_v = (self._reader.get("potmon") or {}).get("pot_az_voltage")
         except (KeyError, redis.exceptions.ConnectionError):
             pot_v = None
-        try:
-            el = (self._reader.get("imu_el") or {}).get("el_deg")
-        except (KeyError, redis.exceptions.ConnectionError):
-            el = None
+        el = read_el_estimate(self._reader, logger=self.logger).el_deg
         return pot_v, el
 
     def _check_sensor_fence(self, axis):
