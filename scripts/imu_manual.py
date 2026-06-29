@@ -30,14 +30,14 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from eigsep_observing._scripts_util import add_redis_args, build_transport
-from eigsep_observing.io import _IMU_SCHEMA
+from eigsep_observing.io import _IMU_BASE
 from eigsep_observing.utils import configure_eig_logger
 
 
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
-# Field names this script renders. Asserting against the schema keeps
+# Field names this script renders. Asserting against _IMU_BASE keeps
 # the display honest: if the IMU schema grows or loses a field, this
 # import-time check fires so the script can't silently mis-render.
 _EXPECTED = {
@@ -48,9 +48,9 @@ _EXPECTED = {
     "accel_y",
     "accel_z",
 }
-_missing = _EXPECTED - set(_IMU_SCHEMA)
+_missing = _EXPECTED - set(_IMU_BASE)
 assert not _missing, (
-    f"imu_manual expects fields {_EXPECTED} from _IMU_SCHEMA; missing "
+    f"imu_manual expects fields {_EXPECTED} from _IMU_BASE; missing "
     f"{_missing}. Has the IMU schema changed in io.py?"
 )
 
@@ -80,7 +80,7 @@ class _PlotHistory:
 
     One sample per loop tick: elapsed seconds since the first sample,
     plus each IMU's :data:`PLOT_FIELDS` values. A field that is missing
-    or non-numeric (sensor error nulls fields per ``_IMU_SCHEMA``) is
+    or non-numeric (sensor error nulls fields per ``_IMU_BASE``) is
     stored as ``float("nan")`` so a dropout becomes a gap in the trace
     rather than a spurious zero or a crash. Samples older than
     ``window_s`` are dropped from the front so the plot stays a
