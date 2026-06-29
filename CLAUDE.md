@@ -287,11 +287,26 @@ separate per-channel streams, so the consumer no longer needs a custom
 splitter. (The standalone `temp_mon` Pico app was retired in picohost
 1.0.0.)
 
-**IMU mode (picohost 1.0.0).** The two IMU picos (`imu_el` panda elevation,
+**IMU mode (picohost 1.0.0+).** The two IMU picos (`imu_el` panda elevation,
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:
 just `yaw`/`pitch`/`roll` (degrees) and `accel_x/y/z` (m/s²). No quaternion,
-linear-accel, gyro, mag, or calibration-level fields. Both share the
-`_IMU_SCHEMA` body in `io.py`.
+linear-accel, gyro, mag, or BNO085 calibration-status fields. The two picos
+now carry *different* derived field sets, so the single shared `_IMU_SCHEMA`
+was split (picohost 3.10, calibrate-imu) into a common `_IMU_BASE` body plus
+two per-pico schemas in `io.py`: `_IMU_EL_SCHEMA` adds a gravity-derived
+signed `el_deg`; `_IMU_AZ_SCHEMA` adds `el_deg` (|θ|) plus the azimuth blend
+(`az_deg`, `az_from_accel_deg`, `az_from_yaw_deg`, `az_blend_weight`). All
+derived fields are `float` in the schema and `None` when the IMU is
+uncalibrated — the producer's stable shape — so the float→mean reduction and
+`_validate_metadata`'s None short-circuit handle them cleanly.
+
+Like `potmon`, the IMU schema is enforced against the **post-handler** shape,
+not the raw emulator output: `ImuEmulator.get_status()` emits only the BNO085
+fields, and `PicoIMU._imu_redis_handler` adds the calibrate-imu derived fields
+at Redis-publish time. The producer-contract test composes the two via
+`_imu_post_handler_reading` (run uncalibrated, so derived fields are `None`) —
+see it in `src/eigsep_observing/contract_tests/test_producer_contracts.py`,
+mirroring `_potmon_post_handler_reading`.
 
 **`potmon` producer-contract quirk.** The `potmon` schema is enforced
 against the **post-`_pot_redis_handler`** shape, not the raw

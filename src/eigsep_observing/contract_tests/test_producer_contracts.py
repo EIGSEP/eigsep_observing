@@ -50,6 +50,7 @@ import eigsep_observing
 from eigsep_observing import io
 from eigsep_observing._test_fixtures import (
     HEADER,
+    IMU_AZ_READING,
     IMU_READING,
     tempctrl_post_handler_reading,
 )
@@ -267,6 +268,17 @@ def test_test_imu_reading_conforms_to_imu_el_schema():
     the imu_el schema. Catches drift in the fixture."""
     assert (
         io._validate_metadata(IMU_READING, io.SENSOR_SCHEMAS["imu_el"]) == []
+    )
+
+
+def test_test_imu_az_reading_conforms_to_imu_az_schema():
+    """The IMU_AZ_READING fixture is shared across VNA_METADATA,
+    CORR_METADATA, test_io.py, and conftest.py; pin it against the
+    imu_az schema so drift in one fixture can't silently rot every
+    test that touches it."""
+    assert (
+        io._validate_metadata(IMU_AZ_READING, io.SENSOR_SCHEMAS["imu_az"])
+        == []
     )
 
 
