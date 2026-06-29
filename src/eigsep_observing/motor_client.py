@@ -390,7 +390,11 @@ class MotorClient:
             pot_v = (self._reader.get("potmon") or {}).get("pot_az_voltage")
         except (KeyError, redis.exceptions.ConnectionError):
             pot_v = None
-        el = read_el_estimate(self._reader, logger=self.logger).el_deg
+        # IMU cross-check warning suppressed on the high-frequency fence
+        # path (~10 Hz inside _wait_for_stop); the homer's settle-cadence
+        # read (MotorHomer._read_sensors) and the live-status dashboard
+        # surface IMU disagreement at a sane rate.
+        el = read_el_estimate(self._reader, logger=None).el_deg
         return pot_v, el
 
     def _check_sensor_fence(self, axis):

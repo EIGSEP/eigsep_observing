@@ -14,13 +14,19 @@ from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from .motion_switch import MotionSwitchCoordinator
-from .motor_client import MotorClient
+from .motor_client import MotorClient, MotorLimitError
 from .motor_homer import MotorHomer
 from .tempctrl_client import TempCtrlClient
 from .vna import VnaWriter
 from .vna import measure_s11 as _measure_s11
 
 logger = logging.getLogger(__name__)
+
+# Exception types that motor_loop should absorb and recover from.
+# MotorLimitError is a ValueError; without explicit inclusion it would
+# propagate out of the bare Thread(target=client.motor_loop) in
+# scripts/panda_observe.py and silently kill autonomous scanning.
+_MOTOR_LOOP_ERRORS = (TimeoutError, RuntimeError, MotorLimitError)
 
 # Valid RF switch state names, sourced from the firmware-side class so
 # that a pico firmware change flows through automatically.
@@ -417,12 +423,26 @@ class PandaClient:
             return
         self.logger.info(f"Motor client initialized (kwargs={kwargs})")
         if self.cfg.get("home_after_scan", False):
-            homer_kwargs = self.cfg.get("motor_homer_kwargs", {}) or {}
-            self.motor_homer = MotorHomer(
-                self.transport,
-                motor_client=self.motor_client,
-                **homer_kwargs,
-            )
+            raw_homer_kwargs = self.cfg.get("motor_homer_kwargs", {})
+            homer_kwargs = raw_homer_kwargs or {}
+            if not isinstance(homer_kwargs, dict):
+                self.logger.warning(
+                    "Invalid motor_homer_kwargs config; expected dict, "
+                    f"got {type(raw_homer_kwargs).__name__}. "
+                    "Motor homer disabled."
+                )
+                return
+            try:
+                self.motor_homer = MotorHomer(
+                    self.transport,
+                    motor_client=self.motor_client,
+                    **homer_kwargs,
+                )
+            except TypeError as err:
+                self.logger.warning(
+                    "Invalid motor_homer_kwargs for MotorHomer: "
+                    f"{err}. Motor homer disabled."
+                )
 
     def init_tempctrl(self):
         """
@@ -841,7 +861,7 @@ class PandaClient:
         # below re-surfaces the same fault and drives the retry loop.
         try:
             self.motor_client.set_delay()
-        except (RuntimeError, TimeoutError) as exc:
+        except _MOTOR_LOOP_ERRORS as exc:
             self._warn_with_status(
                 f"Motor set_delay failed at loop start "
                 f"({type(exc).__name__}: {exc}); scans will retry."
@@ -860,7 +880,7 @@ class PandaClient:
                         logging.INFO,
                     )
                     wait_s = interval
-                except (TimeoutError, RuntimeError) as exc:
+                except _MOTOR_LOOP_ERRORS as exc:
                     # Log locally only so repeated failures during a
                     # persistent fault don't flood the bounded status
                     # stream. Operator already saw the original ERROR
@@ -886,7 +906,7 @@ class PandaClient:
                                     "Post-scan homing did not converge; "
                                     "motors left parked."
                                 )
-                        except (TimeoutError, RuntimeError) as homer_exc:
+                        except _MOTOR_LOOP_ERRORS as homer_exc:
                             self._warn_with_status(
                                 f"Post-scan homing failed "
                                 f"({type(homer_exc).__name__}: "
@@ -895,7 +915,7 @@ class PandaClient:
                             )
                             self.motor_client.home()
                     wait_s = interval
-                except (TimeoutError, RuntimeError) as exc:
+                except _MOTOR_LOOP_ERRORS as exc:
                     self._error_with_status(
                         f"Motor scan aborted ({type(exc).__name__}: {exc})."
                     )
@@ -905,7 +925,7 @@ class PandaClient:
                             "Motors parked at home after scan failure."
                         )
                         wait_s = interval
-                    except (TimeoutError, RuntimeError) as park_exc:
+                    except _MOTOR_LOOP_ERRORS as park_exc:
                         self._error_with_status(
                             f"Post-failure home() also failed "
                             f"({type(park_exc).__name__}: {park_exc}); "

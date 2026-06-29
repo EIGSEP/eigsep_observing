@@ -2050,6 +2050,85 @@ def test_motor_loop_failure_park_stays_open_loop(transport, dummy_cfg):
         client.stop()
 
 
+def test_motor_loop_survives_motor_limit_error(transport, dummy_cfg, caplog):
+    """A ``MotorLimitError`` from ``scan`` (sensor fence or commanded-target
+    guard) must not propagate out of ``motor_loop``.  It must be treated
+    identically to a scan ``RuntimeError``: logged at ERROR on both channels,
+    followed by an open-loop park attempt, then the loop exits cleanly because
+    ``stop_client`` was set inside the raising scan stub."""
+    from eigsep_observing.motor_client import MotorLimitError
+
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        home_calls = []
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise MotorLimitError("out of window")
+
+        def recording_home():
+            home_calls.append(True)
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_client, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_client, "home", side_effect=recording_home
+            ),
+        ):
+            caplog.set_level("ERROR")
+            client.motor_loop()  # must return, not raise
+
+        assert home_calls == [True], (
+            "motor_loop must attempt open-loop park after MotorLimitError "
+            "so a power loss doesn't strand the rig at an arbitrary position"
+        )
+        assert any(
+            "Motor scan aborted" in r.getMessage()
+            and "MotorLimitError" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.ERROR
+        assert "Motor scan aborted" in status
+    finally:
+        client.stop()
+
+
+def test_invalid_motor_homer_kwargs_disables_homer(
+    transport, dummy_cfg, caplog
+):
+    """A ``motor_homer_kwargs`` with an unknown key must not raise during
+    ``PandaClient.__init__``; ``init_motor_client`` must catch the resulting
+    ``TypeError``, warn, and leave ``motor_homer`` as ``None`` so the loop
+    still works (open-loop park only)."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"nonexistent_kwarg": 1}
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert client.motor_homer is None, (
+            "Invalid motor_homer_kwargs must disable motor_homer, not raise"
+        )
+        assert any(
+            "Invalid motor_homer_kwargs" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+    finally:
+        client.stop()
+
+
 # ``tempctrl_loop`` mirrors ``motor_loop``: periodic action gated by a
 # ``use_*`` flag. Unit tests for the command dispatch + emulator state
 # live in tests/test_tempctrl_client.py; these tests cover the
