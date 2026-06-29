@@ -712,3 +712,37 @@ def test_reset_step_position_sends_command():
         send.assert_called_once_with(
             "reset_step_position", az_step=0, el_step=0
         )
+
+
+# ---------------------------------------------------------------------------
+# _read_fence_sensors: IMU cross-check logger suppression
+# ---------------------------------------------------------------------------
+
+
+def test_fence_sensors_passes_logger_none_to_read_el_estimate():
+    """``_read_fence_sensors`` must pass ``logger=None`` to
+    ``read_el_estimate`` so the "IMU elevation readings disagree" WARNING
+    is not emitted at ~10 Hz on the high-frequency fence-poll path.
+    ``MotorHomer._read_sensors`` keeps ``logger=self.logger`` for the
+    settle-cadence read, which surfaces disagreement at a sane rate."""
+    mc = MotorClient(DummyTransport())
+    mc._reader.get = lambda key: {}
+    captured_loggers = []
+
+    def recording_read_el(reader, *, logger=None, **kw):
+        captured_loggers.append(logger)
+        from eigsep_observing.el_sensor import ElEstimate
+
+        return ElEstimate(el_deg=None, magnitude_only=False, source=None)
+
+    with patch(
+        "eigsep_observing.motor_client.read_el_estimate",
+        side_effect=recording_read_el,
+    ):
+        mc._read_fence_sensors()
+
+    assert captured_loggers, "_read_fence_sensors must call read_el_estimate"
+    assert all(lg is None for lg in captured_loggers), (
+        "_read_fence_sensors must pass logger=None to suppress high-frequency "
+        f"IMU cross-check warnings; got: {captured_loggers}"
+    )
