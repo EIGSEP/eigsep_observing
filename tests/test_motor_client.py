@@ -698,3 +698,17 @@ def test_fence_breach_mid_move_halts_and_raises():
     with pytest.raises(MotorLimitError):
         mc._wait_for_stop(timeout=5.0, axis="az")
     assert halted, "breach must halt the motor before raising"
+
+
+# ---------------------------------------------------------------------------
+# MotorClient.reset_step_position
+# ---------------------------------------------------------------------------
+
+
+def test_reset_step_position_sends_command():
+    mc = MotorClient(DummyTransport())
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.reset_step_position(az_step=0, el_step=0)
+        send.assert_called_once_with(
+            "reset_step_position", az_step=0, el_step=0
+        )
