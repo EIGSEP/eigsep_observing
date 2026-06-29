@@ -85,8 +85,9 @@ HEADER = {
 # Schema-conformant raw IMU reading (as emitted by a pico and pushed into
 # stream:imu_el by picohost). Mirrors the BNO085 UART RVC payload
 # introduced in picohost 1.0.0: yaw/pitch/roll orientation in degrees and
-# accel_x/y/z in m/s². Used to build CORR_METADATA entries and by tests
-# that feed raw stream data into File.add_data.
+# accel_x/y/z in m/s². ``el_deg`` is the calibrate-imu derived signed
+# gravity elevation (0.0 at the level pose). Used to build CORR_METADATA
+# entries and by tests that feed raw stream data into File.add_data.
 IMU_READING = {
     "sensor_name": "imu_el",
     "status": "update",
@@ -97,6 +98,7 @@ IMU_READING = {
     "accel_x": 0.0,
     "accel_y": 0.0,
     "accel_z": 9.81,
+    "el_deg": 0.0,
 }
 
 
@@ -117,6 +119,7 @@ def _imu_avg_entry(yaw):
         "accel_x": 0.0,
         "accel_y": 0.0,
         "accel_z": 9.81,
+        "el_deg": 0.0,
     }
 
 
