@@ -533,3 +533,67 @@ def test_cal_motor_roundtrips_steps_deg():
     steps = cal.deg_to_steps(90.0)
     assert isinstance(steps, int)
     assert abs(cal.steps_to_deg(steps) - 90.0) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Task-2 additions: commanded-target guard in _send_and_wait
+# ---------------------------------------------------------------------------
+
+
+def _client_seeded(az_target=0, el_target=0, **kw):
+    """Client whose snapshot reports a known at-rest target on both axes."""
+    mc = MotorClient(DummyTransport(), **kw)
+    status = {
+        "az_pos": az_target,
+        "az_target_pos": az_target,
+        "el_pos": el_target,
+        "el_target_pos": el_target,
+    }
+    mc._motor_status = lambda: status
+    return mc
+
+
+def test_absolute_target_deg_beyond_limit_raises_before_send():
+    mc = _client_seeded()
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(az_deg=200.0)
+        send.assert_not_called()
+
+
+def test_absolute_target_deg_within_limit_sends():
+    mc = _client_seeded()
+    # short-circuit the wait so the test only exercises the guard + send
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=170.0)
+        send.assert_called_once()
+
+
+def test_relative_jog_past_limit_uses_absolute_result():
+    # current target 175 deg -> a +10 jog lands at 185 -> blocked
+    cal = MotorClient(DummyTransport())._cal
+    steps_175 = cal.deg_to_steps(175.0)
+    mc = _client_seeded(az_target=steps_175)
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.jog_az(10.0)
+        send.assert_not_called()
+
+
+def test_el_window_narrowed_by_config():
+    mc = _client_seeded(el_limits_deg=(-30.0, 30.0))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(el_deg=45.0)
+        send.assert_not_called()
+
+
+def test_home_and_halt_never_blocked():
+    mc = _client_seeded(az_target=999999, el_target=999999)  # absurd count
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.home()  # target steps 0 -> 0 deg, always in window
+        send.assert_called()

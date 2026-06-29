@@ -292,6 +292,7 @@ class MotorClient:
         )
         with self._coord.motion_section(label=label):
             before_target = self._axis_target(axis)
+            self._check_target_limit(axis, action, before_target, kwargs)
             self._proxy.send_command(action, **kwargs)
             self._wait_for_start(axis, before_target, stop_event=stop_event)
             if stop_event is not None and stop_event.is_set():
@@ -311,6 +312,43 @@ class MotorClient:
         if status is None:
             return None
         return status.get(f"{axis}_target_pos")
+
+    def _resulting_deg(self, action, before_target_steps, kwargs):
+        """Absolute resulting axis position in degrees for a move action,
+        or None for actions without a positional target (e.g. ``halt``).
+
+        Handles the three move shapes: absolute degrees
+        (``*_target_deg``), absolute steps (``*_target_steps``), and
+        relative degrees (``*_move_deg``, added to the current target).
+        """
+        if action.endswith("_target_deg"):
+            return float(kwargs["target_deg"])
+        if action.endswith("_target_steps"):
+            return self._cal.steps_to_deg(int(kwargs["target_steps"]))
+        if action.endswith("_move_deg"):
+            base = (
+                0 if before_target_steps is None else int(before_target_steps)
+            )
+            return self._cal.steps_to_deg(
+                base + self._cal.deg_to_steps(float(kwargs["delta_deg"]))
+            )
+        return None
+
+    def _check_target_limit(self, axis, action, before_target_steps, kwargs):
+        """Raise MotorLimitError if the resulting absolute position for
+        *axis* falls outside its configured window. No-op for axis-less
+        actions or actions with no positional target."""
+        if axis is None:
+            return
+        deg = self._resulting_deg(action, before_target_steps, kwargs)
+        if deg is None:
+            return
+        lo, hi = self.az_limits_deg if axis == "az" else self.el_limits_deg
+        if not (lo <= deg <= hi):
+            raise MotorLimitError(
+                f"{axis} move to {deg:.1f} deg outside safe window "
+                f"[{lo:.1f}, {hi:.1f}]; refusing to send {action}."
+            )
 
     def move_to(
         self,
