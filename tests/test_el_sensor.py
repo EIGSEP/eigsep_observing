@@ -1,5 +1,7 @@
 import logging
 
+import redis
+
 from eigsep_observing.el_sensor import ElEstimate, read_el_estimate
 
 
@@ -40,3 +42,11 @@ def test_crosscheck_silent_when_consistent(caplog):
     with caplog.at_level(logging.WARNING):
         read_el_estimate(r, logger=logging.getLogger("t"))
     assert not caplog.records
+
+
+def test_connection_error_returns_none_sentinel():
+    class _ErrorReader:
+        def get(self, key):
+            raise redis.exceptions.ConnectionError("down")
+
+    assert read_el_estimate(_ErrorReader()) == ElEstimate(None, False, "none")

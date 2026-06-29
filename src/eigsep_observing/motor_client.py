@@ -20,6 +20,7 @@ import redis.exceptions
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
 
+from .el_sensor import read_el_estimate
 from .motor_cal import cal_motor
 from .motion_switch import MotionSwitchCoordinator
 
@@ -377,8 +378,6 @@ class MotorClient:
         connection error yields ``None``.  The fence treats ``el`` as a
         magnitude vs a symmetric window, so the magnitude-only failover is
         handled correctly without sign."""
-        from .el_sensor import read_el_estimate
-
         try:
             pot_v = (self._reader.get("potmon") or {}).get("pot_az_voltage")
         except (KeyError, redis.exceptions.ConnectionError):
