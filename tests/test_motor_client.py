@@ -14,7 +14,13 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from eigsep_observing import MotionSwitchCoordinator, MotorClient
+from eigsep_observing import (
+    MotionSwitchCoordinator,
+    MotorClient,
+    MotorLimitError,
+)
+from eigsep_observing.motor_cal import cal_motor
+from eigsep_redis.testing import DummyTransport
 
 
 SMALL_RANGE = np.array([-1.0, 0.0, 1.0])
@@ -501,14 +507,10 @@ def test_scan_uses_send_and_wait_helper(client):
 
 
 def _client(**kw):
-    from eigsep_redis.testing import DummyTransport
-
     return MotorClient(DummyTransport(), **kw)
 
 
 def test_motor_limit_error_is_valueerror():
-    from eigsep_observing.motor_client import MotorLimitError
-
     assert issubclass(MotorLimitError, ValueError)
 
 
@@ -527,8 +529,6 @@ def test_limits_overridable():
 
 
 def test_cal_motor_roundtrips_steps_deg():
-    from eigsep_observing.motor_cal import cal_motor
-
     cal = cal_motor()
     steps = cal.deg_to_steps(90.0)
     assert isinstance(steps, int)
