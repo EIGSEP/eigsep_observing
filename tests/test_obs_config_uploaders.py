@@ -34,6 +34,7 @@ UPLOADER_SCRIPTS = {
 # read snapshots and must coexist, so they live in RUN_TAG_EXEMPT.
 ACTIVE_DRIVER_SCRIPTS = {
     "field_zero.py",
+    "motor_home.py",
     "vna_manual.py",
     "rfswitch_manual.py",
     "tempctrl_manual.py",
