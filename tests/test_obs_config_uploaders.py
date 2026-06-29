@@ -33,6 +33,7 @@ UPLOADER_SCRIPTS = {
 # alt-mode vna_position_sweep). Passive readouts are NOT here; they only
 # read snapshots and must coexist, so they live in RUN_TAG_EXEMPT.
 ACTIVE_DRIVER_SCRIPTS = {
+    "field_zero.py",
     "vna_manual.py",
     "rfswitch_manual.py",
     "tempctrl_manual.py",
