@@ -2,9 +2,9 @@
 re-pin the pot calibration intercept with the box in its hanging pose.
 
 Self-contained active driver (see scripts/CLAUDE.md): claims run_tag,
-talks to hardware only via PicoProxy, requires pico-manager. Later tasks
-add the interactive zeroing and the pot re-pin; this task is the pure
-slip-verdict helper.
+talks to hardware only via PicoProxy, requires pico-manager. Performs
+pot-slip pre-check, interactive jog-to-zero, motor-origin reset, and
+pot intercept re-pin.
 """
 
 import curses
@@ -26,6 +26,8 @@ from eigsep_observing.utils import configure_eig_logger
 
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
+
+_POT_DOWN_MSG = "potmon not publishing pot_az_voltage; cannot run slip check"
 
 
 def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
@@ -82,9 +84,13 @@ def run_slip_check(motor_client, snapshot, slope_m, move_deg=30.0):
     dV = dAngle / m). Returns (verdict, expected_dv, measured_dv).
     """
     v_before = _pot_voltage(snapshot)
+    if v_before is None:
+        raise SystemExit(_POT_DOWN_MSG)
     motor_client.jog_az(move_deg)
     v_after = _pot_voltage(snapshot)
     motor_client.jog_az(-move_deg)
+    if v_after is None:
+        raise SystemExit(_POT_DOWN_MSG)
     expected_dv = abs(move_deg) / abs(slope_m)
     measured_dv = abs(v_after - v_before)
     return slip_verdict(expected_dv, measured_dv), expected_dv, measured_dv
