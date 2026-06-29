@@ -6,7 +6,6 @@ import pytest
 
 from eigsep_observing import MotorZeroer
 from eigsep_observing.motor_zeroer import _CAL_MOTOR, _format_pos
-from eigsep_redis.keys import METADATA_HASH
 
 
 _KEY_ENTER = ord("\n")
@@ -124,11 +123,20 @@ def test_jogs_block_until_move_completes(client):
     assert el.position == el_target
 
 
-def test_status_text_waiting_when_no_metadata(client):
+def test_status_text_waiting_when_no_metadata(client, monkeypatch):
     zeroer = _zeroer(client.transport)
-    # Clear the motor metadata row so the reader raises KeyError.
-    client.transport.r.hdel(METADATA_HASH, "motor")
-    client.transport.r.hdel(METADATA_HASH, "motor_ts")
+
+    # The live PicoManager republishes the motor metadata row every
+    # ~50ms, so an hdel here races the publisher and loses under load
+    # (it re-creates the row ~40-80ms later). Force the reader to report
+    # the row absent instead — a missing key is exactly what
+    # MetadataSnapshotReader.get surfaces as KeyError, and that is the
+    # condition status_text() must handle. The heartbeat stays real, so
+    # the connected assertion still exercises genuine manager liveness.
+    def _raise_keyerror(keys=None):
+        raise KeyError(keys)
+
+    monkeypatch.setattr(zeroer._reader, "get", _raise_keyerror)
     az, el, connected = zeroer.status_text()
     assert (az, el) == ("WAITING", "---")
     # Heartbeat is still alive even if metadata is missing.
