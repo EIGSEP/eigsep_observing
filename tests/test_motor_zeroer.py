@@ -4,7 +4,10 @@ import time
 
 import pytest
 
+from eigsep_redis.testing import DummyTransport
+
 from eigsep_observing import MotorZeroer
+from eigsep_observing.motor_client import MotorClient, MotorLimitError
 from eigsep_observing.motor_zeroer import _CAL_MOTOR, _format_pos
 
 
@@ -432,3 +435,20 @@ def test_format_pos_renders_axis_degrees():
     # Non-numeric sentinels (e.g. a missing position key) pass through
     # verbatim so a partial status dict never crashes the UI.
     assert _format_pos("?") == "?"
+
+
+def test_zeroer_jog_inherits_travel_limit():
+    # inject a MotorClient pinned near the +az edge; a further +jog must raise
+    transport = DummyTransport()
+    cal = MotorClient(transport)._cal
+    mc = MotorClient(transport)
+    steps = cal.deg_to_steps(179.0)
+    mc._motor_status = lambda: {
+        "az_pos": steps,
+        "az_target_pos": steps,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }
+    zeroer = MotorZeroer(transport, motor_client=mc)
+    with pytest.raises(MotorLimitError):
+        zeroer.jog_az(5.0)  # 179 + 5 = 184 -> outside ±180
