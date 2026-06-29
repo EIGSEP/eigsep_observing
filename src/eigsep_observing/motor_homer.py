@@ -113,8 +113,13 @@ class MotorHomer:
             slope = (cal.get("pot_az") or [None])[0]
             if slope:
                 return abs(float(slope))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.logger.warning(
+                "PotCalStore unavailable; using az gain fallback "
+                "%.1f deg/V: %s",
+                _AZ_GAIN_FALLBACK_DEG_PER_VOLT,
+                exc,
+            )
         return _AZ_GAIN_FALLBACK_DEG_PER_VOLT
 
     def _az_residual_deg(self, ref, pot_v):
