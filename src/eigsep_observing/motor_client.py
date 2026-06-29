@@ -51,6 +51,24 @@ class MotorClient:
         Must exceed the producer status cadence (~200 ms) so a real move
         is never mistaken for a no-op — this start phase is what keeps a
         move reliably one-axis-at-a-time.
+    az_limits_deg : tuple of (float, float)
+        Inclusive ``(min, max)`` azimuth travel limits in degrees.
+        Defaults to ``(-180.0, 180.0)``. Commands that would violate
+        these bounds raise :class:`MotorLimitError`.
+    el_limits_deg : tuple of (float, float)
+        Inclusive ``(min, max)`` elevation travel limits in degrees.
+        Defaults to ``(-180.0, 180.0)``. Commands that would violate
+        these bounds raise :class:`MotorLimitError`.
+    pot_az_v_limits : tuple of (float, float) or None
+        Inclusive ``(min, max)`` safe voltage range for the azimuth
+        potentiometer. When ``None`` (default) no potentiometer limit
+        is enforced. A live reading outside this window raises
+        :class:`MotorLimitError`.
+    imu_el_limits_deg : tuple of (float, float) or None
+        Inclusive ``(min, max)`` safe elevation range derived from the
+        IMU. When ``None`` (default) no IMU elevation limit is
+        enforced. A live reading outside this window raises
+        :class:`MotorLimitError`.
     source : str
         Identifier stamped on proxy command stream entries.
     coord : MotionSwitchCoordinator or None
