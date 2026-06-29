@@ -31,6 +31,11 @@ use_motor: true
 motor_interval: 1  # seconds between scans
 motor_failure_retry_s: 0.5  # fast retry for tests
 motor_scan: {}
+motor_client_kwargs:
+  az_limits_deg: [-180.0, 180.0]
+  el_limits_deg: [-180.0, 180.0]
+  pot_az_v_limits: null
+  imu_el_limits_deg: null
 
 # motion-switch coordination (default off; tests opt in per-fixture)
 serialize_motion_and_switching: false
