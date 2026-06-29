@@ -12,6 +12,7 @@ Flask-Login problem.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import time
@@ -19,6 +20,7 @@ from typing import Any, Optional
 
 import numpy as np
 from flask import Flask, Response, jsonify, render_template, request
+from picohost.motor import PicoMotor
 from plotly.offline import get_plotlyjs
 
 from .aggregator import (
@@ -33,6 +35,7 @@ from .calibration import (
 )
 from ..io import pair_label
 from ..vna_calibration import VnaCache, calibrate_s11
+from .orientation import compute_orientation
 from .signals import enabled_signals
 from .thresholds import Thresholds
 
@@ -42,6 +45,24 @@ logger = logging.getLogger(__name__)
 
 CELSIUS_TO_KELVIN = 273.15
 T_REF_K = 290.0  # IEEE ENR reference temperature
+
+
+def _default_ori_motor():
+    """Serial-less :class:`~picohost.motor.PicoMotor` for steps→degrees.
+
+    Mirrors :func:`eigsep_observing.motor_zeroer._default_cal_motor`:
+    ``PicoMotor.__new__`` bypass (no serial I/O) + constructor-default
+    geometry attributes so ``steps_to_deg`` matches the firmware's own
+    ``deg_to_steps`` exactly without duplicating the gear constants here.
+    """
+    sig = inspect.signature(PicoMotor.__init__)
+    motor = PicoMotor.__new__(PicoMotor)
+    for attr in ("step_angle_deg", "gear_teeth", "microstep"):
+        setattr(motor, attr, sig.parameters[attr].default)
+    return motor
+
+
+_ORI_MOTOR = _default_ori_motor()
 
 
 def _envelope(data: Any, warnings: Optional[list] = None) -> dict:
@@ -358,6 +379,21 @@ def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
             "status": status,
             "classify": classify_by_sig,
         }
+    ori = compute_orientation(out, _ORI_MOTOR.steps_to_deg)
+    out["orientation"] = {
+        "value": ori,
+        "ts_unix": None,
+        "age_s": None,
+        "status": None,
+        "classify": {
+            "orientation.az_spread_deg": thresholds.classify(
+                "orientation.az_spread_deg", ori["az"].get("spread")
+            ),
+            "orientation.el_spread_deg": thresholds.classify(
+                "orientation.el_spread_deg", ori["el"].get("spread")
+            ),
+        },
+    }
     return out
 
 
