@@ -493,3 +493,43 @@ def test_scan_uses_send_and_wait_helper(client):
     # el_target_steps), so per-move serialization covers the home calls.
     assert any(a == "az_target_steps" for a, _ in calls)
     assert any(a == "el_target_steps" for a, _ in calls)
+
+
+# ---------------------------------------------------------------------------
+# Task-1 additions: MotorLimitError + per-axis limit kwargs + shared cal
+# ---------------------------------------------------------------------------
+
+
+def _client(**kw):
+    from eigsep_redis.testing import DummyTransport
+
+    return MotorClient(DummyTransport(), **kw)
+
+
+def test_motor_limit_error_is_valueerror():
+    from eigsep_observing.motor_client import MotorLimitError
+
+    assert issubclass(MotorLimitError, ValueError)
+
+
+def test_default_limits_are_symmetric_180():
+    mc = _client()
+    assert mc.az_limits_deg == (-180.0, 180.0)
+    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.pot_az_v_limits is None
+    assert mc.imu_el_limits_deg is None
+
+
+def test_limits_overridable():
+    mc = _client(el_limits_deg=(-30.0, 30.0), pot_az_v_limits=(0.2, 3.1))
+    assert mc.el_limits_deg == (-30.0, 30.0)
+    assert mc.pot_az_v_limits == (0.2, 3.1)
+
+
+def test_cal_motor_roundtrips_steps_deg():
+    from eigsep_observing.motor_cal import cal_motor
+
+    cal = cal_motor()
+    steps = cal.deg_to_steps(90.0)
+    assert isinstance(steps, int)
+    assert abs(cal.steps_to_deg(steps) - 90.0) < 1.0

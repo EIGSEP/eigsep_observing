@@ -7,15 +7,14 @@ rendering, and the same logic is reachable by unit tests without a
 terminal.
 """
 
-import inspect
 import logging
 import threading
 import time
 
 from eigsep_redis import MetadataSnapshotReader
-from picohost.motor import PicoMotor
 from picohost.proxy import PicoProxy
 
+from .motor_cal import cal_motor
 from .motor_client import MotorClient
 
 logger = logging.getLogger(__name__)
@@ -25,29 +24,7 @@ logger = logging.getLogger(__name__)
 _KEY_ENTER = ord("\n")
 _REQUIRE_STATUS_RETRY_S = 0.5
 
-
-def _default_cal_motor():
-    """A serial-less :class:`PicoMotor` carrying only the calibration
-    constants, used purely to convert step counts to axis degrees for
-    display.
-
-    ``PicoManager`` constructs the real motor pico with ``PicoMotor``'s
-    constructor defaults and never overrides ``step_angle_deg`` /
-    ``gear_teeth`` / ``microstep`` (see ``picohost.manager``), so reusing
-    those defaults here makes the displayed degrees match the mover's
-    own ``deg_to_steps`` exactly instead of duplicating the gear math.
-    Pulling the values from the constructor signature keeps them in
-    lockstep with picohost. The ``__new__`` bypass (no serial I/O)
-    mirrors ``contract_tests.test_producer_contracts``.
-    """
-    sig = inspect.signature(PicoMotor.__init__)
-    cal = PicoMotor.__new__(PicoMotor)
-    for attr in ("step_angle_deg", "gear_teeth", "microstep"):
-        setattr(cal, attr, sig.parameters[attr].default)
-    return cal
-
-
-_CAL_MOTOR = _default_cal_motor()
+_CAL_MOTOR = cal_motor()
 
 
 def _format_pos(raw):
