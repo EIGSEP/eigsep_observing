@@ -123,6 +123,53 @@ def _imu_avg_entry(yaw):
     }
 
 
+# Representative calibrated imu_az reading. el_deg is |theta| (>=0); the az
+# fields track yaw here as an illustrative calibrated reading. DEVIATION
+# (CLAUDE.md rule 2): not composed from the real PicoIMU handler because
+# calibrate-imu is not yet in the released picohost; switch to
+# emulator+handler composition (cf. tempctrl_post_handler_reading) once it
+# ships.
+IMU_AZ_READING = {
+    "sensor_name": "imu_az",
+    "status": "update",
+    "app_id": 6,
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "accel_x": 0.0,
+    "accel_y": 0.0,
+    "accel_z": 9.81,
+    "el_deg": 0.0,
+    "az_deg": 0.0,
+    "az_from_accel_deg": 0.0,
+    "az_from_yaw_deg": 0.0,
+    "az_blend_weight": 1.0,
+}
+
+
+def _imu_az_avg_entry(yaw):
+    """One imu_az per-sample entry as avg_metadata would emit it.
+
+    az fields track yaw (see IMU_AZ_READING deviation note).
+    """
+    return {
+        "sensor_name": "imu_az",
+        "status": "update",
+        "app_id": 6,
+        "yaw": yaw,
+        "pitch": 0.0,
+        "roll": 0.0,
+        "accel_x": 0.0,
+        "accel_y": 0.0,
+        "accel_z": 9.81,
+        "el_deg": 0.0,
+        "az_deg": yaw,
+        "az_from_accel_deg": yaw,
+        "az_from_yaw_deg": yaw,
+        "az_blend_weight": 1.0,
+    }
+
+
 def _lidar_avg_entry(distance_m):
     """One per-sample lidar entry as avg_metadata would emit it."""
     return {
@@ -218,10 +265,7 @@ CORR_METADATA = {
         else _imu_errored_integration_entry(0.001 * i)
         for i in range(NTIMES)
     ],
-    "imu_az": [
-        {**_imu_avg_entry(0.002 * i), "sensor_name": "imu_az", "app_id": 6}
-        for i in range(NTIMES)
-    ],
+    "imu_az": [_imu_az_avg_entry(0.002 * i) for i in range(NTIMES)],
     "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "tempctrl_lna": [
@@ -254,7 +298,7 @@ _SNAPSHOT_TS = 1775997296.789012
 VNA_METADATA = {
     "imu_el": IMU_READING,
     "imu_el_ts": _SNAPSHOT_TS,
-    "imu_az": {**IMU_READING, "sensor_name": "imu_az", "app_id": 6},
+    "imu_az": IMU_AZ_READING,
     "imu_az_ts": _SNAPSHOT_TS,
     "lidar": {
         "sensor_name": "lidar",

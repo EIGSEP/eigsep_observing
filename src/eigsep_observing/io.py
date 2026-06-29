@@ -808,10 +808,6 @@ _IMU_AZ_SCHEMA = {
     "az_blend_weight": float,
 }
 
-# Temporary alias: SENSOR_SCHEMAS still references _IMU_SCHEMA for both
-# imu_el and imu_az. A later task remaps SENSOR_SCHEMAS and removes this.
-_IMU_SCHEMA = _IMU_EL_SCHEMA
-
 # tempctrl publishes two flat streams (one per Peltier channel), each
 # matching this schema. The producer is
 # `picohost.base.PicoPeltier._peltier_redis_handler`, which fans the
@@ -863,8 +859,8 @@ _PELTIER_SCHEMA = {
 # filters None survivors, so an uncalibrated stream averages cleanly
 # to None for the cal/angle fields.
 SENSOR_SCHEMAS = {
-    "imu_el": _IMU_SCHEMA,
-    "imu_az": _IMU_SCHEMA,
+    "imu_el": _IMU_EL_SCHEMA,
+    "imu_az": _IMU_AZ_SCHEMA,
     "tempctrl_lna": _PELTIER_SCHEMA,
     "tempctrl_load": _PELTIER_SCHEMA,
     "potmon": {
