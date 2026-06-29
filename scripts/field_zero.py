@@ -17,6 +17,7 @@ from picohost.proxy import PicoProxy
 from eigsep_redis import MetadataSnapshotReader
 
 from eigsep_observing import MotorClient, MotorZeroer, run_tag
+from eigsep_observing.home_ref import publish_home_ref
 from eigsep_observing._scripts_util import (
     add_redis_args,
     build_transport,
@@ -102,6 +103,16 @@ def run_slip_check(motor_client, snapshot, slope_m, move_deg=30.0):
     return slip_verdict(expected_dv, measured_dv), expected_dv, measured_dv
 
 
+def _write_home_ref(transport, snapshot, v0):
+    """Write the home reference K/V after a confirmed zero.
+
+    Records the pot voltage at the zeroed position (slope-independent
+    az reference) and the current IMU elevation (None when uncalibrated).
+    """
+    el = (snapshot.get().get("imu_el") or {}).get("el_deg")
+    publish_home_ref(transport, pot_az_voltage_v0=v0, imu_el_deg_home=el)
+
+
 def _render(screen, zeroer, snapshot, deg):
     az, el, connected = zeroer.status_text()
     pot = snapshot.get().get("potmon") or {}
@@ -155,6 +166,7 @@ def _curses_main(screen, zeroer, snapshot, pot_proxy, transport, deg):
                         )
                     else:
                         m, b = rezero_pot(transport, pot_proxy, v0)
+                        _write_home_ref(transport, snapshot, v0)
                         logger.info(
                             "Zeroed: motor origin reset; pot re-pinned "
                             "m=%.3f b=%.3f at v0=%.4f",
@@ -186,6 +198,11 @@ def _parse_args():
         default=1.0,
         help="Initial jog step size in degrees (default: 1.0)",
     )
+    p.add_argument(
+        "--no-slip-check",
+        action="store_true",
+        help="Skip the pot-slip pre-check (step 1).",
+    )
     return p.parse_args()
 
 
@@ -209,24 +226,26 @@ def main():
 
     with run_tag.session(transport, "field_zero"):
         mc = MotorClient(transport, source="field_zero")
-        verdict, exp, meas = run_slip_check(
-            mc, snapshot, slope_m, args.move_deg
-        )
-        logger.info(
-            "Pot slip check: %s (expected %.4f V, measured %.4f V)",
-            verdict,
-            exp,
-            meas,
-        )
-        if verdict == "fail":
-            raise SystemExit(
-                f"POT SLIP DETECTED ({meas:.3f} V vs {exp:.3f} V "
-                "expected). Fix the pot coupling before zeroing."
+        if not args.no_slip_check:
+            verdict, exp, meas = run_slip_check(
+                mc, snapshot, slope_m, args.move_deg
             )
-        if verdict == "warn":
-            logger.warning(
-                "Pot tracking marginal; proceeding but inspect the coupling."
+            logger.info(
+                "Pot slip check: %s (expected %.4f V, measured %.4f V)",
+                verdict,
+                exp,
+                meas,
             )
+            if verdict == "fail":
+                raise SystemExit(
+                    f"POT SLIP DETECTED ({meas:.3f} V vs {exp:.3f} V "
+                    "expected). Fix the pot coupling before zeroing."
+                )
+            if verdict == "warn":
+                logger.warning(
+                    "Pot tracking marginal; proceeding but inspect "
+                    "the coupling."
+                )
         zeroer = MotorZeroer(transport, source="field_zero")
         zeroer.set_delay()
         zeroer.halt()
