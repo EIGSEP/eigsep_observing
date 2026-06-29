@@ -11,6 +11,7 @@ the redundant imu_el-signed / imu_az-|θ| estimate.
 import logging
 import time
 from dataclasses import dataclass
+from typing import Optional
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.buses import PotCalStore
@@ -28,8 +29,8 @@ _AZ_GAIN_FALLBACK_DEG_PER_VOLT = 90.0
 class HomeResult:
     converged: bool
     iterations: int
-    residual_az_deg: float
-    residual_el_deg: float
+    residual_az_deg: Optional[float]
+    residual_el_deg: Optional[float]
     degraded: bool
     reset_count: bool
 
@@ -265,6 +266,19 @@ class MotorHomer:
             pot_v, el_est = self._read_sensors()
             res_az = self._az_residual_deg(ref, pot_v)
             res_el, _ = self._el_residual(ref, el_est)
+            if res_az is None and res_el is None:
+                self.logger.warning(
+                    "Homing lost all sensor feedback mid-loop; aborting "
+                    "without re-zero (position unverified)."
+                )
+                return HomeResult(
+                    False,
+                    i,
+                    res_az,
+                    res_el,
+                    degraded=True,
+                    reset_count=False,
+                )
             if self._within_tol(res_az, res_el):
                 converged = True
                 break
