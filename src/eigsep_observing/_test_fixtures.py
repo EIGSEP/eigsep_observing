@@ -124,11 +124,12 @@ def _imu_avg_entry(yaw):
 
 
 # Representative calibrated imu_az reading. el_deg is |theta| (>=0); the az
-# fields track yaw here as an illustrative calibrated reading. DEVIATION
-# (CLAUDE.md rule 2): not composed from the real PicoIMU handler because
-# calibrate-imu is not yet in the released picohost; switch to
-# emulator+handler composition (cf. tempctrl_post_handler_reading) once it
-# ships.
+# fields track yaw here as an illustrative calibrated reading. The
+# producer↔schema contract is now validated against the real handler via
+# _imu_post_handler_reading in the contract test (calibrate-imu shipped in
+# picohost 3.10). These hand-set round-trip values are retained for
+# exact-value assertions, the same convention as the potmon round-trip
+# golden.
 IMU_AZ_READING = {
     "sensor_name": "imu_az",
     "status": "update",

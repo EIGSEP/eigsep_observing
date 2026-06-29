@@ -34,7 +34,7 @@ def _load(name):
 
 
 def _publish_imu(transport, name, **overrides):
-    """Publish one full ``_IMU_SCHEMA``-shaped sample for ``name``.
+    """Publish one full ``_IMU_BASE``-shaped sample for ``name``.
 
     Matches the picohost 1.0.0 BNO085 UART RVC producer: scalar
     yaw/pitch/roll (deg) and accel_x/y/z (m/s²) plus the base
@@ -91,7 +91,7 @@ def test_plot_history_records_fields_and_elapsed(transport):
 
 def test_plot_history_gaps_to_nan(transport):
     """A silent IMU and a nulled-out field (sensor error nulls fields
-    per _IMU_SCHEMA) both become NaN gaps, not zeros or crashes."""
+    per _IMU_BASE) both become NaN gaps, not zeros or crashes."""
     mod = _load("imu_manual")
     _publish_imu(transport, "imu_el", yaw=None)
     snapshot = MetadataSnapshotReader(transport)

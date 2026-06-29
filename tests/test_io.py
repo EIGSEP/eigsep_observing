@@ -3516,6 +3516,7 @@ def test_imu_schemas_field_sets():
         "accel_z",
     }
     assert set(io._IMU_EL_SCHEMA) == base | {"el_deg"}
+    assert io._IMU_EL_SCHEMA["el_deg"] is float
     assert set(io._IMU_AZ_SCHEMA) == base | {
         "el_deg",
         "az_deg",
