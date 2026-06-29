@@ -661,3 +661,40 @@ def test_sensor_fence_noop_when_reading_missing():
     with patch.object(mc._proxy, "send_command") as send:
         mc.move_to(az_deg=10.0)  # no reading -> can't fence -> allowed
         send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Task-4 additions: sensor fence polled during a move
+# ---------------------------------------------------------------------------
+
+
+def test_fence_breach_mid_move_halts_and_raises():
+    # pot voltage starts safe, then crosses the window on the 2nd poll
+    readings = [1.0, 1.0, 3.5]  # 3rd read is out of [0.2, 3.1]
+    it = iter(readings)
+
+    mc = MotorClient(DummyTransport(), pot_az_v_limits=(0.2, 3.1))
+    moving = {
+        "az_pos": 0,
+        "az_target_pos": 100,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }  # az still moving
+    mc._motor_status = lambda: dict(moving)
+
+    def fake_get(key):
+        if key == "potmon":
+            try:
+                return {"pot_az_voltage": next(it)}
+            except StopIteration:
+                return {"pot_az_voltage": 3.5}
+        return {}
+
+    mc._reader.get = fake_get
+
+    halted = []
+    mc.halt = lambda: halted.append(True)
+
+    with pytest.raises(MotorLimitError):
+        mc._wait_for_stop(timeout=5.0, axis="az")
+    assert halted, "breach must halt the motor before raising"
