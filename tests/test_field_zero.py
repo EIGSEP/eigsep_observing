@@ -1,10 +1,13 @@
 import importlib.util
 import pathlib
+import sys
 
 import pytest
 
 from eigsep_redis.testing import DummyTransport
 from picohost.buses import PotCalStore
+
+from eigsep_observing.home_ref import read_home_ref
 
 _spec = importlib.util.spec_from_file_location(
     "field_zero",
@@ -89,3 +92,22 @@ def test_run_slip_check_aborts_without_pot():
 
     with pytest.raises(SystemExit):
         field_zero.run_slip_check(Motor(), Snap(), slope_m=200.0)
+
+
+def test_no_slip_check_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["field_zero", "--no-slip-check"])
+    args = field_zero._parse_args()
+    assert args.no_slip_check is True
+
+
+def test_write_home_ref_stores_pot_and_imu():
+    t = DummyTransport()
+
+    class FakeSnapshot:
+        def get(self):
+            return {"imu_el": {"el_deg": 0.3}}
+
+    field_zero._write_home_ref(t, FakeSnapshot(), 1.7)
+    ref = read_home_ref(t)
+    assert ref["pot_az_voltage_v0"] == 1.7
+    assert ref["imu_el_deg_home"] == pytest.approx(0.3)
