@@ -76,3 +76,16 @@ def test_run_slip_check_uses_pot_swing():
     assert round(exp, 4) == round(30.0 / 200.0, 4)  # 0.15 V expected
     assert round(meas, 4) == 0.15  # 2.15 - 2.00
     assert verdict == "ok"
+
+
+def test_run_slip_check_aborts_without_pot():
+    class Snap:
+        def get(self, *a):
+            return {"potmon": {}}  # no pot_az_voltage
+
+    class Motor:
+        def jog_az(self, d, **k):
+            pass
+
+    with pytest.raises(SystemExit):
+        field_zero.run_slip_check(Motor(), Snap(), slope_m=200.0)
