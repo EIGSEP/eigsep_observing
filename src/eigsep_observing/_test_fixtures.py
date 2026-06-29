@@ -85,8 +85,9 @@ HEADER = {
 # Schema-conformant raw IMU reading (as emitted by a pico and pushed into
 # stream:imu_el by picohost). Mirrors the BNO085 UART RVC payload
 # introduced in picohost 1.0.0: yaw/pitch/roll orientation in degrees and
-# accel_x/y/z in m/s². Used to build CORR_METADATA entries and by tests
-# that feed raw stream data into File.add_data.
+# accel_x/y/z in m/s². ``el_deg`` is the calibrate-imu derived signed
+# gravity elevation (0.0 at the level pose). Used to build CORR_METADATA
+# entries and by tests that feed raw stream data into File.add_data.
 IMU_READING = {
     "sensor_name": "imu_el",
     "status": "update",
@@ -97,6 +98,7 @@ IMU_READING = {
     "accel_x": 0.0,
     "accel_y": 0.0,
     "accel_z": 9.81,
+    "el_deg": 0.0,
 }
 
 
@@ -117,6 +119,55 @@ def _imu_avg_entry(yaw):
         "accel_x": 0.0,
         "accel_y": 0.0,
         "accel_z": 9.81,
+        "el_deg": 0.0,
+    }
+
+
+# Representative calibrated imu_az reading. el_deg is |theta| (>=0); the az
+# fields track yaw here as an illustrative calibrated reading. The
+# producer↔schema contract is now validated against the real handler via
+# _imu_post_handler_reading in the contract test (calibrate-imu shipped in
+# picohost 3.10). These hand-set round-trip values are retained for
+# exact-value assertions, the same convention as the potmon round-trip
+# golden.
+IMU_AZ_READING = {
+    "sensor_name": "imu_az",
+    "status": "update",
+    "app_id": 6,
+    "yaw": 0.0,
+    "pitch": 0.0,
+    "roll": 0.0,
+    "accel_x": 0.0,
+    "accel_y": 0.0,
+    "accel_z": 9.81,
+    "el_deg": 0.0,
+    "az_deg": 0.0,
+    "az_from_accel_deg": 0.0,
+    "az_from_yaw_deg": 0.0,
+    "az_blend_weight": 1.0,
+}
+
+
+def _imu_az_avg_entry(yaw):
+    """One imu_az per-sample entry as avg_metadata would emit it.
+
+    az fields track yaw (see IMU_AZ_READING deviation note).
+    """
+    return {
+        "sensor_name": "imu_az",
+        "status": "update",
+        "app_id": 6,
+        "yaw": yaw,
+        "pitch": 0.0,
+        "roll": 0.0,
+        "accel_x": 0.0,
+        "accel_y": 0.0,
+        "accel_z": 9.81,
+        "el_deg": 0.0,
+        "az_deg": yaw,
+        "az_from_accel_deg": yaw,
+        "az_from_yaw_deg": yaw,
+        "az_blend_weight": 1.0,
     }
 
 
@@ -215,10 +266,7 @@ CORR_METADATA = {
         else _imu_errored_integration_entry(0.001 * i)
         for i in range(NTIMES)
     ],
-    "imu_az": [
-        {**_imu_avg_entry(0.002 * i), "sensor_name": "imu_az", "app_id": 6}
-        for i in range(NTIMES)
-    ],
+    "imu_az": [_imu_az_avg_entry(0.002 * i) for i in range(NTIMES)],
     "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "tempctrl_lna": [
@@ -251,7 +299,7 @@ _SNAPSHOT_TS = 1775997296.789012
 VNA_METADATA = {
     "imu_el": IMU_READING,
     "imu_el_ts": _SNAPSHOT_TS,
-    "imu_az": {**IMU_READING, "sensor_name": "imu_az", "app_id": 6},
+    "imu_az": IMU_AZ_READING,
     "imu_az_ts": _SNAPSHOT_TS,
     "lidar": {
         "sensor_name": "lidar",

@@ -18,10 +18,12 @@ from conftest import (
     CORR_METADATA,
     ERROR_INTEGRATION_INDEX,
     HEADER,
+    IMU_AZ_READING,
     IMU_READING,
     NTIMES,
     S11_HEADER,
     VNA_METADATA,
+    _imu_az_avg_entry,
     tempctrl_post_handler_reading,
 )
 from eigsep_observing import io
@@ -1282,10 +1284,11 @@ def test_metadata_end_to_end_round_trip():
             ],
             "stream:imu_az": [
                 {
-                    **IMU_READING,
-                    "sensor_name": "imu_az",
-                    "app_id": 6,
+                    **IMU_AZ_READING,
                     "yaw": 0.002 * i,
+                    "az_deg": 0.002 * i,
+                    "az_from_accel_deg": 0.002 * i,
+                    "az_from_yaw_deg": 0.002 * i,
                 },
             ],
             "stream:lidar": [
@@ -3498,3 +3501,43 @@ def test_avg_metadata_system_current():
     assert result["status"] == "update"
     assert result["current_a"] == pytest.approx(3.0)
     assert result["current_voltage"] == pytest.approx(1.72)
+
+
+def test_imu_schemas_field_sets():
+    base = {
+        "sensor_name",
+        "status",
+        "app_id",
+        "yaw",
+        "pitch",
+        "roll",
+        "accel_x",
+        "accel_y",
+        "accel_z",
+    }
+    assert set(io._IMU_EL_SCHEMA) == base | {"el_deg"}
+    assert io._IMU_EL_SCHEMA["el_deg"] is float
+    assert set(io._IMU_AZ_SCHEMA) == base | {
+        "el_deg",
+        "az_deg",
+        "az_from_accel_deg",
+        "az_from_yaw_deg",
+        "az_blend_weight",
+    }
+    for k in (
+        "el_deg",
+        "az_deg",
+        "az_from_accel_deg",
+        "az_from_yaw_deg",
+        "az_blend_weight",
+    ):
+        assert io._IMU_AZ_SCHEMA[k] is float
+
+
+def test_imu_az_derived_fields_round_trip():
+    samples = [_imu_az_avg_entry(10.0), _imu_az_avg_entry(30.0)]
+    avg = io.avg_metadata(samples)
+    assert avg["az_deg"] == 20.0  # float->mean over yaw-tracked values
+    assert avg["el_deg"] == 0.0
+    assert avg["az_blend_weight"] == 1.0
+    assert "az_from_accel_deg" in avg and "az_from_yaw_deg" in avg

@@ -25,11 +25,13 @@ from eigsep_observing._test_fixtures import (  # noqa: F401 (re-exported)
     ERROR_INTEGRATION_INDEX,
     FILE_TIME,
     HEADER,
+    IMU_AZ_READING,
     IMU_READING,
     INTEGRATION_TIME,
     NTIMES,
     S11_HEADER,
     VNA_METADATA,
+    _imu_az_avg_entry,
     tempctrl_post_handler_reading,
 )
 from eigsep_observing.testing import DummyPandaClient

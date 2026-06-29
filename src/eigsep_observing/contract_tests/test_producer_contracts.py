@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoLidar, PicoRFSwitch
+from picohost.base import PicoIMU, PicoLidar, PicoRFSwitch
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -50,6 +50,7 @@ import eigsep_observing
 from eigsep_observing import io
 from eigsep_observing._test_fixtures import (
     HEADER,
+    IMU_AZ_READING,
     IMU_READING,
     tempctrl_post_handler_reading,
 )
@@ -211,6 +212,28 @@ def _adc_stats_post_publish_reading():
     return json.loads(raw.decode("utf-8"))
 
 
+def _imu_post_handler_reading(name, app_id):
+    """Return an IMU reading after PicoIMU._imu_redis_handler.
+
+    Composes ImuEmulator.get_status() with the real handler, which adds
+    the calibrate-imu derived fields (el_deg; az_deg + blend for
+    imu_az). The handler is run UNCALIBRATED, so derived fields are
+    None — the genuine state of a freshly-deployed, not-yet-calibrated
+    IMU, which is what the schema's None-when-uncalibrated contract
+    describes. Mirrors _potmon_post_handler_reading (bypass __init__,
+    capture via _base_redis_handler). The float-valued reduction path
+    is covered separately by the round-trip test in test_io.py.
+    """
+    raw = ImuEmulator(app_id=app_id).get_status()
+    raw.setdefault("sensor_name", name)
+    imu = PicoIMU.__new__(PicoIMU)
+    imu._imu_cal = {}
+    captured = {}
+    imu._base_redis_handler = lambda d: captured.update(d)
+    imu._imu_redis_handler(raw)
+    return captured
+
+
 # Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
 # that returns a single fresh reading from the corresponding producer.
 # Most entries are picohost emulators; ``adc_stats`` is an FPGA-side
@@ -221,8 +244,8 @@ def _adc_stats_post_publish_reading():
 # real-producer contract test is impossible: the parametrized test runs
 # over SENSOR_SCHEMAS keys, so a missing registration fails CI loudly.
 SENSOR_EMULATORS = {
-    "imu_el": lambda: ImuEmulator(app_id=3).get_status(),
-    "imu_az": lambda: ImuEmulator(app_id=6).get_status(),
+    "imu_el": lambda: _imu_post_handler_reading("imu_el", 3),
+    "imu_az": lambda: _imu_post_handler_reading("imu_az", 6),
     "rfswitch": _rfswitch_post_handler_reading,
     "tempctrl_lna": lambda: _peltier_post_handler_reading("tempctrl_lna"),
     "tempctrl_load": lambda: _peltier_post_handler_reading("tempctrl_load"),
@@ -245,6 +268,17 @@ def test_test_imu_reading_conforms_to_imu_el_schema():
     the imu_el schema. Catches drift in the fixture."""
     assert (
         io._validate_metadata(IMU_READING, io.SENSOR_SCHEMAS["imu_el"]) == []
+    )
+
+
+def test_test_imu_az_reading_conforms_to_imu_az_schema():
+    """The IMU_AZ_READING fixture is shared across VNA_METADATA,
+    CORR_METADATA, test_io.py, and conftest.py; pin it against the
+    imu_az schema so drift in one fixture can't silently rot every
+    test that touches it."""
+    assert (
+        io._validate_metadata(IMU_AZ_READING, io.SENSOR_SCHEMAS["imu_az"])
+        == []
     )
 
 
