@@ -15,6 +15,7 @@ import threading
 import time
 
 import numpy as np
+import redis.exceptions
 
 from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
@@ -293,6 +294,7 @@ class MotorClient:
         with self._coord.motion_section(label=label):
             before_target = self._axis_target(axis)
             self._check_target_limit(axis, action, before_target, kwargs)
+            self._check_sensor_fence(axis)
             self._proxy.send_command(action, **kwargs)
             self._wait_for_start(axis, before_target, stop_event=stop_event)
             if stop_event is not None and stop_event.is_set():
@@ -349,6 +351,42 @@ class MotorClient:
                 f"{axis} move to {deg:.1f} deg outside safe window "
                 f"[{lo:.1f}, {hi:.1f}]; refusing to send {action}."
             )
+
+    def _read_fence_sensors(self):
+        """(pot_az_voltage, imu_el_deg) from the snapshot; each None if
+        unavailable. ConnectionError (panda down) yields (None, None) so a
+        sensor-less move is allowed rather than crashing — the commanded
+        guard still applies."""
+        try:
+            snap = self._reader.get("potmon") or {}
+            pot_v = snap.get("pot_az_voltage")
+        except (KeyError, redis.exceptions.ConnectionError):
+            pot_v = None
+        try:
+            el = (self._reader.get("imu_el") or {}).get("el_deg")
+        except (KeyError, redis.exceptions.ConnectionError):
+            el = None
+        return pot_v, el
+
+    def _check_sensor_fence(self, axis):
+        """Raise MotorLimitError if a present sensor reading shows the
+        relevant axis already outside its configured raw-sensor window.
+        No-op for an unset window or a missing reading."""
+        pot_v, el = self._read_fence_sensors()
+        if axis in (None, "az") and self.pot_az_v_limits and pot_v is not None:
+            lo, hi = self.pot_az_v_limits
+            if not (lo <= pot_v <= hi):
+                raise MotorLimitError(
+                    f"pot_az_voltage {pot_v:.3f} V outside safe window "
+                    f"[{lo:.3f}, {hi:.3f}]; refusing az move."
+                )
+        if axis in (None, "el") and self.imu_el_limits_deg and el is not None:
+            lo, hi = self.imu_el_limits_deg
+            if not (lo <= el <= hi):
+                raise MotorLimitError(
+                    f"imu el {el:.1f} deg outside safe window "
+                    f"[{lo:.1f}, {hi:.1f}]; refusing el move."
+                )
 
     def move_to(
         self,
