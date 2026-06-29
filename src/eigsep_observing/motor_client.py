@@ -146,6 +146,14 @@ class MotorClient:
         except (RuntimeError, TimeoutError) as exc:
             self.logger.warning("halt skipped: %s", exc)
 
+    def reset_step_position(self, az_step=0, el_step=0):
+        """Define the current physical pose as the given step counts
+        (default origin). No motion — intentionally bypasses the travel
+        guard; used by MotorHomer to re-zero the count at converged home."""
+        self._proxy.send_command(
+            "reset_step_position", az_step=az_step, el_step=el_step
+        )
+
     def _motor_status(self):
         try:
             return self._reader.get("motor")
