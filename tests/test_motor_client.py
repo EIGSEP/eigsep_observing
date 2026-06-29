@@ -597,3 +597,67 @@ def test_home_and_halt_never_blocked():
     with patch.object(mc._proxy, "send_command") as send:
         mc.home()  # target steps 0 -> 0 deg, always in window
         send.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Task-3 additions: pre-move sensor fence (pot voltage / IMU el windows)
+# ---------------------------------------------------------------------------
+
+
+def _client_with_snapshot(snapshot, **kw):
+    mc = MotorClient(DummyTransport(), **kw)
+    status = {
+        "az_pos": 0,
+        "az_target_pos": 0,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }
+    mc._motor_status = lambda: status
+    mc._reader.get = lambda key: snapshot.get(key, {})
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    return mc
+
+
+def test_sensor_fence_blocks_when_pot_voltage_out_of_window():
+    snap = {"potmon": {"pot_az_voltage": 3.4}}
+    mc = _client_with_snapshot(snap, pot_az_v_limits=(0.2, 3.1))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(az_deg=10.0)
+        send.assert_not_called()
+
+
+def test_sensor_fence_blocks_when_imu_el_out_of_window():
+    snap = {"imu_el": {"el_deg": 40.0}}
+    mc = _client_with_snapshot(snap, imu_el_limits_deg=(-30.0, 30.0))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(el_deg=5.0)
+        send.assert_not_called()
+
+
+def test_sensor_fence_passes_within_window():
+    snap = {"potmon": {"pot_az_voltage": 1.5}, "imu_el": {"el_deg": 0.0}}
+    mc = _client_with_snapshot(
+        snap, pot_az_v_limits=(0.2, 3.1), imu_el_limits_deg=(-30.0, 30.0)
+    )
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()
+
+
+def test_sensor_fence_noop_when_limits_unset():
+    snap = {"potmon": {"pot_az_voltage": 99.0}}  # absurd, but no window set
+    mc = _client_with_snapshot(snap)  # pot_az_v_limits=None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()
+
+
+def test_sensor_fence_noop_when_reading_missing():
+    snap = {}  # potmon absent
+    mc = _client_with_snapshot(snap, pot_az_v_limits=(0.2, 3.1))
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)  # no reading -> can't fence -> allowed
+        send.assert_called_once()
