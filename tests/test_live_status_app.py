@@ -1377,6 +1377,74 @@ def test_vna_drain_drops_payload_with_unknown_mode(agg_primed, caplog):
     )
 
 
+def test_metadata_payload_orientation_agree_and_diverge():
+    """_metadata_payload attaches an orientation entry with classified spread.
+
+    Agreeing sensors (spread ~0.5 deg) -> az_spread classified "ok";
+    diverging sensors (~12 deg off) -> classified "danger".
+    """
+    import inspect
+
+    from picohost.motor import PicoMotor
+
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+    from eigsep_observing.live_status.app import _metadata_payload
+
+    # Build a serial-less PicoMotor for geometry (same pattern as
+    # motor_zeroer._default_cal_motor) to get the real steps_to_deg.
+    sig = inspect.signature(PicoMotor.__init__)
+    cal = PicoMotor.__new__(PicoMotor)
+    for attr in ("step_angle_deg", "gear_teeth", "microstep"):
+        setattr(cal, attr, sig.parameters[attr].default)
+    # Round-trip through the real geometry: ~100 deg.
+    az_steps = int(round(100 * cal.gear_teeth / cal.step_angle_deg))
+    motor_az_deg = cal.steps_to_deg(az_steps)  # ~100.004 deg
+
+    now = 1000.0
+
+    def make_state(pot_az):
+        state = StateSnapshot()
+        state.metadata_snapshot = {
+            "motor": {
+                "sensor_name": "motor",
+                "status": "update",
+                "az_pos": az_steps,
+                "el_pos": 0,
+            },
+            "motor_ts": now,
+            "potmon": {
+                "sensor_name": "potmon",
+                "status": "update",
+                "pot_az_angle": pot_az,
+            },
+            "potmon_ts": now,
+            "imu_az": {
+                "sensor_name": "imu_az",
+                "status": "update",
+                "az_deg": 100.0,
+                "el_deg": 0.0,
+            },
+            "imu_az_ts": now,
+        }
+        state.metadata_snapshot_read_unix = now
+        return state
+
+    # Agreeing sensors: spread = 100.5 - 100.0 = 0.5 -> "ok" (< 3).
+    out = _metadata_payload(make_state(100.5), _payload_thresholds())
+    ori = out["orientation"]
+    assert "az" in ori["value"] and "el" in ori["value"]
+    assert ori["classify"]["orientation.az_spread_deg"] == "ok"
+
+    # Diverging: potmon ~12 deg off -> spread > 10 -> "danger".
+    out2 = _metadata_payload(
+        make_state(motor_az_deg + 12.0), _payload_thresholds()
+    )
+    assert (
+        out2["orientation"]["classify"]["orientation.az_spread_deg"]
+        == "danger"
+    )
+
+
 def test_metadata_payload_classifies_system_current():
     """A system_current snapshot entry is classified against the
     current_a band by the existing /api/metadata projection (no app.py

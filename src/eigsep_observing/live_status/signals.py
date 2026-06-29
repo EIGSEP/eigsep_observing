@@ -163,6 +163,32 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "Potmon azimuth angle",
         unit="deg",
     ),
+    # Antenna orientation — motor/pot/IMU consensus and spread.
+    # Recomputed each tick from live metadata (no stream _ts).
+    "orientation.az_consensus_deg": Signal(
+        "orientation.az_consensus_deg",
+        "Azimuth (consensus)",
+        unit="deg",
+        max_age_s=None,
+    ),
+    "orientation.el_consensus_deg": Signal(
+        "orientation.el_consensus_deg",
+        "Elevation (consensus)",
+        unit="deg",
+        max_age_s=None,
+    ),
+    "orientation.az_spread_deg": Signal(
+        "orientation.az_spread_deg",
+        "Azimuth sensor spread",
+        unit="deg",
+        max_age_s=None,
+    ),
+    "orientation.el_spread_deg": Signal(
+        "orientation.el_spread_deg",
+        "Elevation sensor spread",
+        unit="deg",
+        max_age_s=None,
+    ),
 }
 
 
