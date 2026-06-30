@@ -255,11 +255,12 @@ class EigObserver:
         without this field."
         """
         out = dict(header)
-        # All three reads are defensive: run_tag.read and
-        # obs_config_owner.read_owner already log+swallow and return
-        # the empty sentinel; the explicit try/except below covers
-        # ConfigStore.get raising ValueError (no config uploaded yet)
-        # or ConnectionError (panda unreachable).
+        # All four reads are defensive: run_tag.read,
+        # obs_config_owner.read_owner, and
+        # imu_calibration.read_calibration already log+swallow and
+        # return their empty sentinel; the explicit try/except below
+        # covers ConfigStore.get raising ValueError (no config uploaded
+        # yet) or ConnectionError (panda unreachable).
         tag = run_tag.read(self.transport_panda)
         owner = obs_config_owner.read_owner(self.transport_panda)
         try:
