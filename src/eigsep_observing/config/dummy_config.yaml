@@ -31,11 +31,11 @@ use_motor: true
 motor_interval: 1  # seconds between scans
 motor_failure_retry_s: 0.5  # fast retry for tests
 motor_scan: {}
-motor_client_kwargs:
-  az_limits_deg: [-180.0, 180.0]
-  el_limits_deg: [-180.0, 180.0]
-  pot_az_v_limits: null
-  imu_el_limits_deg: null
+# Motor safe-travel limits are now rig-wide in the MotorLimitStore Redis K/V,
+# set via scripts/set_motor_limits.py (read by every MotorClient). They are
+# intentionally NOT here. motor_client_kwargs may still carry non-limit
+# MotorClient kwargs (step delays, poll interval) if needed.
+motor_client_kwargs: {}
 home_after_scan: false
 motor_homer_kwargs: {settle_s: 0.0, max_iters: 3}
 

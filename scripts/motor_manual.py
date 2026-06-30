@@ -65,11 +65,16 @@ def _render(screen, zeroer, deg):
     screen.refresh()
 
 
+def _build_zeroer(transport, args):
+    """Build a ``MotorZeroer``, honouring ``args.override_limits``."""
+    return MotorZeroer(transport, enforce_limits=not args.override_limits)
+
+
 def _curses_main(screen, transport, args):
     curses.noecho()
     screen.timeout(100)
 
-    zeroer = MotorZeroer(transport)
+    zeroer = _build_zeroer(transport, args)
     zeroer.set_delay()
     zeroer.halt()
     deg = args.deg
@@ -111,6 +116,14 @@ def _parse_args():
         default=1.0,
         help="Initial jog step size in degrees (default: 1.0)",
     )
+    parser.add_argument(
+        "--override-limits",
+        action="store_true",
+        help=(
+            "Disable travel limits for this session"
+            " (recovery from out-of-window)."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -120,6 +133,11 @@ def main():
         args.dummy, host=args.redis_host, real_port=args.redis_port
     )
     require_pico(PicoProxy("motor", transport, source="motor_manual"))
+    if args.override_limits:
+        logger.warning(
+            "Travel limits DISABLED for this session"
+            " (--override-limits) — recovery mode."
+        )
     with run_tag.session(transport, "motor_manual"):
         curses.wrapper(_curses_main, transport, args)
 

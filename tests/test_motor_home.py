@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from eigsep_observing.home_ref import publish_home_ref
 from eigsep_redis.testing import DummyTransport
 
 
@@ -45,3 +46,26 @@ def test_active_driver_listed():
     mod = _ilu.module_from_spec(spec)
     spec.loader.exec_module(mod)
     assert "motor_home.py" in mod.ACTIVE_DRIVER_SCRIPTS
+
+
+def test_override_limits_disables_enforcement(monkeypatch):
+    """run(..., override_limits=True) builds MotorHomer with enforce_limits=False."""
+    import eigsep_observing
+
+    motor_home = _load("motor_home")
+    t = DummyTransport()
+    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+
+    captured = {}
+    orig_homer = eigsep_observing.MotorHomer
+
+    def _spy(transport, **kw):
+        captured.update(kw)
+        return orig_homer(transport, **kw)
+
+    monkeypatch.setattr(motor_home, "MotorHomer", _spy)
+    monkeypatch.setattr(motor_home, "require_pico", lambda _proxy: None)
+    # dry_run=True so we don't actually move; override_limits threads through
+    motor_home.run(t, dry_run=True, override_limits=True)
+
+    assert captured.get("enforce_limits") is False
