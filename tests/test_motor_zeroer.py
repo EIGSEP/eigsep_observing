@@ -452,3 +452,13 @@ def test_zeroer_jog_inherits_travel_limit():
     zeroer = MotorZeroer(transport, motor_client=mc)
     with pytest.raises(MotorLimitError):
         zeroer.jog_az(5.0)  # 179 + 5 = 184 -> outside ±180
+
+
+# ---------------------------------------------------------------------------
+# Task D2: enforce_limits threading
+# ---------------------------------------------------------------------------
+
+
+def test_zeroer_passes_enforce_limits_to_motor_client():
+    z = MotorZeroer(DummyTransport(), enforce_limits=False)
+    assert z._motor_client.enforce_limits is False

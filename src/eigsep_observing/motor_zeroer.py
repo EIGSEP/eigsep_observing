@@ -55,6 +55,7 @@ class MotorZeroer:
         el_up_delay_us=2400,
         el_dn_delay_us=600,
         source="motor_zeroer",
+        enforce_limits=True,
         motor_client=None,
     ):
         self.transport = transport
@@ -74,7 +75,11 @@ class MotorZeroer:
         # background thread so the curses loop keeps rendering live
         # position; injectable for tests.
         if motor_client is None:
-            motor_client = MotorClient(transport, source="motor_manual_home")
+            motor_client = MotorClient(
+                transport,
+                source="motor_manual_home",
+                enforce_limits=enforce_limits,
+            )
         self._motor_client = motor_client
         self._homing = False
         self._home_thread = None

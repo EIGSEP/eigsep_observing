@@ -82,11 +82,14 @@ class MotorHomer:
         max_iters=6,
         az_gain_deg_per_volt=None,
         reset_count=True,
+        enforce_limits=True,
         source="motor_homer",
     ):
         self.transport = transport
         if motor_client is None:
-            motor_client = MotorClient(transport, source=source)
+            motor_client = MotorClient(
+                transport, source=source, enforce_limits=enforce_limits
+            )
         self.motor_client = motor_client
         self.snapshot = snapshot or MetadataSnapshotReader(transport)
         self.tol_az_deg = tol_az_deg
