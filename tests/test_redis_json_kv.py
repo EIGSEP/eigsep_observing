@@ -1,10 +1,10 @@
 """Tests for eigsep_observing._redis_json_kv (shared K/V helper).
 
-The five sibling K/V modules (``run_tag``, ``obs_config_owner``,
-``file_heartbeat``, ``snap_reinit``, ``corr_health``) share one
-publish/read shape; this module is the single home for it. Behavior
-differences (swallow-vs-raise publish, lifecycle, derived fields)
-stay in the sibling modules — see issue #149.
+The six sibling K/V modules (``run_tag``, ``obs_config_owner``,
+``file_heartbeat``, ``snap_reinit``, ``corr_health``,
+``imu_calibration``) share one publish/read shape; this module is the
+single home for it. Behavior differences (swallow-vs-raise publish,
+lifecycle, derived fields) stay in the sibling modules — see issue #149.
 """
 
 from __future__ import annotations
