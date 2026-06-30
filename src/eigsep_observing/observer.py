@@ -10,7 +10,7 @@ from eigsep_redis import (
     StatusReader,
 )
 
-from . import io, obs_config_owner, run_tag
+from . import io, imu_calibration, obs_config_owner, run_tag
 from .corr import CorrConfigStore, CorrReader
 from .file_heartbeat import publish as publish_file_heartbeat
 from .status_log_handler import PANDA_RELAY_LOGGER, StatusStreamHandler
@@ -228,10 +228,13 @@ class EigObserver:
         Adds ``run_tag`` / ``run_started_at_unix`` (from
         :mod:`eigsep_observing.run_tag`),
         ``obs_config_owner`` / ``obs_config_owner_uploaded_unix`` (from
-        :mod:`eigsep_observing.obs_config_owner`), and ``obs_config``
-        (from :class:`eigsep_redis.ConfigStore`) so each corr file
+        :mod:`eigsep_observing.obs_config_owner`), ``obs_config``
+        (from :class:`eigsep_redis.ConfigStore`), and
+        ``imu_calibration`` / ``imu_calibration_upload_unix`` (from
+        :mod:`eigsep_observing.imu_calibration`) so each corr file
         records the active panda script, the last script to upload the
-        config, and the panda-side config snapshot at file-open time.
+        config, the panda-side config snapshot at file-open time, and
+        the IMU calibration blob at the moment the file was opened.
 
         Downstream trust check: ``obs_config_owner != "UNKNOWN"`` means
         someone legitimately uploaded the cfg at some point;
@@ -239,11 +242,14 @@ class EigObserver:
         active driver right now.
 
         All overlay reads are defensive: a missing or malformed
-        run_tag, a missing obs_config_owner, a missing obs_config, or a
-        transient transport failure all resolve to ``"UNKNOWN"`` /
-        ``0.0`` / ``{}`` rather than raising. Corr data is sacred —
-        overlay enrichment must never block a corr file from being
-        written. Sentinel values (rather than dropping the keys)
+        run_tag, a missing obs_config_owner, a missing obs_config, a
+        missing IMU calibration, or a transient transport failure all
+        resolve to ``"UNKNOWN"`` / ``0.0`` / ``{}`` rather than
+        raising. Sentinels: ``imu_calibration = {}`` when no blob is
+        stored or the panda is unreachable;
+        ``imu_calibration_upload_unix = 0.0`` likewise. Corr data is
+        sacred — overlay enrichment must never block a corr file from
+        being written. Sentinel values (rather than dropping the keys)
         guarantee every post-PR file carries the field and let
         downstream distinguish "no producer info" from "old file
         without this field."
@@ -278,6 +284,9 @@ class EigObserver:
             else 0.0
         )
         out["obs_config"] = obs_cfg
+        cal = imu_calibration.read_calibration(self.transport_panda)
+        out["imu_calibration"] = cal
+        out["imu_calibration_upload_unix"] = imu_calibration.upload_unix(cal)
         return out
 
     def record_corr_data(

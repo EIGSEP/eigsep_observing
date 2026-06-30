@@ -12,6 +12,8 @@ from eigsep_redis import ConfigStore, HeartbeatWriter, MetadataWriter
 from eigsep_redis.status import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
 from eigsep_observing import EigObserver, run_tag
+from eigsep_observing._test_fixtures import IMU_CALIBRATION
+from picohost.buses import ImuCalStore
 from eigsep_observing.corr import CorrConfigStore
 from eigsep_observing.status_log_handler import (
     PANDA_RELAY_LOGGER,
@@ -200,6 +202,26 @@ def test_observer_init_panda_empty_config_does_not_raise(transport_snap):
         assert overlaid["run_started_at_unix"] == 0.0
         assert overlaid["obs_config_owner"] == "UNKNOWN"
         assert overlaid["obs_config_owner_uploaded_unix"] == 0.0
+        assert overlaid["imu_calibration"] == {}
+        assert overlaid["imu_calibration_upload_unix"] == 0.0
+    finally:
+        observer.close()
+
+
+def test_with_header_overlays_embeds_imu_calibration(transport_snap):
+    transport_panda = DummyTransport()
+    HeartbeatWriter(transport_panda).set(alive=True)
+    ImuCalStore(transport_panda).upload(IMU_CALIBRATION)
+    observer = EigObserver(
+        transport_snap=transport_snap, transport_panda=transport_panda
+    )
+    try:
+        overlaid = observer._with_header_overlays({})
+        assert (
+            overlaid["imu_calibration"]["imu_az"]
+            == IMU_CALIBRATION["imu_az"]
+        )
+        assert overlaid["imu_calibration_upload_unix"] > 0.0
     finally:
         observer.close()
 
