@@ -1416,7 +1416,8 @@ def test_record_corr_data_resumes_when_panda_arrives_after_startup(
 
 
 def test_with_header_overlays_no_panda_uses_sentinels(observer_snap_only):
-    """No transport_panda → run_tag + owner sentinels + empty obs_config."""
+    """No transport_panda → run_tag + owner sentinels + empty obs_config
+    + imu_calibration sentinels."""
     observer = observer_snap_only
     out = observer._with_header_overlays({"sync_time": 12345.0})
     assert out["sync_time"] == 12345.0
@@ -1425,6 +1426,8 @@ def test_with_header_overlays_no_panda_uses_sentinels(observer_snap_only):
     assert out["obs_config_owner"] == "UNKNOWN"
     assert out["obs_config_owner_uploaded_unix"] == 0.0
     assert out["obs_config"] == {}
+    assert out["imu_calibration"] == {}
+    assert out["imu_calibration_upload_unix"] == 0.0
 
 
 def test_with_header_overlays_panda_published(observer_both, transport_panda):
