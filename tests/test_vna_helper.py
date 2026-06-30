@@ -14,8 +14,10 @@ import numpy as np
 import pytest
 from cmt_vna.testing import DummyVNA
 from eigsep_redis import MetadataSnapshotReader
+from picohost.buses import ImuCalStore
 
 from eigsep_observing import obs_config_owner, run_tag
+from eigsep_observing._test_fixtures import IMU_CALIBRATION
 from eigsep_observing.keys import VNA_STREAM
 from eigsep_observing.vna import VnaWriter, measure_s11
 
@@ -172,6 +174,8 @@ def test_measure_s11_helper_empty_redis_yields_unknown_overlays(
     assert header["obs_config_owner"] == "UNKNOWN"
     assert header["obs_config_owner_uploaded_unix"] == 0.0
     assert header["obs_config"] == dict(dummy_cfg)
+    assert header["imu_calibration"] == {}
+    assert header["imu_calibration_upload_unix"] == 0.0
 
 
 def test_measure_s11_helper_injects_published_owner(transport, dummy_cfg):
@@ -195,6 +199,26 @@ def test_measure_s11_helper_injects_published_owner(transport, dummy_cfg):
 
     assert header["obs_config_owner"] == "panda_observe"
     assert header["obs_config_owner_uploaded_unix"] == 7.5
+
+
+def test_measure_s11_helper_embeds_imu_calibration(transport, dummy_cfg):
+    """A seeded ``ImuCalStore`` blob flows into the VNA header."""
+    ImuCalStore(transport).upload(IMU_CALIBRATION)
+
+    vna = _make_vna(dummy_cfg)
+    writer, snap = _make_sinks(transport)
+
+    _, header, _ = measure_s11(
+        vna,
+        "ant",
+        cfg=dummy_cfg,
+        transport=transport,
+        vna_writer=writer,
+        metadata_snapshot=snap,
+    )
+
+    assert header["imu_calibration"]["imu_el"] == IMU_CALIBRATION["imu_el"]
+    assert header["imu_calibration_upload_unix"] > 0.0
 
 
 def test_measure_s11_helper_rejects_invalid_mode(transport, dummy_cfg):
