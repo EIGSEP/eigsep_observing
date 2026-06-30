@@ -84,9 +84,9 @@ addopts = [
   "--cov-report=term-missing",
   "--cov-report=xml",
   "--junitxml=junit.xml",
-  "-o junit_family=legacy",
   "--timeout=60",
 ]
+junit_family = "legacy"
 
 [tool.coverage.run]
 omit = [
