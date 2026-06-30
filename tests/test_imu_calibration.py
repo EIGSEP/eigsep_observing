@@ -55,7 +55,9 @@ def test_read_malformed_json_returns_empty(caplog):
     t.add_raw(IMU_CAL_KEY, b"not-json")
     with caplog.at_level("WARNING"):
         assert read_calibration(t) == {}
-    assert any("malformed imu_calibration" in r.message for r in caplog.records)
+    assert any(
+        "malformed imu_calibration" in r.message for r in caplog.records
+    )
 
 
 def test_read_non_dict_payload_returns_empty():

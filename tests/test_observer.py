@@ -218,8 +218,7 @@ def test_with_header_overlays_embeds_imu_calibration(transport_snap):
     try:
         overlaid = observer._with_header_overlays({})
         assert (
-            overlaid["imu_calibration"]["imu_az"]
-            == IMU_CALIBRATION["imu_az"]
+            overlaid["imu_calibration"]["imu_az"] == IMU_CALIBRATION["imu_az"]
         )
         assert overlaid["imu_calibration_upload_unix"] > 0.0
     finally:
