@@ -44,6 +44,9 @@ class MotorZeroer:
 
     Parameters mirror :class:`eigsep_observing.motor_client.MotorClient`
     for consistency — the same delay values apply to manual jogging.
+    ``enforce_limits`` is passed to the internally built ``MotorClient``;
+    it is ignored when an external ``motor_client`` is supplied (that
+    client's own ``enforce_limits`` governs).
     """
 
     def __init__(
