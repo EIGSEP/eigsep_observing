@@ -100,6 +100,12 @@ def test_no_slip_check_flag_parses(monkeypatch):
     assert args.no_slip_check is True
 
 
+def test_override_limits_flag_parses(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["field_zero", "--override-limits"])
+    args = field_zero._parse_args()
+    assert args.override_limits is True
+
+
 def test_write_home_ref_stores_pot_and_imu():
     t = DummyTransport()
 

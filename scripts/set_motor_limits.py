@@ -6,6 +6,11 @@ travel-limit guard is rig-wide. Run once per rig (and after re-surveying the
 safe pot-voltage / IMU-el endpoints). Drives no motor; does not claim
 run_tag.
 
+A *set* merges with the existing limits — only the windows you specify
+change; unspecified fields keep their stored values. Use
+``--no-pot-fence`` / ``--no-imu-fence`` to explicitly disable those
+fences (sets the field to None).
+
   set_motor_limits.py --show
   set_motor_limits.py --az-limits -180 180 --el-limits -30 30 \\
       --pot-az-v 0.2 3.1 --imu-el -30 30
@@ -39,33 +44,41 @@ def publish_from_args(transport, *, az_limits, el_limits, pot_az_v, imu_el):
 def run(transport, args):
     if args.show:
         current = read_motor_limits(transport)
-        logger.info("Current motor limits: %s", current or "unset")
-        print(f"Current motor limits: {current if current else 'unset'}")
+        msg = f"Current motor limits: {current if current else 'unset'}"
+        logger.info(msg)
+        print(msg)
         return
-    pot_az_v = None if args.no_pot_fence else args.pot_az_v
-    imu_el = None if args.no_imu_fence else args.imu_el
-    publish_from_args(
+    existing = read_motor_limits(transport) or {}
+
+    def _resolve(window_arg, no_fence, key, default):
+        if no_fence:
+            return None
+        if window_arg is not None:
+            return window_arg
+        return existing.get(key, default)
+
+    az = _resolve(args.az_limits, False, "az_limits_deg", [-180.0, 180.0])
+    el = _resolve(args.el_limits, False, "el_limits_deg", [-180.0, 180.0])
+    pot = _resolve(args.pot_az_v, args.no_pot_fence, "pot_az_v_limits", None)
+    imu = _resolve(args.imu_el, args.no_imu_fence, "imu_el_limits_deg", None)
+    publish_motor_limits(
         transport,
-        az_limits=args.az_limits,
-        el_limits=args.el_limits,
-        pot_az_v=pot_az_v,
-        imu_el=imu_el,
+        az_limits_deg=az,
+        el_limits_deg=el,
+        pot_az_v_limits=pot,
+        imu_el_limits_deg=imu,
     )
-    logger.info(
-        "Published motor limits: az=%s el=%s pot_v=%s imu_el=%s",
-        args.az_limits,
-        args.el_limits,
-        pot_az_v,
-        imu_el,
-    )
+    msg = f"Published motor limits: az={az} el={el} pot_v={pot} imu_el={imu}"
+    logger.info(msg)
+    print(msg)
 
 
 def main():
     p = ArgumentParser(description="Set/inspect rig-wide motor limits")
     p.add_argument("--dummy", action="store_true")
     p.add_argument("--show", action="store_true")
-    p.add_argument("--az-limits", type=float, nargs=2, default=[-180.0, 180.0])
-    p.add_argument("--el-limits", type=float, nargs=2, default=[-180.0, 180.0])
+    p.add_argument("--az-limits", type=float, nargs=2, default=None)
+    p.add_argument("--el-limits", type=float, nargs=2, default=None)
     p.add_argument("--pot-az-v", type=float, nargs=2, default=None)
     p.add_argument("--no-pot-fence", action="store_true")
     p.add_argument("--imu-el", type=float, nargs=2, default=None)

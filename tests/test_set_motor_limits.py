@@ -66,3 +66,54 @@ def test_run_no_pot_fence_maps_to_none():
     v = read_motor_limits(t)
     assert v["pot_az_v_limits"] is None
     assert v["imu_el_limits_deg"] is None
+
+
+def test_partial_set_preserves_other_fields():
+    """A partial run() call merges with existing limits; unspecified fields
+    are preserved from the K/V store rather than reverted to defaults."""
+    sml = _load("set_motor_limits")
+    t = DummyTransport()
+    # Establish a full set first.
+    sml.publish_from_args(
+        t,
+        az_limits=[-180.0, 180.0],
+        el_limits=[-30.0, 30.0],
+        pot_az_v=[0.1, 3.0],
+        imu_el=[-25.0, 25.0],
+    )
+    # Partial update: only pot_az_v changes; az/el/imu_el must survive.
+    sml.run(
+        t,
+        Namespace(
+            show=False,
+            az_limits=None,
+            el_limits=None,
+            pot_az_v=[0.2, 3.1],
+            no_pot_fence=False,
+            imu_el=None,
+            no_imu_fence=False,
+        ),
+    )
+    v = read_motor_limits(t)
+    assert v["el_limits_deg"] == [-30.0, 30.0]  # unchanged
+    assert v["pot_az_v_limits"] == [0.2, 3.1]  # updated
+
+
+def test_set_path_prints(capsys):
+    """run() on a set path must print the confirmation to stdout."""
+    sml = _load("set_motor_limits")
+    t = DummyTransport()
+    sml.run(
+        t,
+        Namespace(
+            show=False,
+            az_limits=[-180.0, 180.0],
+            el_limits=[-30.0, 30.0],
+            pot_az_v=None,
+            no_pot_fence=False,
+            imu_el=None,
+            no_imu_fence=False,
+        ),
+    )
+    out = capsys.readouterr().out
+    assert "Published motor limits:" in out

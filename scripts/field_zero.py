@@ -203,6 +203,14 @@ def _parse_args():
         action="store_true",
         help="Skip the pot-slip pre-check (step 1).",
     )
+    p.add_argument(
+        "--override-limits",
+        action="store_true",
+        help=(
+            "Disable travel limits for this session "
+            "(recovery from out-of-window)."
+        ),
+    )
     return p.parse_args()
 
 
@@ -225,7 +233,16 @@ def main():
     slope_m = float(cal["pot_az"][0])
 
     with run_tag.session(transport, "field_zero"):
-        mc = MotorClient(transport, source="field_zero")
+        if args.override_limits:
+            logger.warning(
+                "Travel limits DISABLED for this session "
+                "(--override-limits) — recovery mode."
+            )
+        mc = MotorClient(
+            transport,
+            source="field_zero",
+            enforce_limits=not args.override_limits,
+        )
         if not args.no_slip_check:
             verdict, exp, meas = run_slip_check(
                 mc, snapshot, slope_m, args.move_deg
@@ -246,7 +263,11 @@ def main():
                     "Pot tracking marginal; proceeding but inspect "
                     "the coupling."
                 )
-        zeroer = MotorZeroer(transport, source="field_zero")
+        zeroer = MotorZeroer(
+            transport,
+            source="field_zero",
+            enforce_limits=not args.override_limits,
+        )
         zeroer.set_delay()
         zeroer.halt()
         curses.wrapper(

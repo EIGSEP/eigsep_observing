@@ -162,15 +162,12 @@ class MotorClient:
 
     @staticmethod
     def _load_stored_limits(transport):
-        """MotorLimitStore values, or {} if unset / Redis unreachable.
-
-        A ConnectionError must never block MotorClient construction —
-        fall back to the hardcoded safe defaults.
-        """
-        try:
-            return read_motor_limits(transport) or {}
-        except redis.exceptions.ConnectionError:
-            return {}
+        """MotorLimitStore values as a dict, or {} when unset / unreachable
+        / malformed. Never blocks MotorClient construction — any non-dict
+        payload (corrupt/hand-edited key) degrades to the hardcoded safe
+        defaults."""
+        stored = read_motor_limits(transport)
+        return stored if isinstance(stored, dict) else {}
 
     @property
     def is_available(self):

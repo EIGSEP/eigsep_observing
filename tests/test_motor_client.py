@@ -822,3 +822,15 @@ def test_explicit_none_kwarg_disables_fence_over_kv():
     )
     mc = MotorClient(t, pot_az_v_limits=None)
     assert mc.pot_az_v_limits is None  # explicit None wins over K/V value
+
+
+def test_load_stored_limits_malformed_payload_degrades_to_empty():
+    """A non-dict K/V payload (corrupt/hand-edited key) must not raise
+    AttributeError out of MotorClient.__init__ — degrade to {} and fall
+    back to the hardcoded safe defaults."""
+    from eigsep_observing._redis_json_kv import publish_json
+
+    t = DummyTransport()
+    publish_json(t, "motor_limits", ["not", "a", "dict"])
+    mc = MotorClient(t)
+    assert mc.az_limits_deg == (-180.0, 180.0)
