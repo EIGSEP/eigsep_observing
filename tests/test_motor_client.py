@@ -746,3 +746,67 @@ def test_fence_sensors_passes_logger_none_to_read_el_estimate():
         "_read_fence_sensors must pass logger=None to suppress high-frequency "
         f"IMU cross-check warnings; got: {captured_loggers}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Task D2: K/V limit loading + enforce_limits flag
+# ---------------------------------------------------------------------------
+
+from eigsep_observing.motor_limits import publish_motor_limits  # noqa: E402
+
+
+def test_limits_load_from_kv_when_kwargs_unset():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-90.0, 90.0],
+        el_limits_deg=[-30.0, 30.0],
+        pot_az_v_limits=[0.2, 3.1],
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t)
+    assert mc.az_limits_deg == [-90.0, 90.0]
+    assert mc.el_limits_deg == [-30.0, 30.0]
+    assert mc.pot_az_v_limits == [0.2, 3.1]
+    assert mc.imu_el_limits_deg is None
+
+
+def test_explicit_kwarg_overrides_kv():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-90.0, 90.0],
+        el_limits_deg=[-90.0, 90.0],
+        pot_az_v_limits=None,
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t, az_limits_deg=(-45.0, 45.0))
+    assert mc.az_limits_deg == (-45.0, 45.0)  # explicit wins
+    assert mc.el_limits_deg == [-90.0, 90.0]  # K/V
+
+
+def test_hardcoded_default_when_no_kv_no_kwarg():
+    mc = MotorClient(DummyTransport())  # nothing published
+    assert mc.az_limits_deg == (-180.0, 180.0)
+    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.pot_az_v_limits is None
+    assert mc.imu_el_limits_deg is None
+
+
+def test_enforce_limits_false_skips_commanded_guard():
+    mc = _client_seeded(el_limits_deg=(-30.0, 30.0), enforce_limits=False)
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(el_deg=120.0)  # way out of window, but enforcement off
+        send.assert_called_once()
+
+
+def test_enforce_limits_false_skips_sensor_fence():
+    snap = {"potmon": {"pot_az_voltage": 99.0}}
+    mc = _client_with_snapshot(
+        snap, pot_az_v_limits=(0.2, 3.1), enforce_limits=False
+    )
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()

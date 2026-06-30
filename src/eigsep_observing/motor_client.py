@@ -22,7 +22,10 @@ from picohost.proxy import PicoProxy
 
 from .el_sensor import read_el_estimate
 from .motor_cal import cal_motor
+from .motor_limits import read_motor_limits
 from .motion_switch import MotionSwitchCoordinator
+
+_UNSET = object()
 
 logger = logging.getLogger(__name__)
 
@@ -53,24 +56,34 @@ class MotorClient:
         Must exceed the producer status cadence (~200 ms) so a real move
         is never mistaken for a no-op — this start phase is what keeps a
         move reliably one-axis-at-a-time.
-    az_limits_deg : tuple of (float, float)
+    az_limits_deg : tuple of (float, float) or _UNSET
         Inclusive ``(min, max)`` azimuth travel limits in degrees.
-        Defaults to ``(-180.0, 180.0)``. Commands that would violate
-        these bounds raise :class:`MotorLimitError`.
-    el_limits_deg : tuple of (float, float)
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-180.0,
+        180.0)``. Commands that would violate these bounds raise
+        :class:`MotorLimitError`.
+    el_limits_deg : tuple of (float, float) or _UNSET
         Inclusive ``(min, max)`` elevation travel limits in degrees.
-        Defaults to ``(-180.0, 180.0)``. Commands that would violate
-        these bounds raise :class:`MotorLimitError`.
-    pot_az_v_limits : tuple of (float, float) or None
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-180.0,
+        180.0)``. Commands that would violate these bounds raise
+        :class:`MotorLimitError`.
+    pot_az_v_limits : tuple of (float, float) or None or _UNSET
         Inclusive ``(min, max)`` safe voltage range for the azimuth
-        potentiometer. When ``None`` (default) no potentiometer limit
-        is enforced. A live reading outside this window raises
+        potentiometer. When ``None`` no potentiometer limit is enforced.
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``None``.
+        A live reading outside this window raises
         :class:`MotorLimitError`.
-    imu_el_limits_deg : tuple of (float, float) or None
+    imu_el_limits_deg : tuple of (float, float) or None or _UNSET
         Inclusive ``(min, max)`` safe elevation range derived from the
-        IMU. When ``None`` (default) no IMU elevation limit is
-        enforced. A live reading outside this window raises
+        IMU. When ``None`` no IMU elevation limit is enforced.
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``None``.
+        A live reading outside this window raises
         :class:`MotorLimitError`.
+    enforce_limits : bool
+        When ``False`` both the commanded-target guard
+        (:meth:`_check_target_limit`) and the live-sensor fence
+        (:meth:`_check_sensor_fence`) are bypassed entirely. Intended
+        for bring-up scripts that need unconstrained motion (e.g.
+        field-zero calibration). Default ``True``.
     source : str
         Identifier stamped on proxy command stream entries.
     coord : MotionSwitchCoordinator or None
@@ -92,10 +105,11 @@ class MotorClient:
         poll_interval_s=0.1,
         stall_timeout_s=30.0,
         start_timeout_s=1.0,
-        az_limits_deg=(-180.0, 180.0),
-        el_limits_deg=(-180.0, 180.0),
-        pot_az_v_limits=None,
-        imu_el_limits_deg=None,
+        az_limits_deg=_UNSET,
+        el_limits_deg=_UNSET,
+        pot_az_v_limits=_UNSET,
+        imu_el_limits_deg=_UNSET,
+        enforce_limits=True,
         source="motor_client",
         coord=None,
     ):
@@ -111,10 +125,20 @@ class MotorClient:
         self.poll_interval_s = poll_interval_s
         self.stall_timeout_s = stall_timeout_s
         self.start_timeout_s = start_timeout_s
-        self.az_limits_deg = az_limits_deg
-        self.el_limits_deg = el_limits_deg
-        self.pot_az_v_limits = pot_az_v_limits
-        self.imu_el_limits_deg = imu_el_limits_deg
+        stored = self._load_stored_limits(transport)
+        self.az_limits_deg = self._resolve_limit(
+            az_limits_deg, stored.get("az_limits_deg"), (-180.0, 180.0)
+        )
+        self.el_limits_deg = self._resolve_limit(
+            el_limits_deg, stored.get("el_limits_deg"), (-180.0, 180.0)
+        )
+        self.pot_az_v_limits = self._resolve_limit(
+            pot_az_v_limits, stored.get("pot_az_v_limits"), None
+        )
+        self.imu_el_limits_deg = self._resolve_limit(
+            imu_el_limits_deg, stored.get("imu_el_limits_deg"), None
+        )
+        self.enforce_limits = enforce_limits
         self._cal = cal_motor()
         self.logger = logger
         if coord is None:
@@ -122,6 +146,31 @@ class MotorClient:
                 threading.RLock(), serialize=False, logger=self.logger
             )
         self._coord = coord
+
+    @staticmethod
+    def _resolve_limit(explicit, stored, default):
+        """Precedence: explicit kwarg > stored K/V value > hardcoded default.
+
+        A stored ``None`` (fence explicitly disabled in the K/V) means
+        'no window', so it is treated the same as absent → default.
+        """
+        if explicit is not _UNSET:
+            return explicit
+        if stored is not None:
+            return stored
+        return default
+
+    @staticmethod
+    def _load_stored_limits(transport):
+        """MotorLimitStore values, or {} if unset / Redis unreachable.
+
+        A ConnectionError must never block MotorClient construction —
+        fall back to the hardcoded safe defaults.
+        """
+        try:
+            return read_motor_limits(transport) or {}
+        except redis.exceptions.ConnectionError:
+            return {}
 
     @property
     def is_available(self):
@@ -362,6 +411,8 @@ class MotorClient:
         """Raise MotorLimitError if the resulting absolute position for
         *axis* falls outside its configured window. No-op for axis-less
         actions or actions with no positional target."""
+        if not self.enforce_limits:
+            return
         if axis is None:
             return
         deg = self._resulting_deg(action, before_target_steps, kwargs)
@@ -401,6 +452,8 @@ class MotorClient:
         """Raise MotorLimitError if a present sensor reading shows the
         relevant axis already outside its configured raw-sensor window.
         No-op for an unset window or a missing reading."""
+        if not self.enforce_limits:
+            return
         pot_v, el = self._read_fence_sensors()
         if axis in (None, "az") and self.pot_az_v_limits and pot_v is not None:
             lo, hi = self.pot_az_v_limits

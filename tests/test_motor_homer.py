@@ -194,3 +194,13 @@ def test_az_sign_autodetect_flips_when_residual_grows():
     h = _homer_with_fake(t, fake)
     res = h.home()
     assert res.converged is True
+
+
+# ---------------------------------------------------------------------------
+# Task D2: enforce_limits threading
+# ---------------------------------------------------------------------------
+
+
+def test_homer_passes_enforce_limits_to_motor_client():
+    h = MotorHomer(DummyTransport(), enforce_limits=False)
+    assert h.motor_client.enforce_limits is False
