@@ -65,6 +65,10 @@ class MotorHomer:
         empty or unreachable.
     reset_count : bool
         Whether to re-zero the step counter upon convergence (default True).
+    enforce_limits : bool
+        Passed to the internally built ``MotorClient``; ignored when an
+        external ``motor_client`` is supplied (that client's own
+        ``enforce_limits`` governs).
     source : str
         Identifier stamped on proxy command stream entries.
     """

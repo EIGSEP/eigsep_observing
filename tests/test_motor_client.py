@@ -20,6 +20,7 @@ from eigsep_observing import (
     MotorLimitError,
 )
 from eigsep_observing.motor_cal import cal_motor
+from eigsep_observing.motor_limits import publish_motor_limits
 from eigsep_redis.testing import DummyTransport
 
 
@@ -752,8 +753,6 @@ def test_fence_sensors_passes_logger_none_to_read_el_estimate():
 # Task D2: K/V limit loading + enforce_limits flag
 # ---------------------------------------------------------------------------
 
-from eigsep_observing.motor_limits import publish_motor_limits  # noqa: E402
-
 
 def test_limits_load_from_kv_when_kwargs_unset():
     t = DummyTransport()
@@ -810,3 +809,16 @@ def test_enforce_limits_false_skips_sensor_fence():
     with patch.object(mc._proxy, "send_command") as send:
         mc.move_to(az_deg=10.0)
         send.assert_called_once()
+
+
+def test_explicit_none_kwarg_disables_fence_over_kv():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-180.0, 180.0],
+        el_limits_deg=[-180.0, 180.0],
+        pot_az_v_limits=[0.2, 3.1],
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t, pot_az_v_limits=None)
+    assert mc.pot_az_v_limits is None  # explicit None wins over K/V value
