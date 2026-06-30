@@ -17,7 +17,7 @@ from eigsep_redis import (
 )
 from picohost.proxy import PicoProxy
 
-from . import obs_config_owner, run_tag
+from . import imu_calibration, obs_config_owner, run_tag
 from ._scripts_util import require_pico
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .keys import VNA_STREAM
@@ -305,7 +305,8 @@ def measure_s11(
         Header published alongside the bundle (instrument header plus
         ``mode``, ``metadata_snapshot_unix``, ``run_tag``,
         ``run_started_at_unix``, ``obs_config_owner``,
-        ``obs_config_owner_uploaded_unix``, ``obs_config``).
+        ``obs_config_owner_uploaded_unix``, ``obs_config``,
+        ``imu_calibration``, ``imu_calibration_upload_unix``).
     metadata : dict
         Panda-side metadata snapshot captured at trigger time.
 
@@ -361,6 +362,9 @@ def measure_s11(
         else 0.0
     )
     header["obs_config"] = dict(cfg)
+    cal = imu_calibration.read_calibration(transport)
+    header["imu_calibration"] = cal
+    header["imu_calibration_upload_unix"] = imu_calibration.upload_unix(cal)
     metadata = metadata_snapshot.get()
 
     violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(

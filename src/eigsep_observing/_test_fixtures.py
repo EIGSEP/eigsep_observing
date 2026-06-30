@@ -171,6 +171,43 @@ def _imu_az_avg_entry(yaw):
     }
 
 
+# Representative imu_calibration blob, matching the picohost-3.10
+# ImuCalStore shape (see picohost/imu_geometry.py
+# fit_calibration_from_sweeps + nearest_signed_permutation). mount_perm
+# is a list of 3 host-axis label strings; M is a 3x3 row-major matrix;
+# accel_bias is a 3-vector. `upload_time` is intentionally absent — it is
+# injected at write time by Transport.upload_dict, so the on-Redis blob
+# has it but a hand-authored "what calibrate-imu produced" fixture does
+# not. Both sections present (a full `--mode all` run); a partial fleet
+# would carry only one section.
+IMU_CALIBRATION = {
+    "imu_el": {
+        "accel_bias": [0.01, -0.02, 0.03],
+        "accel_scale": 1.002,
+        "M": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "mount_perm": ["+x", "+y", "+z"],
+        "mount_misalign_deg": 0.8,
+    },
+    "imu_az": {
+        "accel_bias": [-0.04, 0.05, -0.06],
+        "accel_scale": 0.998,
+        "M": [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+        "az_sign": 1.0,
+        "az_accel_offset_deg": 12.5,
+        "theta_cross_deg": 20.0,
+        "mount_perm": ["-y", "+x", "+z"],
+        "mount_misalign_deg": 1.3,
+        "az_yaw_sign": -1.0,
+        "az_yaw_offset_deg": 47.0,
+    },
+    "metadata": {
+        "timestamp": "2026-06-29T12:00:00+00:00",
+        "mode": "all",
+        "n_samples": 200,
+    },
+}
+
+
 def _lidar_avg_entry(distance_m):
     """One per-sample lidar entry as avg_metadata would emit it."""
     return {

@@ -1,14 +1,16 @@
 """Shared publish/read shape for the single-key Redis JSON K/V modules.
 
-Five sibling modules ride this shape — :mod:`~eigsep_observing.run_tag`,
+Six sibling modules ride this shape — :mod:`~eigsep_observing.run_tag`,
 :mod:`~eigsep_observing.obs_config_owner`,
 :mod:`~eigsep_observing.file_heartbeat`,
 :mod:`~eigsep_observing.snap_reinit`,
-:mod:`~eigsep_observing.corr_health`: a single Redis key holds a small
-JSON blob, overwritten on each publish via ``transport.add_raw`` /
-``transport.get_raw`` — consumers only ever care about the most recent
-value. This module is the single home for the serialize/deserialize
-path so a parsing fix propagates to all siblings at once (issue #149).
+:mod:`~eigsep_observing.corr_health`,
+:mod:`~eigsep_observing.imu_calibration` (read-only; picohost writes it):
+a single Redis key holds a small JSON blob, overwritten on each publish
+via ``transport.add_raw`` / ``transport.get_raw`` — consumers only ever
+care about the most recent value. This module is the single home for the
+serialize/deserialize path so a parsing fix propagates to all siblings at
+once (issue #149).
 
 What stays per-module: the ``*_KEY`` constant, the ``_EMPTY`` sentinel,
 lifecycle semantics (``run_tag``'s ``clear``/``session``,
