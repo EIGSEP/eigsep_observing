@@ -23,12 +23,21 @@ configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
 
-def run(transport, *, dry_run=False):
+def run(transport, *, dry_run=False, override_limits=False):
     if read_home_ref(transport) is None:
         raise SystemExit(
             "No home reference; run field_zero to set home first."
         )
-    homer = MotorHomer(transport, source="motor_home")
+    if override_limits:
+        logger.warning(
+            "Travel limits DISABLED for this session"
+            " (--override-limits) — recovery mode."
+        )
+    homer = MotorHomer(
+        transport,
+        source="motor_home",
+        enforce_limits=not override_limits,
+    )
     require_pico(homer.motor_client._proxy)
     if dry_run:
         pot_v, el_est = homer._read_sensors()
@@ -54,12 +63,20 @@ def main():
         action="store_true",
         help="Report residuals vs home without moving.",
     )
+    p.add_argument(
+        "--override-limits",
+        action="store_true",
+        help=(
+            "Disable travel limits for this session"
+            " (recovery from out-of-window)."
+        ),
+    )
     add_redis_args(p)
     args = p.parse_args()
     transport = build_transport(
         args.dummy, host=args.redis_host, real_port=args.redis_port
     )
-    run(transport, dry_run=args.dry_run)
+    run(transport, dry_run=args.dry_run, override_limits=args.override_limits)
 
 
 if __name__ == "__main__":
