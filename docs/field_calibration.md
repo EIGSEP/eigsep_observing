@@ -155,8 +155,15 @@ unless you copy `dump.rdb`.
    `pot_az_cal_slope` / `pot_az_cal_intercept` at record time. Read them off a
    recent file and re-enter them:
    `calibrate-pot --mode manual --slope <m> --intercept <b>`.
-3. **IMU cal:** re-run `calibrate-imu` (an IMU mount matrix isn't something you
-   hand-type).
+3. **IMU cal, from file:** every recorded corr *and* VNA `.h5` embeds the full
+   `imu_calibration` blob at `header["imu_calibration"]` (and
+   `header["imu_calibration_upload_unix"]`, unix seconds, for staleness).
+   Read it off a recent file and re-upload via picohost `ImuCalStore` — this
+   is now preferred since the mount matrix isn't hand-typeable. If
+   `imu_calibration == {}` or `imu_calibration_upload_unix == 0.0` (that file
+   caught the panda down or uncalibrated), re-run `calibrate-imu` instead.
+   Note: standalone `metadata_*.h5` files do not carry this blob (no header
+   group).
 4. Then re-zero with `field_zero.py`.
 
 ---
