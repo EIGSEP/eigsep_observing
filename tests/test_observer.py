@@ -549,6 +549,8 @@ def test_record_corr_data_transient_header_blip_uses_cache(
         "obs_config_owner": "UNKNOWN",
         "obs_config_owner_uploaded_unix": 0.0,
         "obs_config": {},
+        "imu_calibration": {},
+        "imu_calibration_upload_unix": 0.0,
     }
     mock_file.set_header.assert_any_call(header=expected_header)
     # add_data called on both iterations — corr data is sacred, the
