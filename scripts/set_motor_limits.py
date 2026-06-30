@@ -40,6 +40,7 @@ def run(transport, args):
     if args.show:
         current = read_motor_limits(transport)
         logger.info("Current motor limits: %s", current or "unset")
+        print(f"Current motor limits: {current if current else 'unset'}")
         return
     pot_az_v = None if args.no_pot_fence else args.pot_az_v
     imu_el = None if args.no_imu_fence else args.imu_el
