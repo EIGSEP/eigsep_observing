@@ -175,12 +175,13 @@ def _lidar_post_handler_readings():
     as ``_motor_post_handler_reading`` setting ``_motor_pos_store = None``.
     """
     lidar = PicoLidar.__new__(PicoLidar)
-    # A measured two-point cal (V0, slope_VperA) so the system_current entry
-    # carries float cal scalars — the calibrated post-handler shape, mirroring
-    # _potmon_post_handler_reading. The uncalibrated (all-None) shape is
-    # covered by picohost's TestLidarRedisHandler and the reduction tests in
-    # test_io.py. (picohost >= 3.11 has no nominal fallback: None cal -> None.)
-    lidar._current_cal = (1.4871, 0.11873)
+    # A measured cal in the stored amps-vs-volts form (slope A/V, intercept A)
+    # so the system_current entry carries float cal scalars — the calibrated
+    # post-handler shape, mirroring _potmon_post_handler_reading. The
+    # uncalibrated (all-None) shape is covered by picohost's
+    # TestLidarRedisHandler and the reduction tests in test_io.py.
+    # (picohost >= 3.11 has no nominal fallback: None cal -> None.)
+    lidar._current_cal = (8.4223, -12.5248)
     captured = []
     lidar._base_redis_handler = lambda d: captured.append(dict(d))
     lidar._lidar_redis_handler(LidarEmulator().get_status())
