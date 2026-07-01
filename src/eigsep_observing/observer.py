@@ -265,7 +265,19 @@ class EigObserver:
         owner = obs_config_owner.read_owner(self.transport_panda)
         try:
             obs_cfg = self.config.get()
+        except (ValueError, redis.exceptions.ConnectionError) as exc:
+            # Expected idle/degraded states, not contract violations:
+            # ValueError -> no obs_config uploaded yet (panda_observe
+            # not running); ConnectionError -> panda unreachable
+            # (opportunistic mode). Both fall back to an empty overlay
+            # and log at WARNING so a genuinely stuck producer is still
+            # visible without spamming ERROR during normal idle (this
+            # fires ~every 10s plus once per corr file open).
+            self.logger.warning("obs_config overlay unavailable: %s", exc)
+            obs_cfg = {}
         except Exception as exc:
+            # Anything else (e.g. malformed config) is a real contract
+            # violation -> ERROR per CLAUDE.md, loud and actionable.
             self.logger.error("obs_config overlay read failed: %s", exc)
             obs_cfg = {}
         out["run_tag"] = (

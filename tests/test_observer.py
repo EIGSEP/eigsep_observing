@@ -2,6 +2,7 @@ import itertools
 import logging
 import pytest
 import queue
+import redis.exceptions
 import threading
 import time
 from contextlib import contextmanager
@@ -1502,18 +1503,21 @@ def test_with_header_overlays_owner_unknown(observer_both, transport_panda):
 
 
 def test_with_header_overlays_obs_config_failure_errors(observer_both, caplog):
-    """ConfigStore.get raising → log ERROR, set obs_config={}.
+    """Unexpected ConfigStore.get failure → log ERROR, set obs_config={}.
 
     Per CLAUDE.md, narrow safety nets around non-corr processing must
     log loudly at ERROR level so the upstream contract violation is
-    visible and actionable. obs_config-overlay failure is one such
-    contract violation: corr data still gets written (the safety net),
-    but the producer/transport problem must surface to operators.
+    visible and actionable. An *unexpected* obs_config-overlay failure
+    (here a RuntimeError, e.g. malformed config) is one such contract
+    violation: corr data still gets written (the safety net), but the
+    producer/transport problem must surface to operators. (The expected
+    idle/unreachable cases are downgraded to WARNING — see
+    ``test_with_header_overlays_obs_config_missing_warns``.)
     """
     with patch.object(
-        observer_both.config, "get", side_effect=RuntimeError("redis down")
+        observer_both.config, "get", side_effect=RuntimeError("boom")
     ):
-        with caplog.at_level(logging.ERROR):
+        with caplog.at_level(logging.WARNING):
             out = observer_both._with_header_overlays({"sync_time": 1.0})
     assert out["obs_config"] == {}
     matching = [
@@ -1523,6 +1527,46 @@ def test_with_header_overlays_obs_config_failure_errors(observer_both, caplog):
     ]
     assert matching, "expected obs_config overlay failure log"
     assert all(rec.levelno == logging.ERROR for rec in matching)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        ValueError("No configuration found in Redis."),
+        redis.exceptions.ConnectionError("panda down"),
+    ],
+    ids=["no-config-uploaded", "panda-unreachable"],
+)
+def test_with_header_overlays_obs_config_missing_warns(
+    observer_both, caplog, exc
+):
+    """Expected idle/unreachable obs_config gap → WARNING, not ERROR.
+
+    A missing obs_config (panda_observe not running, nothing uploaded)
+    or an unreachable panda (opportunistic mode) is an expected
+    degraded state, not a contract violation. It fires ~every 10s plus
+    once per corr file open, so logging it at ERROR drowns the log.
+    Downgrade to WARNING: still visible if a producer is genuinely
+    stuck, but not alarming during normal idle. The overlay falls back
+    to an empty dict either way.
+    """
+    with patch.object(observer_both.config, "get", side_effect=exc):
+        with caplog.at_level(logging.WARNING):
+            out = observer_both._with_header_overlays({"sync_time": 1.0})
+    assert out["obs_config"] == {}
+    matching = [
+        rec
+        for rec in caplog.records
+        if "obs_config overlay unavailable" in rec.message
+    ]
+    assert matching, "expected obs_config overlay unavailable log"
+    assert all(rec.levelno == logging.WARNING for rec in matching)
+    # The loud ERROR message must NOT fire for an expected gap.
+    assert not [
+        rec
+        for rec in caplog.records
+        if "obs_config overlay read failed" in rec.message
+    ]
 
 
 def test_with_header_overlays_does_not_mutate_input(observer_snap_only):
