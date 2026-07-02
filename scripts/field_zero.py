@@ -144,6 +144,9 @@ def _render(screen, zeroer, snapshot, deg):
         screen.addstr(
             9, 0, ">>> ZERO HERE? 'y' confirm, any other key cancels <<<"
         )
+    if zeroer.notice:
+        width = screen.getmaxyx()[1]
+        screen.addstr(11, 0, f"! {zeroer.notice}"[: width - 1])
     screen.refresh()
 
 

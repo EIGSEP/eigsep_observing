@@ -15,7 +15,7 @@ from eigsep_redis import MetadataSnapshotReader
 from picohost.proxy import PicoProxy
 
 from .motor_cal import cal_motor
-from .motor_client import MotorClient
+from .motor_client import MotorClient, MotorLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,12 @@ class MotorZeroer:
         self.logger = logger
         # Two-step zero guard: Enter arms this, a deliberate 'y' commits.
         self._pending_zero = False
+        # Operator-visible one-liner for the curses UIs: set when a
+        # jog or home is denied (MotorLimitError) or fails; cleared by
+        # the next successful jog. The manual scripts log with
+        # console=False, so a log-only warning would be invisible
+        # mid-session — the render loops draw this instead.
+        self.notice = None
         # "Go home" drives both axes to step 0 via the same
         # MotorClient.home primitive motor_scan.py uses. It runs in a
         # background thread so the curses loop keeps rendering live
@@ -168,8 +174,12 @@ class MotorZeroer:
         def _run():
             try:
                 self._motor_client.home(stop_event=self._home_stop)
+            except MotorLimitError as exc:
+                self.logger.warning("home denied: %s", exc)
+                self.notice = str(exc)
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("home failed: %s", exc)
+                self.notice = f"home failed: {exc}"
             finally:
                 self._homing = False
 
@@ -284,8 +294,14 @@ class MotorZeroer:
                     self.jog_az(deg_state)
                 else:
                     self.jog_az(-deg_state)
+            except MotorLimitError as exc:
+                self.logger.warning("jog %s denied: %s", key, exc)
+                self.notice = str(exc)
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("jog %s failed: %s", key, exc)
+                self.notice = f"jog failed: {exc}"
+            else:
+                self.notice = None
         return deg_state, False, False
 
     def _confirm_zero(self, ch, deg_state):

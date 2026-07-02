@@ -62,6 +62,9 @@ def _render(screen, zeroer, deg):
             0,
             ">>> ZERO HERE? 'y' to confirm, any other key to cancel <<<",
         )
+    if zeroer.notice:
+        width = screen.getmaxyx()[1]
+        screen.addstr(12, 0, f"! {zeroer.notice}"[: width - 1])
     screen.refresh()
 
 
