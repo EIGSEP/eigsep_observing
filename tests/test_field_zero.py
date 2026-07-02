@@ -7,6 +7,7 @@ import pytest
 from eigsep_redis.testing import DummyTransport
 from picohost.buses import PotCalStore
 
+from eigsep_observing import MotorLimitError
 from eigsep_observing.home_ref import read_home_ref
 
 _spec = importlib.util.spec_from_file_location(
@@ -98,6 +99,26 @@ def test_run_slip_check_aborts_without_pot():
             pass
 
     with pytest.raises(SystemExit):
+        field_zero.run_slip_check(Motor(), Snap(), slope_m=200.0)
+
+
+def test_run_slip_check_probe_denied_exits_cleanly():
+    """A probe jog denied by the travel guard (or aborted by the
+    sensor fence) must surface as an actionable SystemExit, not a
+    MotorLimitError traceback."""
+
+    class Snap:
+        def get(self, *a):
+            return {"potmon": {"pot_az_voltage": 2.0}}
+
+    class Motor:
+        def jog_az(self, d, **k):
+            raise MotorLimitError(
+                "az move to 184.0 deg outside safe window "
+                "[-180.0, 180.0]; refusing to send az_move_deg."
+            )
+
+    with pytest.raises(SystemExit, match="denied by travel limit"):
         field_zero.run_slip_check(Motor(), Snap(), slope_m=200.0)
 
 

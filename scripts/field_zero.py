@@ -16,7 +16,12 @@ from picohost.proxy import PicoProxy
 
 from eigsep_redis import MetadataSnapshotReader
 
-from eigsep_observing import MotorClient, MotorZeroer, run_tag
+from eigsep_observing import (
+    MotorClient,
+    MotorLimitError,
+    MotorZeroer,
+    run_tag,
+)
 from eigsep_observing.home_ref import publish_home_ref
 from eigsep_observing._scripts_util import (
     add_redis_args,
@@ -117,13 +122,24 @@ def run_slip_check(motor_client, snapshot, slope_m, move_deg=30.0):
     Reads pot V, jogs +move_deg, reads pot V, jogs -move_deg (back to
     start). expected_dv = move_deg / |slope_m| (angle = m*V + b =>
     dV = dAngle / m). Returns (verdict, expected_dv, measured_dv).
+    A probe jog denied by the travel guard / sensor fence raises
+    SystemExit with recovery instructions (the rig may be left
+    off-position mid-probe).
     """
     v_before = _pot_voltage(snapshot)
     if v_before is None:
         raise SystemExit(_POT_DOWN_MSG)
-    motor_client.jog_az(move_deg)
-    v_after = _pot_voltage(snapshot)
-    motor_client.jog_az(-move_deg)
+    try:
+        motor_client.jog_az(move_deg)
+        v_after = _pot_voltage(snapshot)
+        motor_client.jog_az(-move_deg)
+    except MotorLimitError as exc:
+        raise SystemExit(
+            f"Slip-check probe move denied by travel limit: {exc} "
+            "The rig may be left off-position; jog back with "
+            "motor_manual, or re-run with --override-limits "
+            "(recovery) or --no-slip-check (skip the probe)."
+        ) from exc
     if v_after is None:
         raise SystemExit(_POT_DOWN_MSG)
     expected_dv = abs(move_deg) / abs(slope_m)
