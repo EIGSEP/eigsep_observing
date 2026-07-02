@@ -3455,23 +3455,37 @@ def test_corr_pair_labels_coerces_int_keys():
 
 def test_system_current_schema_registered_and_validates():
     """system_current is a fanned-out stream (no app_id, like adc_stats).
-    The schema's job is loud validation: current_a/current_voltage must be
+    The schema's job is loud validation: the four numeric fields must be
     real floats so the float->mean reducer doesn't silently drop an
-    int-emitting producer to None."""
+    int-emitting producer to None. The cal scalars (slope A/V, intercept A)
+    are flattened per the picohost scalar-only contract, like potmon."""
     schema = io.SENSOR_SCHEMAS["system_current"]
     assert schema == {
         "sensor_name": str,
         "status": str,
         "current_voltage": float,
         "current_a": float,
+        "current_cal_slope": float,
+        "current_cal_intercept": float,
     }
     good = {
         "sensor_name": "system_current",
         "status": "update",
         "current_voltage": 1.70,
-        "current_a": 2.0,
+        "current_a": 1.793,
+        "current_cal_slope": 8.4223,
+        "current_cal_intercept": -12.5248,
     }
     assert io._validate_metadata(good, schema) == []
+    # Uncalibrated: current_a + both cal scalars are None. None short-circuits
+    # the per-key type check, so the row is still schema-clean.
+    uncal = {
+        **good,
+        "current_a": None,
+        "current_cal_slope": None,
+        "current_cal_intercept": None,
+    }
+    assert io._validate_metadata(uncal, schema) == []
     # int current_a violates the strict float check (would be dropped to
     # None by the float reducer) -> must surface as a contract violation.
     bad = {**good, "current_a": 2}
@@ -3480,20 +3494,29 @@ def test_system_current_schema_registered_and_validates():
 
 
 def test_avg_metadata_system_current():
-    """Both floats reduce via the generic float->mean path; the
-    producer-fixed status='update' row stays clean."""
+    """The numeric fields reduce via the generic float->mean path; the
+    producer-fixed status='update' row stays clean. The cal scalars are
+    invariant within an integration, so the mean passes them through
+    unchanged. NOTE: current_a here is set for averaging arithmetic, not
+    derived from the cal scalars — this test exercises the reducer, not the
+    producer's slope*V+intercept invariant (covered in picohost's
+    TestLidarRedisHandler)."""
     data = [
         {
             "sensor_name": "system_current",
             "status": "update",
             "current_voltage": 1.70,
             "current_a": 2.0,
+            "current_cal_slope": 8.4223,
+            "current_cal_intercept": -12.5248,
         },
         {
             "sensor_name": "system_current",
             "status": "update",
             "current_voltage": 1.74,
             "current_a": 4.0,
+            "current_cal_slope": 8.4223,
+            "current_cal_intercept": -12.5248,
         },
     ]
     result = io.avg_metadata(data)
@@ -3501,6 +3524,36 @@ def test_avg_metadata_system_current():
     assert result["status"] == "update"
     assert result["current_a"] == pytest.approx(3.0)
     assert result["current_voltage"] == pytest.approx(1.72)
+    assert result["current_cal_slope"] == pytest.approx(8.4223)
+    assert result["current_cal_intercept"] == pytest.approx(-12.5248)
+
+
+def test_avg_metadata_system_current_uncalibrated():
+    """An uncalibrated stream (current_a + cal scalars all None) reduces to
+    None for those fields — the float reducer has no non-None survivors."""
+    data = [
+        {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 0.7057,
+            "current_a": None,
+            "current_cal_slope": None,
+            "current_cal_intercept": None,
+        },
+        {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 0.7061,
+            "current_a": None,
+            "current_cal_slope": None,
+            "current_cal_intercept": None,
+        },
+    ]
+    result = io.avg_metadata(data)
+    assert result["current_voltage"] == pytest.approx(0.7059)
+    assert result["current_a"] is None
+    assert result["current_cal_slope"] is None
+    assert result["current_cal_intercept"] is None
 
 
 def test_imu_schemas_field_sets():

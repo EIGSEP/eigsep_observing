@@ -891,12 +891,20 @@ SENSOR_SCHEMAS = {
     # 1:1 pico app). `status` is producer-fixed to "update" (the ADC read
     # is decoupled from lidar's I2C result). `current_a` is the meaningful
     # value (amps); `current_voltage` is the raw ADC-pin voltage diagnostic.
-    # Both floats reduce via the standard float->mean path.
+    # `current_cal_slope` (A/V) and `current_cal_intercept` (A) are the
+    # measured two-point cal projected to amps-vs-volts
+    # (current_a == slope*current_voltage + intercept), flattened to scalars
+    # like potmon's pot_az_cal_slope/intercept. All four floats reduce via
+    # the standard float->mean path; all are None for an uncalibrated stream
+    # (no nominal fallback in picohost >= 3.11), and _validate_metadata /
+    # _avg_sensor_values short-circuit None cleanly.
     "system_current": {
         "sensor_name": str,
         "status": str,
         "current_voltage": float,
         "current_a": float,
+        "current_cal_slope": float,
+        "current_cal_intercept": float,
     },
     # Motor positions are stepper counts. The C firmware emits them
     # as ints, but `PicoMotor._motor_redis_handler` coerces to float

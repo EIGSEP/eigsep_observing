@@ -1460,6 +1460,8 @@ def test_metadata_payload_classifies_system_current():
             "status": "update",
             "current_voltage": 1.70,
             "current_a": 3.0,
+            "current_cal_slope": 8.4223,
+            "current_cal_intercept": -12.5248,
         },
         "system_current_ts": now,
     }
@@ -1468,6 +1470,26 @@ def test_metadata_payload_classifies_system_current():
     entry = payload["system_current"]
     assert entry["classify"]["system_current.current_a"] == "ok"
     assert entry["status"] == "update"
+
+    # Uncalibrated (picohost >= 3.11): current_a None classifies "unknown",
+    # not a band violation. classify() already short-circuits None; this is
+    # a regression guard so the live current card degrades gracefully.
+    uncal_state = StateSnapshot()
+    uncal_state.metadata_snapshot = {
+        "system_current": {
+            "sensor_name": "system_current",
+            "status": "update",
+            "current_voltage": 0.7057,
+            "current_a": None,
+            "current_cal_slope": None,
+            "current_cal_intercept": None,
+        },
+        "system_current_ts": now,
+    }
+    uncal_state.metadata_snapshot_read_unix = now
+    uncal_payload = _metadata_payload(uncal_state, _payload_thresholds())
+    uncal_entry = uncal_payload["system_current"]
+    assert uncal_entry["classify"]["system_current.current_a"] == "unknown"
 
 
 def client_for(agg):

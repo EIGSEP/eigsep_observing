@@ -170,12 +170,18 @@ def _lidar_post_handler_readings():
     through the real handler and capture both publishes in order. Mirrors
     ``_rfswitch_post_handler_reading`` / ``_motor_post_handler_reading``.
     ``_current_cal`` is normally set in ``PicoLidar.__init__`` (two-point
-    current cal, picohost); ``__new__`` bypasses that, so set it to ``None``
-    to select the nominal ACS724 conversion — same pattern as
-    ``_motor_post_handler_reading`` setting ``_motor_pos_store = None``.
+    current cal, picohost); ``__new__`` bypasses that, so set a measured cal
+    here to exercise the calibrated system_current shape — same bypass pattern
+    as ``_motor_post_handler_reading`` setting ``_motor_pos_store = None``.
     """
     lidar = PicoLidar.__new__(PicoLidar)
-    lidar._current_cal = None  # bypass __init__: nominal conversion
+    # A measured cal in the stored amps-vs-volts form (slope A/V, intercept A)
+    # so the system_current entry carries float cal scalars — the calibrated
+    # post-handler shape, mirroring _potmon_post_handler_reading. The
+    # uncalibrated (all-None) shape is covered by picohost's
+    # TestLidarRedisHandler and the reduction tests in test_io.py.
+    # (picohost >= 3.11 has no nominal fallback: None cal -> None.)
+    lidar._current_cal = (8.4223, -12.5248)
     captured = []
     lidar._base_redis_handler = lambda d: captured.append(dict(d))
     lidar._lidar_redis_handler(LidarEmulator().get_status())
