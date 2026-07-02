@@ -1,5 +1,26 @@
 # Changelog
 
+## [2.9.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.8.0...v2.9.0) (2026-07-02)
+
+
+### Features
+
+* **io:** embed IMU mount calibration in corr + VNA file headers ([#176](https://github.com/EIGSEP/eigsep_observing/issues/176)) ([#177](https://github.com/EIGSEP/eigsep_observing/issues/177)) ([278688c](https://github.com/EIGSEP/eigsep_observing/commit/278688cd104aab821994f9ce312340e33d6984e1))
+* **io:** record system_current cal params in metadata (picohost 3.11) ([#178](https://github.com/EIGSEP/eigsep_observing/issues/178)) ([9a91365](https://github.com/EIGSEP/eigsep_observing/commit/9a913655e5102528e8f91ef8364d1e1b3552ea24))
+* **io:** split _IMU_SCHEMA into el/az schemas for calibrate-imu fields ([#172](https://github.com/EIGSEP/eigsep_observing/issues/172)) ([5674e11](https://github.com/EIGSEP/eigsep_observing/commit/5674e110f7ac0fb9286210c4a1bd7b9bb7b19942))
+* **live_status:** Antenna pointing panel with sensor-spread drift/stall alarm ([#174](https://github.com/EIGSEP/eigsep_observing/issues/174)) ([d67738b](https://github.com/EIGSEP/eigsep_observing/commit/d67738b6d397b45003967512a4ecb9a6b453f4ab))
+
+
+### Bug Fixes
+
+* **observer:** downgrade expected obs_config overlay gap to WARNING ([af31343](https://github.com/EIGSEP/eigsep_observing/commit/af313434bd2d027e0d0e6d61e4db590657b30c1f))
+
+
+### Documentation
+
+* field calibration & zeroing runbook (lab/field/routine/recovery) ([f3832fb](https://github.com/EIGSEP/eigsep_observing/commit/f3832fbbfe0aae23d41ffe03c86e2984b8404494))
+* **notebooks:** azimuth sensor cross-check + field-debug notebook ([20c1461](https://github.com/EIGSEP/eigsep_observing/commit/20c1461bcb87bb9972f0ba9c81961562e5acaa39))
+
 ## [2.8.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.7.0...v2.8.0) (2026-06-28)
 
 
