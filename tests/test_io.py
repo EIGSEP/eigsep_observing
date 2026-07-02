@@ -1334,7 +1334,7 @@ def test_metadata_end_to_end_round_trip():
                     "sensor_name": "rfswitch",
                     "status": "update",
                     "app_id": 5,
-                    "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                    "sw_state": PicoRFSwitch.PATHS[name],
                     "sw_state_name": name,
                 },
             ],
@@ -1524,6 +1524,123 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
             assert row["pot_az_near_rail"] is False
             # The integration is clean — no errored samples.
             assert row["status"] == "update"
+
+
+def test_rfswitch_therm_end_to_end_round_trip():
+    """Round-trip the rfswitch_therm PCB-thermistor stream, including a
+    saturated/dead channel within an integration.
+
+    ``rfswitch_therm`` (three PCB thermistors fanned out of the
+    switch-state line, see the schema comment in ``io.py``) goes through
+    the GENERIC ``_avg_sensor_values`` reduction like ``system_current`` —
+    NOT the special string-valued ``_avg_rfswitch_metadata`` path used by
+    the sibling ``rfswitch`` stream. This test asserts the averaged output
+    is a dict (not a bare state-name string) and survives the JSON round
+    trip with the right float values.
+
+    Each integration feeds THREE raw pushes for channel 0
+    (``temp_therm0``): two real readings and one ``None`` — the
+    producer's documented saturated/dead-channel value (io.py's
+    ``rfswitch_therm`` schema comment: "``None`` when the channel is
+    dead/shorted or ADC-saturated below ~8.5C"). ``_avg_sensor_values``'s
+    float branch filters ``None`` survivors before averaging::
+
+        floats = [s for s in survivors if isinstance(s, float)]
+        avg[data_key] = float(np.mean(floats)) if floats else None
+
+    (see ``_avg_sensor_values`` in ``src/eigsep_observing/io.py``), so the
+    averaged ``temp_therm0`` must equal the mean of the two REAL pushes —
+    not a pass-through of a single sample and not ``None``. Channels 1
+    and 2 stay fully healthy across all three pushes as a control, and
+    ``volt_therm0`` (the raw ADC voltage) stays real for all three pushes
+    even on the push where the derived temperature is None — matching
+    the documented saturation contract (voltage pinned near the rail,
+    temperature undefined).
+    """
+    n = 4
+
+    def _rfswitch_therm_payload(i):
+        return {
+            "stream:rfswitch_therm": [
+                {
+                    "sensor_name": "rfswitch_therm",
+                    "status": "update",
+                    "volt_therm0": 2.5,
+                    "volt_therm1": 2.5,
+                    "volt_therm2": 2.5,
+                    "temp_therm0": 25.0 + i,
+                    "temp_therm1": 25.0 + 0.1 * i,
+                    "temp_therm2": 25.0 + 0.2 * i,
+                },
+                {
+                    "sensor_name": "rfswitch_therm",
+                    "status": "update",
+                    "volt_therm0": 2.5,
+                    "volt_therm1": 2.5,
+                    "volt_therm2": 2.5,
+                    "temp_therm0": 27.0 + i,
+                    "temp_therm1": 25.0 + 0.1 * i,
+                    "temp_therm2": 25.0 + 0.2 * i,
+                },
+                {
+                    # Channel 0 saturated/dead on this push: the raw ADC
+                    # pin voltage is still a real float (pinned near the
+                    # 3.3V rail), but the host-side Beta conversion
+                    # emits None per the documented saturation contract.
+                    "sensor_name": "rfswitch_therm",
+                    "status": "update",
+                    "volt_therm0": 3.3,
+                    "volt_therm1": 2.5,
+                    "volt_therm2": 2.5,
+                    "temp_therm0": None,
+                    "temp_therm1": 25.0 + 0.1 * i,
+                    "temp_therm2": 25.0 + 0.2 * i,
+                },
+            ],
+        }
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        save_dir = Path(tmpdir)
+        pairs = ["0"]
+        cfg = HEADER.copy()
+        cfg["integration_time"] = 0.1
+        f = io.File(save_dir, pairs, n, cfg)
+
+        dtype = np.dtype(HEADER["dtype"])
+        spec_len = io.data_shape(1, HEADER["acc_bins"], HEADER["nchan"])[1]
+        d = {"0": np.full(spec_len, 1, dtype=dtype)}
+
+        for i in range(n):
+            f.add_data(i + 1, 0.0, d, metadata=_rfswitch_therm_payload(i))
+        f.close()
+
+        files = glob.glob(str(save_dir / "*.h5"))
+        assert len(files) == 1, f"expected one file, got {files}"
+        _data, _hdr, read_meta = io.read_hdf5(files[0])
+
+        assert "rfswitch_therm" in read_meta
+        rows = read_meta["rfswitch_therm"]
+        assert len(rows) == n
+        for i, row in enumerate(rows):
+            # Generic dict path, not the special rfswitch string path.
+            assert isinstance(row, dict)
+            assert row["sensor_name"] == "rfswitch_therm"
+            assert row["status"] == "update"
+            # temp_therm0's None-survivor push is filtered; the average
+            # is the mean of the two REAL pushes, not a pass-through of
+            # one sample and not None.
+            assert row["temp_therm0"] == pytest.approx(
+                np.mean([25.0 + i, 27.0 + i])
+            )
+            # Healthy channels 1/2 average normally across all 3 pushes.
+            assert row["temp_therm1"] == pytest.approx(25.0 + 0.1 * i)
+            assert row["temp_therm2"] == pytest.approx(25.0 + 0.2 * i)
+            # Raw voltage stays float and averages across all 3 pushes,
+            # including the saturated one (voltage is real even though
+            # the derived temperature is None).
+            assert row["volt_therm0"] == pytest.approx(
+                np.mean([2.5, 2.5, 3.3])
+            )
 
 
 def test_write_error_surfaced():
@@ -3076,7 +3193,7 @@ def _make_rfswitch_md(name):
                 "sensor_name": "rfswitch",
                 "status": "update",
                 "app_id": 5,
-                "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                "sw_state": PicoRFSwitch.PATHS[name],
                 "sw_state_name": name,
             }
         ]

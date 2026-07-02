@@ -888,6 +888,29 @@ SENSOR_SCHEMAS = {
         "sw_state": int,
         "sw_state_name": str,
     },
+    # `rfswitch_therm`: three PCB thermistors on the RF switch board,
+    # fanned out of the switch-state line by
+    # PicoRFSwitch._rfswitch_redis_handler (the system_current pattern) so
+    # the categorical rfswitch stream stays pure. Like system_current it is
+    # a derived stream with no `app_id`. `volt_therm<i>` is the raw ADC-pin
+    # voltage (0-3.3V, referenced to the RP2040's internal ADC full-scale;
+    # the external divider is a 5V pullup, so there is no 3.3V in the
+    # sensor harness). `temp_therm<i>` is the host-side datasheet-Beta
+    # conversion in degrees C, `None` when the channel is dead/shorted or
+    # ADC-saturated (below ~8.5C the 5V divider drives the pin past the 3.3V
+    # ADC ceiling). All six floats reduce via the standard float->mean path
+    # and land in the corr file (PCB temperature affects the cal network);
+    # None short-circuits in _validate_metadata / _avg_sensor_values.
+    "rfswitch_therm": {
+        "sensor_name": str,
+        "status": str,
+        "volt_therm0": float,
+        "volt_therm1": float,
+        "volt_therm2": float,
+        "temp_therm0": float,
+        "temp_therm1": float,
+        "temp_therm2": float,
+    },
     "lidar": {
         "sensor_name": str,
         "status": str,

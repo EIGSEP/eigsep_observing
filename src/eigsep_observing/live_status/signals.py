@@ -169,6 +169,26 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         unit="C",
         max_age_s=60.0,
     ),
+    # RF switch PCB thermistors — three 10k NTC on the switch board, fanned
+    # out of the switch-state line into the rfswitch_therm stream. Host-side
+    # datasheet-Beta conversion (~+/-1-2C), so no config-derived band —
+    # grey "unknown" tiles until an empirical band is added to the YAML
+    # override. Always enabled (a board vital, like system_current).
+    "rfswitch_therm.temp_therm0": Signal(
+        "rfswitch_therm.temp_therm0",
+        "RF switch PCB temp 0",
+        unit="C",
+    ),
+    "rfswitch_therm.temp_therm1": Signal(
+        "rfswitch_therm.temp_therm1",
+        "RF switch PCB temp 1",
+        unit="C",
+    ),
+    "rfswitch_therm.temp_therm2": Signal(
+        "rfswitch_therm.temp_therm2",
+        "RF switch PCB temp 2",
+        unit="C",
+    ),
     # Site-geometry signals — YAML override only (TODO after deploy).
     "lidar.distance_m": Signal(
         "lidar.distance_m",

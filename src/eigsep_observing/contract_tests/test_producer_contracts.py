@@ -140,22 +140,25 @@ def _peltier_post_handler_reading(stream_name):
     return tempctrl_post_handler_reading(stream_name)
 
 
-def _rfswitch_post_handler_reading():
-    """Return an rfswitch reading after _rfswitch_redis_handler.
+def _rfswitch_post_handler_readings():
+    """Return [rfswitch, rfswitch_therm] after _rfswitch_redis_handler.
 
-    The actual ``rfswitch`` producer is the composition
-    ``RFSwitchEmulator.get_status()`` + ``PicoRFSwitch._rfswitch_redis_handler``
-    — the emulator only emits the raw ``sw_state`` int, and the device
-    handler is where ``sw_state_name`` is added. The contract this test
-    enforces is the *post-handler* shape (what reaches Redis), so the
-    fixture has to compose the two. Mirrors ``_potmon_post_handler_reading``.
+    The rfswitch producer fans the three PCB thermistors out of the
+    switch-state line into a separate rfswitch_therm stream (raw volts +
+    host-derived degrees C), the same two-publish shape as
+    PicoLidar -> system_current. Compose RFSwitchEmulator.get_status()
+    through the real handler and capture both publishes in order. Mirrors
+    _lidar_post_handler_readings.
     """
     sw = PicoRFSwitch.__new__(PicoRFSwitch)
     sw._name_by_state = {v: k for k, v in sw.__class__.paths.fget(sw).items()}
-    captured = {}
-    sw._base_redis_handler = lambda d: captured.update(d)
+    captured = []
+    sw._base_redis_handler = lambda d: captured.append(dict(d))
     sw._rfswitch_redis_handler(RFSwitchEmulator().get_status())
-    return captured
+    assert len(captured) == 2, (
+        f"expected rfswitch + rfswitch_therm publishes, got {len(captured)}"
+    )
+    return captured[0], captured[1]
 
 
 def _lidar_post_handler_readings():
@@ -168,7 +171,7 @@ def _lidar_post_handler_readings():
     derived current_a). The contract these tests enforce is the
     post-handler shape of each, so compose ``LidarEmulator.get_status()``
     through the real handler and capture both publishes in order. Mirrors
-    ``_rfswitch_post_handler_reading`` / ``_motor_post_handler_reading``.
+    ``_rfswitch_post_handler_readings`` / ``_motor_post_handler_reading``.
     ``_current_cal`` is normally set in ``PicoLidar.__init__`` (two-point
     current cal, picohost); ``__new__`` bypasses that, so set a measured cal
     here to exercise the calibrated system_current shape — same bypass pattern
@@ -252,7 +255,8 @@ def _imu_post_handler_reading(name, app_id):
 SENSOR_EMULATORS = {
     "imu_el": lambda: _imu_post_handler_reading("imu_el", 3),
     "imu_az": lambda: _imu_post_handler_reading("imu_az", 6),
-    "rfswitch": _rfswitch_post_handler_reading,
+    "rfswitch": lambda: _rfswitch_post_handler_readings()[0],
+    "rfswitch_therm": lambda: _rfswitch_post_handler_readings()[1],
     "tempctrl_lna": lambda: _peltier_post_handler_reading("tempctrl_lna"),
     "tempctrl_load": lambda: _peltier_post_handler_reading("tempctrl_load"),
     "lidar": lambda: _lidar_post_handler_readings()[0],
