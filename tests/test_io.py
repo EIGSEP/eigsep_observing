@@ -1333,7 +1333,7 @@ def test_metadata_end_to_end_round_trip():
                     "sensor_name": "rfswitch",
                     "status": "update",
                     "app_id": 5,
-                    "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                    "sw_state": PicoRFSwitch.PATHS[name],
                     "sw_state_name": name,
                 },
             ],
@@ -3067,7 +3067,7 @@ def _make_rfswitch_md(name):
                 "sensor_name": "rfswitch",
                 "status": "update",
                 "app_id": 5,
-                "sw_state": PicoRFSwitch.rbin(PicoRFSwitch.path_str[name]),
+                "sw_state": PicoRFSwitch.PATHS[name],
                 "sw_state_name": name,
             }
         ]

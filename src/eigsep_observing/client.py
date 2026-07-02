@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Valid RF switch state names, sourced from the firmware-side class so
 # that a pico firmware change flows through automatically.
-VALID_SWITCH_STATES = set(PicoRFSwitch.path_str)
+VALID_SWITCH_STATES = set(PicoRFSwitch.PATHS)
 
 
 class PandaClient:
@@ -282,7 +282,7 @@ class PandaClient:
         Examples
         --------
         >>> with panda.switch_session() as sw:
-        ...     sw("RFLOAD")
+        ...     sw("RFAMB")
         ...     take_measurement()
         # rfswitch auto-restored to the mode that was active on entry
         """

@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Canonical state list — sourced from the firmware-side class so a
 # new state added in firmware shows up here without a code change.
-STATES = list(PicoRFSwitch.path_str)
+STATES = list(PicoRFSwitch.PATHS)
 
 
 def _print_menu():
