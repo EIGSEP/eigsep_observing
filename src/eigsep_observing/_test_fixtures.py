@@ -262,8 +262,9 @@ def _potmon_avg_entry(pot_az_voltage):
     """One per-sample potmon entry as avg_metadata would emit it.
 
     Mirrors the post-``_pot_redis_handler`` shape that lands in Redis:
-    raw voltage plus the flattened cal slope/intercept and the derived
-    angle. All-scalar per the picohost scalar-only contract; the cal
+    raw voltage plus the flattened cal slope/intercept, the derived
+    angle, and the voltage-derived ``pot_az_near_rail`` flag (picohost
+    >= 3.12). All-scalar per the picohost scalar-only contract; the cal
     fields are de-facto invariants for the lifetime of a stream.
 
     A *calibrated* reading is used here so every cal/angle field is a
@@ -286,6 +287,9 @@ def _potmon_avg_entry(pot_az_voltage):
         "pot_az_cal_slope": 200.0,
         "pot_az_cal_intercept": -100.0,
         "pot_az_angle": 200.0 * pot_az_voltage - 100.0,
+        # bool→any reduction over all-False mid-range samples; the
+        # fixture voltages (~1.5 V) sit far from both ADC rails.
+        "pot_az_near_rail": False,
     }
 
 
@@ -353,6 +357,7 @@ VNA_METADATA = {
         "pot_az_cal_slope": 200.0,
         "pot_az_cal_intercept": -100.0,
         "pot_az_angle": 200.0,
+        "pot_az_near_rail": False,
     },
     "potmon_ts": _SNAPSHOT_TS,
     "rfswitch": {

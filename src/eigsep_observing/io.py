@@ -858,6 +858,14 @@ _PELTIER_SCHEMA = {
 # short-circuits None, and `_avg_sensor_values`'s float reduction
 # filters None survivors, so an uncalibrated stream averages cleanly
 # to None for the cal/angle fields.
+# `pot_az_near_rail` (picohost >= 3.12) is derived from the raw voltage
+# (within POT_NEAR_RAIL_V = 0.2 V of an ADC rail), not from the cal, so
+# it is a real bool even on an uncalibrated stream; it is `None` only
+# when the voltage itself is missing. A railed pot reports a steady,
+# plausible voltage indistinguishable from a parked antenna, so this
+# flag is the stream-level tell that the absolute azimuth reference is
+# at risk. The bool→`any` reduction is the fault-flag worst case: an
+# integration where any sample was near a rail is flagged.
 SENSOR_SCHEMAS = {
     "imu_el": _IMU_EL_SCHEMA,
     "imu_az": _IMU_AZ_SCHEMA,
@@ -871,6 +879,7 @@ SENSOR_SCHEMAS = {
         "pot_az_angle": float,
         "pot_az_cal_slope": float,
         "pot_az_cal_intercept": float,
+        "pot_az_near_rail": bool,
     },
     "rfswitch": {
         "sensor_name": str,
