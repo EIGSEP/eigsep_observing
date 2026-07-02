@@ -1,0 +1,34 @@
+[Unit]
+Description=EIGSEP Raspberry Pi vitals publisher (CPU temperature)
+Documentation=https://github.com/EIGSEP/eigsep_observing/blob/main/deploy/systemd/README.md
+# Publishes to the pi's LOCAL Redis only — this identical unit file
+# ships to both pis (backend pi and panda pi); the live-status
+# dashboard reads both Redis servers and maps each to its host by
+# transport. No ordering hard-dependency on Redis: the transport is
+# lazy and each publish retries, so a Redis that comes up later just
+# costs a few WARNs in the journal.
+After=network.target redis-server.service
+Wants=redis-server.service
+StartLimitIntervalSec=0
+
+[Service]
+# Edit User/ExecStart via `systemctl edit eigsep-host-health.service`
+# (drop-in override) for your deployment — the values below are the
+# canonical layout, not a hard requirement.
+User=eigsep
+Group=eigsep
+ExecStart=/home/eigsep/eigsep_observing/.venv/bin/eigsep-host-health
+
+# The publisher is stateless (single overwritten Redis key); always
+# restart. A dead publisher surfaces on the dashboard as a 'stale'
+# pi-temperature tile.
+Restart=always
+RestartSec=10s
+
+# Logs go to journald; tail with:
+#   journalctl -u eigsep-host-health.service -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

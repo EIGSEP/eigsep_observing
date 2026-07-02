@@ -1,7 +1,7 @@
 """Tests for eigsep_observing._redis_json_kv (shared K/V helper).
 
-The six sibling K/V modules (``run_tag``, ``obs_config_owner``,
-``file_heartbeat``, ``snap_reinit``, ``corr_health``,
+The seven sibling K/V modules (``run_tag``, ``obs_config_owner``,
+``file_heartbeat``, ``snap_reinit``, ``corr_health``, ``host_health``,
 ``imu_calibration``) share one publish/read shape; this module is the
 single home for it. Behavior differences (swallow-vs-raise publish,
 lifecycle, derived fields) stay in the sibling modules — see issue #149.
@@ -106,7 +106,7 @@ def test_read_decodes_bytes_payload():
 
 def test_publish_raises_on_transport_error():
     """publish_json does NOT swallow — each sibling owns its failure
-    policy (four swallow+WARN, corr_health raises to its caller)."""
+    policy (five swallow+WARN, corr_health raises to its caller)."""
 
     class BoomTransport:
         def add_raw(self, key, value, ex=None):

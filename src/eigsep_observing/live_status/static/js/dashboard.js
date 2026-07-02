@@ -576,6 +576,13 @@ function updateHealth(h, fileData) {
     runTile.textContent = `Run: ${h.run_tag} (${ageStr})`;
   }
 
+  // Raspberry Pi CPU temperature tiles — one per pi, colored by the
+  // host_*.temp_c bands. A dead publisher arrives as classify
+  // "stale"; a live publisher whose thermal-zone read failed arrives
+  // as classify "unknown" with temp_c null (rendered as "—").
+  renderHostTile("tile-host-backend", "Backend pi", h.host_backend);
+  renderHostTile("tile-host-panda", "Panda pi", h.host_panda);
+
   const reinitTile = document.getElementById("tile-reinit");
   const reinit = h.snap_reinit || {};
   // No "ok" / "warn" classification: the count is informational, the
@@ -593,6 +600,37 @@ function updateHealth(h, fileData) {
         : "";
     reinitTile.textContent = `Reinits: ${reinit.count}${ageStr}`;
   }
+}
+
+// One Raspberry Pi CPU-temperature tile. The hostname (provenance
+// from the publisher) is appended to the tile's static tooltip
+// (title attribute) rather than the tile text, which stays
+// glanceable.
+function renderHostTile(tileId, label, host) {
+  const tile = document.getElementById(tileId);
+  if (!tile) return;
+  if (tile.dataset.baseTitle === undefined) {
+    tile.dataset.baseTitle = tile.title;
+  }
+  tile.title =
+    host && host.hostname
+      ? `${tile.dataset.baseTitle}\nPublisher hostname: ${host.hostname}`
+      : tile.dataset.baseTitle;
+  if (!host) {
+    tile.className = "tile unknown";
+    tile.textContent = `${label}: —`;
+    return;
+  }
+  tile.className = tileClass(host.classify);
+  let text = `${label}: ${
+    host.temp_c !== null && host.temp_c !== undefined
+      ? `${fmt(host.temp_c, 1)}°C`
+      : "—"
+  }`;
+  if (host.classify === "stale") {
+    text += ` (${fmtDuration(host.seconds_since_publish)} ago)`;
+  }
+  tile.textContent = text;
 }
 
 // ---- metadata + adc + tempctrl + rfswitch --------------------------

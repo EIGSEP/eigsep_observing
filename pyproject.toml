@@ -40,6 +40,9 @@ dependencies = [
 eigsep-fpga-init              = "eigsep_observing.scripts.fpga_init:main"
 eigsep-observe                = "eigsep_observing.scripts.observe:main"
 eigsep-panda                  = "eigsep_observing.scripts.panda_observe:main"
+# Always-on pi vitals publisher; backs the eigsep-host-health systemd
+# unit on BOTH pis (each publishes to its local Redis).
+eigsep-host-health            = "eigsep_observing.scripts.host_health:main"
 # Alt-mode panda observers (see scripts/CLAUDE.md): structurally
 # panda_observe-like, mutually exclusive with eigsep-panda. main() takes
 # (transport, args) so tests can drive it directly; cli() is the no-arg

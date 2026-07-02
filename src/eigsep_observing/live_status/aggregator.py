@@ -60,6 +60,7 @@ from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
 from ..corr_health import read as read_corr_health
 from ..file_heartbeat import read as read_file_heartbeat
+from ..host_health import read as read_host_health
 from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
 from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
@@ -222,6 +223,28 @@ class StateSnapshot:
             "count": None,
             "last_reinit_unix": None,
             "seconds_since_reinit": None,
+        }
+    )
+
+    # Raspberry Pi host vitals (raw K/V, published by each pi's
+    # always-on ``eigsep-host-health`` service to its *local* Redis):
+    # backend pi rides the SNAP transport, panda pi rides the panda
+    # transport. Same key constant on both — the transport identifies
+    # the host.
+    host_health_backend: dict = field(
+        default_factory=lambda: {
+            "hostname": None,
+            "temp_c": None,
+            "published_unix": None,
+            "seconds_since_publish": None,
+        }
+    )
+    host_health_panda: dict = field(
+        default_factory=lambda: {
+            "hostname": None,
+            "temp_c": None,
+            "published_unix": None,
+            "seconds_since_publish": None,
         }
     )
 
@@ -432,6 +455,8 @@ class LiveStatusAggregator:
                 file_heartbeat=dict(s.file_heartbeat),
                 snap_reinit=dict(s.snap_reinit),
                 corr_health=dict(s.corr_health),
+                host_health_backend=dict(s.host_health_backend),
+                host_health_panda=dict(s.host_health_panda),
                 last_rfnoff_pairs=(
                     dict(s.last_rfnoff_pairs)
                     if s.last_rfnoff_pairs is not None
@@ -538,6 +563,17 @@ class LiveStatusAggregator:
         )
         any_ok = any_ok or ok
 
+        # Backend pi vitals (raw K/V, published by the always-on
+        # ``eigsep-host-health`` service to the backend pi's local
+        # Redis). Same shape contract as the file heartbeat: missing
+        # key resolves to the empty-sentinel dict.
+        host_h, ok = self._read_benign_missing(
+            "host_health.read",
+            lambda: read_host_health(self.transport_snap, now=now),
+            errors,
+        )
+        any_ok = any_ok or ok
+
         with self._lock:
             s = self.state
             s.snap_last_tick_unix = now
@@ -606,6 +642,9 @@ class LiveStatusAggregator:
 
             if reinit_h is not None:
                 s.snap_reinit = reinit_h
+
+            if host_h is not None:
+                s.host_health_backend = host_h
 
         self._maybe_probe_snap_fpga(now, corr_unix_pre_tick, corr_cfg_pre_tick)
 
@@ -870,6 +909,17 @@ class LiveStatusAggregator:
         )
         any_ok = any_ok or ok
 
+        # Panda pi vitals (raw K/V, published by the always-on
+        # ``eigsep-host-health`` service to the panda pi's local
+        # Redis — same key constant as the backend pi's, disambiguated
+        # by transport).
+        host_h, ok = self._read_benign_missing(
+            "host_health.read",
+            lambda: read_host_health(self.transport_panda, now=now),
+            errors,
+        )
+        any_ok = any_ok or ok
+
         with self._lock:
             s = self.state
             s.panda_last_tick_unix = now
@@ -955,6 +1005,9 @@ class LiveStatusAggregator:
                         exc,
                     )
                     s.panda_config_upload_unix = None
+
+            if host_h is not None:
+                s.host_health_panda = host_h
 
     def _drain_status(self) -> tuple[list[tuple[int, str]], bool]:
         """Drain StatusReader until the next poll comes back empty.

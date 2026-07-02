@@ -1,10 +1,11 @@
 """Shared publish/read shape for the single-key Redis JSON K/V modules.
 
-Six sibling modules ride this shape — :mod:`~eigsep_observing.run_tag`,
+Seven sibling modules ride this shape — :mod:`~eigsep_observing.run_tag`,
 :mod:`~eigsep_observing.obs_config_owner`,
 :mod:`~eigsep_observing.file_heartbeat`,
 :mod:`~eigsep_observing.snap_reinit`,
 :mod:`~eigsep_observing.corr_health`,
+:mod:`~eigsep_observing.host_health`,
 :mod:`~eigsep_observing.imu_calibration` (read-only; picohost writes it):
 a single Redis key holds a small JSON blob, overwritten on each publish
 via ``transport.add_raw`` / ``transport.get_raw`` — consumers only ever

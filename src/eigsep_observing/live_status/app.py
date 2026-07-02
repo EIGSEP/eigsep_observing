@@ -564,7 +564,28 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     }
 
 
-def _health_payload(state: StateSnapshot, now: float) -> dict:
+def _host_health_payload(
+    entry: dict, signal: str, now: float, thresholds: Thresholds
+) -> dict:
+    """Project one pi's host_health K/V with a band classification.
+
+    ``seconds_since_publish`` is recomputed against ``now`` (not the
+    drain-tick value) so the tile ages between drains — the same
+    pattern the reinit and run tiles use. The recomputed age also
+    feeds ``classify``, so a dead publisher degrades to ``"stale"``
+    instead of painting the last temperature green forever.
+    """
+    out = dict(entry or {})
+    pub = out.get("published_unix")
+    age = max(0.0, now - pub) if pub is not None else None
+    out["seconds_since_publish"] = age
+    out["classify"] = thresholds.classify(signal, out.get("temp_c"), age_s=age)
+    return out
+
+
+def _health_payload(
+    state: StateSnapshot, now: float, thresholds: Thresholds
+) -> dict:
     corr_health = dict(state.corr_health or {})
     panda_hb_age = None
     if state.panda_heartbeat_last_check_unix is not None:
@@ -623,6 +644,15 @@ def _health_payload(state: StateSnapshot, now: float) -> dict:
         "corr_dropped_integrations": corr_health.get("dropped_integrations"),
         "corr_readout_time_ms": corr_health.get("readout_time_ms"),
         "corr_health_published_unix": corr_health.get("published_unix"),
+        # Raspberry Pi host vitals (dashboard-only K/V; see the
+        # host_health module): each pi's eigsep-host-health service
+        # publishes CPU temperature to its local Redis.
+        "host_backend": _host_health_payload(
+            state.host_health_backend, "host_backend.temp_c", now, thresholds
+        ),
+        "host_panda": _host_health_payload(
+            state.host_health_panda, "host_panda.temp_c", now, thresholds
+        ),
     }
 
 
@@ -680,7 +710,11 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     @app.route("/api/health")
     def api_health():
         state = aggregator.snapshot()
-        return jsonify(_envelope(_health_payload(state, time.time())))
+        return jsonify(
+            _envelope(
+                _health_payload(state, time.time(), aggregator.thresholds)
+            )
+        )
 
     @app.route("/api/corr")
     def api_corr():
