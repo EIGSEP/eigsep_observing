@@ -152,6 +152,23 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "System current",
         unit="A",
     ),
+    # Raspberry Pi SoC temperature — published by each pi's always-on
+    # eigsep-host-health service to its local Redis (backend pi on the
+    # SNAP transport, panda pi on the panda transport). Always enabled
+    # — host thermals are a system-wide vital, not gated by a
+    # subsystem flag. max_age_s is 6x the 10 s publish cadence.
+    "host_backend.temp_c": Signal(
+        "host_backend.temp_c",
+        "Backend pi CPU temperature",
+        unit="C",
+        max_age_s=60.0,
+    ),
+    "host_panda.temp_c": Signal(
+        "host_panda.temp_c",
+        "Panda pi CPU temperature",
+        unit="C",
+        max_age_s=60.0,
+    ),
     # Site-geometry signals — YAML override only (TODO after deploy).
     "lidar.distance_m": Signal(
         "lidar.distance_m",

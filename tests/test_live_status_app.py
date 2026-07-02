@@ -353,6 +353,80 @@ def test_health_route_corr_health_absent_returns_none(agg_primed):
     assert data["corr_readout_time_ms"] is None
 
 
+def test_health_route_surfaces_host_health(agg_primed):
+    """Each pi's eigsep-host-health service publishes to its local
+    Redis; /api/health surfaces both with a band classification so the
+    dashboard tiles color directly."""
+    from eigsep_observing.host_health import publish as publish_host_health
+
+    publish_host_health(
+        agg_primed.transport_snap, temp_c=52.3, hostname="eigsep-backend"
+    )
+    publish_host_health(
+        agg_primed.transport_panda, temp_c=61.0, hostname="eigsep-panda"
+    )
+    agg_primed._snap_tick()
+    agg_primed._panda_tick()
+
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["host_backend"]["temp_c"] == pytest.approx(52.3)
+    assert data["host_backend"]["hostname"] == "eigsep-backend"
+    assert data["host_backend"]["classify"] == "ok"
+    assert data["host_backend"]["seconds_since_publish"] is not None
+    assert data["host_panda"]["temp_c"] == pytest.approx(61.0)
+    assert data["host_panda"]["hostname"] == "eigsep-panda"
+    assert data["host_panda"]["classify"] == "ok"
+
+
+def test_health_route_host_health_absent_returns_unknown(agg_primed):
+    """No publisher running (e.g. lab bench without the service): the
+    keys are present with null values and an 'unknown' classification
+    so the tiles render grey rather than the route failing."""
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["host_backend"]["temp_c"] is None
+    assert data["host_backend"]["classify"] == "unknown"
+    assert data["host_panda"]["temp_c"] is None
+    assert data["host_panda"]["classify"] == "unknown"
+
+
+def test_health_route_host_health_stale_classifies_stale(agg_primed):
+    """A dead publisher (fresh value never arrives) must surface as
+    'stale', not keep rendering the last temperature as healthy. The
+    age is recomputed against ``now`` so the tile ages between drain
+    ticks."""
+    agg_primed.state.host_health_backend = {
+        "hostname": "eigsep-backend",
+        "temp_c": 52.0,
+        "published_unix": time.time() - 300.0,
+        "seconds_since_publish": 0.0,  # drain-tick value; must be ignored
+    }
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["host_backend"]["classify"] == "stale"
+    assert data["host_backend"]["seconds_since_publish"] >= 300.0
+
+
+@pytest.mark.parametrize(
+    "temp_c,expected",
+    [
+        (75.0, "warn"),  # above healthy hi (70), inside danger (80)
+        (85.0, "danger"),  # past the firmware soft-throttle point
+    ],
+)
+def test_health_route_host_health_hot_classifies(agg_primed, temp_c, expected):
+    agg_primed.state.host_health_panda = {
+        "hostname": "eigsep-panda",
+        "temp_c": temp_c,
+        "published_unix": time.time(),
+        "seconds_since_publish": 0.0,
+    }
+    client = create_app(agg_primed).test_client()
+    data = client.get("/api/health").get_json()["data"]
+    assert data["host_panda"]["classify"] == expected
+
+
 def test_health_route_snap_fpga_state_live_when_corr_fresh(agg_primed):
     """corr fresh → state is 'live' regardless of probe result."""
     agg_primed.state.corr_last_unix = time.time()

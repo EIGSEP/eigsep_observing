@@ -13,13 +13,24 @@ Two units for the ground-PC side of an EIGSEP deployment:
   SNAP silence instead of suiciding, so the writer survives ordinary
   supervisor restarts of the SNAP unit.
 
-Both console scripts are installed by the `eigsep_observing` wheel
-(`[project.scripts]`), so they resolve to `<venv>/bin/eigsep-fpga-init`
-and `<venv>/bin/eigsep-observe` on any host that pip-installed the
-package — no source checkout required.
+Plus one unit that ships to **both** pis (backend pi *and* panda pi):
 
-The panda-side processes (motors, tempctrl, VNA, RF switch) run on a
-different machine and are out of scope for these units.
+- `eigsep-host-health.service` — runs the `eigsep-host-health` console
+  script, which publishes the pi's CPU temperature to its **local**
+  Redis every 10 s for the live-status dashboard's pi-temperature
+  tiles. The unit file is identical on both hosts because each pi
+  publishes to `localhost` and the dashboard reads both Redis servers.
+  Stateless; `Restart=always`. A dead publisher surfaces as a `stale`
+  tile, not a systemd alert.
+
+The console scripts are installed by the `eigsep_observing` wheel
+(`[project.scripts]`), so they resolve to `<venv>/bin/eigsep-fpga-init`
+etc. on any host that pip-installed the package — no source checkout
+required.
+
+The panda-side observing processes (motors, tempctrl, VNA, RF switch)
+run on a different machine and are out of scope for these units
+(except `eigsep-host-health`, which runs there too).
 
 ## Install
 
@@ -56,10 +67,16 @@ sudo ln -s "$(pwd)/deploy/systemd/eigsep-observe.service" \
     /etc/systemd/system/eigsep-observe.service
 sudo ln -s "$(pwd)/deploy/systemd/eigsep-observe-writer.service" \
     /etc/systemd/system/eigsep-observe-writer.service
+sudo ln -s "$(pwd)/deploy/systemd/eigsep-host-health.service" \
+    /etc/systemd/system/eigsep-host-health.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now eigsep-observe.service
 sudo systemctl enable --now eigsep-observe-writer.service
+sudo systemctl enable --now eigsep-host-health.service
 ```
+
+On the panda pi, only `eigsep-host-health.service` applies — symlink
+and enable just that unit there.
 
 Verify before enabling:
 

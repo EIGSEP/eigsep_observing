@@ -24,6 +24,7 @@ from eigsep_redis.testing import DummyTransport
 from eigsep_observing.adc import AdcSnapshotWriter
 from eigsep_observing.corr import CorrConfigStore, CorrWriter
 from eigsep_observing.corr_health import publish as publish_corr_health
+from eigsep_observing.host_health import publish as publish_host_health
 from eigsep_observing.live_status import (
     LiveStatusAggregator,
     Thresholds,
@@ -316,6 +317,36 @@ def test_snap_tick_reads_corr_health_kv(agg, seeded):
     assert state.corr_health["readout_time_ms"] == 42.0
     assert state.corr_health["published_unix"] is not None
     assert state.corr_health["seconds_since_publish"] is not None
+
+
+def test_snap_tick_reads_host_health_kv(agg, seeded):
+    snap, _ = seeded
+    # host_health is a plain K/V that each pi's eigsep-host-health
+    # service publishes to its *local* Redis — on the snap transport
+    # it is the backend pi's vitals.
+    publish_host_health(snap, temp_c=52.3, hostname="eigsep-backend")
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.host_health_backend["temp_c"] == 52.3
+    assert state.host_health_backend["hostname"] == "eigsep-backend"
+    assert state.host_health_backend["seconds_since_publish"] is not None
+    # The snap tick must not touch the panda pi's field.
+    assert state.host_health_panda["temp_c"] is None
+
+
+def test_panda_tick_reads_host_health_kv(agg, seeded):
+    _, panda = seeded
+    # Same key constant, panda transport — the panda pi's vitals.
+    publish_host_health(panda, temp_c=61.0, hostname="eigsep-panda")
+
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert state.host_health_panda["temp_c"] == 61.0
+    assert state.host_health_panda["hostname"] == "eigsep-panda"
+    assert state.host_health_backend["temp_c"] is None
 
 
 def test_snap_tick_ingests_adc_snapshot_and_computes_clipping(agg, seeded):

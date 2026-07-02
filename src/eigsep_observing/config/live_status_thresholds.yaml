@@ -44,6 +44,17 @@ system_current.current_a:
   healthy: [0.0, 5.0]
   danger:  [0.0, 8.0]
 
+# Raspberry Pi SoC temperature — pure physics, no config pin. Both the
+# Pi 4B (panda pi) and Pi 5 (backend pi) firmware soft-throttle the
+# clock at 80 C, so 70-80 C is the watch band and past 80 C the pi is
+# actively derating.
+host_backend.temp_c:
+  healthy: [0.0, 70.0]
+  danger:  [0.0, 80.0]
+host_panda.temp_c:
+  healthy: [0.0, 70.0]
+  danger:  [0.0, 80.0]
+
 # Site-geometry signals — operator fills these in after deployment.
 lidar.distance_m:
   healthy: null  # TODO: set from site geometry
