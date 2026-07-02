@@ -883,12 +883,15 @@ SENSOR_SCHEMAS = {
     # fanned out of the switch-state line by
     # PicoRFSwitch._rfswitch_redis_handler (the system_current pattern) so
     # the categorical rfswitch stream stays pure. Like system_current it is
-    # a derived stream with no `app_id`. `volt_therm<i>` is the raw
-    # 3.3V-referenced ADC-pin voltage; `temp_therm<i>` is the host-side
-    # datasheet-Beta conversion in degrees C (None when the channel reads
-    # out of range). All six floats reduce via the standard float->mean
-    # path and land in the corr file (PCB temperature affects the cal
-    # network); None short-circuits in _validate_metadata / _avg_sensor_values.
+    # a derived stream with no `app_id`. `volt_therm<i>` is the raw ADC-pin
+    # voltage (0-3.3V, referenced to the RP2040's internal ADC full-scale;
+    # the external divider is a 5V pullup, so there is no 3.3V in the
+    # sensor harness). `temp_therm<i>` is the host-side datasheet-Beta
+    # conversion in degrees C, `None` when the channel is dead/shorted or
+    # ADC-saturated (below ~8.5C the 5V divider drives the pin past the 3.3V
+    # ADC ceiling). All six floats reduce via the standard float->mean path
+    # and land in the corr file (PCB temperature affects the cal network);
+    # None short-circuits in _validate_metadata / _avg_sensor_values.
     "rfswitch_therm": {
         "sensor_name": str,
         "status": str,
