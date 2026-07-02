@@ -1566,6 +1566,36 @@ def test_metadata_payload_classifies_system_current():
     assert uncal_entry["classify"]["system_current.current_a"] == "unknown"
 
 
+def test_metadata_payload_classifies_rfswitch_therm():
+    """rfswitch_therm rides the generic /api/metadata projection: each
+    temp_therm* field is classified against its registered signal (no band
+    -> 'unknown'), and the raw volts pass through in `value`."""
+    from eigsep_observing.live_status.app import _metadata_payload
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+
+    now = 1000.0
+    state = StateSnapshot()
+    state.metadata_snapshot = {
+        "rfswitch_therm": {
+            "sensor_name": "rfswitch_therm",
+            "status": "update",
+            "volt_therm0": 2.5,
+            "volt_therm1": 2.5,
+            "volt_therm2": 2.5,
+            "temp_therm0": 25.0,
+            "temp_therm1": 25.0,
+            "temp_therm2": 25.0,
+        },
+        "rfswitch_therm_ts": now,
+    }
+    state.metadata_snapshot_read_unix = now
+    payload = _metadata_payload(state, _payload_thresholds())
+    entry = payload["rfswitch_therm"]
+    assert entry["status"] == "update"
+    assert entry["value"]["temp_therm0"] == 25.0
+    assert entry["classify"]["rfswitch_therm.temp_therm0"] == "unknown"
+
+
 def client_for(agg):
     """Helper: build a Flask test_client for a primed aggregator."""
     app = create_app(agg)

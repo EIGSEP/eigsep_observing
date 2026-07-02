@@ -913,7 +913,7 @@ function renderAdcInCorr(adc) {
   container.appendChild(grid);
 }
 
-function renderRfswitch(rf, metaEntry) {
+function renderRfswitch(rf, metaEntry, thermEntry) {
   const el = document.getElementById("rfswitch");
   el.replaceChildren();
   if (metaEntry) {
@@ -959,7 +959,30 @@ function renderRfswitch(rf, metaEntry) {
     makeSpan("value", nextStr, "grid-column: span 2;")
   );
 
-  el.append(row1, row2);
+  // PCB thermistors (rfswitch_therm stream): three °C rows, raw V in
+  // parens, classify tile per channel (grey "unknown" until a band is set).
+  const rows = [row1, row2];
+  const tv = (thermEntry && thermEntry.value) || null;
+  const tc = (thermEntry && thermEntry.classify) || {};
+  if (tv) {
+    for (let i = 0; i < 3; i++) {
+      const t = tv[`temp_therm${i}`];
+      const v = tv[`volt_therm${i}`];
+      const label = t !== null && t !== undefined
+        ? `${fmt(t, 1)}°C (${fmt(v, 3)} V)`
+        : `— (${fmt(v, 3)} V)`;
+      const cls = tc[`rfswitch_therm.temp_therm${i}`] || "unknown";
+      const trow = document.createElement("div");
+      trow.className = "metadata-row";
+      trow.append(
+        makeSpan("label", `PCB temp ${i}`),
+        makeSpan(tileClass(cls), label),
+        makeSpan("value", "")
+      );
+      rows.push(trow);
+    }
+  }
+  el.append(...rows);
 }
 
 function renderStatusLog(entries) {
@@ -1010,7 +1033,7 @@ async function tick() {
     renderPotmon(metadata.data);
     renderLidar(metadata.data);
     renderSystemCurrent(metadata.data);
-    renderRfswitch(rfswitch.data, metadata.data["rfswitch"]);
+    renderRfswitch(rfswitch.data, metadata.data["rfswitch"], metadata.data["rfswitch_therm"]);
     renderAdcInCorr(adc.data);
     renderStatusLog(status.data);
     updateVna(vna.data);
