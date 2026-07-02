@@ -603,11 +603,19 @@ function updateHealth(h, fileData) {
 }
 
 // One Raspberry Pi CPU-temperature tile. The hostname (provenance
-// from the publisher) rides on the tooltip-friendly title attribute
-// rather than the tile text, which stays glanceable.
+// from the publisher) is appended to the tile's static tooltip
+// (title attribute) rather than the tile text, which stays
+// glanceable.
 function renderHostTile(tileId, label, host) {
   const tile = document.getElementById(tileId);
   if (!tile) return;
+  if (tile.dataset.baseTitle === undefined) {
+    tile.dataset.baseTitle = tile.title;
+  }
+  tile.title =
+    host && host.hostname
+      ? `${tile.dataset.baseTitle}\nPublisher hostname: ${host.hostname}`
+      : tile.dataset.baseTitle;
   if (!host) {
     tile.className = "tile unknown";
     tile.textContent = `${label}: —`;
