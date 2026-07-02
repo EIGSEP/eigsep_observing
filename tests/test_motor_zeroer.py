@@ -462,3 +462,67 @@ def test_zeroer_jog_inherits_travel_limit():
 def test_zeroer_passes_enforce_limits_to_motor_client():
     z = MotorZeroer(DummyTransport(), enforce_limits=False)
     assert z._motor_client.enforce_limits is False
+
+
+# ---------------------------------------------------------------------------
+# Limit denials must not crash the curses loop (field finding, 2026-07-01)
+# ---------------------------------------------------------------------------
+
+
+class _LimitTrippingHomeClient:
+    """Stand-in ``MotorClient`` whose ``home`` trips the sensor fence."""
+
+    def home(self, stop_event=None):
+        raise MotorLimitError(
+            "pot_az_voltage 2.900 V outside safe window [0.500, 2.500]; "
+            "refusing az move."
+        )
+
+
+def test_handle_key_swallows_limit_error_and_sets_notice(client):
+    """A jog denied by the travel guard must not escape handle_key —
+    the curses loop stays alive — and the denial must be surfaced via
+    ``notice`` (console logging is off in the manual scripts, so a
+    log-only warning is invisible mid-session)."""
+    zeroer = _zeroer(client.transport)
+    motor = client._manager.picos["motor"]
+    before = motor._emulator.azimuth.target_pos
+    # 200 deg from home is outside the ±180 default window.
+    new_deg, should_exit, zeroed = zeroer.handle_key(ord("l"), 200.0)
+    assert (new_deg, should_exit, zeroed) == (200.0, False, False)
+    assert "outside safe window" in zeroer.notice
+    assert motor._emulator.azimuth.target_pos == before  # move refused
+
+
+def test_handle_key_successful_jog_clears_notice(client):
+    zeroer = _zeroer(client.transport)
+    zeroer.handle_key(ord("l"), 200.0)  # denied — notice set
+    assert zeroer.notice is not None
+    zeroer.handle_key(ord("l"), 1.0)  # in-window jog succeeds
+    assert zeroer.notice is None
+
+
+def test_handle_key_jog_failure_sets_notice(client, monkeypatch):
+    """Non-limit jog failures (already swallowed today) must also
+    surface on screen, not just in the invisible log file."""
+    zeroer = _zeroer(client.transport)
+
+    def boom(*_a, **_k):
+        raise RuntimeError("unrelated firmware error")
+
+    monkeypatch.setattr(zeroer._motor_client._proxy, "send_command", boom)
+    _, should_exit, _ = zeroer.handle_key(ord("l"), 1.0)
+    assert should_exit is False
+    assert "unrelated firmware error" in zeroer.notice
+
+
+def test_start_home_survives_limit_error(client):
+    """A sensor-fence trip mid-home must unwind the background thread
+    cleanly (no traceback splatted over the curses screen) and surface
+    the denial via ``notice``."""
+    zeroer = MotorZeroer(
+        client.transport, motor_client=_LimitTrippingHomeClient()
+    )
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert "outside safe window" in zeroer.notice
