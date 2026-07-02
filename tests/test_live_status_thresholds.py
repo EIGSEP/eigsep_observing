@@ -335,3 +335,23 @@ def test_system_current_band_from_bundled_yaml():
     assert th.classify("system_current.current_a", 3.0) == "ok"
     assert th.classify("system_current.current_a", 6.0) == "warn"
     assert th.classify("system_current.current_a", 9.0) == "danger"
+
+
+# rfswitch_therm PCB thermistor signals
+# ---------------------------------------------------------------------
+
+
+def test_rfswitch_therm_signals_registered_and_always_enabled():
+    for i in range(3):
+        name = f"rfswitch_therm.temp_therm{i}"
+        sig = SIGNAL_REGISTRY[name]
+        assert sig.unit == "C"
+        assert sig.enabled_by is None  # board vital, never gated
+        # present even with optional subsystems off
+        assert name in enabled_signals(OBS_CFG_TEMPCTRL_OFF)
+
+
+def test_rfswitch_therm_classifies_unknown_without_band():
+    # No config-derived and no bundled-YAML band -> grey "unknown" tile.
+    th = Thresholds(OBS_CFG_TEMPCTRL_OFF, CORR_HEADER)
+    assert th.classify("rfswitch_therm.temp_therm0", 30.0) == "unknown"
