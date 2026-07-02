@@ -1308,6 +1308,7 @@ def test_metadata_end_to_end_round_trip():
                     "pot_az_cal_slope": 200.0,
                     "pot_az_cal_intercept": -100.0,
                     "pot_az_angle": 200.0 * (1.5 + 0.001 * i) - 100.0,
+                    "pot_az_near_rail": False,
                 },
             ],
             "stream:tempctrl_lna": [
@@ -1461,6 +1462,10 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
                     "pot_az_cal_slope": None,
                     "pot_az_cal_intercept": None,
                     "pot_az_angle": None,
+                    # Voltage-derived, not cal-derived: a real bool
+                    # even on an uncalibrated stream (None only when
+                    # the voltage itself is missing).
+                    "pot_az_near_rail": False,
                 },
             ],
         }
@@ -1513,6 +1518,10 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
             assert row["pot_az_cal_slope"] is None
             assert row["pot_az_cal_intercept"] is None
             assert row["pot_az_angle"] is None
+            # Near-rail is voltage-derived, so it survives the round
+            # trip as a real bool even though the stream is
+            # uncalibrated (bool→any over all-False samples).
+            assert row["pot_az_near_rail"] is False
             # The integration is clean — no errored samples.
             assert row["status"] == "update"
 

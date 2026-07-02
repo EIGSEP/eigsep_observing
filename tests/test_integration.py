@@ -139,6 +139,10 @@ def test_metadata_has_expected_fields(client, transport):
     assert potmon["pot_az_cal_slope"] is None
     assert potmon["pot_az_cal_intercept"] is None
     assert potmon["pot_az_angle"] is None
+    # Near-rail flag (picohost >= 3.12) is voltage-derived, so it is a
+    # real bool even uncalibrated; the emulator baseline (~1.5 V) is
+    # mid-range, far from both ADC rails.
+    assert potmon["pot_az_near_rail"] is False
 
 
 def test_metadata_snapshot_single_key(client, transport):
