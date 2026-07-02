@@ -24,10 +24,17 @@ def _make_dummy_transport():
 
 def test_slip_verdict_bands():
     assert field_zero.slip_verdict(1.0, 1.00) == "ok"
-    assert field_zero.slip_verdict(1.0, 0.96) == "ok"  # 4% off
-    assert field_zero.slip_verdict(1.0, 0.93) == "warn"  # 7% off
-    assert field_zero.slip_verdict(1.0, 0.80) == "fail"  # 20% off
+    assert field_zero.slip_verdict(1.0, 0.96) == "ok"  # 4% short
+    assert field_zero.slip_verdict(1.0, 0.93) == "warn"  # 7% short
+    assert field_zero.slip_verdict(1.0, 0.80) == "fail"  # 20% short
     assert field_zero.slip_verdict(0.0, 0.0) == "fail"  # zero expected
+    # Overshoot is never slip: slip/stall under-travels the pot. A
+    # larger-than-expected swing means the stored slope is too steep
+    # (stale cal), so it warns without blocking (field finding,
+    # 2026-07-01: a real zero was wrongly denied on overshoot).
+    assert field_zero.slip_verdict(1.0, 1.04) == "ok"  # 4% over
+    assert field_zero.slip_verdict(1.0, 1.07) == "overshoot"  # 7% over
+    assert field_zero.slip_verdict(1.0, 1.50) == "overshoot"  # gross
 
 
 def test_rezero_pot_pins_intercept():

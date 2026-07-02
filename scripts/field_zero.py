@@ -35,16 +35,24 @@ def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
     """Classify how well the pot tracked a known motor move.
 
     expected_dv / measured_dv are pot voltage swings (V) for the same
-    commanded move. Returns "ok" / "warn" / "fail" on the fractional
-    shortfall. A non-positive expected swing is unusable -> "fail".
+    commanded move. Only a shortfall (pot under-traveled) indicates
+    slip: "warn" at ``warn``, "fail" at ``fail`` fractional shortfall.
+    An overshoot of at least ``warn`` returns "overshoot" — the pot
+    swung MORE than the stored slope predicts, which a slipping
+    coupling cannot do; it means the stored slope is stale, and it
+    must never block zeroing (the zero is slope-independent: home_ref
+    stores raw v0 and the re-pin keeps the slope). A non-positive
+    expected swing is unusable -> "fail".
     """
     if expected_dv <= 0:
         return "fail"
-    frac = abs(measured_dv - expected_dv) / abs(expected_dv)
-    if frac >= fail:
+    frac_short = (expected_dv - measured_dv) / expected_dv
+    if frac_short >= fail:
         return "fail"
-    if frac >= warn:
+    if frac_short >= warn:
         return "warn"
+    if frac_short <= -warn:
+        return "overshoot"
     return "ok"
 
 
