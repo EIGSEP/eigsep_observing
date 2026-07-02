@@ -113,6 +113,27 @@ def test_override_limits_flag_parses(monkeypatch):
     assert args.override_limits is True
 
 
+def test_prompt_override_yes(monkeypatch, capsys):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "y")
+    assert field_zero._prompt_override(0.150, 0.050) is True
+    out = capsys.readouterr().out
+    # Operator decides with the numbers in hand.
+    assert "0.050" in out and "0.150" in out
+
+
+def test_prompt_override_default_is_no(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _prompt: "")
+    assert field_zero._prompt_override(0.150, 0.050) is False
+
+
+def test_prompt_override_eof_is_no(monkeypatch):
+    def _eof(_prompt):
+        raise EOFError
+
+    monkeypatch.setattr("builtins.input", _eof)
+    assert field_zero._prompt_override(0.150, 0.050) is False
+
+
 def test_write_home_ref_stores_pot_and_imu():
     t = DummyTransport()
 

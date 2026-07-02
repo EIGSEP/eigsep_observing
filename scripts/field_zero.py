@@ -56,6 +56,26 @@ def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
     return "ok"
 
 
+def _prompt_override(expected_dv, measured_dv):
+    """Ask the operator whether to zero despite a failed slip check.
+
+    Field reality: a slipping/odd pot coupling often cannot be fixed
+    on the rig, and the zero itself is slope-independent, so the
+    operator gets the final say — with the numbers in hand, before
+    the probe move has to be repeated. Returns True only on an
+    explicit y/yes; EOF (non-interactive stdin) is No.
+    """
+    print(
+        f"POT SLIP DETECTED: measured {measured_dv:.3f} V vs "
+        f"{expected_dv:.3f} V expected for the probe move."
+    )
+    try:
+        answer = input("Proceed with zeroing anyway? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
 def rezero_pot(transport, pot_proxy, v0):
     """Re-pin the pot intercept at home voltage v0, keeping the stored slope.
 
@@ -258,22 +278,40 @@ def main():
             verdict, exp, meas = run_slip_check(
                 mc, snapshot, slope_m, args.move_deg
             )
-            logger.info(
-                "Pot slip check: %s (expected %.4f V, measured %.4f V)",
-                verdict,
-                exp,
-                meas,
+            msg = (
+                f"Pot slip check: {verdict} "
+                f"(expected {exp:.4f} V, measured {meas:.4f} V)"
             )
+            print(msg)
+            logger.info(msg)
             if verdict == "fail":
-                raise SystemExit(
-                    f"POT SLIP DETECTED ({meas:.3f} V vs {exp:.3f} V "
-                    "expected). Fix the pot coupling before zeroing."
-                )
-            if verdict == "warn":
+                if not _prompt_override(exp, meas):
+                    raise SystemExit(
+                        f"POT SLIP DETECTED ({meas:.3f} V vs "
+                        f"{exp:.3f} V expected). Fix the pot coupling "
+                        "before zeroing."
+                    )
                 logger.warning(
+                    "OPERATOR OVERRIDE: zeroing despite failed pot "
+                    "slip check (measured %.4f V vs %.4f V expected).",
+                    meas,
+                    exp,
+                )
+            elif verdict == "warn":
+                warn_msg = (
                     "Pot tracking marginal; proceeding but inspect "
                     "the coupling."
                 )
+                print(warn_msg)
+                logger.warning(warn_msg)
+            elif verdict == "overshoot":
+                over_msg = (
+                    "Pot swing LARGER than expected — not slip; the "
+                    "stored slope is likely stale. Proceeding; re-run "
+                    "calibrate-pot --mode azimuth when convenient."
+                )
+                print(over_msg)
+                logger.warning(over_msg)
         zeroer = MotorZeroer(
             transport,
             source="field_zero",
