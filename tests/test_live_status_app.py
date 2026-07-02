@@ -1595,6 +1595,37 @@ def test_metadata_payload_classifies_rfswitch_therm():
     assert entry["value"]["temp_therm0"] == 25.0
     assert entry["classify"]["rfswitch_therm.temp_therm0"] == "unknown"
 
+    # Saturated/dead channel: the producer emits None for temp_therm0
+    # per the documented ADC-saturation contract (io.py's rfswitch_therm
+    # schema comment: None below ~8.5C or on a dead/shorted channel).
+    # thresholds.classify() short-circuits `value is None` -> "unknown"
+    # (see Thresholds.classify in thresholds.py); this guards that the
+    # dashboard degrades gracefully — no exception — when one channel
+    # is saturated while its neighbors stay healthy.
+    saturated_state = StateSnapshot()
+    saturated_state.metadata_snapshot = {
+        "rfswitch_therm": {
+            "sensor_name": "rfswitch_therm",
+            "status": "update",
+            "volt_therm0": 3.3,
+            "volt_therm1": 2.5,
+            "volt_therm2": 2.5,
+            "temp_therm0": None,
+            "temp_therm1": 25.0,
+            "temp_therm2": 25.0,
+        },
+        "rfswitch_therm_ts": now,
+    }
+    saturated_state.metadata_snapshot_read_unix = now
+    saturated_payload = _metadata_payload(
+        saturated_state, _payload_thresholds()
+    )
+    saturated_entry = saturated_payload["rfswitch_therm"]
+    assert saturated_entry["value"]["temp_therm0"] is None
+    assert (
+        saturated_entry["classify"]["rfswitch_therm.temp_therm0"] == "unknown"
+    )
+
 
 def client_for(agg):
     """Helper: build a Flask test_client for a primed aggregator."""
