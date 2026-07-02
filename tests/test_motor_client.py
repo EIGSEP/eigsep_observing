@@ -14,7 +14,14 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from eigsep_observing import MotionSwitchCoordinator, MotorClient
+from eigsep_observing import (
+    MotionSwitchCoordinator,
+    MotorClient,
+    MotorLimitError,
+)
+from eigsep_observing.motor_cal import cal_motor
+from eigsep_observing.motor_limits import publish_motor_limits
+from eigsep_redis.testing import DummyTransport
 
 
 SMALL_RANGE = np.array([-1.0, 0.0, 1.0])
@@ -493,3 +500,337 @@ def test_scan_uses_send_and_wait_helper(client):
     # el_target_steps), so per-move serialization covers the home calls.
     assert any(a == "az_target_steps" for a, _ in calls)
     assert any(a == "el_target_steps" for a, _ in calls)
+
+
+# ---------------------------------------------------------------------------
+# Task-1 additions: MotorLimitError + per-axis limit kwargs + shared cal
+# ---------------------------------------------------------------------------
+
+
+def _client(**kw):
+    return MotorClient(DummyTransport(), **kw)
+
+
+def test_motor_limit_error_is_valueerror():
+    assert issubclass(MotorLimitError, ValueError)
+
+
+def test_default_limits_are_symmetric_180():
+    mc = _client()
+    assert mc.az_limits_deg == (-180.0, 180.0)
+    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.pot_az_v_limits is None
+    assert mc.imu_el_limits_deg is None
+
+
+def test_limits_overridable():
+    mc = _client(el_limits_deg=(-30.0, 30.0), pot_az_v_limits=(0.2, 3.1))
+    assert mc.el_limits_deg == (-30.0, 30.0)
+    assert mc.pot_az_v_limits == (0.2, 3.1)
+
+
+def test_cal_motor_roundtrips_steps_deg():
+    cal = cal_motor()
+    steps = cal.deg_to_steps(90.0)
+    assert isinstance(steps, int)
+    assert abs(cal.steps_to_deg(steps) - 90.0) < 1.0
+
+
+# ---------------------------------------------------------------------------
+# Task-2 additions: commanded-target guard in _send_and_wait
+# ---------------------------------------------------------------------------
+
+
+def _client_seeded(az_target=0, el_target=0, **kw):
+    """Client whose snapshot reports a known at-rest target on both axes."""
+    mc = MotorClient(DummyTransport(), **kw)
+    status = {
+        "az_pos": az_target,
+        "az_target_pos": az_target,
+        "el_pos": el_target,
+        "el_target_pos": el_target,
+    }
+    mc._motor_status = lambda: status
+    return mc
+
+
+def test_absolute_target_deg_beyond_limit_raises_before_send():
+    mc = _client_seeded()
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(az_deg=200.0)
+        send.assert_not_called()
+
+
+def test_absolute_target_deg_within_limit_sends():
+    mc = _client_seeded()
+    # short-circuit the wait so the test only exercises the guard + send
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=170.0)
+        send.assert_called_once()
+
+
+def test_relative_jog_past_limit_uses_absolute_result():
+    # current target 175 deg -> a +10 jog lands at 185 -> blocked
+    cal = MotorClient(DummyTransport())._cal
+    steps_175 = cal.deg_to_steps(175.0)
+    mc = _client_seeded(az_target=steps_175)
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.jog_az(10.0)
+        send.assert_not_called()
+
+
+def test_el_window_narrowed_by_config():
+    mc = _client_seeded(el_limits_deg=(-30.0, 30.0))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(el_deg=45.0)
+        send.assert_not_called()
+
+
+def test_home_and_halt_never_blocked():
+    mc = _client_seeded(az_target=999999, el_target=999999)  # absurd count
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.home()  # target steps 0 -> 0 deg, always in window
+        send.assert_called()
+
+
+# ---------------------------------------------------------------------------
+# Task-3 additions: pre-move sensor fence (pot voltage / IMU el windows)
+# ---------------------------------------------------------------------------
+
+
+def _client_with_snapshot(snapshot, **kw):
+    mc = MotorClient(DummyTransport(), **kw)
+    status = {
+        "az_pos": 0,
+        "az_target_pos": 0,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }
+    mc._motor_status = lambda: status
+    mc._reader.get = lambda key: snapshot.get(key, {})
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    return mc
+
+
+def test_sensor_fence_blocks_when_pot_voltage_out_of_window():
+    snap = {"potmon": {"pot_az_voltage": 3.4}}
+    mc = _client_with_snapshot(snap, pot_az_v_limits=(0.2, 3.1))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(az_deg=10.0)
+        send.assert_not_called()
+
+
+def test_sensor_fence_blocks_when_imu_el_out_of_window():
+    snap = {"imu_el": {"el_deg": 40.0}}
+    mc = _client_with_snapshot(snap, imu_el_limits_deg=(-30.0, 30.0))
+    with patch.object(mc._proxy, "send_command") as send:
+        with pytest.raises(MotorLimitError):
+            mc.move_to(el_deg=5.0)
+        send.assert_not_called()
+
+
+def test_sensor_fence_passes_within_window():
+    snap = {"potmon": {"pot_az_voltage": 1.5}, "imu_el": {"el_deg": 0.0}}
+    mc = _client_with_snapshot(
+        snap, pot_az_v_limits=(0.2, 3.1), imu_el_limits_deg=(-30.0, 30.0)
+    )
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()
+
+
+def test_sensor_fence_noop_when_limits_unset():
+    snap = {"potmon": {"pot_az_voltage": 99.0}}  # absurd, but no window set
+    mc = _client_with_snapshot(snap)  # pot_az_v_limits=None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()
+
+
+def test_sensor_fence_noop_when_reading_missing():
+    snap = {}  # potmon absent
+    mc = _client_with_snapshot(snap, pot_az_v_limits=(0.2, 3.1))
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)  # no reading -> can't fence -> allowed
+        send.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Task-4 additions: sensor fence polled during a move
+# ---------------------------------------------------------------------------
+
+
+def test_fence_breach_mid_move_halts_and_raises():
+    # pot voltage starts safe, then crosses the window on the 2nd poll
+    readings = [1.0, 1.0, 3.5]  # 3rd read is out of [0.2, 3.1]
+    it = iter(readings)
+
+    mc = MotorClient(DummyTransport(), pot_az_v_limits=(0.2, 3.1))
+    moving = {
+        "az_pos": 0,
+        "az_target_pos": 100,
+        "el_pos": 0,
+        "el_target_pos": 0,
+    }  # az still moving
+    mc._motor_status = lambda: dict(moving)
+
+    def fake_get(key):
+        if key == "potmon":
+            try:
+                return {"pot_az_voltage": next(it)}
+            except StopIteration:
+                return {"pot_az_voltage": 3.5}
+        return {}
+
+    mc._reader.get = fake_get
+
+    halted = []
+    mc.halt = lambda: halted.append(True)
+
+    with pytest.raises(MotorLimitError):
+        mc._wait_for_stop(timeout=5.0, axis="az")
+    assert halted, "breach must halt the motor before raising"
+
+
+# ---------------------------------------------------------------------------
+# MotorClient.reset_step_position
+# ---------------------------------------------------------------------------
+
+
+def test_reset_step_position_sends_command():
+    mc = MotorClient(DummyTransport())
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.reset_step_position(az_step=0, el_step=0)
+        send.assert_called_once_with(
+            "reset_step_position", az_step=0, el_step=0
+        )
+
+
+# ---------------------------------------------------------------------------
+# _read_fence_sensors: IMU cross-check logger suppression
+# ---------------------------------------------------------------------------
+
+
+def test_fence_sensors_passes_logger_none_to_read_el_estimate():
+    """``_read_fence_sensors`` must pass ``logger=None`` to
+    ``read_el_estimate`` so the "IMU elevation readings disagree" WARNING
+    is not emitted at ~10 Hz on the high-frequency fence-poll path.
+    ``MotorHomer._read_sensors`` keeps ``logger=self.logger`` for the
+    settle-cadence read, which surfaces disagreement at a sane rate."""
+    mc = MotorClient(DummyTransport())
+    mc._reader.get = lambda key: {}
+    captured_loggers = []
+
+    def recording_read_el(reader, *, logger=None, **kw):
+        captured_loggers.append(logger)
+        from eigsep_observing.el_sensor import ElEstimate
+
+        return ElEstimate(el_deg=None, magnitude_only=False, source=None)
+
+    with patch(
+        "eigsep_observing.motor_client.read_el_estimate",
+        side_effect=recording_read_el,
+    ):
+        mc._read_fence_sensors()
+
+    assert captured_loggers, "_read_fence_sensors must call read_el_estimate"
+    assert all(lg is None for lg in captured_loggers), (
+        "_read_fence_sensors must pass logger=None to suppress high-frequency "
+        f"IMU cross-check warnings; got: {captured_loggers}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Task D2: K/V limit loading + enforce_limits flag
+# ---------------------------------------------------------------------------
+
+
+def test_limits_load_from_kv_when_kwargs_unset():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-90.0, 90.0],
+        el_limits_deg=[-30.0, 30.0],
+        pot_az_v_limits=[0.2, 3.1],
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t)
+    assert mc.az_limits_deg == [-90.0, 90.0]
+    assert mc.el_limits_deg == [-30.0, 30.0]
+    assert mc.pot_az_v_limits == [0.2, 3.1]
+    assert mc.imu_el_limits_deg is None
+
+
+def test_explicit_kwarg_overrides_kv():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-90.0, 90.0],
+        el_limits_deg=[-90.0, 90.0],
+        pot_az_v_limits=None,
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t, az_limits_deg=(-45.0, 45.0))
+    assert mc.az_limits_deg == (-45.0, 45.0)  # explicit wins
+    assert mc.el_limits_deg == [-90.0, 90.0]  # K/V
+
+
+def test_hardcoded_default_when_no_kv_no_kwarg():
+    mc = MotorClient(DummyTransport())  # nothing published
+    assert mc.az_limits_deg == (-180.0, 180.0)
+    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.pot_az_v_limits is None
+    assert mc.imu_el_limits_deg is None
+
+
+def test_enforce_limits_false_skips_commanded_guard():
+    mc = _client_seeded(el_limits_deg=(-30.0, 30.0), enforce_limits=False)
+    mc._wait_for_start = lambda *a, **k: None
+    mc._wait_for_stop = lambda *a, **k: None
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(el_deg=120.0)  # way out of window, but enforcement off
+        send.assert_called_once()
+
+
+def test_enforce_limits_false_skips_sensor_fence():
+    snap = {"potmon": {"pot_az_voltage": 99.0}}
+    mc = _client_with_snapshot(
+        snap, pot_az_v_limits=(0.2, 3.1), enforce_limits=False
+    )
+    with patch.object(mc._proxy, "send_command") as send:
+        mc.move_to(az_deg=10.0)
+        send.assert_called_once()
+
+
+def test_explicit_none_kwarg_disables_fence_over_kv():
+    t = DummyTransport()
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-180.0, 180.0],
+        el_limits_deg=[-180.0, 180.0],
+        pot_az_v_limits=[0.2, 3.1],
+        imu_el_limits_deg=None,
+    )
+    mc = MotorClient(t, pot_az_v_limits=None)
+    assert mc.pot_az_v_limits is None  # explicit None wins over K/V value
+
+
+def test_load_stored_limits_malformed_payload_degrades_to_empty():
+    """A non-dict K/V payload (corrupt/hand-edited key) must not raise
+    AttributeError out of MotorClient.__init__ — degrade to {} and fall
+    back to the hardcoded safe defaults."""
+    from eigsep_observing._redis_json_kv import publish_json
+
+    t = DummyTransport()
+    publish_json(t, "motor_limits", ["not", "a", "dict"])
+    mc = MotorClient(t)
+    assert mc.az_limits_deg == (-180.0, 180.0)

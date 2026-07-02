@@ -7,16 +7,15 @@ rendering, and the same logic is reachable by unit tests without a
 terminal.
 """
 
-import inspect
 import logging
 import threading
 import time
 
 from eigsep_redis import MetadataSnapshotReader
-from picohost.motor import PicoMotor
 from picohost.proxy import PicoProxy
 
-from .motor_client import MotorClient
+from .motor_cal import cal_motor
+from .motor_client import MotorClient, MotorLimitError
 
 logger = logging.getLogger(__name__)
 
@@ -25,29 +24,7 @@ logger = logging.getLogger(__name__)
 _KEY_ENTER = ord("\n")
 _REQUIRE_STATUS_RETRY_S = 0.5
 
-
-def _default_cal_motor():
-    """A serial-less :class:`PicoMotor` carrying only the calibration
-    constants, used purely to convert step counts to axis degrees for
-    display.
-
-    ``PicoManager`` constructs the real motor pico with ``PicoMotor``'s
-    constructor defaults and never overrides ``step_angle_deg`` /
-    ``gear_teeth`` / ``microstep`` (see ``picohost.manager``), so reusing
-    those defaults here makes the displayed degrees match the mover's
-    own ``deg_to_steps`` exactly instead of duplicating the gear math.
-    Pulling the values from the constructor signature keeps them in
-    lockstep with picohost. The ``__new__`` bypass (no serial I/O)
-    mirrors ``contract_tests.test_producer_contracts``.
-    """
-    sig = inspect.signature(PicoMotor.__init__)
-    cal = PicoMotor.__new__(PicoMotor)
-    for attr in ("step_angle_deg", "gear_teeth", "microstep"):
-        setattr(cal, attr, sig.parameters[attr].default)
-    return cal
-
-
-_CAL_MOTOR = _default_cal_motor()
+_CAL_MOTOR = cal_motor()
 
 
 def _format_pos(raw):
@@ -67,6 +44,9 @@ class MotorZeroer:
 
     Parameters mirror :class:`eigsep_observing.motor_client.MotorClient`
     for consistency — the same delay values apply to manual jogging.
+    ``enforce_limits`` is passed to the internally built ``MotorClient``;
+    it is ignored when an external ``motor_client`` is supplied (that
+    client's own ``enforce_limits`` governs).
     """
 
     def __init__(
@@ -78,6 +58,7 @@ class MotorZeroer:
         el_up_delay_us=2400,
         el_dn_delay_us=600,
         source="motor_zeroer",
+        enforce_limits=True,
         motor_client=None,
     ):
         self.transport = transport
@@ -92,12 +73,22 @@ class MotorZeroer:
         self.logger = logger
         # Two-step zero guard: Enter arms this, a deliberate 'y' commits.
         self._pending_zero = False
+        # Operator-visible one-liner for the curses UIs: set when a
+        # jog or home is denied (MotorLimitError) or fails; cleared by
+        # the next successful jog. The manual scripts log with
+        # console=False, so a log-only warning would be invisible
+        # mid-session — the render loops draw this instead.
+        self.notice = None
         # "Go home" drives both axes to step 0 via the same
         # MotorClient.home primitive motor_scan.py uses. It runs in a
         # background thread so the curses loop keeps rendering live
         # position; injectable for tests.
         if motor_client is None:
-            motor_client = MotorClient(transport, source="motor_manual_home")
+            motor_client = MotorClient(
+                transport,
+                source="motor_manual_home",
+                enforce_limits=enforce_limits,
+            )
         self._motor_client = motor_client
         self._homing = False
         self._home_thread = None
@@ -183,8 +174,12 @@ class MotorZeroer:
         def _run():
             try:
                 self._motor_client.home(stop_event=self._home_stop)
+            except MotorLimitError as exc:
+                self.logger.warning("home denied: %s", exc)
+                self.notice = str(exc)
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("home failed: %s", exc)
+                self.notice = f"home failed: {exc}"
             finally:
                 self._homing = False
 
@@ -299,8 +294,14 @@ class MotorZeroer:
                     self.jog_az(deg_state)
                 else:
                     self.jog_az(-deg_state)
+            except MotorLimitError as exc:
+                self.logger.warning("jog %s denied: %s", key, exc)
+                self.notice = str(exc)
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("jog %s failed: %s", key, exc)
+                self.notice = f"jog failed: {exc}"
+            else:
+                self.notice = None
         return deg_state, False, False
 
     def _confirm_zero(self, ch, deg_state):

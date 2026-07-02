@@ -33,6 +33,8 @@ UPLOADER_SCRIPTS = {
 # alt-mode vna_position_sweep). Passive readouts are NOT here; they only
 # read snapshots and must coexist, so they live in RUN_TAG_EXEMPT.
 ACTIVE_DRIVER_SCRIPTS = {
+    "field_zero.py",
+    "motor_home.py",
     "vna_manual.py",
     "rfswitch_manual.py",
     "tempctrl_manual.py",
@@ -63,6 +65,12 @@ ACTIVE_DRIVER_SCRIPTS = {
 #   - clear_run_tag.py: the stale-lock recovery tool; it inspects and
 #     clears the run_tag key, and entering run_tag.session would be
 #     refused by the very stale tag it exists to clear.
+#   - set_motor_limits.py: rig-wide motor-limit admin tool. Writes a
+#     dedicated MotorLimitStore K/V (not obs_config), drives no motor,
+#     and writes no files, so it changes none of the always-recording
+#     physical state and has no provenance to record. A one-shot config
+#     tool that must coexist with whatever is running, so it must not
+#     claim the refuse-on-conflict tag.
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
@@ -79,6 +87,7 @@ RUN_TAG_EXEMPT = {
     "lidar_manual.py",
     "pico_preflight.py",
     "clear_run_tag.py",
+    "set_motor_limits.py",
 }
 
 
