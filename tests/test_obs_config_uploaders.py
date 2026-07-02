@@ -63,6 +63,11 @@ ACTIVE_DRIVER_SCRIPTS = {
 #   - clear_run_tag.py: the stale-lock recovery tool; it inspects and
 #     clears the run_tag key, and entering run_tag.session would be
 #     refused by the very stale tag it exists to clear.
+#   - host_health.py: always-on per-pi vitals publisher (the
+#     eigsep-host-health systemd service). Publishes a dashboard-only
+#     K/V to the local Redis, drives no hardware, and must keep
+#     running through manual sessions and corr-only operation — the
+#     same coexistence reasoning as the dashboards.
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
@@ -79,6 +84,7 @@ RUN_TAG_EXEMPT = {
     "lidar_manual.py",
     "pico_preflight.py",
     "clear_run_tag.py",
+    "host_health.py",
 }
 
 
