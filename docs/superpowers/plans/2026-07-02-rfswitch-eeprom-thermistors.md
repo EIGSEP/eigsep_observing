@@ -14,7 +14,8 @@
 - Python **3.9+** compatibility (no 3.10+ syntax).
 - **Contract-based:** every producer stream in `SENSOR_SCHEMAS` must have a matching `SENSOR_EMULATORS` entry (enforced by `test_every_schema_has_conforming_emulator`).
 - **Corr data is sacred:** never let non-corr processing changes touch the corr path.
-- Datasheet thermistor constants (verbatim): 10k NTC, **R₀ = 10000 Ω @ 25 °C**, **B = 3380** (25–50 °C), divider = **10 kΩ pullup to 5.0 V**, thermistor to GND. Firmware `volt_therm` is the **3.3 V-referenced** ADC-pin voltage.
+- Datasheet thermistor constants (verbatim): 10k NTC, **R₀ = 10000 Ω @ 25 °C**, **B = 3380** (25–50 °C), divider = **10 kΩ pullup to 5.0 V**, thermistor to GND. Firmware `volt_therm` is the ADC-pin voltage referenced to the RP2040's **internal 3.3 V ADC full-scale** (the external harness is 5 V-only; there is no 3.3 V rail in the sensor circuit).
+- **Post-execution addendum (circuit confirmed 2026-07-02):** the 5 V pullup on a 3.3 V ADC saturates below **~8.5 °C** (R≈19.4 kΩ, pin=3.3 V). `_therm_temp_c` gained `THERM_ADC_MAX_VOLTS = 3.3` and returns **`None`** at/above it (saturated → untrustworthy) rather than a fake ~8.5 °C floor (picohost commit `aca2f45`, io.py comment `8d49797`). Hardware caveat flagged to operator: RP2040 ADC pin is not 5 V-tolerant.
 - **Two repos, coordinated:** the picohost change (Phase A) must be installed into the `eigsep_observing` venv before its tests can pass. The two must land together.
 
 ### Environments / commands

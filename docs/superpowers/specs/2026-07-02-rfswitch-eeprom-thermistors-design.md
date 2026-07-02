@@ -118,33 +118,40 @@ values as a second metadata entry — the two-publish shape of
 }
 ```
 
-**Conversion (new picohost helper + constants on `PicoRFSwitch`).** The C
-firmware reports `volt_therm` as the absolute ADC-pin voltage (counts × 3.3/4095,
-referenced to the 3.3V ADC rail). The divider is powered from **5.0V** with a
-**10k pullup** and the thermistor to GND, so:
+**Conversion (new picohost helper + constants on `PicoRFSwitch`).**
+Confirmed circuit: `5.0V —[10k pullup]— ADC pin —[NTC]— GND`; the external
+harness runs on 5V only (no 3.3V rail). The C firmware reports `volt_therm` as
+the absolute ADC-pin voltage (counts × 3.3/4095) — the **3.3V is the RP2040's
+internal ADC full-scale reference**, distinct from the 5V divider rail. So:
 
 ```python
 # constants (datasheet, hardcoded with provenance — cf. tempctrl's hardcoded SH)
-THERM_SUPPLY_VOLTS = 5.0     # divider pullup rail (distinct from the 3.3V ADC ref)
-THERM_PULLUP_OHMS  = 10_000.0
-THERM_R0_OHMS      = 10_000.0  # at 25 °C
-THERM_T0_K         = 298.15
-THERM_B            = 3380.0    # 25–50 °C beta
+THERM_SUPPLY_VOLTS  = 5.0     # divider pullup rail (the 5V external circuit)
+THERM_ADC_MAX_VOLTS = 3.3     # RP2040 internal ADC full-scale ref; >= this saturates
+THERM_PULLUP_OHMS   = 10_000.0
+THERM_R0_OHMS       = 10_000.0  # at 25 °C
+THERM_T0_K          = 298.15
+THERM_B             = 3380.0    # 25–50 °C beta
 
 def _therm_temp_c(v):
     # v = ADC-pin volts (0..3.3). Divider: 5V -[10k]- pin -[NTC]- GND
     #   v = SUPPLY * R/(PULLUP + R)  =>  R = PULLUP * v/(SUPPLY - v)
-    if v is None or not math.isfinite(v) or v <= 0.0 or v >= THERM_SUPPLY_VOLTS:
+    # v >= 3.3 is ADC-saturated (true voltage unknown) -> None.
+    if v is None or not math.isfinite(v) or v <= 0.0 or v >= THERM_ADC_MAX_VOLTS:
         return None
     r = THERM_PULLUP_OHMS * v / (THERM_SUPPLY_VOLTS - v)
     inv_t = 1.0 / THERM_T0_K + math.log(r / THERM_R0_OHMS) / THERM_B  # beta eqn
     return 1.0 / inv_t - 273.15
 ```
 
-Checks: v=2.5 → R=10k → **25.0 °C**. Range note: with the 5V pullup the pin
-crosses the 3.3V ADC ceiling near **~8.5 °C**, so temps below that clip to the
-floor (a hardware consequence; irrelevant for operating PCB temps ~15–50 °C).
-Recorded as a known limitation, not handled specially.
+Checks: v=2.5 → R=10k → **25.0 °C**. **ADC saturation:** with a 5V pullup on a
+3.3V ADC, the pin crosses the 3.3V ceiling at R≈19.4kΩ → **~8.5 °C**; below that
+the ADC clips and the true voltage is unknown, so `temp_therm` is reported as
+**`None`** (not a fake ~8.5 °C floor) — matches the "enforce loudly, don't
+paper over" philosophy. **Hardware caveat (flagged to the operator):** the
+RP2040 ADC pin is not 5V-tolerant; below ~8.5 °C, and up to 5V if a thermistor
+opens/disconnects, the pin is over-driven past its 3.3V max — a clamp or a 3.3V
+pullup is the hardware fix (out of scope for this software).
 
 - The C firmware / `RFSwitchEmulator.get_status()` still emit raw `volt_therm`
   on the status line — no C firmware change; the handler adds the temps
