@@ -1,5 +1,27 @@
 # Changelog
 
+## [2.10.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.9.0...v2.10.0) (2026-07-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **io:** adopt tempctrl data-validity status + split trip flags
+
+### Features
+
+* **io:** add pot_az_near_rail to the potmon schema (picohost 3.12) ([a16f460](https://github.com/EIGSEP/eigsep_observing/commit/a16f4601d21cf8d2a265d9a0d68954043a062a93)), closes [#182](https://github.com/EIGSEP/eigsep_observing/issues/182)
+* **io:** adopt tempctrl data-validity status + split trip flags ([9dd968f](https://github.com/EIGSEP/eigsep_observing/commit/9dd968f18b34a5f2806a18d63e1efee36b6c3535))
+
+
+### Bug Fixes
+
+* picohost v4 compatible rfswitch api + thermistors ([b15b0c8](https://github.com/EIGSEP/eigsep_observing/commit/b15b0c83b57342c80fbd7b52848f3bfc70468496))
+
+
+### Miscellaneous Chores
+
+* release 2.10.0 ([7ef1fe4](https://github.com/EIGSEP/eigsep_observing/commit/7ef1fe49823fda7a729e43b3f16a5ed3a9d6c2b2))
+
 ## [2.9.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.8.0...v2.9.0) (2026-07-02)
 
 
