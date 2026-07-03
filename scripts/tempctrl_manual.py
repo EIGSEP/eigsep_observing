@@ -43,15 +43,22 @@ behavior mirrors the production tempctrl_loop path. Setpoints and
 clamp values are tracked client-side so the +/- keys can bump them
 without round-tripping the firmware to read back the current value.
 
-Trip clearing (picohost >= 3.4.0 / pico-firmware e0724e0): ``enabled``
-is host intent only — firmware never mutates it. Drive engages iff
-``enabled && !int_disabled && !stall_tripped && !watchdog_tripped``
-(shown as the ``armed`` column in the readout). The sticky trips
-``stall_tripped`` and ``watchdog_tripped`` are cleared by an explicit
-``*_enable=true`` rising edge from the host. From this UI that means
-``l`` (LNA on), ``o`` (LOAD on), or ``r`` (re-enable both) double as
-the operator's trip-clear ack — bare keepalives refresh the watchdog
-timer but no longer clear the trip flag.
+Trip clearing (picohost >= 3.4.0): ``enabled`` is host intent only —
+firmware never mutates it. Drive engages iff ``enabled &&
+!sensor_tripped && !stall_tripped && !runaway_tripped &&
+!watchdog_tripped`` (shown as the ``armed`` column in the readout).
+All sticky trips are cleared by an explicit ``*_enable=true`` rising
+edge from the host. From this UI that means ``l`` (LNA on), ``o``
+(LOAD on), or ``r`` (re-enable both) double as the operator's
+trip-clear ack — bare keepalives refresh the watchdog timer but no
+longer clear the trip flags.
+
+Since the tempctrl status redesign, per-channel ``status`` reports
+data validity only: a channel can read ``armed=False`` with
+``status='update'``, meaning the sensor data is fine but a sticky trip
+is gating drive — check the ``trips`` column for which one. ``T_now``
+reads ``--`` (null) exactly when the current sample is untrustworthy;
+``voltage`` stays live then (≈3.3 V says open thermistor, ≈0 V short).
 """
 
 from argparse import ArgumentParser
@@ -395,23 +402,45 @@ def _fmt(value, fmt):
     return format(value, fmt)
 
 
+_TRIP_FLAGS = ("sensor_tripped", "stall_tripped", "runaway_tripped")
+
+
 def _armed(channel):
     """Derive whether firmware drive is engaged for ``channel``.
 
-    Mirrors the firmware gate (picohost >= 3.4.0): drive engages iff
-    ``enabled && !int_disabled && !stall_tripped && !watchdog_tripped``.
-    Since ``enabled`` is now host intent only (firmware never clears
-    it on trip), this derived flag is what the operator actually wants
-    to read off the panel to confirm the channel is driving.
+    Mirrors the firmware gate (tempctrl_drive_allowed): drive engages iff
+    ``enabled && !sensor_tripped && !stall_tripped && !runaway_tripped
+    && !watchdog_tripped``. Since ``enabled`` is host intent only
+    (firmware never clears it on trip), this derived flag is what the
+    operator actually wants to read off the panel to confirm the channel
+    is driving.
     """
     if not channel:
         return None
     return bool(
         channel.get("enabled")
-        and not channel.get("int_disabled")
-        and not channel.get("stall_tripped")
+        and not any(channel.get(flag) for flag in _TRIP_FLAGS)
         and not channel.get("watchdog_tripped")
     )
+
+
+def _trips(channel):
+    """Compact list of active sticky trips, or ``-`` when clear.
+
+    The interesting read is ``armed=False`` with ``status='update'``:
+    the data is healthy but a latch is gating drive — this column says
+    which one (sensor = rate-guard garbage burst, stall = drive moved
+    nothing, runaway = temperature moved against the drive: check the
+    wiring before re-enabling).
+    """
+    if not channel:
+        return "--"
+    active = [
+        flag.removesuffix("_tripped")
+        for flag in _TRIP_FLAGS
+        if channel.get(flag)
+    ]
+    return ",".join(active) if active else "-"
 
 
 def _render(screen, snapshot, state):
@@ -451,9 +480,9 @@ def _render(screen, snapshot, state):
     )
     # PI controller readout — Kp/Ki are config-set (last-write-wins
     # cached in PicoPeltier._last_gains), `integral` is the firmware
-    # accumulator. `stall_tripped` is per-channel and sticky; clear it
-    # with an `l on` / `o on` (or `r`) rising-edge ack.
-    screen.addstr(5, 0, "channel   Kp     Ki      integral  stall_tripped")
+    # accumulator. Trips are per-channel and sticky; clear them with an
+    # `l on` / `o on` (or `r`) rising-edge ack.
+    screen.addstr(5, 0, "channel   Kp     Ki      integral  trips")
     screen.addstr(
         6,
         0,
@@ -461,7 +490,7 @@ def _render(screen, snapshot, state):
         f"{_fmt(lna.get('Kp'), '6.3f')}  "
         f"{_fmt(lna.get('Ki'), '6.3f')}  "
         f"{_fmt(lna.get('integral'), '8.3f')}  "
-        f"{str(lna.get('stall_tripped')):>13}",
+        f"{_trips(lna)}",
     )
     screen.addstr(
         7,
@@ -470,7 +499,7 @@ def _render(screen, snapshot, state):
         f"{_fmt(load.get('Kp'), '6.3f')}  "
         f"{_fmt(load.get('Ki'), '6.3f')}  "
         f"{_fmt(load.get('integral'), '8.3f')}  "
-        f"{str(load.get('stall_tripped')):>13}",
+        f"{_trips(load)}",
     )
     # watchdog_tripped is duplicated across both streams (see
     # _PELTIER_SCHEMA) — read from either; LNA is fine.
