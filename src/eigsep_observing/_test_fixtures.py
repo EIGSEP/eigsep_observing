@@ -232,7 +232,13 @@ def tempctrl_post_handler_reading(stream_name):
     pel = PicoPeltier.__new__(PicoPeltier)
     captured = []
     pel._base_redis_handler = lambda d: captured.append(dict(d))
-    pel._peltier_redis_handler(TempCtrlEmulator().get_status())
+    # One op() before status, mirroring the firmware main loop: before the
+    # first sample tick the channels report invalid data (status "error",
+    # null T_now/resistance), which is not the steady state this fixture
+    # is meant to pin.
+    emu = TempCtrlEmulator()
+    emu.op()
+    pel._peltier_redis_handler(emu.get_status())
     for entry in captured:
         if entry.get("sensor_name") == stream_name:
             return entry

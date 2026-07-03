@@ -834,8 +834,17 @@ _PELTIER_SCHEMA = {
     "drive_level": float,
     "enabled": bool,
     "active": bool,
-    "int_disabled": bool,
+    # Sticky control latches (pico-firmware feat/tempctrl-status-redesign):
+    # sensor_tripped = rate-guard latch (garbage burst), stall_tripped =
+    # drive moved nothing for a full window, runaway_tripped = temperature
+    # moved against the drive (mis-wire/lost-heatsink signature). All gate
+    # drive and are cleared by a *_enable=true host ack; none affect the
+    # per-stream `status`, which is data-validity only — a latched channel
+    # with a recovered sensor keeps contributing real values here. `any`
+    # reduction = worst-case fault flag, as designed.
+    "sensor_tripped": bool,
     "stall_tripped": bool,
+    "runaway_tripped": bool,
     # Asymmetric-clamp safety setting (False forbids drive<0). Reduces
     # via `any` like every other bool config field; a mid-integration
     # toggle is an operator action and rare enough that surfacing
