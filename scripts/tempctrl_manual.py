@@ -523,9 +523,7 @@ def _render(screen, snapshot, state):
     )
     screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
     screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
-    screen.addstr(
-        18, 0, "r re-enable both   p plot PNG   q quit"
-    )
+    screen.addstr(18, 0, "r re-enable both   p plot PNG   q quit")
     if state.last_message:
         screen.addstr(20, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
