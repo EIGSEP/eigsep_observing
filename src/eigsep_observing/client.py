@@ -779,49 +779,60 @@ class PandaClient:
         """
         Observe with VNA and write data to files.
         """
-        if self.vna is None:
+        if not self._vna_enabled:
             self._warn_with_status(
-                "VNA not initialized. Cannot execute VNA commands."
+                "VNA disabled in config (use_vna=false); vna_loop exiting."
             )
             return
         while not self.stop_client.is_set():
-            with self.coord.switch_section():
-                prev_mode = self._read_switch_mode_from_redis()
-                if prev_mode is None:
-                    self._warn_with_status(
-                        "rfswitch state unavailable in Redis; defaulting "
-                        "post-VNA switch-back to RFANT."
-                    )
-                    prev_mode = "RFANT"
-                target_mode = prev_mode
-                try:
-                    for mode in ["ant", "rec"]:
-                        self.logger.info(f"Measuring S11 of {mode} with VNA")
-                        self.measure_s11(mode)
-                except Exception as exc:
-                    # Any exception from measure_s11 (``_switch`` raising
-                    # mid-OSL under the eigsep-vna 1.3 contract, VNA
-                    # instrument TimeoutError, Redis write failure, ...)
-                    # leaves the switch at whatever state cmt_vna last
-                    # drove it to. Default the recovery target to RFANT
-                    # rather than prev_mode — we've lost the
-                    # "known-good state" invariant and RFANT is the
-                    # physically safe fallback. The next switch_loop
-                    # iteration will re-assert the configured mode.
-                    self._error_with_status(
-                        f"VNA cycle aborted "
-                        f"({type(exc).__name__}: {exc}); "
-                        "recovering rfswitch to RFANT."
-                    )
-                    target_mode = "RFANT"
-                self.logger.info(
-                    f"Switching rfswitch to {target_mode} "
-                    f"(previous mode: {prev_mode})"
+            try:
+                with self.vna_session():
+                    with self.coord.switch_section():
+                        prev_mode = self._read_switch_mode_from_redis()
+                        if prev_mode is None:
+                            self._warn_with_status(
+                                "rfswitch state unavailable in Redis; "
+                                "defaulting post-VNA switch-back to RFANT."
+                            )
+                            prev_mode = "RFANT"
+                        target_mode = prev_mode
+                        try:
+                            for mode in ["ant", "rec"]:
+                                self.logger.info(
+                                    f"Measuring S11 of {mode} with VNA"
+                                )
+                                self.measure_s11(mode)
+                        except Exception as exc:
+                            # Any exception from measure_s11 (``_switch``
+                            # raising mid-OSL under the eigsep-vna 1.3
+                            # contract, VNA instrument TimeoutError, Redis
+                            # write failure, ...) leaves the switch at
+                            # whatever state cmt_vna last drove it to.
+                            # Default the recovery target to RFANT rather
+                            # than prev_mode — we've lost the
+                            # "known-good state" invariant and RFANT is
+                            # the physically safe fallback. The next
+                            # switch_loop iteration will re-assert the
+                            # configured mode.
+                            self._error_with_status(
+                                f"VNA cycle aborted "
+                                f"({type(exc).__name__}: {exc}); "
+                                "recovering rfswitch to RFANT."
+                            )
+                            target_mode = "RFANT"
+                        self.logger.info(
+                            f"Switching rfswitch to {target_mode} "
+                            f"(previous mode: {prev_mode})"
+                        )
+                        if not self._safe_switch(target_mode):
+                            self._warn_with_status(
+                                f"Failed to switch back to {target_mode}"
+                            )
+            except Exception as exc:
+                self._error_with_status(
+                    f"VNA session failed "
+                    f"({type(exc).__name__}: {exc}); skipping this cycle."
                 )
-                if not self._safe_switch(target_mode):
-                    self._warn_with_status(
-                        f"Failed to switch back to {target_mode}"
-                    )
             self.stop_client.wait(self.cfg["vna_interval"])
 
     def motor_loop(self):

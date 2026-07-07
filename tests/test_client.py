@@ -138,10 +138,11 @@ def test_pico_manager_devices_visible(client):
 
 
 def test_vna_loop_returns_when_vna_is_none(caplog, client):
-    """vna_loop must return promptly when self.vna is None — no
-    polling. Regression for a bare `threading.Event().wait(5)` that
-    ignored stop_client. Also asserts the warning rides both channels
-    (local + status stream) so the ground observer sees the failure."""
+    """vna_loop must return promptly when the VNA is disabled
+    (``use_vna=false``) — no polling. Regression for a bare
+    `threading.Event().wait(5)` that ignored stop_client. Also asserts
+    the warning rides both channels (local + status stream) so the
+    ground observer sees it."""
     caplog.set_level("WARNING")
     assert client.vna is None
     _arm_status_reader(client)
@@ -149,11 +150,13 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     client.vna_loop()
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
-    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+    assert any(
+        "VNA disabled in config" in r.getMessage() for r in caplog.records
+    )
 
     level, status = _status_reader(client).read(timeout=1)
     assert level == logging.WARNING
-    assert "VNA not initialized" in status
+    assert "VNA disabled in config" in status
 
 
 def test_switch_loop_does_not_mutate_cfg_schedule(client):
@@ -2684,5 +2687,33 @@ def test_vna_open_resets_vna_on_build_failure(
         assert closed["n"] == 1  # socket closed
         assert events == ["start", "stop"]  # service started then stopped
         assert client._vna_depth == 0
+    finally:
+        client.stop()
+
+
+def test_vna_loop_measures_then_stops(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 0.05
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        # Stop after the first iteration's measurements land.
+        import threading
+
+        def stopper():
+            while client.transport.r.xlen(VNA_STREAM) < 2:
+                pass
+            client.stop_client.set()
+
+        t = threading.Thread(target=stopper, daemon=True)
+        t.start()
+        client.vna_loop()  # returns once stop_client is set
+        t.join(timeout=5)
+        # ant + rec bundles were published in at least one session.
+        assert client.transport.r.xlen(VNA_STREAM) >= 2
+        # Session torn down on loop exit.
+        assert client.vna is None
     finally:
         client.stop()
