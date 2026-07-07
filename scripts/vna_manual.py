@@ -188,6 +188,8 @@ def main():
     transport = build_transport_bare(
         args.dummy, host=args.redis_host, real_port=args.redis_port
     )
+    # build_vna_subsystem starts cmtvna.service (real mode) and its
+    # cleanup() stops it, so the whole REPL runs in one service window.
     subsystem = build_vna_subsystem(
         transport, cfg, source="vna_manual", dummy=args.dummy
     )

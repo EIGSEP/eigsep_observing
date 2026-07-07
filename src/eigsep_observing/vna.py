@@ -17,7 +17,7 @@ from eigsep_redis import (
 )
 from picohost.proxy import PicoProxy
 
-from . import imu_calibration, obs_config_owner, run_tag
+from . import imu_calibration, obs_config_owner, run_tag, vna_service
 from ._scripts_util import require_pico
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .keys import VNA_STREAM
@@ -187,14 +187,18 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     dummy : bool, optional
         If True, use ``DummyVNA`` and start an in-process dummy
         ``PicoManager`` (so the ``rfswitch`` proxy resolves). The
-        manager is shut down by the returned ``cleanup`` callback.
+        manager is shut down by the returned ``cleanup`` callback. If
+        False (default), start ``cmtvna.service`` and wait for the R60
+        to answer before opening the socket; the returned ``cleanup``
+        stops the service again.
 
     Returns
     -------
     VnaSubsystem
         Dataclass with ``vna``, ``vna_writer``, ``metadata_snapshot``
         and a ``cleanup`` callable the caller must invoke on teardown
-        (idempotent; no-op when ``dummy=False``).
+        (stops the dummy ``PicoManager`` when ``dummy=True``, stops
+        ``cmtvna.service`` when ``dummy=False``).
 
     Raises
     ------
@@ -219,6 +223,11 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
 
         vna_cls = DummyVNA
         manager = start_dummy_pico_manager(transport)
+    else:
+        # Real hardware: bring cmtvna.service up and wait for the R60
+        # before opening the socket. cleanup() stops it again.
+        vna_service.start()
+        vna_service.wait_ready(cfg["vna_ip"], cfg["vna_port"])
 
     vna = vna_cls(
         ip=cfg["vna_ip"],
@@ -236,6 +245,11 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     def cleanup():
         if manager is not None:
             manager.stop()
+        if not dummy:
+            try:
+                vna_service.stop()
+            except Exception:
+                logger.warning("cmtvna stop failed", exc_info=True)
 
     return VnaSubsystem(
         vna=vna,
