@@ -327,7 +327,11 @@ def measure_s11(
     if mode not in ("ant", "rec"):
         raise ValueError(f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'.")
     if vna is None:
-        raise RuntimeError("VNA not initialized. Cannot execute VNA commands.")
+        raise RuntimeError(
+            "VNA not initialized. Open a VNA session first "
+            "(PandaClient.vna_open()/vna_session(), or "
+            "build_vna_subsystem)."
+        )
 
     vna.power_dBm = cfg["vna_settings"]["power_dBm"][mode]
     osl_s11 = vna.measure_OSL()

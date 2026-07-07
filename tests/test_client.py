@@ -2553,3 +2553,89 @@ def test_run_calibration_sequence_skips_invalid_modes(
         )
     finally:
         client.stop()
+
+
+def test_vna_lazy_none_until_session(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert client.vna is None  # lazy: not built at construction
+        assert client.vna_enabled is True
+        with client.vna_session():
+            assert isinstance(client.vna, DummyVNA)
+        assert client.vna is None  # torn down on exit
+    finally:
+        client.stop()
+
+
+def test_vna_session_nests_without_early_teardown(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        with client.vna_session():
+            outer = client.vna
+            with client.vna_session():
+                assert client.vna is outer  # inner reuses the object
+            assert client.vna is outer  # still alive after inner exit
+        assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_vna_open_rejected_when_disabled(client):
+    # default fixture cfg has use_vna=False
+    assert client.vna_enabled is False
+    with pytest.raises(RuntimeError, match="use_vna=false"):
+        client.vna_open()
+
+
+def test_vna_session_starts_and_stops_service(
+    transport, dummy_cfg, monkeypatch
+):
+    # Force the real (service-managed) path even on the dummy client.
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    events = []
+    from eigsep_observing import vna_service
+
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(
+        vna_service, "wait_ready", lambda ip, port, **k: events.append("ready")
+    )
+    try:
+        with client.vna_session():
+            assert events == ["start", "ready"]
+        assert events == ["start", "ready", "stop"]
+    finally:
+        client.stop()
+
+
+def test_vna_session_stops_service_on_ready_failure(
+    transport, dummy_cfg, monkeypatch
+):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    events = []
+    from eigsep_observing import vna_service
+
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+
+    def boom(ip, port, **k):
+        raise TimeoutError("not ready")
+
+    monkeypatch.setattr(vna_service, "wait_ready", boom)
+    try:
+        with pytest.raises(TimeoutError):
+            client.vna_open()
+        assert events == ["start", "stop"]  # service stopped on failure
+        assert client._vna_depth == 0
+    finally:
+        client.stop()

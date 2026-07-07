@@ -13,6 +13,7 @@ from eigsep_redis import (
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from . import vna_service
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient
 from .tempctrl_client import TempCtrlClient
@@ -114,11 +115,16 @@ class PandaClient:
                 "is unknown."
             )
 
-        if self.cfg.get("use_vna", False):
-            self.init_VNA()
-        else:
-            self.vna = None
-            self.logger.info("VNA not initialized")
+        # VNA is lazy: cmtvna.service busy-loops the CPU, so it runs
+        # on-demand. vna_open()/vna_session() start the service, wait for
+        # readiness, and build a fresh VNA; the service is stopped on
+        # close. self.vna is None between sessions. See
+        # eigsep_observing.vna_service.
+        self.vna = None
+        self._vna_enabled = self.cfg.get("use_vna", False)
+        self._vna_depth = 0
+        if not self._vna_enabled:
+            self.logger.info("VNA disabled (use_vna=false)")
 
         if self.cfg.get("use_motor", False):
             self.init_motor_client()
@@ -374,6 +380,82 @@ class PandaClient:
         self.logger.info(f"vna kwargs: {kwargs}")
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
+
+    _manage_vna_service = True
+
+    @property
+    def vna_enabled(self):
+        """True if the config enabled the VNA (``use_vna``)."""
+        return self._vna_enabled
+
+    def vna_open(self):
+        """Start cmtvna.service, wait for readiness, and build the VNA.
+
+        Refcounted: the service starts and the VNA is built on the
+        outermost open; inner opens only bump the depth. On the outermost
+        open, a readiness/build failure stops the service again before
+        re-raising, so a failed open never leaves the CPU pegged. Raises
+        RuntimeError if the config disabled the VNA.
+        """
+        if not self._vna_enabled:
+            raise RuntimeError(
+                "Cannot open a VNA session: VNA disabled in config "
+                "(use_vna=false)."
+            )
+        if self._vna_depth == 0:
+            if self._manage_vna_service:
+                vna_service.start()
+            try:
+                if self._manage_vna_service:
+                    vna_service.wait_ready(
+                        self.cfg["vna_ip"], self.cfg["vna_port"]
+                    )
+                self.init_VNA()
+            except Exception:
+                if self._manage_vna_service:
+                    try:
+                        vna_service.stop()
+                    except Exception:
+                        self.logger.warning(
+                            "cmtvna stop after failed open also failed",
+                            exc_info=True,
+                        )
+                raise
+        self._vna_depth += 1
+
+    def vna_close(self):
+        """Tear down the VNA and stop cmtvna.service on the outermost close."""
+        if self._vna_depth == 0:
+            return
+        self._vna_depth -= 1
+        if self._vna_depth > 0:
+            return
+        vna = self.vna
+        self.vna = None
+        sock = getattr(vna, "s", None)
+        if sock is not None and hasattr(sock, "close"):
+            try:
+                sock.close()
+            except Exception:
+                self.logger.warning("VNA socket close failed", exc_info=True)
+        if self._manage_vna_service:
+            try:
+                vna_service.stop()
+            except Exception:
+                self.logger.warning("cmtvna stop failed", exc_info=True)
+
+    @contextmanager
+    def vna_session(self):
+        """Context-managed VNA window: open on enter, close on exit.
+
+        Wrap it OUTSIDE ``coord.switch_section()`` so the ~5.5s warm-up
+        does not hold the RF-switch lock.
+        """
+        self.vna_open()
+        try:
+            yield
+        finally:
+            self.vna_close()
 
     def init_motor_client(self):
         """
