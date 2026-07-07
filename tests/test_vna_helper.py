@@ -330,3 +330,70 @@ def dummy_cfg_vna(dummy_cfg):
     cfg = dict(dummy_cfg)
     cfg["use_vna"] = True
     return cfg
+
+
+def test_build_vna_subsystem_real_stops_service_on_wait_ready_failure(
+    monkeypatch, dummy_cfg
+):
+    from eigsep_redis.testing import DummyTransport
+    from eigsep_observing import vna, vna_service
+    from cmt_vna.testing import DummyVNA
+    from eigsep_observing.testing import start_dummy_pico_manager
+
+    events = []
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+
+    def boom(ip, port, **k):
+        raise TimeoutError("not ready")
+
+    monkeypatch.setattr(vna_service, "wait_ready", boom)
+    monkeypatch.setattr(vna, "VNA", DummyVNA)
+
+    transport = DummyTransport()
+    mgr = start_dummy_pico_manager(transport)
+    try:
+        with pytest.raises(TimeoutError):
+            vna.build_vna_subsystem(
+                transport,
+                dummy_cfg_vna(dummy_cfg),
+                source="test",
+                dummy=False,
+            )
+        assert events == ["start", "stop"]
+    finally:
+        mgr.stop()
+
+
+def test_build_vna_subsystem_real_stops_service_on_build_failure(
+    monkeypatch, dummy_cfg
+):
+    from eigsep_redis.testing import DummyTransport
+    from eigsep_observing import vna, vna_service
+    from cmt_vna.testing import DummyVNA
+    from eigsep_observing.testing import start_dummy_pico_manager
+
+    events = []
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(vna_service, "wait_ready", lambda ip, port, **k: None)
+
+    class BoomVNA(DummyVNA):
+        def setup(self, **kwargs):
+            raise RuntimeError("setup boom")
+
+    monkeypatch.setattr(vna, "VNA", BoomVNA)
+
+    transport = DummyTransport()
+    mgr = start_dummy_pico_manager(transport)
+    try:
+        with pytest.raises(RuntimeError, match="setup boom"):
+            vna.build_vna_subsystem(
+                transport,
+                dummy_cfg_vna(dummy_cfg),
+                source="test",
+                dummy=False,
+            )
+        assert events == ["start", "stop"]
+    finally:
+        mgr.stop()

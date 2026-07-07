@@ -224,23 +224,11 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
         vna_cls = DummyVNA
         manager = start_dummy_pico_manager(transport)
     else:
-        # Real hardware: bring cmtvna.service up and wait for the R60
-        # before opening the socket. cleanup() stops it again.
+        # Real hardware: bring cmtvna.service up before opening the
+        # socket. cleanup() (below) stops it again — including on any
+        # failure during the build, so a half-built subsystem never
+        # leaves the CPU-pegging service running.
         vna_service.start()
-        vna_service.wait_ready(cfg["vna_ip"], cfg["vna_port"])
-
-    vna = vna_cls(
-        ip=cfg["vna_ip"],
-        port=cfg["vna_port"],
-        timeout=cfg["vna_timeout"],
-        switch_fn=switch_fn,
-    )
-
-    require_pico(sw_proxy)
-
-    setup_kwargs = cfg["vna_settings"].copy()
-    setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
-    vna.setup(**setup_kwargs)
 
     def cleanup():
         if manager is not None:
@@ -250,6 +238,23 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
                 vna_service.stop()
             except Exception:
                 logger.warning("cmtvna stop failed", exc_info=True)
+
+    try:
+        if not dummy:
+            vna_service.wait_ready(cfg["vna_ip"], cfg["vna_port"])
+        vna = vna_cls(
+            ip=cfg["vna_ip"],
+            port=cfg["vna_port"],
+            timeout=cfg["vna_timeout"],
+            switch_fn=switch_fn,
+        )
+        require_pico(sw_proxy)
+        setup_kwargs = cfg["vna_settings"].copy()
+        setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
+        vna.setup(**setup_kwargs)
+    except Exception:
+        cleanup()
+        raise
 
     return VnaSubsystem(
         vna=vna,
