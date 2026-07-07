@@ -111,9 +111,9 @@ def main(transport, args):
                     "Motor client not initialized; check motor pico "
                     "registration."
                 )
-            if client.vna is None:
+            if not client.vna_enabled:
                 raise RuntimeError(
-                    "VNA not initialized; check vna config block."
+                    "VNA disabled (use_vna=false); check vna config block."
                 )
 
             status.send(
@@ -128,22 +128,26 @@ def main(transport, args):
             client.motor_client.set_delay()
             client.motor_client.halt()
             client.motor_client.home()
-            for idx, (az, el) in enumerate(grid):
-                if client.stop_client.is_set():
-                    logger.info("stop_client set; aborting sweep")
-                    break
-                logger.info(
-                    f"[{idx + 1}/{len(grid)}] move_to az={az}, el={el}"
-                )
-                client.motor_client.move_to(az_deg=az, el_deg=el)
-                if settle_s > 0 and client.stop_client.wait(settle_s):
-                    break
-                with client.coord.switch_section():
-                    for mode in ("ant", "rec"):
-                        logger.info(
-                            f"[{idx + 1}/{len(grid)}] measure_s11({mode!r})"
-                        )
-                        client.measure_s11(mode)
+            # One service window for the whole burst: start cmtvna once,
+            # keep it warm across every grid point, stop it after.
+            with client.vna_session():
+                for idx, (az, el) in enumerate(grid):
+                    if client.stop_client.is_set():
+                        logger.info("stop_client set; aborting sweep")
+                        break
+                    logger.info(
+                        f"[{idx + 1}/{len(grid)}] move_to az={az}, el={el}"
+                    )
+                    client.motor_client.move_to(az_deg=az, el_deg=el)
+                    if settle_s > 0 and client.stop_client.wait(settle_s):
+                        break
+                    with client.coord.switch_section():
+                        for mode in ("ant", "rec"):
+                            logger.info(
+                                f"[{idx + 1}/{len(grid)}] "
+                                f"measure_s11({mode!r})"
+                            )
+                            client.measure_s11(mode)
             client.motor_client.home()
     except KeyboardInterrupt:
         logger.info("Sweep interrupted by user")
