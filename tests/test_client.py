@@ -779,7 +779,8 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
             return_value=violations,
         ):
             caplog.set_level(logging.WARNING, logger="eigsep_observing.client")
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
 
         # Panda-local log channel.
         warning_msgs = [
@@ -813,7 +814,8 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
-        client.measure_s11("ant")
+        with client.vna_session():
+            client.measure_s11("ant")
         level, status = _status_reader(client).read(timeout=0.2)
     finally:
         client.stop()
@@ -831,7 +833,8 @@ def test_measure_s11_returns_published_payload(transport, dummy_cfg):
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, cfg=cfg)
     try:
-        result = client.measure_s11("ant")
+        with client.vna_session():
+            result = client.measure_s11("ant")
         assert isinstance(result, tuple) and len(result) == 3
         s11, header, metadata = result
         assert set(("ant", "noise", "load")).issubset(s11.keys())
@@ -1109,12 +1112,13 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, cfg=cfg)
     try:
-        client.measure_s11("rec")
-        expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
-        assert client.vna.power_dBm == expected_rec
-        client.measure_s11("ant")
-        expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
-        assert client.vna.power_dBm == expected_ant
+        with client.vna_session():
+            client.measure_s11("rec")
+            expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
+            assert client.vna.power_dBm == expected_rec
+            client.measure_s11("ant")
+            expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
+            assert client.vna.power_dBm == expected_ant
     finally:
         client.stop()
 
@@ -1127,7 +1131,8 @@ def test_measure_s11_injects_overlay_sentinels(transport, dummy_cfg):
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
         assert mock_add.called
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "UNKNOWN"
@@ -1151,7 +1156,8 @@ def test_measure_s11_injects_published_run_tag(transport, dummy_cfg):
     try:
         run_tag.publish(transport, "vna_position_sweep", started_unix=12345.0)
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("rec")
+            with client.vna_session():
+                client.measure_s11("rec")
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "vna_position_sweep"
         assert header["run_started_at_unix"] == 12345.0
@@ -1171,7 +1177,8 @@ def test_measure_s11_injects_published_owner(transport, dummy_cfg):
             transport, "panda_observe", uploaded_at_unix=7.5
         )
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
         header = mock_add.call_args.kwargs["header"]
         assert header["obs_config_owner"] == "panda_observe"
         assert header["obs_config_owner_uploaded_unix"] == 7.5
