@@ -76,17 +76,23 @@ def wait_ready(ip, port, *, timeout=30.0, poll_interval=0.5):
     deadline = time.monotonic() + timeout
     last_exc = None
     while time.monotonic() < deadline:
+        res = None
         try:
             res = rm.open_resource(addr)
             res.read_termination = "\n"
             res.timeout = 2000
             idn = res.query("*IDN?\n")
-            res.close()
             logger.info("%s ready: %s", UNIT, idn.strip())
             return idn.strip()
         except Exception as exc:  # pyvisa raises many error types
             last_exc = exc
             time.sleep(poll_interval)
+        finally:
+            if res is not None:
+                try:
+                    res.close()
+                except Exception:
+                    pass
     raise TimeoutError(
         f"cmtvna not ready on {ip}:{port} after {timeout}s "
         f"(last error: {last_exc})"
