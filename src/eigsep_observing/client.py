@@ -715,28 +715,38 @@ class PandaClient:
             If the resolved ``switch_schedule`` is neither ``None`` nor
             a dict.
         """
-        if self.vna is None:
+        if not self._vna_enabled:
             self._warn_with_status(
-                "VNA not initialized; skipping VNA portion of calibration."
+                "VNA disabled (use_vna=false); skipping VNA portion of "
+                "calibration."
             )
         else:
-            with self.coord.switch_section():
-                try:
-                    for mode in vna_modes:
-                        if self.stop_client.is_set():
-                            return False
-                        self.logger.info(
-                            f"Calibration: measuring S11 of {mode} with VNA"
-                        )
-                        self.measure_s11(mode)
-                except Exception as exc:
-                    # Match vna_loop's recovery posture: log loudly
-                    # and continue to the dwell phase rather than
-                    # aborting calibration outright.
-                    self._error_with_status(
-                        f"Calibration VNA cycle aborted "
-                        f"({type(exc).__name__}: {exc})."
-                    )
+            try:
+                with self.vna_session():
+                    with self.coord.switch_section():
+                        try:
+                            for mode in vna_modes:
+                                if self.stop_client.is_set():
+                                    return False
+                                self.logger.info(
+                                    f"Calibration: measuring S11 of "
+                                    f"{mode} with VNA"
+                                )
+                                self.measure_s11(mode)
+                        except Exception as exc:
+                            # Match vna_loop's recovery posture: log
+                            # loudly and continue to the dwell phase
+                            # rather than aborting calibration
+                            # outright.
+                            self._error_with_status(
+                                f"Calibration VNA cycle aborted "
+                                f"({type(exc).__name__}: {exc})."
+                            )
+            except Exception as exc:
+                self._error_with_status(
+                    f"Calibration VNA session failed "
+                    f"({type(exc).__name__}: {exc})."
+                )
 
         if self.stop_client.is_set():
             return False

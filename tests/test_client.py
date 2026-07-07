@@ -2419,14 +2419,19 @@ def test_coord_lock_is_rlock(client):
     client.coord.lock.release()
 
 
-def test_run_calibration_sequence_skips_vna_when_uninitialized(client, caplog):
-    """No VNA → calibration logs a warning and proceeds to dwells."""
+def test_run_calibration_sequence_skips_vna_when_disabled(client, caplog):
+    """use_vna=false → calibration logs a warning and proceeds to
+    dwells without opening a VNA session.
+    """
     assert client.vna is None  # dummy_cfg has use_vna: false
     caplog.set_level("WARNING")
     schedule = {"RFANT": 60, "RFNOFF": 0.05}
     completed = client.run_calibration_sequence(schedule=schedule)
     assert completed is True
-    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+    assert any(
+        "VNA disabled (use_vna=false)" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_run_calibration_sequence_filters_rfant(transport, dummy_cfg):
@@ -2762,5 +2767,20 @@ def test_vna_loop_survives_session_open_failure(
             "VNA session failed" in r.getMessage() for r in caplog.records
         )
         assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_uses_session(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["switch_schedule"] = {}  # skip dwell phase; test the VNA block
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        assert client.run_calibration_sequence() is True
+        assert client.transport.r.xlen(VNA_STREAM) >= 2  # ant + rec
+        assert client.vna is None  # session closed after the block
     finally:
         client.stop()
