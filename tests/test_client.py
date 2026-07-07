@@ -2700,11 +2700,12 @@ def test_vna_loop_measures_then_stops(transport, dummy_cfg):
         from eigsep_observing.keys import VNA_STREAM
 
         # Stop after the first iteration's measurements land.
-        import threading
-
         def stopper():
-            while client.transport.r.xlen(VNA_STREAM) < 2:
-                pass
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client.transport.r.xlen(VNA_STREAM) >= 2:
+                    break
+                time.sleep(0.01)
             client.stop_client.set()
 
         t = threading.Thread(target=stopper, daemon=True)
@@ -2714,6 +2715,52 @@ def test_vna_loop_measures_then_stops(transport, dummy_cfg):
         # ant + rec bundles were published in at least one session.
         assert client.transport.r.xlen(VNA_STREAM) >= 2
         # Session torn down on loop exit.
+        assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_vna_loop_survives_session_open_failure(
+    transport, dummy_cfg, monkeypatch, caplog
+):
+    """A failed vna_open (service won't start) must not kill vna_loop:
+    it logs and continues to the next iteration."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 0.01
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        calls = {"n": 0}
+        orig_open = client.vna_open
+
+        def flaky_open():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("service start failed")
+            return orig_open()
+
+        monkeypatch.setattr(client, "vna_open", flaky_open)
+
+        def stopper():
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client.transport.r.xlen(VNA_STREAM) >= 2:
+                    break
+                time.sleep(0.01)
+            client.stop_client.set()
+
+        caplog.set_level(logging.ERROR, logger="eigsep_observing.client")
+        t = threading.Thread(target=stopper, daemon=True)
+        t.start()
+        client.vna_loop()
+        t.join(timeout=5)
+
+        assert calls["n"] >= 2  # first open failed, a later one succeeded
+        assert any(
+            "VNA session failed" in r.getMessage() for r in caplog.records
+        )
         assert client.vna is None
     finally:
         client.stop()
