@@ -412,6 +412,7 @@ class PandaClient:
                     )
                 self.init_VNA()
             except Exception:
+                self._teardown_vna()
                 if self._manage_vna_service:
                     try:
                         vna_service.stop()
@@ -423,13 +424,8 @@ class PandaClient:
                 raise
         self._vna_depth += 1
 
-    def vna_close(self):
-        """Tear down the VNA and stop cmtvna.service on the outermost close."""
-        if self._vna_depth == 0:
-            return
-        self._vna_depth -= 1
-        if self._vna_depth > 0:
-            return
+    def _teardown_vna(self):
+        """Close the VNA socket (if any) and clear the handle."""
         vna = self.vna
         self.vna = None
         sock = getattr(vna, "s", None)
@@ -438,6 +434,15 @@ class PandaClient:
                 sock.close()
             except Exception:
                 self.logger.warning("VNA socket close failed", exc_info=True)
+
+    def vna_close(self):
+        """Tear down the VNA and stop cmtvna.service on the outermost close."""
+        if self._vna_depth == 0:
+            return
+        self._vna_depth -= 1
+        if self._vna_depth > 0:
+            return
+        self._teardown_vna()
         if self._manage_vna_service:
             try:
                 vna_service.stop()

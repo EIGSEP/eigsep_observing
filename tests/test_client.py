@@ -2639,3 +2639,43 @@ def test_vna_session_stops_service_on_ready_failure(
         assert client._vna_depth == 0
     finally:
         client.stop()
+
+
+def test_vna_open_resets_vna_on_build_failure(
+    transport, dummy_cfg, monkeypatch
+):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    from eigsep_observing import vna_service
+
+    events = []
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(vna_service, "wait_ready", lambda ip, port, **k: None)
+
+    closed = {"n": 0}
+
+    class FakeSock:
+        def close(self):
+            closed["n"] += 1
+
+    class HalfVNA:
+        s = FakeSock()
+
+    def failing_init():
+        # mimic init_VNA assigning self.vna then setup() raising
+        client.vna = HalfVNA()
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(client, "init_VNA", failing_init)
+    try:
+        with pytest.raises(RuntimeError, match="setup failed"):
+            client.vna_open()
+        assert client.vna is None  # not leaked
+        assert closed["n"] == 1  # socket closed
+        assert events == ["start", "stop"]  # service started then stopped
+        assert client._vna_depth == 0
+    finally:
+        client.stop()
