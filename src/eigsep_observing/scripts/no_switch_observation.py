@@ -97,9 +97,9 @@ def main(transport, args):
                     "Motor client not initialized; check motor pico "
                     "registration."
                 )
-            if client.vna is None:
+            if not client.vna_enabled:
                 raise RuntimeError(
-                    "VNA not initialized; check vna config block."
+                    "VNA disabled (use_vna=false); check vna config block."
                 )
 
             status.send("no_switch_observation started")
