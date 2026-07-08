@@ -1006,24 +1006,38 @@ def test_envelope_shape(client):
 def _seed_onoff_cache(
     agg, *, p_off_value: int = 100, p_on_value: int = 250
 ) -> None:
-    """Inject a fresh on/off pair into the aggregator state.
+    """Inject a fresh amb/non pair into the aggregator state.
 
     Uses the post-``reshape_data`` shape (``(1, NCHAN)`` int32 autos,
     ``(1, NCHAN, 2)`` int32 crosses) so the live-status calibration
-    sees exactly what the SNAP drain would produce.
+    sees exactly what the SNAP drain would produce. RFAMB (ambient
+    load) is the cold reference the solve consumes; RFNOFF is seeded
+    at a deliberately *different* power level (2x — the off-diode
+    path and the ambient load genuinely differ in power on hardware)
+    so any assert on an RFAMB-derived number (``gain_median``, the
+    T_LOAD round-trip) fails if the solve loop ever iterates the
+    RFNOFF cache instead.
     """
     auto_off = np.full((1, NCHAN), p_off_value, dtype=np.int32)
     auto_on = np.full((1, NCHAN), p_on_value, dtype=np.int32)
     cross_off = np.full((1, NCHAN, 2), p_off_value // 20, dtype=np.int32)
     cross_on = np.full((1, NCHAN, 2), p_on_value // 20, dtype=np.int32)
+    p_noff_value = 2 * p_off_value
+    auto_noff = np.full((1, NCHAN), p_noff_value, dtype=np.int32)
+    cross_noff = np.full((1, NCHAN, 2), p_noff_value // 20, dtype=np.int32)
     now = time.time()
     with agg._lock:
-        agg.state.last_rfnoff_pairs = {"0": auto_off, "02": cross_off}
-        agg.state.last_rfnoff_unix = now
-        agg.state.last_rfnoff_acc_cnt = 90
+        agg.state.last_rfamb_pairs = {"0": auto_off, "02": cross_off}
+        agg.state.last_rfamb_unix = now
+        agg.state.last_rfamb_acc_cnt = 90
         agg.state.last_rfnon_pairs = {"0": auto_on, "02": cross_on}
         agg.state.last_rfnon_unix = now
         agg.state.last_rfnon_acc_cnt = 95
+        # RFNOFF stays cached (cross-check display) but must not feed
+        # the coefficient solve — seeded at 2x the RFAMB level so a
+        # solve reading it produces a numerically different gain.
+        agg.state.last_rfnoff_pairs = {"0": auto_noff, "02": cross_noff}
+        agg.state.last_rfnoff_unix = now
 
 
 def test_corr_route_default_returns_raw_with_no_calibration_meta(client):
@@ -1064,8 +1078,11 @@ def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
     assert meta["noise_diode_enr_db"] == pytest.approx(
         10.0 * math.log10(1500.0 / 290.0), rel=1e-12
     )
-    assert meta["last_rfnoff_age_s"] is not None
+    assert meta["last_rfamb_age_s"] is not None
     assert meta["last_rfnon_age_s"] is not None
+    # RFNOFF is still cached (cross-check display) even though it no
+    # longer feeds the solve.
+    assert meta["last_rfnoff_age_s"] is not None
     # Gain summary present and finite.
     assert meta["gain_median"] == pytest.approx(0.1, rel=1e-6)
 
@@ -1098,7 +1115,7 @@ def test_corr_route_calibrated_with_aged_cache_still_calibrates_and_exposes_age(
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
     # Backdate the cache well past the old 300 s window.
     with agg_primed._lock:
-        agg_primed.state.last_rfnoff_unix -= 1800.0
+        agg_primed.state.last_rfamb_unix -= 1800.0
         agg_primed.state.last_rfnon_unix -= 1800.0
 
     app = create_app(agg_primed)
@@ -1110,7 +1127,7 @@ def test_corr_route_calibrated_with_aged_cache_still_calibrates_and_exposes_age(
     assert data["pairs"]["0"]["mag"][0] == pytest.approx(expected_k, rel=1e-6)
     meta = data["calibration_meta"]
     assert meta["stale"] is False
-    assert meta["last_rfnoff_age_s"] >= 1800.0
+    assert meta["last_rfamb_age_s"] >= 1800.0
     assert meta["last_rfnon_age_s"] >= 1800.0
 
 
@@ -1250,6 +1267,44 @@ def test_solve_calibration_reason_names_configured_stream(agg_primed):
     )
     assert coeffs is None
     assert "tempctrl_lna" in meta["reason"]
+
+
+def test_solve_calibration_requires_amb_and_non(agg_primed):
+    """Missing the RFAMB cache disables the cal with a reason string,
+    even when RFNOFF+RFNON are both cached — RFNOFF is a cross-check,
+    not the reference (spec: RFNON+RFAMB pair)."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.last_rfamb_pairs = None
+    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert meta["reason"] == "no on/amb pair cached yet"
+
+
+def test_solve_calibration_solves_from_rfamb_not_rfnoff(agg_primed):
+    """With BOTH caches present but holding different data, the solved
+    coefficients must be the RFAMB-derived ones. The seeding helper
+    puts RFNOFF at 2x the RFAMB level, so a solve loop iterating the
+    RFNOFF cache would produce gain (250-200)/1500 ~= 0.0333 instead
+    of the RFAMB-derived (250-100)/1500 = 0.1 — this pins the loop's
+    data source, not just the presence gate."""
+    _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    # t_enr_k = 1500 K exactly, matching OBS_CFG's calibration block.
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    assert meta["gain_median"] == pytest.approx(0.1, rel=1e-6)
+    gain, _ = coeffs["0"]
+    np.testing.assert_allclose(gain, 0.1, rtol=1e-6)
 
 
 def test_solve_calibration_logs_error_on_non_numeric_enr_db(

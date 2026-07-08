@@ -108,9 +108,15 @@ def _solve_calibration(
 ) -> tuple[Optional[dict], dict]:
     """Build per-channel ``(gain, t_rx)`` for the dashboard cal toggle.
 
+    Coefficients are solved from the most recent ``RFNON``/``RFAMB``
+    pair — ``RFAMB`` (ambient load) is the cold reference, ``RFNON``
+    (noise diode on) the hot reference. ``RFNOFF`` stays cached and its
+    age still lands in ``meta`` for the cross-check display, but it no
+    longer feeds the solve.
+
     Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
     can't run (missing cache, missing T_LOAD, missing config); the
-    ``meta`` dict is always returned and exposes the cached on/off ages
+    ``meta`` dict is always returned and exposes the cached pair ages
     so the frontend can render a "cal is N seconds old" indicator. We
     intentionally do not gate on cache age: the ``RFANT`` dwell is an
     hour, so any fixed threshold either rejects nearly every antenna
@@ -156,6 +162,7 @@ def _solve_calibration(
         "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
         "last_rfnon_age_s": None,
+        "last_rfamb_age_s": None,
         "gain_median": None,
     }
 
@@ -163,16 +170,18 @@ def _solve_calibration(
         meta["reason"] = "noise_diode_enr_db missing or non-numeric"
         return None, meta
 
-    rfnoff = state.last_rfnoff_pairs
+    rfamb = state.last_rfamb_pairs
     rfnon = state.last_rfnon_pairs
-    if rfnoff is None or rfnon is None:
-        meta["reason"] = "no on/off pair cached yet"
+    if rfamb is None or rfnon is None:
+        meta["reason"] = "no on/amb pair cached yet"
         return None, meta
 
     if state.last_rfnoff_unix is not None:
         meta["last_rfnoff_age_s"] = max(0.0, now - state.last_rfnoff_unix)
     if state.last_rfnon_unix is not None:
         meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
+    if state.last_rfamb_unix is not None:
+        meta["last_rfamb_age_s"] = max(0.0, now - state.last_rfamb_unix)
 
     load_entry = state.metadata_snapshot.get(t_load_stream)
     load_t_now = (
@@ -196,18 +205,18 @@ def _solve_calibration(
     meta["t_load_k"] = t_load_k
 
     coeffs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for pair, off_arr in rfnoff.items():
+    for pair, amb_arr in rfamb.items():
         on_arr = rfnon.get(pair)
-        if on_arr is None or off_arr.shape != on_arr.shape:
+        if on_arr is None or amb_arr.shape != on_arr.shape:
             continue
         # Autos are ``(1, NCHAN)`` int32 power; gain is solved per-channel
         # against the auto power. Cross pairs (``(1, NCHAN, 2)``) reuse
         # the same per-channel gain at apply time.
-        if off_arr.ndim == 2:
-            p_off = off_arr[0].astype(np.float64)
+        if amb_arr.ndim == 2:
+            p_amb = amb_arr[0].astype(np.float64)
             p_on = on_arr[0].astype(np.float64)
             try:
-                gain, t_rx = compute_gain_trx(p_on, p_off, t_load_k, t_enr_k)
+                gain, t_rx = compute_gain_trx(p_on, p_amb, t_load_k, t_enr_k)
             except ValueError as exc:
                 # Outer guards force `t_enr_k` finite and positive, so this
                 # path is only reachable via a logic regression — log loudly.
