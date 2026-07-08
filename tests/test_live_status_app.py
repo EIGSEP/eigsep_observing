@@ -1882,6 +1882,20 @@ def test_index_renders_with_aggregator_cfg(client):
     assert b"EIGSEP live status" in r.data
 
 
+def test_index_serves_sp1_pane(client):
+    """Spare-1 cable S11 pane markup is present in the page.
+
+    Markup-presence guard, mirroring test_index_serves_theme_toggle: no
+    JS test runner in this repo, so this is the cheapest regression
+    catch for the sp1 pane's DOM ids that dashboard.js wires against.
+    """
+    resp = client.get("/")
+    body = resp.get_data(as_text=True)
+    assert "plot-vna-sp1-mag" in body
+    assert "plot-vna-sp1-phase" in body
+    assert "vna-sp1-status" in body
+
+
 def test_index_serves_theme_toggle(client):
     """The Sun/Light/Dark theme control is present in the page.
 
