@@ -1,6 +1,10 @@
-"""Fit per-channel linear-range bounds from a corr_linearity sweep.
+"""Fit per-channel linear-range bounds from corr_linearity sweeps.
 
-Reads the per-channel sweep npz written by ``corr_linearity.py`` and,
+Reads one or more per-channel sweep npz files written by
+``corr_linearity.py`` — several files (e.g. one per SNAP input from
+separate noise-source hookups) merge into a single product, after
+validating that they share an operating point and do not repeat an
+input. Then,
 per input and per frequency channel, finds the attenuation steps
 whose ``log10(counts - floor)`` sits within ``--threshold-db`` of a
 unit-slope (1 dB/dB) line anchored at the steps' median offset — the
@@ -33,7 +37,7 @@ deploy the product, commit it to ``src/eigsep_observing/data/`` and
 set ``linear_range_file`` in ``corr_config.yaml``.
 
 Usage:
-    python fit_linearity.py linearity_corr.npz --plot
+    python fit_linearity.py sweep_input0.npz sweep_input1.npz --plot
 """
 
 import argparse
@@ -45,7 +49,10 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from eigsep_observing.linear_range import save_linear_range
+from eigsep_observing.linear_range import (
+    save_linear_range,
+    validate_operating_point,
+)
 
 MAX_CLIP_ITERATIONS = 5
 # The floor enters the fit observable (excess = counts - floor), so a
@@ -57,7 +64,15 @@ parser = argparse.ArgumentParser(
     description="Fit per-channel linear-range bounds from a sweep npz",
     formatter_class=argparse.ArgumentDefaultsHelpFormatter,
 )
-parser.add_argument("sweep", type=str, help="Sweep npz from corr_linearity")
+parser.add_argument(
+    "sweep",
+    type=str,
+    nargs="+",
+    help="Sweep npz file(s) from corr_linearity. Multiple files (e.g. "
+    "one per SNAP input from separate noise-source hookups) merge "
+    "into one product; they must share an operating point and must "
+    "not repeat an input",
+)
 parser.add_argument(
     "--outfile",
     type=str,
@@ -247,30 +262,59 @@ def main():
     if args.smooth_window % 2 == 0:
         parser.error("--smooth-window must be odd")
 
-    sweep = np.load(args.sweep, allow_pickle=False)
-    header = json.loads(str(sweep["header_json"]))
-    freqs = sweep["freqs"]
-    inputs = sorted(
-        k[len("spectra_") :] for k in sweep.files if k.startswith("spectra_")
-    )
+    sweeps = [np.load(f, allow_pickle=False) for f in args.sweep]
+    headers = [json.loads(str(s["header_json"])) for s in sweeps]
+    header = headers[0]
+    # One product carries one operating point: bounds measured at
+    # different gain/FFT-shift/scalar settings do not belong in the
+    # same file, and the downstream consumers validate exactly one
+    # header. Refuse loudly rather than merge junk.
+    for fname, other in zip(args.sweep[1:], headers[1:]):
+        mismatches = validate_operating_point(header, other)
+        if mismatches:
+            parser.error(
+                f"operating-point mismatch between {args.sweep[0]!r} "
+                f"and {fname!r}: {'; '.join(mismatches)}. Re-sweep at "
+                "a common operating point or fit separately."
+            )
+    freqs = sweeps[0]["freqs"]
+    for fname, s in zip(args.sweep[1:], sweeps[1:]):
+        if not np.array_equal(s["freqs"], freqs):
+            parser.error(
+                f"frequency-axis mismatch between {args.sweep[0]!r} "
+                f"and {fname!r}"
+            )
 
-    noise_density = (
-        args.noise_density_dbm_hz
-        if args.noise_density_dbm_hz is not None
-        else float(sweep["noise_density_dbm_hz"])
-    )
-    bandwidth = (
-        args.bandwidth_hz
-        if args.bandwidth_hz is not None
-        else float(sweep["bandwidth_hz"])
-    )
-    total_power_dbm = noise_density + 10 * np.log10(bandwidth)
-    p_in_dbm = total_power_dbm - sweep["attenuation_dB"]
-
-    # Sort steps by ascending input power so "lowest/highest linear
-    # step" is well defined regardless of sweep direction.
-    order = np.argsort(p_in_dbm)
-    p_in_dbm = p_in_dbm[order]
+    # Per-(sweep, input) plan. Each sweep contributes the inputs it
+    # recorded, fit against its own attenuation axis; a duplicated
+    # input is ambiguous (which hookup is authoritative?) — refuse.
+    sweep_by_input = {}
+    p_in_by_input = {}
+    for fname, s in zip(args.sweep, sweeps):
+        noise_density = (
+            args.noise_density_dbm_hz
+            if args.noise_density_dbm_hz is not None
+            else float(s["noise_density_dbm_hz"])
+        )
+        bandwidth = (
+            args.bandwidth_hz
+            if args.bandwidth_hz is not None
+            else float(s["bandwidth_hz"])
+        )
+        total_power_dbm = noise_density + 10 * np.log10(bandwidth)
+        p_in = total_power_dbm - s["attenuation_dB"]
+        for key in s.files:
+            if not key.startswith("spectra_"):
+                continue
+            p = key[len("spectra_") :]
+            if p in sweep_by_input:
+                parser.error(
+                    f"input {p} appears in more than one sweep "
+                    f"(fit them separately or drop one)"
+                )
+            sweep_by_input[p] = s
+            p_in_by_input[p] = p_in
+    inputs = sorted(sweep_by_input)
 
     nchan = freqs.size
     per_input = {}
@@ -279,8 +323,13 @@ def main():
     # diagnostics plots, not part of the saved product schema.
     floors_by_input = {}
     for p in inputs:
-        counts = sweep[f"spectra_{p}"].astype(np.float64).mean(axis=1)
-        counts = counts[order]
+        # Sort steps by ascending input power so "lowest/highest
+        # linear step" is well defined regardless of sweep direction.
+        order = np.argsort(p_in_by_input[p])
+        p_in_dbm = p_in_by_input[p][order]
+        p_in_by_input[p] = p_in_dbm
+        counts = sweep_by_input[p][f"spectra_{p}"]
+        counts = counts.astype(np.float64).mean(axis=1)[order]
         counts_by_input[p] = counts
         fields = {
             name: np.full(nchan, np.nan)
@@ -356,7 +405,7 @@ def main():
         threshold_db=args.threshold_db,
         smooth_window=args.smooth_window,
         created_unix=time.time(),
-        source_file=Path(args.sweep).name,
+        source_file=",".join(Path(f).name for f in args.sweep),
         per_input=per_input,
     )
     print(f"Saved product to {outfile}")
@@ -365,7 +414,7 @@ def main():
         plot_diagnostics(
             outfile,
             freqs,
-            p_in_dbm,
+            p_in_by_input,
             counts_by_input,
             per_input,
             floors_by_input,
@@ -377,7 +426,7 @@ def main():
 def plot_diagnostics(
     outfile,
     freqs,
-    p_in_dbm,
+    p_in_by_input,
     counts_by_input,
     per_input,
     floors_by_input,
@@ -395,6 +444,7 @@ def plot_diagnostics(
         counts = counts_by_input[p]
         fields = per_input[p]
         floors = floors_by_input[p]
+        p_in_dbm = p_in_by_input[p]
         for c in sample_chans:
             (line,) = ax.plot(
                 p_in_dbm,
@@ -439,6 +489,7 @@ def plot_diagnostics(
     p = inputs[0]
     counts = counts_by_input[p]
     fields = per_input[p]
+    p_in_dbm = p_in_by_input[p]
     with np.errstate(divide="ignore", invalid="ignore"):
         fit = 10 ** (
             fields["slope"][None, :] * p_in_dbm[:, None]
