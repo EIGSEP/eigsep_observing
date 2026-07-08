@@ -29,8 +29,12 @@ plots. This workflow supersedes it with per-channel line fits.
 2. **Fit**:
 
    ```
-   python fit_linearity.py sweep.npz --plot
+   python fit_linearity.py sweep_in0.npz sweep_in1.npz ... --plot
    ```
+
+   Multiple sweep files (one per input hookup) merge into a single
+   product; they must share an operating point (validated, refused
+   loudly on mismatch) and must not repeat an input.
 
    Per input and channel this anchors a unit-slope (1 dB/dB) line —
    the response a linear chain must have — at the median offset of
