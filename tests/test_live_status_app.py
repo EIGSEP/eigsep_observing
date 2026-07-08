@@ -1200,6 +1200,52 @@ def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
     assert meta["t_enr_k"] == pytest.approx(expected_k, rel=1e-9)
 
 
+def test_solve_calibration_honors_t_load_stream_knob(agg_primed):
+    """``calibration.t_load_stream`` re-points the load-temperature
+    reference at another stream — the hot-swap path where the LOAD
+    module rides the LNA connector and publishes as ``tempctrl_lna``.
+    The default ``tempctrl_load`` entry is removed to prove the knob
+    (not a fallback) satisfied the lookup."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        snap = agg_primed.state.metadata_snapshot
+        snap["tempctrl_lna"] = dict(snap["tempctrl_load"])
+        snap.pop("tempctrl_load", None)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "t_load_stream": "tempctrl_lna",
+        }
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    assert meta["t_load_k"] is not None
+
+
+def test_solve_calibration_reason_names_configured_stream(agg_primed):
+    """When the configured temp-reference stream is missing, the bail
+    reason names *that* stream so a mis-typed knob is self-describing."""
+    _seed_onoff_cache(agg_primed)
+    # Remove the configured stream (agg_primed seeds both channels);
+    # tempctrl_load remains, proving the lookup follows the knob and
+    # does not fall back.
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot.pop("tempctrl_lna", None)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "t_load_stream": "tempctrl_lna",
+        }
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "tempctrl_lna" in meta["reason"]
+
+
 def test_solve_calibration_logs_error_on_non_numeric_enr_db(
     agg_primed, caplog
 ):

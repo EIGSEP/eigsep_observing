@@ -218,7 +218,7 @@ def _lidar_avg_entry(distance_m):
     }
 
 
-def tempctrl_post_handler_reading(stream_name):
+def tempctrl_post_handler_reading(stream_name, *, sensor_error=None):
     """One per-channel tempctrl reading after ``_peltier_redis_handler``.
 
     The firmware/emulator emits one combined ``sensor_name="tempctrl"``
@@ -228,6 +228,16 @@ def tempctrl_post_handler_reading(stream_name):
     the emulator with the handler here means every test fixture downstream
     is anchored to the real producer output rather than drifting on
     hand-typed steady-state values.
+
+    Parameters
+    ----------
+    sensor_error : str, optional
+        Channel name (``"LNA"`` or ``"LOAD"``) to put into the
+        railed-divider error state before the op tick, yielding that
+        stream's real error-row shape (``status: "error"``, null
+        T_now/resistance, voltage at the rail) — the row an unplugged
+        thermistor produces, e.g. during the reboot burst before
+        pico-manager replays the installed flags.
     """
     pel = PicoPeltier.__new__(PicoPeltier)
     captured = []
@@ -237,6 +247,8 @@ def tempctrl_post_handler_reading(stream_name):
     # null T_now/resistance), which is not the steady state this fixture
     # is meant to pin.
     emu = TempCtrlEmulator()
+    if sensor_error is not None:
+        emu.inject_sensor_error(sensor_error)
     emu.op()
     pel._peltier_redis_handler(emu.get_status())
     for entry in captured:

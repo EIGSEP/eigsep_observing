@@ -140,10 +140,18 @@ def _solve_calibration(
 
     t_enr_k = T_REF_K * 10.0 ** (enr_db / 10.0) if enr_db is not None else None
 
+    # Which metadata stream carries the calibration load's temperature.
+    # Default is the LOAD channel's stream; the knob exists for the
+    # hot-swap contingency where the LOAD module rides the LNA connector
+    # and publishes as tempctrl_lna (see OPERATIONS.md "Tempctrl channel
+    # descope and hot-swap").
+    t_load_stream = cal_cfg.get("t_load_stream") or "tempctrl_load"
+
     meta: dict = {
         "stale": True,
         "reason": None,
         "t_load_k": None,
+        "t_load_stream": t_load_stream,
         "noise_diode_enr_db": enr_db,
         "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
@@ -166,22 +174,23 @@ def _solve_calibration(
     if state.last_rfnon_unix is not None:
         meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
 
-    tempctrl_load = state.metadata_snapshot.get("tempctrl_load")
+    load_entry = state.metadata_snapshot.get(t_load_stream)
     load_t_now = (
-        tempctrl_load.get("T_now") if isinstance(tempctrl_load, dict) else None
+        load_entry.get("T_now") if isinstance(load_entry, dict) else None
     )
     try:
         load_t_now_f = float(load_t_now) if load_t_now is not None else None
     except (TypeError, ValueError):
         logger.error(
-            "Live-status cal: tempctrl_load.T_now=%r is not coercible to "
+            "Live-status cal: %s.T_now=%r is not coercible to "
             "float; producer/schema contract violation (T_now must be "
             "float per SENSOR_SCHEMAS).",
+            t_load_stream,
             load_t_now,
         )
         load_t_now_f = None
     if load_t_now_f is None:
-        meta["reason"] = "tempctrl_load.T_now missing or non-numeric"
+        meta["reason"] = f"{t_load_stream}.T_now missing or non-numeric"
         return None, meta
     t_load_k = load_t_now_f + CELSIUS_TO_KELVIN
     meta["t_load_k"] = t_load_k

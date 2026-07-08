@@ -30,6 +30,7 @@ class TempCtrlClient:
             {
                 "watchdog_timeout_ms": int,
                 "LNA": {
+                    "installed": bool,  # optional; firmware default True
                     "enable": bool,
                     "cooling_enabled": bool,  # optional; firmware default True
                     "target_C": float,
@@ -55,6 +56,11 @@ class TempCtrlClient:
         ``[-clamp, +clamp]``); omit to leave the firmware default
         (True) in place. Deployments that cannot dissipate Peltier
         heat should set this False on the affected channel.
+        ``installed: false`` descopes a channel whose hardware module
+        is physically absent: firmware never samples or drives it, its
+        Redis stream stops publishing entirely, and :meth:`get_status`
+        stops reading it. Must be paired with ``enable: false`` (an
+        absent module cannot be armed — rejected at construction).
     source : str
         Identifier stamped on proxy command stream entries.
     """
@@ -125,7 +131,7 @@ class TempCtrlClient:
                             f"tempctrl[{ch}].{fname}: {val!r} not "
                             f"float-coercible ({exc})"
                         ) from exc
-            for bname in ("enable", "cooling_enabled"):
+            for bname in ("installed", "enable", "cooling_enabled"):
                 if bname in section:
                     val = section[bname]
                     if not isinstance(val, bool):
@@ -134,6 +140,15 @@ class TempCtrlClient:
                             f"bool, got {type(val).__name__}"
                         )
                     coerced[bname] = val
+            if (
+                coerced.get("installed") is False
+                and coerced.get("enable") is True
+            ):
+                raise ValueError(
+                    f"tempctrl[{ch}]: installed: false with enable: true "
+                    "— an absent module cannot be armed; set enable: "
+                    "false or mark the channel installed"
+                )
             out[ch] = coerced
         return out
 
@@ -150,15 +165,29 @@ class TempCtrlClient:
         merges them back into the flat ``LNA_*`` / ``LOAD_*`` shape
         used internally by ``_tempctrl_health_check`` so callers don't
         have to know about the split.
+
+        A channel whose settings say ``installed: false`` is never
+        read: its stream stopped publishing at the producer, but a
+        leftover hash entry (lab bring-up, pre-descope deployment, the
+        reboot burst before pico-manager replays the flags) would
+        otherwise feed stale data into the merged status and trigger
+        the snapshot reader's staleness warning on every poll. With
+        one channel skipped, the device-wide ``watchdog_*`` fields
+        ride the remaining channel's entry — same firmware tick, no
+        information loss.
         """
-        try:
-            lna = self._reader.get("tempctrl_lna")
-        except KeyError:
-            lna = None
-        try:
-            load = self._reader.get("tempctrl_load")
-        except KeyError:
-            load = None
+        lna = None
+        if self.settings.get("LNA", {}).get("installed") is not False:
+            try:
+                lna = self._reader.get("tempctrl_lna")
+            except KeyError:
+                lna = None
+        load = None
+        if self.settings.get("LOAD", {}).get("installed") is not False:
+            try:
+                load = self._reader.get("tempctrl_load")
+            except KeyError:
+                load = None
         if not lna and not load:
             return None
         merged = {}
@@ -180,6 +209,27 @@ class TempCtrlClient:
         self._proxy.send_command(
             "set_watchdog_timeout", timeout_ms=int(timeout_ms)
         )
+
+    def set_installed(self, *, LNA=None, LOAD=None):
+        """Mark a channel's hardware module present/absent.
+
+        Mirrors :meth:`picohost.base.PicoPeltier.set_installed`.
+        ``False`` descopes the channel: firmware never samples its
+        thermistor (no ADC mux switch to a dead divider) or drives it,
+        and the redis fan-out suppresses its stream entirely — clean
+        absence downstream. Distinct from :meth:`set_enable` (drive
+        intent for present hardware); not a trip ack. Only the kwargs
+        that are not ``None`` are forwarded, so partial application
+        does not flip the untouched channel. Firmware caches the
+        setting for replay on reconnect.
+        """
+        kwargs = {}
+        if LNA is not None:
+            kwargs["LNA"] = bool(LNA)
+        if LOAD is not None:
+            kwargs["LOAD"] = bool(LOAD)
+        if kwargs:
+            self._proxy.send_command("set_installed", **kwargs)
 
     def set_clamp(self, *, LNA=None, LOAD=None):
         kwargs = {}
@@ -296,22 +346,25 @@ class TempCtrlClient:
         """Push the full config to the pico in safe order.
 
         Order matches ``PicoPeltier``'s reconnect replay
-        (watchdog → clamp → cooling_enabled → gains → temperature →
-        enable):
+        (watchdog → installed → clamp → cooling_enabled → gains →
+        temperature → enable):
 
         1. ``set_watchdog_timeout`` first so any subsequent
            delay-between-commands cannot trip a zero-timeout default.
-        2. ``set_clamp`` — establish the duty-cycle ceiling before
+        2. ``set_installed`` — gate a descoped channel (no sampling,
+           no drive, no stream) before any drive-producing config
+           arrives; firmware reboots to installed=true defaults.
+        3. ``set_clamp`` — establish the duty-cycle ceiling before
            anything is armed.
-        3. ``set_cooling_enabled`` — apply the asymmetric-clamp safety
+        4. ``set_cooling_enabled`` — apply the asymmetric-clamp safety
            setting before the PI controller can produce drive on the
            new config.
-        4. ``set_gains`` — tune the PI controller before the setpoint
+        5. ``set_gains`` — tune the PI controller before the setpoint
            is published, so the very first PI tick on the new target
            uses the configured Kp/Ki rather than firmware defaults.
-        5. ``set_temperature`` — publish the target (and hysteresis)
+        6. ``set_temperature`` — publish the target (and hysteresis)
            while still disarmed (or at prior arm state).
-        6. ``set_enable`` — arm last, so by the time the channel turns
+        7. ``set_enable`` — arm last, so by the time the channel turns
            on the clamp, gains, and setpoint are already in place.
 
         Idempotent: calling repeatedly with unchanged settings is a
@@ -319,8 +372,13 @@ class TempCtrlClient:
         with identical ones). Missing sections are skipped — e.g.
         omitting ``watchdog_timeout_ms`` leaves whatever the firmware
         currently has. Missing ``Kp``/``Ki`` likewise leaves the
-        firmware defaults in place. Missing ``cooling_enabled`` leaves
-        the firmware default (True) in place.
+        firmware defaults in place. Missing ``cooling_enabled`` and
+        ``installed`` leave the firmware defaults (True) in place.
+        An uninstalled channel's setpoints/gains still push — harmless
+        while descoped (no sampling, no drive) and pre-staged for the
+        moment the module is re-installed; arming it is what's
+        forbidden (``_coerce_settings`` rejects ``installed: false``
+        with ``enable: true``).
 
         Raises
         ------
@@ -336,6 +394,10 @@ class TempCtrlClient:
             self.set_watchdog_timeout(watchdog)
         lna = s.get("LNA", {})
         load = s.get("LOAD", {})
+        self.set_installed(
+            LNA=lna.get("installed"),
+            LOAD=load.get("installed"),
+        )
         self.set_clamp(
             LNA=lna.get("clamp"),
             LOAD=load.get("clamp"),

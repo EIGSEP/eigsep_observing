@@ -240,12 +240,28 @@ def enabled_signals(
     ``use_tempctrl: true``. A missing key is treated as disabled so the
     dashboard doesn't render tiles for subsystems the observer isn't
     running.
+
+    A tempctrl channel descoped via
+    ``tempctrl_settings.{LNA,LOAD}.installed: false`` is dropped even
+    with ``use_tempctrl: true``: the producer publishes no stream for
+    it (see ``TempCtrlClient.set_installed``), so its tiles would sit
+    permanently empty on the dashboard — the field deployment's only
+    alerting surface.
     """
     reg = registry if registry is not None else SIGNAL_REGISTRY
     out: dict[str, Signal] = {}
     for name, sig in reg.items():
         if sig.enabled_by is None or obs_cfg.get(sig.enabled_by):
             out[name] = sig
+    settings = obs_cfg.get("tempctrl_settings", {}) or {}
+    for channel, stream in (
+        ("LNA", "tempctrl_lna"),
+        ("LOAD", "tempctrl_load"),
+    ):
+        if (settings.get(channel) or {}).get("installed") is False:
+            out = {
+                k: v for k, v in out.items() if not k.startswith(f"{stream}.")
+            }
     return out
 
 
@@ -309,6 +325,11 @@ def default_thresholds(
             ("LOAD", "tempctrl_load"),
         ):
             ch_cfg = settings.get(channel, {}) or {}
+            if ch_cfg.get("installed") is False:
+                # Descoped channel: no stream exists, so staged
+                # setpoints (kept for hot-swap re-install) must not
+                # produce bands with nothing to classify.
+                continue
             target = ch_cfg.get("target_C")
             hyst = ch_cfg.get("hysteresis_C")
             clamp = ch_cfg.get("clamp")

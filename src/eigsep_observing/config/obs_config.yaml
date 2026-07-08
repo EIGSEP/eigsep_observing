@@ -61,6 +61,11 @@ vna_position_sweep:
 # from the IEEE-standard ENR convention: T_ns = 290 K · 10^(ENR_dB / 10).
 calibration:
   noise_diode_enr_db: 11.0   # post-attenuator ENR (dB), referenced to 290 K
+  # Which metadata stream carries the calibration load's temperature
+  # (T_LOAD above). Change only for the hot-swap contingency where the
+  # LOAD module rides the LNA connector and publishes as tempctrl_lna —
+  # see OPERATIONS.md "Tempctrl channel descope and hot-swap".
+  t_load_stream: tempctrl_load
 
 # tempctrl
 use_tempctrl: false
@@ -68,6 +73,14 @@ tempctrl_interval: 60  # seconds between setpoint re-apply + health check
 tempctrl_settings:
   watchdog_timeout_ms: 30000
   LNA:
+    # Hardware descope flag: false means the channel's Peltier +
+    # thermistor module is physically absent — firmware never samples
+    # or drives it and its tempctrl_lna stream stops publishing
+    # entirely (no corr-file column, no dashboard tiles, no health
+    # checks). Must be paired with enable: false. Flip back to true
+    # when the module is (re)connected. See OPERATIONS.md "Tempctrl
+    # channel descope and hot-swap".
+    installed: true
     enable: true
     target_C: 25.0
     hysteresis_C: 0.5
@@ -81,6 +94,7 @@ tempctrl_settings:
     # tempctrl.c (lower_clamp) for the firmware behavior.
     cooling_enabled: false
   LOAD:
+    installed: true  # see the LNA block's descope note
     enable: true
     target_C: 25.0
     hysteresis_C: 0.5
