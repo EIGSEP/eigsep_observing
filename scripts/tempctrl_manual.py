@@ -676,7 +676,7 @@ def _handle_key(ch, proxy, state, history=None, outdir="."):
     elif ch == ord("U"):
         state.load_installed = False
         _push_installed(proxy, state)
-        elif ch == ord("r"):
+    elif ch == ord("r"):
         state.lna_enabled = True
         state.load_enabled = True
         _push_enables(proxy, state)
