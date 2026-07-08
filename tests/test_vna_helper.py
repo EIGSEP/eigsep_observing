@@ -54,11 +54,41 @@ def test_measure_s11_helper_ant_publishes_bundle(transport, dummy_cfg):
 
     # ant bundle: DUT keys + OSL standards
     assert "ant" in s11 and "load" in s11 and "noise" in s11
+    assert "amb" in s11 and "sp1" in s11
     assert "cal:VNAO" in s11 and "cal:VNAS" in s11 and "cal:VNAL" in s11
     assert header["mode"] == "ant"
 
     # A single bundle landed on the VNA stream.
     assert transport.r.xlen(VNA_STREAM) == 1
+
+
+def test_measure_s11_ant_switch_sequence(transport, dummy_cfg):
+    """Pin the full ant-cycle switch order: OSL standards, then the
+    four DUTs. A reorder silently changes which physical path each
+    trace was taken on."""
+    calls = []
+    vna = _make_vna(dummy_cfg, switch_fn=calls.append)
+    writer, snap = _make_sinks(transport)
+
+    measure_s11(
+        vna,
+        "ant",
+        cfg=dummy_cfg,
+        transport=transport,
+        vna_writer=writer,
+        metadata_snapshot=snap,
+    )
+
+    assert calls == [
+        "VNAO",
+        "VNAS",
+        "VNAL",
+        "VNAANT",
+        "VNANOFF",
+        "VNANON",
+        "VNAAMB",
+        "VNASP1",
+    ]
 
 
 def test_measure_s11_helper_rec_publishes_bundle(transport, dummy_cfg):

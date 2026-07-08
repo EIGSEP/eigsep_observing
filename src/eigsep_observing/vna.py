@@ -36,10 +36,11 @@ class VnaWriter(SingleStreamWriter):
     are flattened to lists before encoding.
 
     ``maxlen`` is a dead-reader failsafe: each ``measure_s11`` call
-    produces one bundled entry (ant+noise+load+OSL or rec+OSL), and
-    the ground reader drains it synchronously. 200 covers ~100 full
-    ant+rec sweeps of headroom even during VNA-only campaigns —
-    well beyond any realistic ground-reader outage window.
+    produces one bundled entry (ant+load+noise+amb+sp1+OSL or
+    rec+OSL), and the ground reader drains it synchronously. 200
+    covers ~100 full ant+rec sweeps of headroom even during VNA-only
+    campaigns — well beyond any realistic ground-reader outage
+    window.
     """
 
     stream = VNA_STREAM
@@ -318,8 +319,9 @@ def measure_s11(
     Returns
     -------
     s11 : dict[str, np.ndarray]
-        Bundle published to Redis (raw DUT traces plus ``cal:VNAO`` /
-        ``cal:VNAS`` / ``cal:VNAL`` standards).
+        Bundle published to Redis (raw DUT traces — ``ant``/``load``/
+        ``noise``/``amb``/``sp1`` in ant mode, ``rec`` in rec mode —
+        plus ``cal:VNAO`` / ``cal:VNAS`` / ``cal:VNAL`` standards).
     header : dict
         Header published alongside the bundle (instrument header plus
         ``mode``, ``metadata_snapshot_unix``, ``run_tag``,
@@ -357,6 +359,9 @@ def measure_s11(
     if mode == "ant":
         logger.info("Measuring antenna, noise, load S11")
         s11 = vna.measure_ant(measure_noise=True, measure_load=True)
+        logger.info("Measuring ambient-load and Spare-1 S11")
+        s11["amb"] = vna.measure_dut("VNAAMB")
+        s11["sp1"] = vna.measure_dut("VNASP1")
     else:  # mode is rec
         logger.info("Measuring receiver S11")
         s11 = vna.measure_rec()
