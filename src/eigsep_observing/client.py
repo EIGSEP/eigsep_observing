@@ -13,6 +13,7 @@ from eigsep_redis import (
 from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from . import vna_service
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient
 from .tempctrl_client import TempCtrlClient
@@ -114,11 +115,16 @@ class PandaClient:
                 "is unknown."
             )
 
-        if self.cfg.get("use_vna", False):
-            self.init_VNA()
-        else:
-            self.vna = None
-            self.logger.info("VNA not initialized")
+        # VNA is lazy: cmtvna.service busy-loops the CPU, so it runs
+        # on-demand. vna_open()/vna_session() start the service, wait for
+        # readiness, and build a fresh VNA; the service is stopped on
+        # close. self.vna is None between sessions. See
+        # eigsep_observing.vna_service.
+        self.vna = None
+        self._vna_enabled = self.cfg.get("use_vna", False)
+        self._vna_depth = 0
+        if not self._vna_enabled:
+            self.logger.info("VNA disabled (use_vna=false)")
 
         if self.cfg.get("use_motor", False):
             self.init_motor_client()
@@ -375,6 +381,87 @@ class PandaClient:
         self.vna.setup(**kwargs)
         self.logger.info("VNA initialized")
 
+    _manage_vna_service = True
+
+    @property
+    def vna_enabled(self):
+        """True if the config enabled the VNA (``use_vna``)."""
+        return self._vna_enabled
+
+    def vna_open(self):
+        """Start cmtvna.service, wait for readiness, and build the VNA.
+
+        Refcounted: the service starts and the VNA is built on the
+        outermost open; inner opens only bump the depth. On the outermost
+        open, a readiness/build failure stops the service again before
+        re-raising, so a failed open never leaves the CPU pegged. Raises
+        RuntimeError if the config disabled the VNA.
+        """
+        if not self._vna_enabled:
+            raise RuntimeError(
+                "Cannot open a VNA session: VNA disabled in config "
+                "(use_vna=false)."
+            )
+        if self._vna_depth == 0:
+            if self._manage_vna_service:
+                vna_service.start()
+            try:
+                if self._manage_vna_service:
+                    vna_service.wait_ready(
+                        self.cfg["vna_ip"], self.cfg["vna_port"]
+                    )
+                self.init_VNA()
+            except Exception:
+                self._teardown_vna()
+                if self._manage_vna_service:
+                    try:
+                        vna_service.stop()
+                    except Exception:
+                        self.logger.warning(
+                            "cmtvna stop after failed open also failed",
+                            exc_info=True,
+                        )
+                raise
+        self._vna_depth += 1
+
+    def _teardown_vna(self):
+        """Close the VNA socket (if any) and clear the handle."""
+        vna = self.vna
+        self.vna = None
+        sock = getattr(vna, "s", None)
+        if sock is not None and hasattr(sock, "close"):
+            try:
+                sock.close()
+            except Exception:
+                self.logger.warning("VNA socket close failed", exc_info=True)
+
+    def vna_close(self):
+        """Tear down the VNA and stop cmtvna.service on the outermost close."""
+        if self._vna_depth == 0:
+            return
+        self._vna_depth -= 1
+        if self._vna_depth > 0:
+            return
+        self._teardown_vna()
+        if self._manage_vna_service:
+            try:
+                vna_service.stop()
+            except Exception:
+                self.logger.warning("cmtvna stop failed", exc_info=True)
+
+    @contextmanager
+    def vna_session(self):
+        """Context-managed VNA window: open on enter, close on exit.
+
+        Wrap it OUTSIDE ``coord.switch_section()`` so the ~5.5s warm-up
+        does not hold the RF-switch lock.
+        """
+        self.vna_open()
+        try:
+            yield
+        finally:
+            self.vna_close()
+
     def init_motor_client(self):
         """
         Build a :class:`MotorClient` from the config.
@@ -628,28 +715,38 @@ class PandaClient:
             If the resolved ``switch_schedule`` is neither ``None`` nor
             a dict.
         """
-        if self.vna is None:
+        if not self._vna_enabled:
             self._warn_with_status(
-                "VNA not initialized; skipping VNA portion of calibration."
+                "VNA disabled (use_vna=false); skipping VNA portion of "
+                "calibration."
             )
         else:
-            with self.coord.switch_section():
-                try:
-                    for mode in vna_modes:
-                        if self.stop_client.is_set():
-                            return False
-                        self.logger.info(
-                            f"Calibration: measuring S11 of {mode} with VNA"
-                        )
-                        self.measure_s11(mode)
-                except Exception as exc:
-                    # Match vna_loop's recovery posture: log loudly
-                    # and continue to the dwell phase rather than
-                    # aborting calibration outright.
-                    self._error_with_status(
-                        f"Calibration VNA cycle aborted "
-                        f"({type(exc).__name__}: {exc})."
-                    )
+            try:
+                with self.vna_session():
+                    with self.coord.switch_section():
+                        try:
+                            for mode in vna_modes:
+                                if self.stop_client.is_set():
+                                    return False
+                                self.logger.info(
+                                    f"Calibration: measuring S11 of "
+                                    f"{mode} with VNA"
+                                )
+                                self.measure_s11(mode)
+                        except Exception as exc:
+                            # Match vna_loop's recovery posture: log
+                            # loudly and continue to the dwell phase
+                            # rather than aborting calibration
+                            # outright.
+                            self._error_with_status(
+                                f"Calibration VNA cycle aborted "
+                                f"({type(exc).__name__}: {exc})."
+                            )
+            except Exception as exc:
+                self._error_with_status(
+                    f"Calibration VNA session failed "
+                    f"({type(exc).__name__}: {exc})."
+                )
 
         if self.stop_client.is_set():
             return False
@@ -692,49 +789,60 @@ class PandaClient:
         """
         Observe with VNA and write data to files.
         """
-        if self.vna is None:
+        if not self._vna_enabled:
             self._warn_with_status(
-                "VNA not initialized. Cannot execute VNA commands."
+                "VNA disabled in config (use_vna=false); vna_loop exiting."
             )
             return
         while not self.stop_client.is_set():
-            with self.coord.switch_section():
-                prev_mode = self._read_switch_mode_from_redis()
-                if prev_mode is None:
-                    self._warn_with_status(
-                        "rfswitch state unavailable in Redis; defaulting "
-                        "post-VNA switch-back to RFANT."
-                    )
-                    prev_mode = "RFANT"
-                target_mode = prev_mode
-                try:
-                    for mode in ["ant", "rec"]:
-                        self.logger.info(f"Measuring S11 of {mode} with VNA")
-                        self.measure_s11(mode)
-                except Exception as exc:
-                    # Any exception from measure_s11 (``_switch`` raising
-                    # mid-OSL under the eigsep-vna 1.3 contract, VNA
-                    # instrument TimeoutError, Redis write failure, ...)
-                    # leaves the switch at whatever state cmt_vna last
-                    # drove it to. Default the recovery target to RFANT
-                    # rather than prev_mode — we've lost the
-                    # "known-good state" invariant and RFANT is the
-                    # physically safe fallback. The next switch_loop
-                    # iteration will re-assert the configured mode.
-                    self._error_with_status(
-                        f"VNA cycle aborted "
-                        f"({type(exc).__name__}: {exc}); "
-                        "recovering rfswitch to RFANT."
-                    )
-                    target_mode = "RFANT"
-                self.logger.info(
-                    f"Switching rfswitch to {target_mode} "
-                    f"(previous mode: {prev_mode})"
+            try:
+                with self.vna_session():
+                    with self.coord.switch_section():
+                        prev_mode = self._read_switch_mode_from_redis()
+                        if prev_mode is None:
+                            self._warn_with_status(
+                                "rfswitch state unavailable in Redis; "
+                                "defaulting post-VNA switch-back to RFANT."
+                            )
+                            prev_mode = "RFANT"
+                        target_mode = prev_mode
+                        try:
+                            for mode in ["ant", "rec"]:
+                                self.logger.info(
+                                    f"Measuring S11 of {mode} with VNA"
+                                )
+                                self.measure_s11(mode)
+                        except Exception as exc:
+                            # Any exception from measure_s11 (``_switch``
+                            # raising mid-OSL under the eigsep-vna 1.3
+                            # contract, VNA instrument TimeoutError, Redis
+                            # write failure, ...) leaves the switch at
+                            # whatever state cmt_vna last drove it to.
+                            # Default the recovery target to RFANT rather
+                            # than prev_mode — we've lost the
+                            # "known-good state" invariant and RFANT is
+                            # the physically safe fallback. The next
+                            # switch_loop iteration will re-assert the
+                            # configured mode.
+                            self._error_with_status(
+                                f"VNA cycle aborted "
+                                f"({type(exc).__name__}: {exc}); "
+                                "recovering rfswitch to RFANT."
+                            )
+                            target_mode = "RFANT"
+                        self.logger.info(
+                            f"Switching rfswitch to {target_mode} "
+                            f"(previous mode: {prev_mode})"
+                        )
+                        if not self._safe_switch(target_mode):
+                            self._warn_with_status(
+                                f"Failed to switch back to {target_mode}"
+                            )
+            except Exception as exc:
+                self._error_with_status(
+                    f"VNA session failed "
+                    f"({type(exc).__name__}: {exc}); skipping this cycle."
                 )
-                if not self._safe_switch(target_mode):
-                    self._warn_with_status(
-                        f"Failed to switch back to {target_mode}"
-                    )
             self.stop_client.wait(self.cfg["vna_interval"])
 
     def motor_loop(self):

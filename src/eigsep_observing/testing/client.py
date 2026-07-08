@@ -94,6 +94,10 @@ class DummyPandaClient(PandaClient):
     their devices already registered.
     """
 
+    # The dummy client uses DummyVNA and has no cmtvna.service; never
+    # shell out to systemctl.
+    _manage_vna_service = False
+
     def __init__(self, transport=None, *, cfg=None):
         if transport is None:
             transport = DummyTransport()
