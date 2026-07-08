@@ -81,7 +81,10 @@ def _print_menu(last_summary):
     print()
     if last_summary:
         print(f"Last bundle: {last_summary}")
-    print("  [a] antenna bundle  (OSL + VNAANT + VNANOFF + VNANON)")
+    print(
+        "  [a] antenna bundle  (OSL + VNAANT + VNANOFF + VNANON + "
+        "VNAAMB + VNASP1)"
+    )
     print("  [r] receiver bundle (OSL + VNARF)")
     print("  [q] quit")
 

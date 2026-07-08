@@ -111,8 +111,8 @@ def _solve_calibration(
     Coefficients are solved from the most recent ``RFNON``/``RFAMB``
     pair — ``RFAMB`` (ambient load) is the cold reference, ``RFNON``
     (noise diode on) the hot reference. ``RFNOFF`` stays cached and its
-    age still lands in ``meta`` for the cross-check display, but it no
-    longer feeds the solve.
+    age is retained in ``meta`` for offline cross-check / API
+    consumers, but it no longer feeds the solve.
 
     Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
     can't run (missing cache, missing T_LOAD, missing config); the

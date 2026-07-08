@@ -852,7 +852,9 @@ class LiveStatusAggregator:
 
         ``RFANT`` and ``UNKNOWN`` (and any state still inside the
         transition window) are no-ops so the operator's first-order
-        cal keeps using the most recent valid on/off pair.
+        cal keeps using the most recent valid on/amb pair — RFNOFF
+        is cached alongside for the offline cross-check but does not
+        feed the solve.
         """
         rf = s.metadata_latest.get("rfswitch") or {}
         name = rf.get("sw_state_name") if isinstance(rf, dict) else None

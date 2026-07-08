@@ -4,8 +4,9 @@ Display-only. The "real" calibration (lab-measured ENR, polynomial
 bandpass corrections, etc.) lives elsewhere; this module exists so an
 operator looking at the live dashboard can flip a toggle and see
 spectra in Kelvin, with the built-in sanity check that ``RFAMB``
-calibrates to ``T_LOAD``, ``RFNON`` to ``T_LOAD + T_ENR``, and the
-``RFNOFF`` cross-check lands near ``T_LOAD``.
+calibrates to ``T_LOAD`` and ``RFNON`` to ``T_LOAD + T_ENR``.
+``RFNOFF`` is still measured every cycle and lands near ``T_LOAD``
+as an offline cross-check.
 
 Pure numpy. No Redis, no Flask, no aggregator — the route handler in
 ``app.py`` and the cache in ``aggregator.py`` are the only callers.

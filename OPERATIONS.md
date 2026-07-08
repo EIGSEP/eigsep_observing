@@ -133,7 +133,7 @@ eigsep-observe --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
                     │  │   PandaClient     │   │
                     │  │                   │   │
                     │  │  heartbeat_thd ────────── sets heartbeat:client
-                    │  │  switch_loop   ────────── cycles RFANT/RFNOFF/RFNON
+                    │  │  switch_loop   ────────── cycles RFANT/RFNOFF/RFNON/RFAMB/RFSP1
                     │  │  vna_loop      ────────── measures S11, writes stream:vna
                     │  │  pico threads  ────────── reads sensors, writes metadata
                     │  │                   │   │
@@ -182,24 +182,34 @@ switch_loop                          vna_loop
 ───────────                          ────────
 while not stopped:                   while not stopped:
   for mode in schedule:                acquire switch_lock
-    ┌──────────────────┐               ├─ save current switch state
-    │ RFANT  (sky)     │ 3600s         ├─ measure_s11("ant")
-    │  lock → switch   │               │   ├─ set VNA power for antenna
-    │  unlock          │               │   ├─ OSL calibration (O, S, L)
-    │  wait 3600s      │               │   ├─ measure antenna + noise + load
-    │  (VNA can        │               │   ├─ get live metadata from Redis
-    │   interrupt here)│               │   └─ write to stream:vna
-    ├──────────────────┤               ├─ measure_s11("rec")
-    │ RFNOFF (load)    │ 60s           │   ├─ set VNA power for receiver
-    │  lock → switch   │               │   ├─ OSL calibration
-    │  wait with lock  │               │   ├─ measure receiver
-    │  (VNA blocked)   │               │   └─ write to stream:vna
-    ├──────────────────┤               ├─ restore previous switch state
-    │ RFNON  (noise)   │ 60s           release switch_lock
-    │  lock → switch   │               wait vna_interval (3600s)
-    │  wait with lock  │
-    │  (VNA blocked)   │
-    └──────────────────┘
+    ┌─────────────────────────────────────────────────────┐         ├─ save current switch state
+    │ RFANT  (sky)                                        │ 3600s   ├─ measure_s11("ant")
+    │  lock → switch                                      │         │   ├─ set VNA power for antenna
+    │  unlock                                             │         │   ├─ OSL calibration (O, S, L)
+    │  wait 3600s                                         │         │   ├─ measure antenna + noise + load
+    │  (VNA can                                           │         │   ├─ get live metadata from Redis
+    │   interrupt here)                                   │         │   └─ write to stream:vna
+    ├─────────────────────────────────────────────────────┤         ├─ measure_s11("rec")
+    │ RFNOFF (noise off — offline cross-check)            │ 60s     │   ├─ set VNA power for receiver
+    │  lock → switch                                      │         │   ├─ OSL calibration
+    │  wait with lock                                     │         │   ├─ measure receiver
+    │  (VNA blocked)                                      │         │   └─ write to stream:vna
+    ├─────────────────────────────────────────────────────┤         ├─ restore previous switch state
+    │ RFNON  (noise on — Y-factor hot)                    │ 60s     release switch_lock
+    │  lock → switch                                      │         wait vna_interval (3600s)
+    │  wait with lock                                     │
+    │  (VNA blocked)                                      │
+    ├─────────────────────────────────────────────────────┤
+    │ RFAMB  (ambient load — Y-factor cold)               │ 60s
+    │  lock → switch                                      │
+    │  wait with lock                                     │
+    │  (VNA blocked)                                      │
+    ├─────────────────────────────────────────────────────┤
+    │ RFSP1  (Spare-1 open cable, see switch_connections) │ 60s
+    │  lock → switch                                      │
+    │  wait with lock                                     │
+    │  (VNA blocked)                                      │
+    └─────────────────────────────────────────────────────┘
 
 heartbeat_thd                        pico threads (per device)
 ─────────────                        ────────────────────────
