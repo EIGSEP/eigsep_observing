@@ -1,21 +1,22 @@
 """Fit per-channel linear-range bounds from a corr_linearity sweep.
 
 Reads the per-channel sweep npz written by ``corr_linearity.py`` and,
-per input and per frequency channel, fits a line to
-``log10(counts - floor)`` vs input power (dBm) over a robust region
-(sigma-clipped). The additive receive-chain noise floor — estimated
-per channel from the two deepest attenuation steps — is subtracted
-before fitting: raw counts flatten into the floor at the bottom of
-the sweep, which biases a raw-counts fit shallow (measured on the
-2026-07-08 input-5 sweep: raw fits gave ~0.46 dB/dB where the
-floor-subtracted excess tracks 1 dB/dB). The linear range is the set
-of measurable steps (excess above ``--min-excess-frac`` of the floor)
-whose excess stays within ``--threshold-db`` of the fit; the
-per-channel min/max bounds remain the *raw* measured counts at the
+per input and per frequency channel, finds the attenuation steps
+whose ``log10(counts - floor)`` sits within ``--threshold-db`` of a
+unit-slope (1 dB/dB) line anchored at the steps' median offset — the
+response a linear chain must have. The additive receive-chain noise
+floor — estimated per channel from the two deepest attenuation
+steps — is subtracted first: raw counts flatten into the floor at
+the bottom of the sweep, which biases everything shallow (measured
+on the 2026-07-08 input-5 sweep: raw fits gave ~0.46 dB/dB where the
+floor-subtracted excess tracks 1 dB/dB). Only measurable steps
+(excess above ``--min-excess-frac`` of the floor) participate. The
+per-channel min/max bounds are the *raw* measured counts at the
 lowest and highest linear step, since production compares raw corr
-data against them. Channels with too little dynamic range or too
-few usable steps (e.g. above the anti-aliasing LPF cutoff, where the
-noise source injects no power) get NaN bounds.
+data against them; a free-slope line refit on the linear set is
+saved as the measured-linearity diagnostic. Channels with too little
+dynamic range or too few usable steps (e.g. above the anti-aliasing
+LPF cutoff, where the noise source injects no power) get NaN bounds.
 
 As a sanity gate, the median fit slope per input is checked against
 the ideal 1 dB/dB; a large deviation means the sweep is floor- or
@@ -117,7 +118,7 @@ parser.add_argument(
 def fit_channel(
     p_in_dbm, counts, threshold_db, min_excess_frac, min_steps, min_dr_db
 ):
-    """Fit one channel's log10(counts - floor) vs input power.
+    """Find one channel's linear range in log10(counts - floor).
 
     Parameters
     ----------
@@ -131,10 +132,11 @@ def fit_channel(
     Returns
     -------
     slope, intercept, min_counts, max_counts, floor : float
-        Fit of the floor-subtracted excess, raw-counts bounds of the
-        linear range, and the channel's floor estimate. All NaN when
-        the channel is degenerate (insufficient dynamic range or too
-        few fit steps).
+        Free-slope refit of the floor-subtracted excess on the linear
+        set (the measured-linearity diagnostic), raw-counts bounds of
+        the linear range, and the channel's floor estimate. All NaN
+        when the channel is degenerate (insufficient dynamic range or
+        no credible unit-slope run).
 
     """
     nan5 = (np.nan,) * 5
@@ -162,24 +164,32 @@ def fit_channel(
 
     with np.errstate(divide="ignore", invalid="ignore"):
         log_excess = np.log10(np.where(excess > 0, excess, np.nan))
-    mask = candidates
-    slope = intercept = None
-    for _ in range(MAX_CLIP_ITERATIONS):
-        slope, intercept = np.polyfit(p_in_dbm[mask], log_excess[mask], 1)
-        resid_db = 10 * (log_excess - (slope * p_in_dbm + intercept))
-        new_mask = candidates & (np.abs(resid_db) <= threshold_db)
-        if new_mask.sum() < min_steps:
-            break  # keep the previous (last valid) fit
-        if (new_mask == mask).all():
-            break
-        mask = new_mask
-
-    resid_db = 10 * (log_excess - (slope * p_in_dbm + intercept))
-    # Only measurable steps (excess gate) may claim linearity: a step
+    # A linear chain has counts ∝ input power: slope exactly 1 dB/dB.
+    # Fitting a free slope to candidates that include compressed steps
+    # lets the contamination drag the line (a free fit + hard clip
+    # collapsed below min_steps and kept the contaminated fit on the
+    # 2026-07-08 run-2 sweep), so anchor a unit-slope line at the
+    # candidates' median offset — robust to <50% contamination — and
+    # let the threshold define the linear set around it. Only
+    # measurable steps (excess gate) may claim linearity: a step
     # buried in floor noise says nothing about the chain either way.
-    linear = candidates & (np.abs(resid_db) <= threshold_db)
-    if not linear.any():
-        return nan5
+    unit_slope = 0.1  # log10(counts) per dB of input power
+    linear = candidates
+    for _ in range(MAX_CLIP_ITERATIONS):
+        offset = np.median(log_excess[linear] - unit_slope * p_in_dbm[linear])
+        resid_db = 10 * (log_excess - (unit_slope * p_in_dbm + offset))
+        new_linear = candidates & (np.abs(resid_db) <= threshold_db)
+        if new_linear.sum() < min_steps:
+            # No credible unit-slope run: the channel never shows
+            # enough verifiably linear steps.
+            return nan5
+        if (new_linear == linear).all():
+            break
+        linear = new_linear
+
+    # Free-slope refit on the linear set is the measured-linearity
+    # diagnostic the downstream slope gate checks.
+    slope, intercept = np.polyfit(p_in_dbm[linear], log_excess[linear], 1)
     idx = np.nonzero(linear)[0]
     return slope, intercept, counts[idx[0]], counts[idx[-1]], floor
 
