@@ -909,6 +909,37 @@ def test_rfnon_spectrum_caches_independently_of_rfnoff(agg, seeded):
     assert state.last_rfnoff_pairs is None  # RFNOFF was never observed
 
 
+def test_rfamb_spectrum_caches_independently(agg, seeded):
+    """RFAMB integrations populate their own cal-reference cache —
+    the new Y-factor cold reference (spec: RFNON+RFAMB pair)."""
+    snap, panda = seeded
+    _publish_rfswitch(panda, "RFAMB", sw_state=13)
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=400, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfamb_pairs is not None
+    assert "0" in state.last_rfamb_pairs
+    assert state.last_rfamb_acc_cnt == 400
+    assert state.last_rfamb_unix is not None
+    assert state.last_rfnoff_pairs is None
+    assert state.last_rfnon_pairs is None
+    # snapshot() must hand out a shallow copy of the pairs dict (same
+    # convention as last_rfnoff_pairs / last_rfnon_pairs) so a Flask
+    # handler mutating its snapshot can't corrupt the live cache.
+    state.last_rfamb_pairs.clear()
+    assert "0" in agg.snapshot().last_rfamb_pairs
+
+
 def test_corr_during_transition_window_is_not_cached(agg, seeded):
     """Spectra captured while the physical switch is mid-actuation
     (i.e. less than ``RFSWITCH_TRANSITION_WINDOW_S`` since the state

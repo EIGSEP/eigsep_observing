@@ -177,10 +177,12 @@ class StateSnapshot:
     rfswitch_state_entered_unix: Optional[float] = None
 
     # Most recent integration captured while the switch was settled in
-    # RFNOFF / RFNON (dwell past ``RFSWITCH_TRANSITION_WINDOW_S``). The
-    # live-status first-order Y-factor calibration reads from these.
-    # ``RFANT`` and ``UNKNOWN`` integrations never evict the caches, so
-    # the operator's "calibrated" toggle keeps painting across long
+    # RFNOFF / RFNON / RFAMB (dwell past
+    # ``RFSWITCH_TRANSITION_WINDOW_S``). The live-status first-order
+    # Y-factor calibration reads RFNON (hot) + RFAMB (cold reference);
+    # RFNOFF is cached for the dashboard cross-check only. ``RFANT``
+    # and ``UNKNOWN`` integrations never evict the caches, so the
+    # operator's "calibrated" toggle keeps painting across long
     # antenna dwells and short transition windows.
     last_rfnoff_pairs: Optional[dict[str, np.ndarray]] = None
     last_rfnoff_unix: Optional[float] = None
@@ -188,6 +190,9 @@ class StateSnapshot:
     last_rfnon_pairs: Optional[dict[str, np.ndarray]] = None
     last_rfnon_unix: Optional[float] = None
     last_rfnon_acc_cnt: Optional[int] = None
+    last_rfamb_pairs: Optional[dict[str, np.ndarray]] = None
+    last_rfamb_unix: Optional[float] = None
+    last_rfamb_acc_cnt: Optional[int] = None
 
     # Most recent VNA payload, cached per-mode. The route handler
     # calibrates lazily off these (see eigsep_observing.vna_calibration)
@@ -481,6 +486,11 @@ class LiveStatusAggregator:
                 last_rfnon_pairs=(
                     dict(s.last_rfnon_pairs)
                     if s.last_rfnon_pairs is not None
+                    else None
+                ),
+                last_rfamb_pairs=(
+                    dict(s.last_rfamb_pairs)
+                    if s.last_rfamb_pairs is not None
                     else None
                 ),
                 snap_fpga_reachable=s.snap_fpga_reachable,
@@ -832,9 +842,9 @@ class LiveStatusAggregator:
         acc_cnt: int,
         now: float,
     ) -> None:
-        """Cache the freshly-received integration as an RFNOFF or RFNON
-        reference if the switch has been settled in that state past the
-        physical transition window.
+        """Cache the freshly-received integration as an RFNOFF, RFNON,
+        or RFAMB reference if the switch has been settled in that
+        state past the physical transition window.
 
         ``RFANT`` and ``UNKNOWN`` (and any state still inside the
         transition window) are no-ops so the operator's first-order
@@ -842,7 +852,7 @@ class LiveStatusAggregator:
         """
         rf = s.metadata_latest.get("rfswitch") or {}
         name = rf.get("sw_state_name") if isinstance(rf, dict) else None
-        if name not in ("RFNOFF", "RFNON"):
+        if name not in ("RFNOFF", "RFNON", "RFAMB"):
             return
         entered = s.rfswitch_state_entered_unix
         if entered is None or (now - entered) < RFSWITCH_TRANSITION_WINDOW_S:
@@ -851,10 +861,14 @@ class LiveStatusAggregator:
             s.last_rfnoff_pairs = pairs_data
             s.last_rfnoff_unix = now
             s.last_rfnoff_acc_cnt = acc_cnt
-        else:
+        elif name == "RFNON":
             s.last_rfnon_pairs = pairs_data
             s.last_rfnon_unix = now
             s.last_rfnon_acc_cnt = acc_cnt
+        else:  # RFAMB
+            s.last_rfamb_pairs = pairs_data
+            s.last_rfamb_unix = now
+            s.last_rfamb_acc_cnt = acc_cnt
 
     def _maybe_recompute_thresholds(self, header: dict) -> None:
         """Rebuild self.thresholds when integration_time changes."""
