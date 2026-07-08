@@ -178,8 +178,9 @@ class EigsepFpga:
             accumulation length, dtype, redis). See
             `config/corr_config.yaml`.
         wiring : dict
-            Hardware wiring manifest (snap_id + per-antenna FEM / SNAP
-            input / optional PAM mapping). See `config/wiring.yaml`.
+            Hardware wiring manifest (snap_id + per-antenna modules
+            (tx or FEM, plus Rx) / SNAP input / optional PAM mapping).
+            See `config/wiring.yaml`.
             Kept separate from ``cfg`` so it can be edited in the field
             without tripping ``assert_config_matches_redis`` — the
             standalone ``scripts/republish_header.py`` updates the
