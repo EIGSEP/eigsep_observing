@@ -78,7 +78,8 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="wiring_file",
         default=str(get_config_path("wiring.yaml")),
         help=(
-            "Hardware wiring manifest (antenna → FEM → SNAP input). Edit "
+            "Hardware wiring manifest (antenna → tx/FEM + Rx → SNAP "
+            "input). Edit "
             "and re-run scripts/republish_header.py to correct a file "
             "header without --reinit."
         ),
