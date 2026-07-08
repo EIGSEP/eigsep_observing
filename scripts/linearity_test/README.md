@@ -38,8 +38,11 @@ plots. This workflow supersedes it with per-channel line fits.
    noise floor is estimated from the two deepest attenuation steps
    (so sweep down far enough to pin it). Steps with measurable excess
    (`--min-excess-frac` of the floor) within `--threshold-db`
-   (default 1 dB) of that line are "linear", and the min/max bounds
-   are the raw measured counts at the lowest/highest linear step.
+   (default 1 dB) of that line are "linear". The min bound is the
+   raw measured counts at the lowest linear step; the max bound is
+   interpolated to the threshold crossing between the highest linear
+   step and the first failing step, so it is not quantized to the
+   sweep's discrete attenuation values.
    Channels with too little dynamic range (e.g. above the LPF cutoff)
    get NaN bounds. The median fit slope per input is checked against
    the ideal 1 dB/dB; a warning there means the sweep can't support
