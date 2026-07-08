@@ -1803,8 +1803,9 @@ def test_corr_route_includes_linear_range_bounds(tmp_path):
 
 
 def test_corr_route_omits_linear_range_when_not_configured(client):
-    """No linear_range_file in corr_config (the shipped default) →
-    the payload simply has no bounds keys and the route still works."""
+    """No linear_range_file in corr_config (the seeded fixture has
+    none) → the payload has no bounds keys and the route still
+    works."""
     data = client.get("/api/corr").get_json()["data"]
     assert "linear_min" not in data
     assert "linear_max" not in data

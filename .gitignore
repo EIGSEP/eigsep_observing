@@ -4,6 +4,8 @@
 *.h5
 *.eig
 *.npz
+# except packaged calibration products (versioned, deploy-committed)
+!src/eigsep_observing/data/corr_linear_range_*.npz
 
 # run_fake_observation.sh output
 logs/

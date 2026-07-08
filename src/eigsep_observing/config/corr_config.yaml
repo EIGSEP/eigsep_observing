@@ -67,6 +67,8 @@ diagnostics_period_s: 1.0
 # plot — both after validating the product's operating point against
 # the live corr header (mismatch => ERROR log, bounds omitted).
 # null = feature off (no product measured for this operating point).
-linear_range_file: null
+# Current product: 2026-07-08 lab sweep, inputs 0/2/3/4/5 (input 1
+# unused in the field), conservative cross-input envelope.
+linear_range_file: "corr_linear_range_v2_4_2026-07-08.npz"
 # Hardware wiring (antenna → FEM → PAM → SNAP input mapping) lives in
 # `wiring.yaml`, not here. This file is software-only.
