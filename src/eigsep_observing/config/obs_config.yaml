@@ -13,8 +13,18 @@ corr_ntimes: 240
 use_switches: true
 switch_schedule:  # seconds per measurement
   RFANT: 3600  # sky
-  RFNOFF: 60  # load
-  RFNON: 60  # noise source
+  RFNOFF: 60  # noise source off (offline cross-check)
+  RFNON: 60  # noise source on (Y-factor hot reference)
+  RFAMB: 60  # ambient load (Y-factor cold reference)
+  RFSP1: 60  # Spare 1 port, see switch_connections
+
+# What is physically connected to the spare rfswitch ports right now.
+# Purely descriptive — no code reads it. It rides into every corr and
+# VNA file header via the obs_config embed, so each file records the
+# wiring that was active when it was written. Update on every rewire.
+switch_connections:
+  SP1: "long coax cable, open end"  # operator: record length on install
+  SP2: null  # unconnected
 
 # vna
 use_vna: true
@@ -51,14 +61,18 @@ vna_position_sweep:
 
 # live-status first-order Y-factor calibration (display-only).
 # The dashboard's "Calibrated" toggle reads these to convert raw corr
-# power to Kelvin using the most recent RFNON / RFNOFF integrations.
+# power to Kelvin using the most recent RFNON / RFAMB integrations
+# (RFNOFF is still visited each cycle as an offline cross-check).
 # This is intentionally not the science-grade cal — that lives in a
 # separate offline pipeline.
 #
-# Y-factor: G = (P_on − P_off) / T_ns
-#           T_in = T_ns · (P − P_off) / (P_on − P_off) + T_LOAD
-# T_ns is the diode's excess noise temperature (post-attenuator), derived
-# from the IEEE-standard ENR convention: T_ns = 290 K · 10^(ENR_dB / 10).
+# Y-factor: G = (P_on − P_amb) / T_ns
+#           T_in = T_ns · (P − P_amb) / (P_on − P_amb) + T_LOAD
+# Assumes the noise diode's off-state physical temperature ≈ the
+# ambient load temperature (both sit at enclosure ambient).
+# T_ns is the diode's excess noise temperature (post-attenuator),
+# derived from the IEEE-standard ENR convention:
+# T_ns = 290 K · 10^(ENR_dB / 10).
 calibration:
   noise_diode_enr_db: 11.0   # post-attenuator ENR (dB), referenced to 290 K
   # Which metadata stream carries the calibration load's temperature

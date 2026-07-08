@@ -45,7 +45,13 @@ OBS_CFG = {
         "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
         "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
     },
-    "switch_schedule": {"RFANT": 3600, "RFNOFF": 60, "RFNON": 60},
+    "switch_schedule": {
+        "RFANT": 3600,
+        "RFNOFF": 60,
+        "RFNON": 60,
+        "RFAMB": 60,
+        "RFSP1": 60,
+    },
     "use_switches": True,
     "calibration": {
         "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
