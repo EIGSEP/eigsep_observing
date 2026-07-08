@@ -22,6 +22,10 @@ const LIGHT_COLORWAY = [
   "#b9770e", "#117a8b", "#7a0016", "#1c2833",
 ];
 
+// Warning amber for the linear-range max bound. Plotly can't read CSS
+// variables, so this mirrors the CSS --warn value — keep them in sync.
+const LINEAR_MAX_WARN_COLOR = "#c79b00";
+
 // Per-theme Plotly styling. Plotly can't read the CSS variables that
 // drive the page chrome, so plot colors/fonts/line widths live here and
 // are stamped onto the layout objects by applyThemeToLayouts(). The
@@ -406,22 +410,33 @@ function updateCorr(corr) {
   // null entries (degenerate-fit channels, e.g. above the LPF cutoff)
   // render as line gaps.
   if (!isCalibrated && corr.linear_min && corr.linear_max) {
-    for (const [bounds, name] of [
-      [corr.linear_min, "linear range min"],
-      [corr.linear_max, "linear range max"],
-    ]) {
-      magTraces.push({
-        x: freqs,
-        y: bounds,
-        type: "scatter",
-        mode: "lines",
-        name,
-        line: { dash: "dash", width: 1, color: activeTheme.font },
-        opacity: 0.5,
-        hoverinfo: "skip",
-        showlegend: false,
-      });
-    }
+    // Asymmetric styling: the max bound marks measured compression
+    // onset — data-corrupting, so it gets the warning amber — while
+    // the min bound only marks the bottom of the *verified* range;
+    // cold cal states (load, noise-off) legitimately sit at or below
+    // it, so it stays a faint informational dotted line.
+    magTraces.push({
+      x: freqs,
+      y: corr.linear_max,
+      type: "scatter",
+      mode: "lines",
+      name: "linear range max",
+      line: { dash: "dash", width: 1.5, color: LINEAR_MAX_WARN_COLOR },
+      opacity: 0.9,
+      hoverinfo: "skip",
+      showlegend: false,
+    });
+    magTraces.push({
+      x: freqs,
+      y: corr.linear_min,
+      type: "scatter",
+      mode: "lines",
+      name: "linear range min",
+      line: { dash: "dot", width: 1, color: activeTheme.font },
+      opacity: 0.35,
+      hoverinfo: "skip",
+      showlegend: false,
+    });
   }
   const layout = isCalibrated ? magLayoutCal : magLayoutRaw;
   if (!magPlotInitialized) {
