@@ -1057,7 +1057,12 @@ def dummy_vna():
 
 
 def _make_vna_payload(vna):
-    """Generate VNA data, header, and metadata from a DummyVNA."""
+    """Generate VNA data, header, and metadata from a DummyVNA.
+
+    Deliberately minimal handcrafted bundle (no cal:* / amb / sp1):
+    this exercises record_vna_data's key-agnostic passthrough, not
+    the full ant-bundle producer contract (enforced in contract_tests).
+    """
     s11 = vna.measure_ant(measure_noise=True, measure_load=True)
     header = dict(vna.header)
     header["freqs"] = header["freqs"].tolist()  # JSON serializable

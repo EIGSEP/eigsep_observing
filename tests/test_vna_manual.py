@@ -11,13 +11,15 @@ from eigsep_observing.vna import save_vna_manual_h5
 def _ant_payload(nfreq=8):
     """Synthesize a payload shaped like measure_s11('ant') would return.
 
-    Six complex traces (ant/noise/load + three cal standards) plus a
-    header carrying the freq axis and the production overlay keys."""
+    Eight complex traces (ant/load/noise/amb/sp1 + three cal standards)
+    plus a header carrying the freq axis and the production overlay keys."""
     rng = np.random.default_rng(0)
     s11 = {
         "ant": rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq),
         "noise": rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq),
         "load": rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq),
+        "amb": rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq),
+        "sp1": rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq),
         "cal:VNAO": np.ones(nfreq, dtype=complex) * 0.95,
         "cal:VNAS": -np.ones(nfreq, dtype=complex) * 0.95,
         "cal:VNAL": np.full(nfreq, 0.05 + 0j),
@@ -77,12 +79,14 @@ def test_save_vna_manual_h5_ant_mode_round_trips(tmp_path):
             "ant",
             "noise",
             "load",
+            "amb",
+            "sp1",
             "cal:VNAO",
             "cal:VNAS",
             "cal:VNAL",
         ):
             np.testing.assert_array_equal(f[f"raw/{key}"][:], s11[key])
-        for dut in ("ant", "noise", "load"):
+        for dut in ("ant", "noise", "load", "amb", "sp1"):
             arr = f[f"calibrated/{dut}"][:]
             assert arr.shape == s11["ant"].shape
             assert arr.dtype == np.complex128
