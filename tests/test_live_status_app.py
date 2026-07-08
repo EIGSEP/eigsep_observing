@@ -21,8 +21,10 @@ from eigsep_redis import (
 )
 from eigsep_redis.testing import DummyTransport
 
+from conftest import HEADER as GOLDEN_HEADER
 from eigsep_observing.adc import AdcSnapshotWriter
 from eigsep_observing.corr import CorrConfigStore, CorrWriter
+from eigsep_observing.linear_range import save_linear_range
 from eigsep_observing.live_status import (
     LiveStatusAggregator,
     create_app,
@@ -1698,3 +1700,65 @@ def test_app_pair_label_is_io_pair_label():
     from eigsep_observing import io
 
     assert app.pair_label is io.pair_label
+
+
+# -- linear-range overlay ---------------------------------------------
+
+
+def test_corr_route_includes_linear_range_bounds(tmp_path):
+    """With a product configured and an operating-point-matching
+    header published, /api/corr carries JSON-safe per-channel bounds
+    (NaN-masked channels as null)."""
+    nchan = GOLDEN_HEADER["nchan"]
+    linear_min = np.full(nchan, 1e5)
+    linear_max = np.full(nchan, 5e8)
+    # NaN-masked top band, as the real fit produces above the LPF cutoff
+    linear_min[-nchan // 10 :] = np.nan
+    linear_max[-nchan // 10 :] = np.nan
+    product_path = tmp_path / "product.npz"
+    save_linear_range(
+        product_path,
+        freqs=np.arange(nchan, dtype=np.float64),
+        linear_min=linear_min,
+        linear_max=linear_max,
+        header=GOLDEN_HEADER,
+        threshold_db=1.0,
+        smooth_window=17,
+        created_unix=1751000000.0,
+        source_file="linearity_corr.npz",
+    )
+
+    snap = DummyTransport()
+    panda = DummyTransport()
+    store = CorrConfigStore(snap)
+    store.upload(dict(CORR_CONFIG, linear_range_file=str(product_path)))
+    # The golden production header carries the full operating point,
+    # which the aggregator validates the product against.
+    store.upload_header(GOLDEN_HEADER)
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+    try:
+        agg._snap_tick()
+        data = client_for(agg).get("/api/corr").get_json()["data"]
+    finally:
+        agg.stop(timeout=1.0)
+
+    assert len(data["linear_min"]) == nchan
+    assert len(data["linear_max"]) == nchan
+    assert data["linear_min"][0] == pytest.approx(1e5)
+    assert data["linear_max"][0] == pytest.approx(5e8)
+    # NaN channels serialize as JSON null (Plotly line gap), never NaN.
+    assert data["linear_min"][-1] is None
+    assert data["linear_max"][-1] is None
+
+
+def test_corr_route_omits_linear_range_when_not_configured(client):
+    """No linear_range_file in corr_config (the shipped default) →
+    the payload simply has no bounds keys and the route still works."""
+    data = client.get("/api/corr").get_json()["data"]
+    assert "linear_min" not in data
+    assert "linear_max" not in data

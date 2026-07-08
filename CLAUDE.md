@@ -344,6 +344,25 @@ If you change the on-disk format in the future, update `read_hdf5` to
 invert the transformation so that callers never need to know about the
 storage representation.
 
+## Linear-range product: operating-point-validated, omit-on-mismatch
+
+`linear_range.py` defines the per-channel linear-range calibration
+product (min/max raw corr counts, NaN where the fit is degenerate,
+e.g. above the LPF cutoff), fit by
+`scripts/linearity_test/fit_linearity.py` from a manual attenuation
+sweep and shipped as an npz in `data/` named by `linear_range_file`
+in `corr_config.yaml` (null = feature off). Two consumers load it via
+the shared `load_linear_range`: `append_corr_header` (native
+`linear_range_min`/`linear_range_max` float datasets in corr file
+headers, injected writer-side like `freqs` because the Redis header
+is JSON) and the live-status aggregator (dashed bounds on the raw
+corr plot; NaN → JSON null → Plotly line gap). Both validate
+`OPERATING_POINT_FIELDS` (adc_gain, fft_shift, corr_scalar, ...)
+against the live corr header and **omit the bounds with an ERROR
+log on any failure** — bounds from a different operating point are
+junk, and a bad product must never block corr writes. Re-fit the
+product after any operating-point change.
+
 ## Testing philosophy: dummies over mocks
 
 When testing classes that interact with hardware, Redis, or other

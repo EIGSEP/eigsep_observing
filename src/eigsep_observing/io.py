@@ -12,6 +12,11 @@ import threading
 import time
 from pathlib import Path
 
+from .linear_range import (
+    LinearRangeError,
+    load_linear_range,
+    validate_operating_point,
+)
 from .utils import calc_times, calc_freqs_dfreq
 
 logger = logging.getLogger(__name__)
@@ -216,7 +221,8 @@ def corr_pair_labels(header, pairs):
 def append_corr_header(header, acc_cnts, sync_times):
     """
     Append header for correlation files with useful computed
-    quantities: times and frequencies.
+    quantities: times, frequencies, and (when configured via
+    ``linear_range_file``) the per-channel linear-range bounds.
 
     Each computed field is wrapped in a try/except so that a missing
     or malformed header field cannot prevent the corr data from being
@@ -266,6 +272,35 @@ def append_corr_header(header, acc_cnts, sync_times):
             f"({type(e).__name__}: {e}). 'freqs' and 'dfreq' will be "
             f"missing from the file. Producer must be fixed."
         )
+    # Per-channel linear-range bounds (raw corr counts), from the
+    # packaged calibration product named by ``linear_range_file`` in
+    # corr_config.yaml (which reaches this header via the set_header
+    # cfg merge). Bounds measured at a different operating point are
+    # junk, so a mismatch omits them — fix the config or re-measure.
+    lr_file = header.get("linear_range_file")
+    if lr_file:
+        try:
+            product = load_linear_range(lr_file)
+        except LinearRangeError as e:
+            logger.error(
+                f"Linear-range contract violation: {e}. "
+                f"'linear_range_min'/'linear_range_max' will be "
+                f"missing from the file. Fix 'linear_range_file' in "
+                f"corr_config or regenerate the product."
+            )
+        else:
+            mismatches = validate_operating_point(product["header"], header)
+            if mismatches:
+                logger.error(
+                    f"Linear-range operating-point mismatch for "
+                    f"{lr_file!r}: {'; '.join(mismatches)}. "
+                    f"'linear_range_min'/'linear_range_max' will be "
+                    f"missing from the file. Re-measure the product "
+                    f"at this operating point or fix corr_config."
+                )
+            else:
+                new_header["linear_range_min"] = product["linear_min"]
+                new_header["linear_range_max"] = product["linear_max"]
     return new_header
 
 

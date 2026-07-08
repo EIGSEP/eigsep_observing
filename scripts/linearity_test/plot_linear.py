@@ -49,9 +49,32 @@ if args.adc:
 if args.corr:
     ax = axes[idx]
     d = np.load(args.corr)
-    input_power = TOTAL_POWER_DBM - d["attenuation_dB"]
-    ax.plot(input_power, d["power_0"], "o-", label="Input N0")
-    ax.plot(input_power, d["power_1"], "s-", label="Input E2")
+    # Old sweeps (April 2026) stored total power directly as
+    # power_{p}; per-channel sweeps store spectra_{p} with shape
+    # (nsteps, nsamples, nchan) — reduce to total power on the fly.
+    if "power_0" in d.files:
+        total_power_dbm = TOTAL_POWER_DBM
+        power = {
+            k[len("power_") :]: d[k] for k in d.files if k.startswith("power_")
+        }
+    else:
+        total_power_dbm = float(d["noise_density_dbm_hz"]) + 10 * np.log10(
+            float(d["bandwidth_hz"])
+        )
+        power = {
+            k[len("spectra_") :]: d[k].mean(axis=1).sum(axis=-1)
+            for k in d.files
+            if k.startswith("spectra_")
+        }
+    input_power = total_power_dbm - d["attenuation_dB"]
+    markers = "os^vD"
+    for i, p in enumerate(sorted(power)):
+        ax.plot(
+            input_power,
+            power[p],
+            markers[i % len(markers)] + "-",
+            label=f"Input {p}",
+        )
     ax.set_yscale("log")
     ax.set_xlabel("Input power (dBm)")
     ax.set_ylabel("Total power (correlator units)")
