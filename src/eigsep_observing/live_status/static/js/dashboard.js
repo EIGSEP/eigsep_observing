@@ -401,6 +401,28 @@ function updateCorr(corr) {
   // toggle to decide which axis to render.
   const isCalibrated =
     getUseCalibrated() && corr.calibration_meta && !corr.calibration_meta.stale;
+  // Measured linear-range bounds (raw counts) as dashed reference
+  // curves — raw view only; they are meaningless on the Kelvin axis.
+  // null entries (degenerate-fit channels, e.g. above the LPF cutoff)
+  // render as line gaps.
+  if (!isCalibrated && corr.linear_min && corr.linear_max) {
+    for (const [bounds, name] of [
+      [corr.linear_min, "linear range min"],
+      [corr.linear_max, "linear range max"],
+    ]) {
+      magTraces.push({
+        x: freqs,
+        y: bounds,
+        type: "scatter",
+        mode: "lines",
+        name,
+        line: { dash: "dash", width: 1, color: activeTheme.font },
+        opacity: 0.5,
+        hoverinfo: "skip",
+        showlegend: false,
+      });
+    }
+  }
   const layout = isCalibrated ? magLayoutCal : magLayoutRaw;
   if (!magPlotInitialized) {
     Plotly.newPlot("plot-mag", magTraces, layout, { displayModeBar: false });

@@ -62,6 +62,11 @@ from ..corr_health import read as read_corr_health
 from ..file_heartbeat import read as read_file_heartbeat
 from ..host_health import read as read_host_health
 from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
+from ..linear_range import (
+    LinearRangeError,
+    load_linear_range,
+    validate_operating_point,
+)
 from ..run_tag import read as read_run_tag
 from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
@@ -116,6 +121,17 @@ class StateSnapshot:
     corr_freqs: Optional[np.ndarray] = None
     corr_header: Optional[dict] = None
     corr_config: Optional[dict] = None
+
+    # Per-channel linear-range bounds (raw corr counts, NaN-masked)
+    # from the packaged calibration product named by
+    # ``corr_config["linear_range_file"]``, populated only after the
+    # product's operating point validates against the live corr
+    # header. ``linear_range_key`` memoizes the (file, header-upload)
+    # pair so a bad product logs one ERROR per header publish, not one
+    # per ~1 s tick.
+    corr_linear_min: Optional[np.ndarray] = None
+    corr_linear_max: Optional[np.ndarray] = None
+    linear_range_key: Optional[tuple] = None
 
     # ADC stats stream (SNAP side, one entry per diagnostics-period
     # tick).
@@ -602,6 +618,8 @@ class LiveStatusAggregator:
                         float(sample_rate) * 1e6, int(nchan)
                     )
                     s.corr_freqs = freqs
+            if header is not None or cfg is not None:
+                self._maybe_load_linear_range(s)
 
             if corr_result is not None:
                 acc_cnt, pairs_data = corr_result
@@ -845,6 +863,57 @@ class LiveStatusAggregator:
             return
         self.thresholds = self.thresholds.with_header(header)
         self._thresholds_int_time = new_int_time
+
+    def _maybe_load_linear_range(self, s: StateSnapshot) -> None:
+        """Populate the per-channel linear-range bounds on ``s``.
+
+        Called under ``self._lock`` from ``_snap_tick`` whenever the
+        corr config or header was (re)read. Loads the packaged product
+        named by ``corr_config["linear_range_file"]`` and validates its
+        operating point against the live corr header; a failed load or
+        mismatch clears the bounds. Memoized on the (file,
+        ``header_upload_unix``) pair so a chronic failure logs one
+        ERROR per header publish instead of one per tick (the tick
+        re-reads config/header every ~1 s).
+        """
+        cfg = s.corr_config or {}
+        lr_file = cfg.get("linear_range_file")
+        header = s.corr_header
+        if not lr_file or header is None:
+            s.corr_linear_min = None
+            s.corr_linear_max = None
+            s.linear_range_key = None
+            return
+        key = (lr_file, header.get("header_upload_unix"))
+        if key == s.linear_range_key:
+            return
+        s.linear_range_key = key
+        s.corr_linear_min = None
+        s.corr_linear_max = None
+        try:
+            product = load_linear_range(lr_file)
+        except LinearRangeError as e:
+            logger.error(
+                "Linear-range contract violation: %s. Dashed bounds "
+                "will be missing from the corr plot. Fix "
+                "'linear_range_file' in corr_config or regenerate "
+                "the product.",
+                e,
+            )
+            return
+        mismatches = validate_operating_point(product["header"], header)
+        if mismatches:
+            logger.error(
+                "Linear-range operating-point mismatch for %r: %s. "
+                "Dashed bounds will be missing from the corr plot. "
+                "Re-measure the product at this operating point or "
+                "fix corr_config.",
+                lr_file,
+                "; ".join(mismatches),
+            )
+            return
+        s.corr_linear_min = product["linear_min"]
+        s.corr_linear_max = product["linear_max"]
 
     # -- panda drain loop ------------------------------------------
 

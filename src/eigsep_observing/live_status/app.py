@@ -318,9 +318,23 @@ def _corr_payload(
         "freq_mhz": ((freqs * 1e-6).tolist() if freqs is not None else None),
         "pairs": pairs_out,
     }
+    if state.corr_linear_min is not None and state.corr_linear_max is not None:
+        # NaN (degenerate-fit channels, e.g. above the LPF cutoff)
+        # must become JSON null: stdlib json emits bare ``NaN`` tokens
+        # that JS ``JSON.parse`` rejects, and Plotly renders null as a
+        # line gap — exactly the wanted look for masked channels. The
+        # bounds are raw counts, so the front end draws them on the
+        # raw (uncalibrated) view only.
+        payload["linear_min"] = _nan_to_none(state.corr_linear_min)
+        payload["linear_max"] = _nan_to_none(state.corr_linear_max)
     if cal_meta is not None:
         payload["calibration_meta"] = cal_meta
     return payload
+
+
+def _nan_to_none(arr: np.ndarray) -> list:
+    """Return ``arr`` as a JSON-safe list with NaN mapped to None."""
+    return [None if math.isnan(v) else v for v in arr.tolist()]
 
 
 def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:

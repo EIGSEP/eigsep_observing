@@ -9,6 +9,7 @@ means we can assert state deterministically without sleeps.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -21,10 +22,12 @@ from eigsep_redis import (
 )
 from eigsep_redis.testing import DummyTransport
 
+from conftest import HEADER as GOLDEN_HEADER
 from eigsep_observing.adc import AdcSnapshotWriter
 from eigsep_observing.corr import CorrConfigStore, CorrWriter
 from eigsep_observing.corr_health import publish as publish_corr_health
 from eigsep_observing.host_health import publish as publish_host_health
+from eigsep_observing.linear_range import save_linear_range
 from eigsep_observing.live_status import (
     LiveStatusAggregator,
     Thresholds,
@@ -1103,3 +1106,83 @@ def test_snapshot_exposes_snap_fpga_fields(agg):
     snap = agg.snapshot()
     assert hasattr(snap, "snap_fpga_reachable")
     assert hasattr(snap, "snap_fpga_last_probe_unix")
+
+
+# ---------------------------------------------------------------------
+# Linear-range product loading
+# ---------------------------------------------------------------------
+
+
+def _seed_linear_range(transports, tmp_path, measured_header):
+    """Seed corr config (pointing at a product npz fit at
+    ``measured_header``) plus the golden production header, and return
+    a ready aggregator. The golden header carries the full operating
+    point the aggregator validates the product against."""
+    nchan = GOLDEN_HEADER["nchan"]
+    product_path = tmp_path / "product.npz"
+    save_linear_range(
+        product_path,
+        freqs=np.arange(nchan, dtype=np.float64),
+        linear_min=np.full(nchan, 1e5),
+        linear_max=np.full(nchan, 5e8),
+        header=measured_header,
+        threshold_db=1.0,
+        smooth_window=17,
+        created_unix=1751000000.0,
+        source_file="linearity_corr.npz",
+    )
+    snap, panda = transports
+    store = CorrConfigStore(snap)
+    store.upload(dict(CORR_CONFIG, linear_range_file=str(product_path)))
+    store.upload_header(GOLDEN_HEADER)
+    return LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+
+
+def test_linear_range_loads_on_operating_point_match(transports, tmp_path):
+    agg = _seed_linear_range(transports, tmp_path, GOLDEN_HEADER)
+    try:
+        agg._snap_tick()
+        state = agg.snapshot()
+    finally:
+        agg.stop(timeout=1.0)
+    np.testing.assert_array_equal(
+        state.corr_linear_min, np.full(GOLDEN_HEADER["nchan"], 1e5)
+    )
+    np.testing.assert_array_equal(
+        state.corr_linear_max, np.full(GOLDEN_HEADER["nchan"], 5e8)
+    )
+
+
+def test_linear_range_mismatch_clears_bounds_and_logs_once(
+    transports, tmp_path, caplog
+):
+    """A product fit at a different operating point never reaches the
+    dashboard, and the ERROR is memoized per header publish rather
+    than repeating on every ~1 s tick."""
+    measured = dict(GOLDEN_HEADER, adc_gain=GOLDEN_HEADER["adc_gain"] + 1)
+    agg = _seed_linear_range(transports, tmp_path, measured)
+    try:
+        with caplog.at_level(logging.ERROR):
+            agg._snap_tick()
+            agg._snap_tick()
+        state = agg.snapshot()
+    finally:
+        agg.stop(timeout=1.0)
+    assert state.corr_linear_min is None
+    assert state.corr_linear_max is None
+    errors = [r for r in caplog.records if "mismatch" in r.message]
+    assert len(errors) == 1
+    assert "adc_gain" in errors[0].message
+
+
+def test_linear_range_none_without_config(agg):
+    """The seeded fixture config has no linear_range_file — bounds
+    stay None and no linear-range ERROR fires."""
+    agg._snap_tick()
+    state = agg.snapshot()
+    assert state.corr_linear_min is None
+    assert state.corr_linear_max is None

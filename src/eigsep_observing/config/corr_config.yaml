@@ -60,5 +60,13 @@ adc_snapshot_period_s: 0
 # headroom that matters as corr_acc_len is lowered. Set to 0 to disable
 # both; absent → defaults to 1.0.
 diagnostics_period_s: 1.0
+# Per-channel linear-range calibration product (npz in the packaged
+# data/ dir, produced by scripts/linearity_test/fit_linearity.py).
+# When set, the file writer embeds linear_range_min/max in corr
+# headers and live-status draws them as dashed bounds on the corr
+# plot — both after validating the product's operating point against
+# the live corr header (mismatch => ERROR log, bounds omitted).
+# null = feature off (no product measured for this operating point).
+linear_range_file: null
 # Hardware wiring (antenna → FEM → PAM → SNAP input mapping) lives in
 # `wiring.yaml`, not here. This file is software-only.

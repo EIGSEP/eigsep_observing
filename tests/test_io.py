@@ -27,6 +27,7 @@ from conftest import (
     tempctrl_post_handler_reading,
 )
 from eigsep_observing import io
+from eigsep_observing.linear_range import save_linear_range
 from eigsep_observing.testing.utils import (
     compare_dicts,
     generate_data,
@@ -3720,3 +3721,109 @@ def test_imu_az_derived_fields_round_trip():
     assert avg["el_deg"] == 0.0
     assert avg["az_blend_weight"] == 1.0
     assert "az_from_accel_deg" in avg and "az_from_yaw_deg" in avg
+
+
+# -- linear-range header injection ------------------------------------
+#
+# ``append_corr_header`` embeds the per-channel linear-range bounds
+# when the (cfg-merged) header names a product file. Product fixtures
+# are written with ``save_linear_range`` — the production writer — so
+# they match the real file schema by construction.
+
+
+def _write_linear_range_product(path, header=HEADER):
+    nchan = HEADER["nchan"]
+    linear_min = np.full(nchan, 1e5)
+    linear_max = np.full(nchan, 5e8)
+    # NaN-masked top band, as the real fit produces above the LPF cutoff
+    linear_min[-nchan // 10 :] = np.nan
+    linear_max[-nchan // 10 :] = np.nan
+    save_linear_range(
+        path,
+        freqs=np.arange(nchan, dtype=np.float64),
+        linear_min=linear_min,
+        linear_max=linear_max,
+        header=header,
+        threshold_db=1.0,
+        smooth_window=17,
+        created_unix=1751000000.0,
+        source_file="linearity_corr.npz",
+    )
+    return linear_min, linear_max
+
+
+def _append_header_args():
+    acc_cnts = np.arange(1, 4)
+    sync_times = np.full(3, HEADER["sync_time"])
+    return acc_cnts, sync_times
+
+
+def test_append_corr_header_injects_linear_range(tmp_path):
+    product_path = tmp_path / "product.npz"
+    linear_min, linear_max = _write_linear_range_product(product_path)
+    header = dict(HEADER, linear_range_file=str(product_path))
+    new_header = io.append_corr_header(header, *_append_header_args())
+    np.testing.assert_array_equal(new_header["linear_range_min"], linear_min)
+    np.testing.assert_array_equal(new_header["linear_range_max"], linear_max)
+
+
+def test_append_corr_header_linear_range_off_by_default(caplog):
+    """Absent or null ``linear_range_file`` disables the feature with
+    no ERROR noise — that's the shipped default until a product is
+    measured."""
+    with caplog.at_level(logging.ERROR):
+        new_header = io.append_corr_header(
+            dict(HEADER), *_append_header_args()
+        )
+        null_header = io.append_corr_header(
+            dict(HEADER, linear_range_file=None), *_append_header_args()
+        )
+    assert "linear_range_min" not in new_header
+    assert "linear_range_min" not in null_header
+    assert not [r for r in caplog.records if "inear-range" in r.message]
+
+
+def test_append_corr_header_missing_product_logs_error(tmp_path, caplog):
+    header = dict(HEADER, linear_range_file=str(tmp_path / "nope.npz"))
+    with caplog.at_level(logging.ERROR):
+        new_header = io.append_corr_header(header, *_append_header_args())
+    assert "linear_range_min" not in new_header
+    assert "linear_range_max" not in new_header
+    errors = [r for r in caplog.records if "Linear-range" in r.message]
+    assert len(errors) == 1
+    # corr-sacred: the rest of the header is intact
+    assert "freqs" in new_header
+    assert "times" in new_header
+
+
+def test_append_corr_header_operating_point_mismatch_omits(tmp_path, caplog):
+    product_path = tmp_path / "product.npz"
+    measured_header = dict(HEADER, adc_gain=HEADER["adc_gain"] + 1)
+    _write_linear_range_product(product_path, header=measured_header)
+    header = dict(HEADER, linear_range_file=str(product_path))
+    with caplog.at_level(logging.ERROR):
+        new_header = io.append_corr_header(header, *_append_header_args())
+    assert "linear_range_min" not in new_header
+    assert "linear_range_max" not in new_header
+    errors = [r for r in caplog.records if "mismatch" in r.message]
+    assert len(errors) == 1
+    assert "adc_gain" in errors[0].message
+
+
+def test_linear_range_bounds_hdf5_round_trip(tmp_path):
+    """The injected bounds land as native float datasets and round-trip
+    through write_hdf5 → read_hdf5 with the NaN mask intact."""
+    product_path = tmp_path / "product.npz"
+    linear_min, linear_max = _write_linear_range_product(product_path)
+    header = dict(HEADER, linear_range_file=str(product_path))
+    full_header = io.append_corr_header(header, *_append_header_args())
+    data = generate_data(reshape=True)
+    fname = tmp_path / "corr_linear_range.h5"
+    io.write_hdf5(fname, data, full_header)
+    _, read_header, _ = io.read_hdf5(fname)
+    read_min = read_header["linear_range_min"]
+    read_max = read_header["linear_range_max"]
+    assert isinstance(read_min, np.ndarray)
+    assert read_min.dtype == np.float64
+    np.testing.assert_array_equal(read_min, linear_min)
+    np.testing.assert_array_equal(read_max, linear_max)

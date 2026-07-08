@@ -74,6 +74,7 @@ where = ["src"]
 "eigsep_observing" = [
   "config/*.yaml",
   "data/*.fpg",
+  "data/*.npz",
   "live_status/templates/*.html",
   "live_status/static/css/*.css",
   "live_status/static/js/*.js",
