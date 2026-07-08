@@ -32,13 +32,14 @@ plots. This workflow supersedes it with per-channel line fits.
    python fit_linearity.py sweep.npz --plot
    ```
 
-   Per input and channel this fits log10(counts − floor) vs input
-   power (dBm) on a sigma-clipped region, where the additive noise
-   floor is estimated from the two deepest attenuation steps (so
-   sweep down far enough to pin it). Steps with measurable excess
+   Per input and channel this anchors a unit-slope (1 dB/dB) line —
+   the response a linear chain must have — at the median offset of
+   log10(counts − floor) vs input power (dBm), where the additive
+   noise floor is estimated from the two deepest attenuation steps
+   (so sweep down far enough to pin it). Steps with measurable excess
    (`--min-excess-frac` of the floor) within `--threshold-db`
-   (default 1 dB) of the fit are "linear", and the min/max bounds are
-   the raw measured counts at the lowest/highest linear step.
+   (default 1 dB) of that line are "linear", and the min/max bounds
+   are the raw measured counts at the lowest/highest linear step.
    Channels with too little dynamic range (e.g. above the LPF cutoff)
    get NaN bounds. The median fit slope per input is checked against
    the ideal 1 dB/dB; a warning there means the sweep can't support
