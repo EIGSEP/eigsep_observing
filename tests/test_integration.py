@@ -11,7 +11,9 @@ import pytest
 import yaml
 
 from eigsep_redis import MetadataSnapshotReader
+from eigsep_redis.keys import METADATA_HASH
 from eigsep_redis.testing import DummyTransport
+from picohost.proxy import PicoProxy
 
 import eigsep_observing
 from eigsep_observing.testing import DummyPandaClient
@@ -102,6 +104,35 @@ def test_sensor_metadata_in_redis(client, transport):
             f"Expected sensor '{sensor}' in metadata, "
             f"got keys: {list(metadata.keys())}"
         )
+
+
+def test_uninstalled_channel_stream_stops(client, transport):
+    """Descope end-to-end through the embedded PicoManager:
+    ``set_installed(LNA=False)`` stops ``tempctrl_lna`` publishing
+    entirely (its snapshot timestamp freezes) while ``tempctrl_load``
+    keeps advancing — the clean-absence contract the consumer relies
+    on (no corr-file column, no staleness warnings)."""
+    _wait_for_sensors(transport, sensors=("tempctrl_lna", "tempctrl_load"))
+    proxy = PicoProxy("tempctrl", transport, source="test_integration")
+    assert proxy.send_command("set_installed", LNA=False) is not None
+
+    def _ts(stream):
+        return transport.r.hget(METADATA_HASH, f"{stream}_ts")
+
+    # The command dispatches through the manager's async cmd loop; poll
+    # until one publish gap shows LNA frozen while LOAD advanced.
+    deadline = time.monotonic() + 5.0
+    while True:
+        lna0, load0 = _ts("tempctrl_lna"), _ts("tempctrl_load")
+        time.sleep(0.5)
+        lna1, load1 = _ts("tempctrl_lna"), _ts("tempctrl_load")
+        if load1 != load0 and lna1 == lna0:
+            break
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"tempctrl_lna did not stop publishing: "
+                f"lna {lna0!r}->{lna1!r}, load {load0!r}->{load1!r}"
+            )
 
 
 def test_metadata_has_expected_fields(client, transport):

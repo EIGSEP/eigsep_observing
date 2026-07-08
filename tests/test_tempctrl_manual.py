@@ -155,9 +155,9 @@ def test_seed_state_falls_back_to_default_gains_only(transport):
 
 def test_seed_state_times_out_when_streams_silent(transport):
     """If the pico is registered (``require_pico`` already passed) but
-    never publishes a ``T_target``, the seed exits with a SystemExit
-    message naming the silent streams — rather than papering over the
-    silence with a hardcoded default."""
+    never publishes a ``T_target`` on either stream, the seed exits
+    with a SystemExit message naming the silent streams — rather than
+    papering over the silence with a hardcoded default."""
     mod = _load("tempctrl_manual")
     snapshot = MetadataSnapshotReader(transport)
     with pytest.raises(SystemExit) as exc:
@@ -168,9 +168,39 @@ def test_seed_state_times_out_when_streams_silent(transport):
     assert "T_target" in msg
 
 
-def test_seed_state_times_out_when_one_stream_silent(transport):
-    """One stream silent is still a timeout — both must publish before
-    the UI is allowed to come up with consistent state."""
+def test_seed_state_one_stream_silent_marks_not_installed(transport):
+    """One silent stream is the descoped-channel shape (its firmware
+    channel is marked not installed, so it publishes nothing — see the
+    per-channel installed flag): the UI comes up on the live channel
+    and marks the silent one not-installed, seeding it from firmware
+    defaults so a later re-install (`u` during a hot swap) starts from
+    sane values."""
+    mod = _load("tempctrl_manual")
+    _publish(
+        transport,
+        lna={
+            "sensor_name": "tempctrl_lna",
+            "status": "update",
+            "T_target": 28.0,
+            "enabled": True,
+        },
+    )
+    snapshot = MetadataSnapshotReader(transport)
+    state = mod._seed_state(snapshot, timeout_s=0.05, poll_interval_s=0.01)
+    assert state.lna_installed is True
+    assert state.load_installed is False
+    assert state.lna_setpoint == 28.0
+    assert state.lna_enabled is True
+    # Silent channel seeds firmware defaults.
+    assert state.load_setpoint == mod.DEFAULT_T_TARGET_C
+    assert state.load_enabled is False
+    assert state.load_Kp == mod.DEFAULT_KP
+    assert state.load_Ki == mod.DEFAULT_KI
+    assert state.load_cooling_enabled is True
+
+
+def test_seed_state_both_streams_marks_installed(transport):
+    """Both streams publishing → both channels marked installed."""
     mod = _load("tempctrl_manual")
     _publish(
         transport,
@@ -179,13 +209,16 @@ def test_seed_state_times_out_when_one_stream_silent(transport):
             "status": "update",
             "T_target": 30.0,
         },
+        load={
+            "sensor_name": "tempctrl_load",
+            "status": "update",
+            "T_target": 30.0,
+        },
     )
     snapshot = MetadataSnapshotReader(transport)
-    with pytest.raises(SystemExit) as exc:
-        mod._seed_state(snapshot, timeout_s=0.05, poll_interval_s=0.01)
-    msg = str(exc.value)
-    assert "tempctrl_load" in msg
-    assert "tempctrl_lna" not in msg
+    state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
+    assert state.lna_installed is True
+    assert state.load_installed is True
 
 
 def _record_n(mod, snapshot, n):
@@ -389,6 +422,46 @@ def test_clamp_steps_up_and_saturates_at_max(transport):
     for _ in range(10):
         mod._handle_key(ord("c"), proxy, state)
     assert mod.CLAMPS[state.clamp_idx] == 1.0
+
+
+def test_installed_hotkeys_push_set_installed(transport):
+    """`t`/`T` toggle LNA installed, `u`/`U` toggle LOAD installed —
+    the hot-swap keys. Both channels ride each push (matching the
+    enable/cooling/gain push idiom) so the firmware always sees the
+    UI's full installed state."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+    assert state.lna_installed is True
+    assert state.load_installed is True
+
+    assert mod._handle_key(ord("T"), proxy, state) is True
+    assert state.lna_installed is False
+    assert proxy.sent[-1] == (
+        "set_installed",
+        {"LNA": False, "LOAD": True},
+    )
+
+    mod._handle_key(ord("u"), proxy, state)
+    assert state.load_installed is True
+    assert proxy.sent[-1] == (
+        "set_installed",
+        {"LNA": False, "LOAD": True},
+    )
+
+    mod._handle_key(ord("U"), proxy, state)
+    assert state.load_installed is False
+    assert proxy.sent[-1] == (
+        "set_installed",
+        {"LNA": False, "LOAD": False},
+    )
+
+    mod._handle_key(ord("t"), proxy, state)
+    assert state.lna_installed is True
+    assert proxy.sent[-1] == (
+        "set_installed",
+        {"LNA": True, "LOAD": False},
+    )
 
 
 def test_handle_p_key_no_data(transport, tmp_path):

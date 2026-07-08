@@ -127,6 +127,22 @@ def _fmt_summary(name, reading):
     return " ".join(parts)
 
 
+def _absent_stream_note(*, alive, ts, reading):
+    """Annotation for an alive device whose stream never published.
+
+    A live heartbeat with no stream data is either a deliberately
+    descoped channel (tempctrl ``installed=false`` publishes nothing —
+    see OPERATIONS.md "Tempctrl channel descope and hot-swap") or a
+    producer fault. Say so instead of leaving the reading column
+    blank, without false-failing a descoped field rig. Empty when the
+    device is dead (the alive column already tells that story) or the
+    stream is publishing.
+    """
+    if alive and ts is None and not reading:
+        return "no stream (channel uninstalled or producer fault)"
+    return ""
+
+
 def _flashed_lookup(devices):
     """Return ``{name: port}`` for flashed devices, ``{}`` if no config."""
     if not devices:
@@ -159,11 +175,15 @@ def render(transport):
     for device in APP_NAMES.values():
         port = flashed.get(device, "--")
         hb = HeartbeatReader(transport, name=pico_heartbeat_name(device))
-        alive = "yes" if hb.check() else "no"
+        is_alive = hb.check()
+        alive = "yes" if is_alive else "no"
         for stream in _streams_for(device):
             ts = meta.get(f"{stream}_ts")
             age = _fmt_age(ts, now)
-            summary = _fmt_summary(stream, meta.get(stream))
+            reading = meta.get(stream)
+            summary = _fmt_summary(stream, reading) or _absent_stream_note(
+                alive=is_alive, ts=ts, reading=reading
+            )
             print(f"{stream:14} {port:14} {alive:5} {age:>5}  {summary}")
 
     if devices is None:

@@ -8,13 +8,19 @@ from unittest.mock import patch
 import pytest
 
 from cmt_vna.testing import DummyVNA
-from eigsep_redis import ConfigStore, HeartbeatReader, StatusReader
+from eigsep_redis import (
+    ConfigStore,
+    HeartbeatReader,
+    MetadataWriter,
+    StatusReader,
+)
 from eigsep_redis.keys import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
 from eigsep_observing import MotorClient, PandaClient, TempCtrlClient, run_tag
+from eigsep_observing._test_fixtures import tempctrl_post_handler_reading
 from eigsep_observing.testing import DummyPandaClient
 from eigsep_observing.testing.utils import compare_dicts
 
@@ -2021,6 +2027,97 @@ def test_init_tempctrl_no_warning_when_cooling_default(
         ]
         assert not any("cooling disabled" in m for m in warnings), (
             f"unexpected cooling warning with default config: {warnings}"
+        )
+    finally:
+        client.stop()
+
+
+def test_init_tempctrl_warns_when_channel_uninstalled(
+    transport, dummy_cfg, caplog
+):
+    """``installed: False`` is a deliberate hardware descope — surface
+    it once at init so operators know the channel is dark on purpose,
+    not from a fault. Fires per affected channel."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = {
+        "LNA": {"installed": False, "enable": False},
+        "LOAD": {"installed": True, "enable": True, "target_C": 25.0},
+    }
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert any("LNA not installed" in m for m in warnings), (
+            f"expected LNA not-installed warning in: {warnings}"
+        )
+        assert not any("LOAD not installed" in m for m in warnings), (
+            f"unexpected LOAD warning in: {warnings}"
+        )
+    finally:
+        client.stop()
+
+
+def test_init_tempctrl_no_warning_when_installed_default(
+    transport, dummy_cfg, caplog
+):
+    """Default config (no ``installed`` key) means both modules present
+    — no not-installed warning should fire."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    # dummy_cfg's tempctrl_settings carries no installed keys.
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        warnings = [
+            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+        ]
+        assert not any("not installed" in m for m in warnings), (
+            f"unexpected not-installed warning with default config: {warnings}"
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_health_check_skips_uninstalled_channel(
+    transport, dummy_cfg, caplog
+):
+    """End-to-end descope guard: with ``LNA.installed: false``, the
+    merged status from the real ``TempCtrlClient.get_status`` carries
+    no LNA keys — even with a leftover ``tempctrl_lna`` hash entry in
+    its real error-row shape (the reboot burst) — so the health check
+    emits no LNA warnings. If the stream were read, the error row
+    would trip "LNA thermistor in error state"; its absence proves the
+    skip, not a lucky healthy row."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    cfg["tempctrl_settings"] = {
+        "LNA": {"installed": False, "enable": False},
+        "LOAD": {"installed": True, "enable": True, "target_C": 25.0},
+    }
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        writer = MetadataWriter(client.transport)
+        writer.add(
+            "tempctrl_lna",
+            tempctrl_post_handler_reading("tempctrl_lna", sensor_error="LNA"),
+        )
+        writer.add(
+            "tempctrl_load", tempctrl_post_handler_reading("tempctrl_load")
+        )
+        caplog.set_level("WARNING")
+        status = client.tempctrl.get_status()
+        assert status is not None
+        assert not any(k.startswith("LNA_") for k in status)
+        # Drop the init-time "LNA not installed" descope warning (by
+        # design, tested separately) so the assertion scopes to the
+        # health check alone.
+        caplog.clear()
+        client._tempctrl_health_check(status)
+        assert not any("LNA" in r.getMessage() for r in caplog.records), (
+            f"unexpected LNA warning: {[r.getMessage() for r in caplog.records]}"
         )
     finally:
         client.stop()

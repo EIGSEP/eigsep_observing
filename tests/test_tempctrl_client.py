@@ -308,6 +308,18 @@ def test_is_available_reflects_registration(client):
         # non-bool truthy value would silently leave the cooling guard
         # *armed* (i.e. the safety setting wouldn't apply).
         ({"LNA": {"cooling_enabled": "false"}}, "cooling_enabled"),
+        # `installed: "false"` would silently keep the descoped channel
+        # publishing its dead-divider error stream.
+        ({"LNA": {"installed": "false"}}, "installed"),
+        # Config contradiction: an absent module cannot be armed.
+        (
+            {"LNA": {"installed": False, "enable": True}},
+            "cannot be armed",
+        ),
+        (
+            {"LOAD": {"installed": False, "enable": True}},
+            "cannot be armed",
+        ),
     ],
 )
 def test_coerce_settings_raises_on_bad_config(bad_settings, needle):
@@ -351,6 +363,132 @@ def test_coerce_settings_normalizes_types():
     assert out["LNA"]["Kp"] == 0.0
     assert isinstance(out["LNA"]["Ki"], float)
     assert out["LNA"]["Ki"] == 0.0
+
+
+def test_coerce_settings_accepts_installed_bool():
+    """``installed`` rides the same strict-bool path as ``enable``;
+    ``installed: false`` with ``enable: false`` is the valid descope
+    shape."""
+    out = TempCtrlClient._coerce_settings(
+        {
+            "LNA": {"installed": False, "enable": False},
+            "LOAD": {"installed": True, "enable": True},
+        }
+    )
+    assert out["LNA"]["installed"] is False
+    assert out["LOAD"]["installed"] is True
+
+
+def test_set_installed_pushes_to_emulator(client):
+    """``set_installed`` flips the firmware-side installed flag on the
+    addressed channel(s); the fan-out then stops publishing that
+    channel's stream."""
+    tc = TempCtrlClient(client.transport)
+    em = _emulator(client)
+    assert em.lna.installed is True
+    assert em.load.installed is True
+
+    tc.set_installed(LNA=False)
+
+    assert _wait_until(lambda: em.lna.installed is False)
+    # LOAD was never sent; firmware default (True) untouched.
+    assert em.load.installed is True
+
+
+def test_set_installed_no_kwargs_is_no_op(client):
+    """``set_installed()`` with both args None must not send a command
+    — partial-application callers don't flip the untouched channel."""
+    tc = TempCtrlClient(client.transport)
+    with patch.object(tc._proxy, "send_command") as mock_send:
+        tc.set_installed()
+        mock_send.assert_not_called()
+
+
+def test_apply_settings_order_installed_after_watchdog():
+    """``apply_settings`` pushes installed right after the watchdog —
+    before anything drive-producing — mirroring PicoPeltier's
+    reconnect replay order."""
+    from eigsep_redis.testing import DummyTransport
+
+    transport = DummyTransport()
+    tc = TempCtrlClient(
+        transport,
+        settings={
+            "watchdog_timeout_ms": 25000,
+            "LNA": {
+                "installed": False,
+                "enable": False,
+                "target_C": 25.0,
+                "clamp": 0.5,
+            },
+            "LOAD": {
+                "installed": True,
+                "enable": True,
+                "cooling_enabled": False,
+                "target_C": 25.0,
+                "clamp": 0.5,
+                "Kp": 0.3,
+                "Ki": 0.01,
+            },
+        },
+    )
+    sent = []
+    with patch.object(
+        tc._proxy,
+        "send_command",
+        side_effect=lambda cmd, **kw: sent.append(cmd),
+    ):
+        tc.apply_settings()
+    assert sent == [
+        "set_watchdog_timeout",
+        "set_installed",
+        "set_clamp",
+        "set_cooling_enabled",
+        "set_gains",
+        "set_temperature",
+        "set_enable",
+    ]
+
+
+@pytest.mark.parametrize(
+    "off_ch, on_ch",
+    [("LNA", "LOAD"), ("LOAD", "LNA")],
+)
+def test_get_status_skips_uninstalled_channel_stream(off_ch, on_ch):
+    """A channel whose settings say ``installed: false`` is never read:
+    a leftover hash entry (lab bring-up, pre-descope deployment, reboot
+    burst) must not resurrect stale data into the merged status or
+    trigger the snapshot reader's staleness warning on every poll."""
+    from eigsep_redis import MetadataWriter
+    from eigsep_redis.testing import DummyTransport
+
+    from eigsep_observing._test_fixtures import tempctrl_post_handler_reading
+
+    transport = DummyTransport()
+    writer = MetadataWriter(transport)
+    for stream in ("tempctrl_lna", "tempctrl_load"):
+        writer.add(stream, tempctrl_post_handler_reading(stream))
+
+    tc = TempCtrlClient(
+        transport,
+        settings={off_ch: {"installed": False, "enable": False}},
+    )
+    reads = []
+    original_get = tc._reader.get
+
+    def spying_get(key, *args, **kwargs):
+        reads.append(key)
+        return original_get(key, *args, **kwargs)
+
+    with patch.object(tc._reader, "get", side_effect=spying_get):
+        status = tc.get_status()
+
+    assert f"tempctrl_{off_ch.lower()}" not in reads
+    assert status is not None
+    assert not any(k.startswith(f"{off_ch}_") for k in status)
+    assert any(k.startswith(f"{on_ch}_") for k in status)
+    # Device-wide watchdog fields still ride the installed channel.
+    assert "watchdog_timeout_ms" in status
 
 
 def test_set_cooling_enabled_pushes_to_emulator(client):

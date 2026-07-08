@@ -445,12 +445,20 @@ class PandaClient:
         self.logger.info(
             f"Tempctrl initialized (settings={self.tempctrl.settings})"
         )
-        # Cooling-mode guard: a deliberate non-default safety setting
-        # (see picohost asymmetric clamp). Surfaced once at init rather
-        # than every tempctrl_loop iteration — it's a deployment choice,
-        # not a runtime fault.
+        # Deliberate non-default deployment choices, surfaced once at
+        # init rather than every tempctrl_loop iteration — they are
+        # config decisions, not runtime faults.
         for ch in ("LNA", "LOAD"):
             section = self.tempctrl.settings.get(ch, {})
+            if section.get("installed") is False:
+                # Hardware descope: the module is physically absent —
+                # never sampled, never driven, no Redis stream, no
+                # dashboard tiles. See OPERATIONS.md "Tempctrl channel
+                # descope and hot-swap".
+                self.logger.warning(
+                    f"Tempctrl {ch} not installed — channel descoped: "
+                    "no sampling, no drive, no metadata stream."
+                )
             if section.get("cooling_enabled") is False:
                 self.logger.warning(
                     f"Tempctrl {ch} cooling disabled — drive clamped to "
@@ -967,6 +975,12 @@ class PandaClient:
            thermal capability. Uses a ±0.02 slack on the clamp check
            because ``drive_level`` is a floating-point duty cycle and
            we don't want to false-fire on the last bit of rounding.
+
+        A descoped channel (``installed: false``) never warns: every
+        check here is ``.get()``-guarded and
+        :meth:`TempCtrlClient.get_status` omits an uninstalled
+        channel's keys from the merged snapshot by construction, so no
+        code change is needed per channel.
         """
         if status.get("watchdog_tripped"):
             self._warn_with_status(

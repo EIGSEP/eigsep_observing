@@ -816,6 +816,13 @@ _IMU_AZ_SCHEMA = {
 # `watchdog_tripped` / `watchdog_timeout_ms` fields into both streams.
 # With per-stream `status`, both streams flow through the generic
 # `_avg_sensor_values` reduction like every other sensor.
+#
+# A channel descoped via the firmware `installed` flag
+# (tempctrl_settings.{LNA,LOAD}.installed: false) publishes NO stream
+# at all — clean absence (no corr-file column, no staleness warnings),
+# never a sentinel or a permanent error stream. Both schemas stay
+# registered here regardless: the module may return, and the fan-out
+# never puts an `installed` field into the published per-channel shape.
 _PELTIER_SCHEMA = {
     "sensor_name": str,
     "status": str,

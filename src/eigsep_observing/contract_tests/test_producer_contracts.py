@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoIMU, PicoLidar, PicoRFSwitch
+from picohost.base import PicoIMU, PicoLidar, PicoPeltier, PicoRFSwitch
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -41,6 +41,7 @@ from picohost.testing import (
     MotorEmulator,
     PotMonEmulator,
     RFSwitchEmulator,
+    TempCtrlEmulator,
 )
 
 from eigsep_redis.keys import STATUS_STREAM  # noqa: F401
@@ -265,6 +266,29 @@ SENSOR_EMULATORS = {
     "adc_stats": _adc_stats_post_publish_reading,
     "system_current": lambda: _lidar_post_handler_readings()[1],
 }
+
+
+def test_uninstalled_tempctrl_channel_publishes_nothing():
+    """Descope contract: a channel whose firmware ``installed`` flag is
+    false is fanned out as *nothing* — clean stream absence downstream
+    (no corr-file column, no snapshot staleness warnings) rather than a
+    permanent error stream off the dead thermistor divider. The
+    surviving channel still conforms to its schema, and the installed
+    flag itself never enters the published per-channel shape, so
+    ``_PELTIER_SCHEMA`` is untouched by the descope feature."""
+    pel = PicoPeltier.__new__(PicoPeltier)
+    captured = []
+    pel._base_redis_handler = lambda d: captured.append(dict(d))
+    emu = TempCtrlEmulator()
+    emu.server({"LNA_installed": 0})
+    emu.op()
+    pel._peltier_redis_handler(emu.get_status())
+    assert [e["sensor_name"] for e in captured] == ["tempctrl_load"]
+    entry = captured[0]
+    assert "installed" not in entry
+    assert (
+        io._validate_metadata(entry, io.SENSOR_SCHEMAS["tempctrl_load"]) == []
+    )
 
 
 def test_test_header_conforms_to_corr_schema():

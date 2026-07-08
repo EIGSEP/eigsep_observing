@@ -122,6 +122,53 @@ def test_enabled_signals_includes_tempctrl_when_on():
     assert "tempctrl_lna.drive_level" in enabled
 
 
+# LNA descoped (installed: false) but with setpoints still staged for a
+# potential re-install/hot-swap — the realistic field shape. The channel
+# publishes no stream, so its tiles/bands must disappear while LOAD's
+# stay.
+OBS_CFG_LNA_UNINSTALLED = {
+    "use_tempctrl": True,
+    "corr_ntimes": 240,
+    "tempctrl_settings": {
+        "LNA": {
+            "installed": False,
+            "enable": False,
+            "target_C": 25.0,
+            "hysteresis_C": 0.5,
+            "clamp": 0.6,
+        },
+        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
+    },
+}
+
+
+def test_enabled_signals_drops_uninstalled_channel():
+    """A descoped channel publishes no stream — its tiles would sit
+    permanently empty on the dashboard (the field's only alerting
+    surface), so they're dropped per channel while LOAD's stay."""
+    enabled = enabled_signals(OBS_CFG_LNA_UNINSTALLED)
+    for key in (
+        "tempctrl_lna.T_now",
+        "tempctrl_lna.drive_level",
+        "tempctrl_lna.Kp",
+        "tempctrl_lna.Ki",
+        "tempctrl_lna.integral",
+    ):
+        assert key not in enabled, key
+    assert "tempctrl_load.T_now" in enabled
+    assert "tempctrl_load.drive_level" in enabled
+
+
+def test_default_thresholds_skips_uninstalled_channel():
+    """Staged setpoints on a descoped channel must not produce bands —
+    there is no stream for them to classify."""
+    out = default_thresholds(OBS_CFG_LNA_UNINSTALLED, corr_header=CORR_HEADER)
+    assert "tempctrl_lna.T_now" not in out
+    assert "tempctrl_lna.drive_level" not in out
+    assert "tempctrl_load.T_now" in out
+    assert "tempctrl_load.drive_level" in out
+
+
 # ---------------------------------------------------------------------
 # Thresholds merge + classify
 # ---------------------------------------------------------------------

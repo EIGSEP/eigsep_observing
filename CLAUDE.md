@@ -285,7 +285,11 @@ normal operation.
 generic `_avg_sensor_values` path — picohost publishes them as
 separate per-channel streams, so the consumer no longer needs a custom
 splitter. (The standalone `temp_mon` Pico app was retired in picohost
-1.0.0.)
+1.0.0.) A channel descoped via
+`tempctrl_settings.{LNA,LOAD}.installed: false` (firmware `installed`
+flag, picohost 4.2) publishes no stream at all — consumers see clean
+absence, never a sentinel or error stream; see OPERATIONS.md
+"Tempctrl channel descope and hot-swap".
 
 **IMU mode (picohost 1.0.0+).** The two IMU picos (`imu_el` panda elevation,
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:

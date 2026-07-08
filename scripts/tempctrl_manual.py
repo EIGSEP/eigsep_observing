@@ -23,6 +23,8 @@ Controls:
   i / I    LNA Ki +/- 0.005
   k / K    LOAD Ki +/- 0.005
   z / Z    reset LNA / LOAD PI integrator
+  t / T    LNA installed yes / no (hardware descope, see below)
+  u / U    LOAD installed yes / no
   w        push a 5 s watchdog (should trip if not refreshed)
   r        re-enable both channels at their last setpoint
   p        write a temperature-vs-time PNG of the session so far
@@ -59,6 +61,16 @@ data validity only: a channel can read ``armed=False`` with
 is gating drive — check the ``trips`` column for which one. ``T_now``
 reads ``--`` (null) exactly when the current sample is untrustworthy;
 ``voltage`` stays live then (≈3.3 V says open thermistor, ≈0 V short).
+
+Hardware descope / hot-swap (per-channel ``installed`` flag): a
+channel marked not installed is never sampled or driven and publishes
+no Redis stream — its readout row shows all ``--``. On startup, a
+stream that stays silent through the seed window is taken as a
+descoped channel and the UI comes up on the live one (both silent is
+still a hard error). ``t``/``u`` re-install a channel — the hot-swap
+ack after physically moving the LOAD module onto the LNA connector
+(procedure in OPERATIONS.md); expect its stream to start publishing
+within a tick. ``T``/``U`` descope it again.
 """
 
 from argparse import ArgumentParser
@@ -93,6 +105,7 @@ KP_STEP = 0.05
 KI_STEP = 0.005  # smaller — integral accumulates over many ticks
 DEFAULT_KP = 0.2  # firmware default, matches TempCtrlEmulator
 DEFAULT_KI = 0.0  # firmware default — opt-in via this script or yaml
+DEFAULT_T_TARGET_C = 30.0  # firmware default T_target (init_single_tempctrl)
 WATCHDOG_PROBE_MS = 5000
 # picohost STATUS_CADENCE_MS = 200; poll at the same cadence so we
 # wake on the next publish without busy-spinning.
@@ -131,6 +144,8 @@ class _State:
         load_Ki,
         lna_cooling_enabled,
         load_cooling_enabled,
+        lna_installed=True,
+        load_installed=True,
     ):
         self.lna_setpoint = lna_setpoint
         self.load_setpoint = load_setpoint
@@ -146,6 +161,12 @@ class _State:
         # never disagrees with what the firmware is enforcing.
         self.lna_cooling_enabled = lna_cooling_enabled
         self.load_cooling_enabled = load_cooling_enabled
+        # Hardware-descope flag per channel (see module docstring): an
+        # uninstalled channel publishes no stream, so it's seeded from
+        # stream presence at startup and toggled by t/T (LNA), u/U
+        # (LOAD) during a hot swap.
+        self.lna_installed = lna_installed
+        self.load_installed = load_installed
         self.clamp_idx = CLAMPS.index(0.2)  # firmware default clamp
         self.last_message = ""
 
@@ -251,48 +272,51 @@ def _seed_state(
     poll_interval_s=PICO_PUBLISH_INTERVAL_S,
 ):
     """Block until firmware has published ``T_target`` on both
-    ``tempctrl_lna`` and ``tempctrl_load``, then build a starting
-    :class:`_State` from those values.
+    ``tempctrl_lna`` and ``tempctrl_load`` (or the seed window closes
+    with at least one live), then build a starting :class:`_State`.
 
-    No hardcoded setpoint fallback — the pico's own ``T_target``
-    (firmware default 30 deg C until reconfigured) is the single
-    source of truth, so the UI can never disagree with what the
+    No hardcoded setpoint fallback for a live channel — the pico's own
+    ``T_target`` (firmware default 30 deg C until reconfigured) is the
+    single source of truth, so the UI can never disagree with what the
     firmware is actually driving. ``enabled`` likewise comes from the
     pico; missing ``Kp`` / ``Ki`` fall back to the firmware-side
     defaults (``DEFAULT_KP`` / ``DEFAULT_KI``).
 
+    A stream still silent when the window closes is taken as a
+    descoped channel (firmware ``installed=false`` publishes nothing)
+    and marked not-installed, seeded from firmware defaults so a later
+    re-install (``t``/``u`` during a hot swap) starts from sane
+    values. A fully-fitted rig therefore pays no wait, a descoped one
+    pays one ``timeout_s`` at startup.
+
     Raises
     ------
     SystemExit
-        ``T_target`` did not appear on one or both streams within
-        ``timeout_s``. ``require_pico`` passed first, so the proxy
-        heartbeat is live — that means the pico is registered but the
-        firmware tempctrl publisher hasn't pushed a status frame yet.
-        Usually a misflashed pico or a stuck producer thread.
+        Neither stream published ``T_target`` within ``timeout_s``.
+        ``require_pico`` passed first, so the proxy heartbeat is live —
+        that means the pico is registered but the firmware tempctrl
+        publisher hasn't pushed a status frame yet. Usually a
+        misflashed pico or a stuck producer thread. (Both channels
+        descoped at once is not a supported shape — that's "unplug the
+        pico".)
     """
     deadline = time.monotonic() + timeout_s
     while True:
         lna = _snap(snapshot, "tempctrl_lna") or {}
         load = _snap(snapshot, "tempctrl_load") or {}
-        if (
-            lna.get("T_target") is not None
-            and load.get("T_target") is not None
-        ):
+        lna_live = lna.get("T_target") is not None
+        load_live = load.get("T_target") is not None
+        if lna_live and load_live:
             break
         if time.monotonic() >= deadline:
-            missing = [
-                name
-                for name, d in (
-                    ("tempctrl_lna", lna),
-                    ("tempctrl_load", load),
+            if not lna_live and not load_live:
+                raise SystemExit(
+                    f"ERROR: tempctrl pico is registered but did not "
+                    f"publish T_target on ['tempctrl_lna', "
+                    f"'tempctrl_load'] within {timeout_s:.1f}s. "
+                    f"Check pico-manager logs."
                 )
-                if d.get("T_target") is None
-            ]
-            raise SystemExit(
-                f"ERROR: tempctrl pico is registered but did not publish "
-                f"T_target on {missing} within {timeout_s:.1f}s. "
-                f"Check pico-manager logs."
-            )
+            break
         time.sleep(poll_interval_s)
 
     def _f(d, k, default):
@@ -308,8 +332,12 @@ def _seed_state(
         return v if isinstance(v, bool) else default
 
     return _State(
-        lna_setpoint=float(lna["T_target"]),
-        load_setpoint=float(load["T_target"]),
+        lna_setpoint=(
+            float(lna["T_target"]) if lna_live else DEFAULT_T_TARGET_C
+        ),
+        load_setpoint=(
+            float(load["T_target"]) if load_live else DEFAULT_T_TARGET_C
+        ),
         lna_enabled=bool(lna.get("enabled") or False),
         load_enabled=bool(load.get("enabled") or False),
         lna_Kp=_f(lna, "Kp", DEFAULT_KP),
@@ -320,6 +348,8 @@ def _seed_state(
         # means the firmware predates the setting, so default True too.
         lna_cooling_enabled=_b(lna, "cooling_enabled", True),
         load_cooling_enabled=_b(load, "cooling_enabled", True),
+        lna_installed=lna_live,
+        load_installed=load_live,
     )
 
 
@@ -377,6 +407,25 @@ def _push_cooling(proxy, state):
         "set_cooling_enabled",
         LNA=state.lna_cooling_enabled,
         LOAD=state.load_cooling_enabled,
+    )
+
+
+def _push_installed(proxy, state):
+    """Push the per-channel installed (hardware-descope) flags.
+
+    Both channels ride each push to match the enable/cooling/gain
+    idiom — one round-trip per keypress, and the firmware always sees
+    the UI's full installed state. Re-installing (``t``/``u``) is the
+    hot-swap ack: firmware resumes sampling the channel and its stream
+    starts publishing within a tick. Descoping (``T``/``U``) stops
+    sampling, forces drive off, and the stream disappears; sticky trip
+    latches survive (clear them with the enable ack as usual).
+    """
+    state.last_message = _send(
+        proxy,
+        "set_installed",
+        LNA=state.lna_installed,
+        LOAD=state.load_installed,
     )
 
 
@@ -519,13 +568,26 @@ def _render(screen, snapshot, state):
         f"client gains: LNA(Kp={state.lna_Kp:.3f}, Ki={state.lna_Ki:.3f})  "
         f"LOAD(Kp={state.load_Kp:.3f}, Ki={state.load_Ki:.3f})",
     )
+    # An uninstalled channel publishes no stream, so its readout rows
+    # above show all `--`; this line says whether that's a descope
+    # (installed=False) or a fault.
+    screen.addstr(
+        12,
+        0,
+        f"client installed: LNA={state.lna_installed} "
+        f"LOAD={state.load_installed}",
+    )
     screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
     screen.addstr(14, 0, "n/N LNA cooling on/off      m/M LOAD cooling on/off")
     screen.addstr(
         15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c/C clamp up/down"
     )
     screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
-    screen.addstr(17, 0, "z/Z reset LNA/LOAD integral")
+    screen.addstr(
+        17,
+        0,
+        "z/Z reset LNA/LOAD integral  t/T LNA installed  u/U LOAD installed",
+    )
     screen.addstr(
         18, 0, "w push 5s watchdog   r re-enable both   p plot PNG   q quit"
     )
@@ -607,6 +669,18 @@ def _handle_key(ch, proxy, state, history=None, outdir="."):
         state.last_message = _send(proxy, "reset_integral", LNA=True)
     elif ch == ord("Z"):
         state.last_message = _send(proxy, "reset_integral", LOAD=True)
+    elif ch == ord("t"):
+        state.lna_installed = True
+        _push_installed(proxy, state)
+    elif ch == ord("T"):
+        state.lna_installed = False
+        _push_installed(proxy, state)
+    elif ch == ord("u"):
+        state.load_installed = True
+        _push_installed(proxy, state)
+    elif ch == ord("U"):
+        state.load_installed = False
+        _push_installed(proxy, state)
     elif ch == ord("w"):
         state.last_message = _send(
             proxy, "set_watchdog_timeout", timeout_ms=WATCHDOG_PROBE_MS
