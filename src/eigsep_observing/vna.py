@@ -17,7 +17,7 @@ from eigsep_redis import (
 )
 from picohost.proxy import PicoProxy
 
-from . import imu_calibration, obs_config_owner, run_tag
+from . import imu_calibration, obs_config_owner, run_tag, vna_service
 from ._scripts_util import require_pico
 from .io import _validate_vna_s11_data, _validate_vna_s11_header
 from .keys import VNA_STREAM
@@ -187,14 +187,18 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     dummy : bool, optional
         If True, use ``DummyVNA`` and start an in-process dummy
         ``PicoManager`` (so the ``rfswitch`` proxy resolves). The
-        manager is shut down by the returned ``cleanup`` callback.
+        manager is shut down by the returned ``cleanup`` callback. If
+        False (default), start ``cmtvna.service`` and wait for the R60
+        to answer before opening the socket; the returned ``cleanup``
+        stops the service again.
 
     Returns
     -------
     VnaSubsystem
         Dataclass with ``vna``, ``vna_writer``, ``metadata_snapshot``
         and a ``cleanup`` callable the caller must invoke on teardown
-        (idempotent; no-op when ``dummy=False``).
+        (stops the dummy ``PicoManager`` when ``dummy=True``, stops
+        ``cmtvna.service`` when ``dummy=False``).
 
     Raises
     ------
@@ -219,23 +223,38 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
 
         vna_cls = DummyVNA
         manager = start_dummy_pico_manager(transport)
-
-    vna = vna_cls(
-        ip=cfg["vna_ip"],
-        port=cfg["vna_port"],
-        timeout=cfg["vna_timeout"],
-        switch_fn=switch_fn,
-    )
-
-    require_pico(sw_proxy)
-
-    setup_kwargs = cfg["vna_settings"].copy()
-    setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
-    vna.setup(**setup_kwargs)
+    else:
+        # Real hardware: bring cmtvna.service up before opening the
+        # socket. cleanup() (below) stops it again — including on any
+        # failure during the build, so a half-built subsystem never
+        # leaves the CPU-pegging service running.
+        vna_service.start()
 
     def cleanup():
         if manager is not None:
             manager.stop()
+        if not dummy:
+            try:
+                vna_service.stop()
+            except Exception:
+                logger.warning("cmtvna stop failed", exc_info=True)
+
+    try:
+        if not dummy:
+            vna_service.wait_ready(cfg["vna_ip"], cfg["vna_port"])
+        vna = vna_cls(
+            ip=cfg["vna_ip"],
+            port=cfg["vna_port"],
+            timeout=cfg["vna_timeout"],
+            switch_fn=switch_fn,
+        )
+        require_pico(sw_proxy)
+        setup_kwargs = cfg["vna_settings"].copy()
+        setup_kwargs["power_dBm"] = setup_kwargs["power_dBm"]["ant"]
+        vna.setup(**setup_kwargs)
+    except Exception:
+        cleanup()
+        raise
 
     return VnaSubsystem(
         vna=vna,
@@ -327,7 +346,11 @@ def measure_s11(
     if mode not in ("ant", "rec"):
         raise ValueError(f"Unknown VNA mode: {mode}. Must be 'ant' or 'rec'.")
     if vna is None:
-        raise RuntimeError("VNA not initialized. Cannot execute VNA commands.")
+        raise RuntimeError(
+            "VNA not initialized. Open a VNA session first "
+            "(PandaClient.vna_open()/vna_session(), or "
+            "build_vna_subsystem)."
+        )
 
     vna.power_dBm = cfg["vna_settings"]["power_dBm"][mode]
     osl_s11 = vna.measure_OSL()

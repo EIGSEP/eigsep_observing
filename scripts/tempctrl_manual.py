@@ -4,9 +4,8 @@ Curses UI showing live per-channel readouts for the two tempctrl
 streams (``tempctrl_lna`` and ``tempctrl_load``) and single-key
 commands that exercise every panda-side setter on
 :class:`picohost.base.PicoPeltier`. Operator confirms that the cold
-side temperature actually moves when the setpoint changes, that the
-firmware watchdog trips when the panda goes silent, and that the
-clamp limits drive saturation as expected.
+side temperature actually moves when the setpoint changes and that
+the clamp limits drive saturation as expected.
 
 Controls:
   l / L    enable LNA on / off
@@ -25,7 +24,6 @@ Controls:
   z / Z    reset LNA / LOAD PI integrator
   t / T    LNA installed yes / no (hardware descope, see below)
   u / U    LOAD installed yes / no
-  w        push a 5 s watchdog (should trip if not refreshed)
   r        re-enable both channels at their last setpoint
   p        write a temperature-vs-time PNG of the session so far
   q        quit
@@ -106,7 +104,6 @@ KI_STEP = 0.005  # smaller — integral accumulates over many ticks
 DEFAULT_KP = 0.2  # firmware default, matches TempCtrlEmulator
 DEFAULT_KI = 0.0  # firmware default — opt-in via this script or yaml
 DEFAULT_T_TARGET_C = 30.0  # firmware default T_target (init_single_tempctrl)
-WATCHDOG_PROBE_MS = 5000
 # picohost STATUS_CADENCE_MS = 200; poll at the same cadence so we
 # wake on the next publish without busy-spinning.
 PICO_PUBLISH_INTERVAL_S = 0.2
@@ -588,9 +585,7 @@ def _render(screen, snapshot, state):
         0,
         "z/Z reset LNA/LOAD integral  t/T LNA installed  u/U LOAD installed",
     )
-    screen.addstr(
-        18, 0, "w push 5s watchdog   r re-enable both   p plot PNG   q quit"
-    )
+    screen.addstr(18, 0, "r re-enable both   p plot PNG   q quit")
     if state.last_message:
         screen.addstr(20, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
@@ -681,11 +676,7 @@ def _handle_key(ch, proxy, state, history=None, outdir="."):
     elif ch == ord("U"):
         state.load_installed = False
         _push_installed(proxy, state)
-    elif ch == ord("w"):
-        state.last_message = _send(
-            proxy, "set_watchdog_timeout", timeout_ms=WATCHDOG_PROBE_MS
-        )
-    elif ch == ord("r"):
+        elif ch == ord("r"):
         state.lna_enabled = True
         state.load_enabled = True
         _push_enables(proxy, state)
@@ -720,7 +711,7 @@ def _curses_main(screen, transport, args):
 def _parse_args():
     parser = ArgumentParser(
         description="Interactive tempctrl bring-up: drive setpoints and "
-        "exercise the firmware watchdog."
+        "tune the PI loop."
     )
     parser.add_argument(
         "--dummy",

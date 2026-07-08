@@ -375,7 +375,8 @@ def test_measure_s11_publishes_conforming_payload(mode, tmp_path):
     transport = DummyTransport()
     client = DummyPandaClient(transport, cfg=cfg)
     try:
-        client.measure_s11(mode)
+        with client.vna_session():
+            client.measure_s11(mode)
         # The reader skips producer-backlog by design (see
         # test_vna_reader_skips_producer_backlog); rewind to stream
         # origin so this single-threaded test picks up the entry the

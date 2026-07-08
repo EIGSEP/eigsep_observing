@@ -144,10 +144,11 @@ def test_pico_manager_devices_visible(client):
 
 
 def test_vna_loop_returns_when_vna_is_none(caplog, client):
-    """vna_loop must return promptly when self.vna is None — no
-    polling. Regression for a bare `threading.Event().wait(5)` that
-    ignored stop_client. Also asserts the warning rides both channels
-    (local + status stream) so the ground observer sees the failure."""
+    """vna_loop must return promptly when the VNA is disabled
+    (``use_vna=false``) — no polling. Regression for a bare
+    `threading.Event().wait(5)` that ignored stop_client. Also asserts
+    the warning rides both channels (local + status stream) so the
+    ground observer sees it."""
     caplog.set_level("WARNING")
     assert client.vna is None
     _arm_status_reader(client)
@@ -155,11 +156,13 @@ def test_vna_loop_returns_when_vna_is_none(caplog, client):
     client.vna_loop()
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0, f"vna_loop did not return promptly ({elapsed}s)"
-    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+    assert any(
+        "VNA disabled in config" in r.getMessage() for r in caplog.records
+    )
 
     level, status = _status_reader(client).read(timeout=1)
     assert level == logging.WARNING
-    assert "VNA not initialized" in status
+    assert "VNA disabled in config" in status
 
 
 def test_switch_loop_does_not_mutate_cfg_schedule(client):
@@ -785,7 +788,8 @@ def test_measure_s11_contract_violation_emits_on_both_channels(
             return_value=violations,
         ):
             caplog.set_level(logging.WARNING, logger="eigsep_observing.client")
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
 
         # Panda-local log channel.
         warning_msgs = [
@@ -819,7 +823,8 @@ def test_measure_s11_clean_payload_does_not_send_status(transport, dummy_cfg):
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         _arm_status_reader(client)
-        client.measure_s11("ant")
+        with client.vna_session():
+            client.measure_s11("ant")
         level, status = _status_reader(client).read(timeout=0.2)
     finally:
         client.stop()
@@ -837,7 +842,8 @@ def test_measure_s11_returns_published_payload(transport, dummy_cfg):
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, cfg=cfg)
     try:
-        result = client.measure_s11("ant")
+        with client.vna_session():
+            result = client.measure_s11("ant")
         assert isinstance(result, tuple) and len(result) == 3
         s11, header, metadata = result
         assert set(("ant", "noise", "load")).issubset(s11.keys())
@@ -1115,12 +1121,13 @@ def test_measure_s11_uses_mode_specific_power_dbm(transport, dummy_cfg):
     cfg["use_vna"] = True
     client = DummyPandaClient(transport, cfg=cfg)
     try:
-        client.measure_s11("rec")
-        expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
-        assert client.vna.power_dBm == expected_rec
-        client.measure_s11("ant")
-        expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
-        assert client.vna.power_dBm == expected_ant
+        with client.vna_session():
+            client.measure_s11("rec")
+            expected_rec = cfg["vna_settings"]["power_dBm"]["rec"]
+            assert client.vna.power_dBm == expected_rec
+            client.measure_s11("ant")
+            expected_ant = cfg["vna_settings"]["power_dBm"]["ant"]
+            assert client.vna.power_dBm == expected_ant
     finally:
         client.stop()
 
@@ -1133,7 +1140,8 @@ def test_measure_s11_injects_overlay_sentinels(transport, dummy_cfg):
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
         assert mock_add.called
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "UNKNOWN"
@@ -1157,7 +1165,8 @@ def test_measure_s11_injects_published_run_tag(transport, dummy_cfg):
     try:
         run_tag.publish(transport, "vna_position_sweep", started_unix=12345.0)
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("rec")
+            with client.vna_session():
+                client.measure_s11("rec")
         header = mock_add.call_args.kwargs["header"]
         assert header["run_tag"] == "vna_position_sweep"
         assert header["run_started_at_unix"] == 12345.0
@@ -1177,7 +1186,8 @@ def test_measure_s11_injects_published_owner(transport, dummy_cfg):
             transport, "panda_observe", uploaded_at_unix=7.5
         )
         with patch.object(client.vna_writer, "add") as mock_add:
-            client.measure_s11("ant")
+            with client.vna_session():
+                client.measure_s11("ant")
         header = mock_add.call_args.kwargs["header"]
         assert header["obs_config_owner"] == "panda_observe"
         assert header["obs_config_owner_uploaded_unix"] == 7.5
@@ -2506,14 +2516,19 @@ def test_coord_lock_is_rlock(client):
     client.coord.lock.release()
 
 
-def test_run_calibration_sequence_skips_vna_when_uninitialized(client, caplog):
-    """No VNA → calibration logs a warning and proceeds to dwells."""
+def test_run_calibration_sequence_skips_vna_when_disabled(client, caplog):
+    """use_vna=false → calibration logs a warning and proceeds to
+    dwells without opening a VNA session.
+    """
     assert client.vna is None  # dummy_cfg has use_vna: false
     caplog.set_level("WARNING")
     schedule = {"RFANT": 60, "RFNOFF": 0.05}
     completed = client.run_calibration_sequence(schedule=schedule)
     assert completed is True
-    assert any("VNA not initialized" in r.getMessage() for r in caplog.records)
+    assert any(
+        "VNA disabled (use_vna=false)" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_run_calibration_sequence_filters_rfant(transport, dummy_cfg):
@@ -2648,5 +2663,221 @@ def test_run_calibration_sequence_skips_invalid_modes(
             and "NOT_A_MODE" in r.getMessage()
             for r in caplog.records
         )
+    finally:
+        client.stop()
+
+
+def test_vna_lazy_none_until_session(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert client.vna is None  # lazy: not built at construction
+        assert client.vna_enabled is True
+        with client.vna_session():
+            assert isinstance(client.vna, DummyVNA)
+        assert client.vna is None  # torn down on exit
+    finally:
+        client.stop()
+
+
+def test_vna_session_nests_without_early_teardown(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        with client.vna_session():
+            outer = client.vna
+            with client.vna_session():
+                assert client.vna is outer  # inner reuses the object
+            assert client.vna is outer  # still alive after inner exit
+        assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_vna_open_rejected_when_disabled(client):
+    # default fixture cfg has use_vna=False
+    assert client.vna_enabled is False
+    with pytest.raises(RuntimeError, match="use_vna=false"):
+        client.vna_open()
+
+
+def test_vna_session_starts_and_stops_service(
+    transport, dummy_cfg, monkeypatch
+):
+    # Force the real (service-managed) path even on the dummy client.
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    events = []
+    from eigsep_observing import vna_service
+
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(
+        vna_service, "wait_ready", lambda ip, port, **k: events.append("ready")
+    )
+    try:
+        with client.vna_session():
+            assert events == ["start", "ready"]
+        assert events == ["start", "ready", "stop"]
+    finally:
+        client.stop()
+
+
+def test_vna_session_stops_service_on_ready_failure(
+    transport, dummy_cfg, monkeypatch
+):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    events = []
+    from eigsep_observing import vna_service
+
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+
+    def boom(ip, port, **k):
+        raise TimeoutError("not ready")
+
+    monkeypatch.setattr(vna_service, "wait_ready", boom)
+    try:
+        with pytest.raises(TimeoutError):
+            client.vna_open()
+        assert events == ["start", "stop"]  # service stopped on failure
+        assert client._vna_depth == 0
+    finally:
+        client.stop()
+
+
+def test_vna_open_resets_vna_on_build_failure(
+    transport, dummy_cfg, monkeypatch
+):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    monkeypatch.setattr(client, "_manage_vna_service", True)
+    from eigsep_observing import vna_service
+
+    events = []
+    monkeypatch.setattr(vna_service, "start", lambda: events.append("start"))
+    monkeypatch.setattr(vna_service, "stop", lambda: events.append("stop"))
+    monkeypatch.setattr(vna_service, "wait_ready", lambda ip, port, **k: None)
+
+    closed = {"n": 0}
+
+    class FakeSock:
+        def close(self):
+            closed["n"] += 1
+
+    class HalfVNA:
+        s = FakeSock()
+
+    def failing_init():
+        # mimic init_VNA assigning self.vna then setup() raising
+        client.vna = HalfVNA()
+        raise RuntimeError("setup failed")
+
+    monkeypatch.setattr(client, "init_VNA", failing_init)
+    try:
+        with pytest.raises(RuntimeError, match="setup failed"):
+            client.vna_open()
+        assert client.vna is None  # not leaked
+        assert closed["n"] == 1  # socket closed
+        assert events == ["start", "stop"]  # service started then stopped
+        assert client._vna_depth == 0
+    finally:
+        client.stop()
+
+
+def test_vna_loop_measures_then_stops(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 0.05
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        # Stop after the first iteration's measurements land.
+        def stopper():
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client.transport.r.xlen(VNA_STREAM) >= 2:
+                    break
+                time.sleep(0.01)
+            client.stop_client.set()
+
+        t = threading.Thread(target=stopper, daemon=True)
+        t.start()
+        client.vna_loop()  # returns once stop_client is set
+        t.join(timeout=5)
+        # ant + rec bundles were published in at least one session.
+        assert client.transport.r.xlen(VNA_STREAM) >= 2
+        # Session torn down on loop exit.
+        assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_vna_loop_survives_session_open_failure(
+    transport, dummy_cfg, monkeypatch, caplog
+):
+    """A failed vna_open (service won't start) must not kill vna_loop:
+    it logs and continues to the next iteration."""
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["vna_interval"] = 0.01
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        calls = {"n": 0}
+        orig_open = client.vna_open
+
+        def flaky_open():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("service start failed")
+            return orig_open()
+
+        monkeypatch.setattr(client, "vna_open", flaky_open)
+
+        def stopper():
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if client.transport.r.xlen(VNA_STREAM) >= 2:
+                    break
+                time.sleep(0.01)
+            client.stop_client.set()
+
+        caplog.set_level(logging.ERROR, logger="eigsep_observing.client")
+        t = threading.Thread(target=stopper, daemon=True)
+        t.start()
+        client.vna_loop()
+        t.join(timeout=5)
+
+        assert calls["n"] >= 2  # first open failed, a later one succeeded
+        assert any(
+            "VNA session failed" in r.getMessage() for r in caplog.records
+        )
+        assert client.vna is None
+    finally:
+        client.stop()
+
+
+def test_run_calibration_sequence_uses_session(transport, dummy_cfg):
+    cfg = dict(dummy_cfg)
+    cfg["use_vna"] = True
+    cfg["switch_schedule"] = {}  # skip dwell phase; test the VNA block
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        from eigsep_observing.keys import VNA_STREAM
+
+        assert client.run_calibration_sequence() is True
+        assert client.transport.r.xlen(VNA_STREAM) >= 2  # ant + rec
+        assert client.vna is None  # session closed after the block
     finally:
         client.stop()
