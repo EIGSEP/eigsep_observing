@@ -32,6 +32,7 @@ from eigsep_observing.live_status import (
     LiveStatusAggregator,
     Thresholds,
 )
+from eigsep_observing.vna import VnaWriter
 
 
 NCHAN = 1024
@@ -144,6 +145,26 @@ def _make_corr_row(pairs=("0", "1", "02"), auto_value=100, cross_value=5):
             arr = np.full((NCHAN, 2, 2), cross_value, dtype=np.dtype(DTYPE))
         out[p] = arr.tobytes()
     return out
+
+
+def _make_ant_bundle(nfreq=16):
+    """Conforming ant-mode VNA bundle (all 5 DUTs + OSL)."""
+    z = np.ones(nfreq, dtype=np.complex128)
+    data = {
+        "ant": z,
+        "load": 0.5 * z,
+        "noise": 0.25 * z,
+        "amb": 0.1 * z,
+        "sp1": 0.9 * z,
+        "cal:VNAO": z,
+        "cal:VNAS": -z,
+        "cal:VNAL": 0.0 * z,
+    }
+    header = {
+        "mode": "ant",
+        "freqs": np.linspace(1e6, 250e6, nfreq).tolist(),
+    }
+    return data, header
 
 
 # ---------------------------------------------------------------------
@@ -1137,6 +1158,49 @@ def test_snap_fpga_probe_unknown_when_no_host(agg, monkeypatch):
     agg._snap_tick()
     assert calls == []
     assert agg.state.snap_fpga_reachable is None
+
+
+# ---------------------------------------------------------------------
+# VNA tick — sp1 cache
+# ---------------------------------------------------------------------
+
+
+def test_vna_tick_caches_ant_and_sp1_from_one_bundle(agg, seeded):
+    """One ant-mode entry fills both the ant and sp1 VnaCache slots,
+    sharing OSL arrays and freqs."""
+    _, panda = seeded
+    data, header = _make_ant_bundle()
+    VnaWriter(panda).add(data, header=header)
+    _rewind_streams(panda, ["stream:vna"])
+
+    agg._vna_tick()
+
+    state = agg.snapshot()
+    assert state.last_vna_ant is not None
+    assert state.last_vna_sp1 is not None
+    np.testing.assert_array_equal(state.last_vna_sp1.raw_s11, data["sp1"])
+    np.testing.assert_array_equal(
+        state.last_vna_sp1.cal_o, state.last_vna_ant.cal_o
+    )
+    assert state.last_vna_rec is None
+
+
+def test_vna_tick_missing_sp1_drops_only_sp1(agg, seeded, caplog):
+    """A pre-upgrade ant bundle without sp1 still caches the ant trace;
+    the sp1 slot stays empty and the violation logs at ERROR."""
+    _, panda = seeded
+    data, header = _make_ant_bundle()
+    del data["sp1"]
+    VnaWriter(panda).add(data, header=header)
+    _rewind_streams(panda, ["stream:vna"])
+
+    with caplog.at_level(logging.ERROR):
+        agg._vna_tick()
+
+    state = agg.snapshot()
+    assert state.last_vna_ant is not None
+    assert state.last_vna_sp1 is None
+    assert any("sp1" in r.message for r in caplog.records)
 
 
 def test_snapshot_exposes_snap_fpga_fields(agg):
