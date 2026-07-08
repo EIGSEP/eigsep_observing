@@ -11,10 +11,13 @@ the bottom of the sweep, which biases everything shallow (measured
 on the 2026-07-08 input-5 sweep: raw fits gave ~0.46 dB/dB where the
 floor-subtracted excess tracks 1 dB/dB). Only measurable steps
 (excess above ``--min-excess-frac`` of the floor) participate. The
-per-channel min/max bounds are the *raw* measured counts at the
-lowest and highest linear step, since production compares raw corr
-data against them; a free-slope line refit on the linear set is
-saved as the measured-linearity diagnostic. Channels with too little
+per-channel bounds are in *raw* counts, since production compares
+raw corr data against them: the min bound is the measured counts at
+the lowest linear step, and the max bound is interpolated to where
+the deviation crosses the threshold between the highest linear step
+and the first failing step above it (de-quantizing the discrete
+sweep). A free-slope line refit on the linear set is saved as the
+measured-linearity diagnostic. Channels with too little
 dynamic range or too few usable steps (e.g. above the anti-aliasing
 LPF cutoff, where the noise source injects no power) get NaN bounds.
 
@@ -134,9 +137,10 @@ def fit_channel(
     slope, intercept, min_counts, max_counts, floor : float
         Free-slope refit of the floor-subtracted excess on the linear
         set (the measured-linearity diagnostic), raw-counts bounds of
-        the linear range, and the channel's floor estimate. All NaN
-        when the channel is degenerate (insufficient dynamic range or
-        no credible unit-slope run).
+        the linear range (max interpolated to the threshold crossing
+        above the last linear step), and the channel's floor
+        estimate. All NaN when the channel is degenerate
+        (insufficient dynamic range or no credible unit-slope run).
 
     """
     nan5 = (np.nan,) * 5
@@ -187,11 +191,37 @@ def fit_channel(
             break
         linear = new_linear
 
+    # Recompute the anchored line from the converged set: when the
+    # loop exits by exhausting MAX_CLIP_ITERATIONS, offset/resid are
+    # stale by one iteration.
+    offset = np.median(log_excess[linear] - unit_slope * p_in_dbm[linear])
+    resid_db = 10 * (log_excess - (unit_slope * p_in_dbm + offset))
+
     # Free-slope refit on the linear set is the measured-linearity
     # diagnostic the downstream slope gate checks.
     slope, intercept = np.polyfit(p_in_dbm[linear], log_excess[linear], 1)
     idx = np.nonzero(linear)[0]
-    return slope, intercept, counts[idx[0]], counts[idx[-1]], floor
+    lo_counts = counts[idx[0]]
+    hi = idx[-1]
+    hi_counts = counts[hi]
+    # The discrete sweep quantizes the upper bound to step values
+    # (neighboring channels flip between adjacent attenuator steps —
+    # a ~2 dB square wave across frequency), so interpolate where the
+    # deviation from the anchored line crosses the threshold between
+    # the last linear step and the first failing step above it, and
+    # take the model counts at that crossing. The lower bound stays
+    # at the lowest passing step: near the floor the counts axis is
+    # too compressed for quantization to matter, and interpolating
+    # further down would lean on sub-gate (noise-dominated) steps.
+    if hi + 1 < len(counts) and np.isfinite(resid_db[hi + 1]):
+        r0, r1 = resid_db[hi], resid_db[hi + 1]
+        target = np.sign(r1) * threshold_db
+        if np.abs(r1) > threshold_db and not np.isclose(r0, r1):
+            frac = np.clip((target - r0) / (r1 - r0), 0.0, 1.0)
+            p_cross = p_in_dbm[hi] + frac * (p_in_dbm[hi + 1] - p_in_dbm[hi])
+            excess_cross = 10 ** (unit_slope * p_cross + offset + target / 10)
+            hi_counts = max(hi_counts, floor + excess_cross)
+    return slope, intercept, lo_counts, hi_counts, floor
 
 
 def nan_median_smooth(arr, window):
