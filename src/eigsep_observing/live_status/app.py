@@ -530,7 +530,11 @@ _VNA_STALE_AGE_S = 5400.0
 
 
 def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
-    """Calibrated VNA pane payload for ``mode in {"ant", "rec"}``.
+    """Calibrated VNA pane payload for ``mode in {"ant", "rec", "sp1"}``.
+
+    ``sp1`` (Spare-1 open-cable trace) carries an extra ``"phase_deg"``
+    field (unwrapped phase in degrees) alongside the standard
+    magnitude data — see the mode-specific block below.
 
     Calibration is computed lazily here so the drain thread never pays
     the calkit cost when the pane isn't visible. A failure of the cal
@@ -538,15 +542,18 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     surfaces ``available=false`` to the front-end — corr / metadata
     panes stay unaffected.
     """
-    if mode not in ("ant", "rec"):
+    caches: dict[str, Optional[VnaCache]] = {
+        "ant": state.last_vna_ant,
+        "rec": state.last_vna_rec,
+        "sp1": state.last_vna_sp1,
+    }
+    if mode not in caches:
         return {
             "available": False,
             "mode": mode,
             "reason": f"unknown mode {mode!r}",
         }
-    cache: Optional[VnaCache] = (
-        state.last_vna_ant if mode == "ant" else state.last_vna_rec
-    )
+    cache = caches[mode]
     if cache is None:
         return {
             "available": False,
@@ -585,7 +592,7 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     # plotly draws a gap rather than crashing on NaN/Inf.
     s11_db_list = [float(v) if np.isfinite(v) else None for v in s11_db]
     freqs_mhz = (cache.freqs * 1e-6).tolist()
-    return {
+    payload = {
         "available": True,
         "mode": mode,
         "freqs_mhz": freqs_mhz,
@@ -594,6 +601,23 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
         "stale": age_s > _VNA_STALE_AGE_S,
         "metadata_snapshot_unix": cache.metadata_snapshot_unix,
     }
+    if mode == "sp1":
+        # An open cable's phase vs. frequency is ~linear (slope = the
+        # cable's round-trip delay); unwrapping makes slope drift or
+        # ripple visible instead of sawtoothing at +-180 deg.
+        #
+        # Unwrap only the finite channels: np.unwrap cumsums phase
+        # diffs, so a single NaN would poison every later channel.
+        # Unwrapping across a NaN gap can miss a wrap inside the gap —
+        # acceptable for this display-only pane.
+        ang = np.angle(cal)
+        phase = np.full(ang.shape, np.nan)
+        finite = np.isfinite(ang)
+        phase[finite] = np.degrees(np.unwrap(ang[finite]))
+        payload["phase_deg"] = [
+            float(v) if np.isfinite(v) else None for v in phase
+        ]
+    return payload
 
 
 def _host_health_payload(

@@ -1397,6 +1397,7 @@ def _publish_vna(
     cal_s=None,
     cal_l=None,
     metadata_snapshot_unix=None,
+    sp1=None,
 ):
     """Publish one synthetic VNA entry to the given transport.
 
@@ -1404,6 +1405,10 @@ def _publish_vna(
     a constant raw S11 of 0.3+0j across the band. With those, the
     calibrated output equals the input — which is what the route's
     s11_db assertion exploits.
+
+    ``sp1``, when given, rides in the data dict alongside the DUT
+    trace — the producer contract for ant bundles, which the
+    aggregator projects into ``last_vna_sp1``.
     """
     if raw_s11 is None:
         raw_s11 = np.full(_VNA_NFREQ, 0.3 + 0.0j, dtype=complex)
@@ -1422,6 +1427,8 @@ def _publish_vna(
         "cal:VNAS": cal_s,
         "cal:VNAL": cal_l,
     }
+    if sp1 is not None:
+        data["sp1"] = sp1
     header = {
         "mode": mode,
         "freqs": np.linspace(50e6, 250e6, _VNA_NFREQ).tolist(),
@@ -1517,6 +1524,130 @@ def test_vna_payload_stale_flag_fires_past_threshold(agg_primed):
     stale = _vna_payload(state, "ant", now=received + _VNA_STALE_AGE_S + 60.0)
     assert stale["stale"] is True
     assert stale["age_s"] >= _VNA_STALE_AGE_S
+
+
+# Synthetic Spare-1 open-cable round-trip delay for the sp1 tests.
+# Over the fixture band (50-250 MHz, _VNA_NFREQ channels) 15 ns gives a
+# -34.8 deg/channel phase step — small enough (< 180 deg) that the
+# unwrap is unambiguous, yet the -1080 deg total span crosses +-180 deg
+# several times, so a wrapped trace is visibly different from an
+# unwrapped one.
+_SP1_TAU_S = 15e-9
+
+
+def _sp1_delay_trace():
+    """(freqs_hz, s11) for a unit-magnitude linear-delay sp1 trace.
+
+    Phase is exactly -360 * f * tau degrees. The frequency axis matches
+    the header ``_publish_vna`` writes, so analytic phase expectations
+    line up channel-for-channel with the payload.
+    """
+    freqs = np.linspace(50e6, 250e6, _VNA_NFREQ)
+    return freqs, np.exp(-2j * np.pi * freqs * _SP1_TAU_S)
+
+
+def test_vna_payload_sp1_includes_unwrapped_phase(agg_primed):
+    """sp1 payloads carry unwrapped phase_deg alongside s11_db; ant
+    payloads don't (magnitude-only pane).
+
+    The trace's true phase spans -1080 deg (three full turns), so the
+    assertions discriminate between implementations: a *wrapped* trace
+    jumps +360 deg at every +-180 crossing (fails the monotonic
+    check), a *radians* trace has per-channel steps too small by
+    180/pi (fails the slope check), and asserting on np.diff sidesteps
+    the arbitrary constant offset the unwrap's starting branch leaves.
+    """
+    from eigsep_observing.live_status.app import _vna_payload
+
+    agg = agg_primed
+    panda = agg.transport_panda
+    freqs, sp1_trace = _sp1_delay_trace()
+    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _rewind(panda, ["stream:vna"])
+    agg._vna_tick()
+    state = agg.snapshot()
+
+    payload = _vna_payload(state, "sp1", now=time.time())
+    assert payload["available"] is True
+    assert payload["mode"] == "sp1"
+    assert len(payload["phase_deg"]) == len(payload["s11_db"])
+    assert all(isinstance(v, float) for v in payload["phase_deg"])
+    phase = np.asarray(payload["phase_deg"])
+    # No +360 sawtooth resets anywhere: pins UNWRAPPED.
+    assert np.all(np.diff(phase) < 0)
+    # Per-channel slope matches the analytic -360 * f * tau exactly
+    # (ideal OSL: calibrated == raw): pins DEGREES and the value math.
+    expected_deg = -360.0 * freqs * _SP1_TAU_S
+    np.testing.assert_allclose(
+        np.diff(phase), np.diff(expected_deg), rtol=1e-6
+    )
+    # Full span is three turns — impossible for a wrapped trace, whose
+    # values all sit inside (-180, 180].
+    assert phase[0] - phase[-1] == pytest.approx(1080.0, rel=1e-6)
+
+    ant_payload = _vna_payload(state, "ant", now=time.time())
+    assert "phase_deg" not in ant_payload
+
+
+def test_vna_payload_sp1_nan_channel_masked_not_poisoning(agg_primed):
+    """One non-finite channel surfaces as a single None gap.
+
+    A NaN in the sp1 trace survives calibrate_s11 element-wise (ideal
+    OSL is per-channel math), so np.angle(cal) has exactly one NaN.
+    np.unwrap cumsums phase diffs, so an implementation that unwraps
+    the whole array instead of only the finite channels would turn
+    every channel *after* the gap into None — this test pins the
+    finite-mask.
+    """
+    from eigsep_observing.live_status.app import _vna_payload
+
+    agg = agg_primed
+    panda = agg.transport_panda
+    _, sp1_trace = _sp1_delay_trace()
+    nan_ch = 5
+    sp1_trace[nan_ch] = np.nan
+    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _rewind(panda, ["stream:vna"])
+    agg._vna_tick()
+
+    payload = _vna_payload(agg.snapshot(), "sp1", now=time.time())
+    assert payload["available"] is True
+    phase = payload["phase_deg"]
+    assert phase[nan_ch] is None
+    assert all(isinstance(v, float) for v in phase[:nan_ch])
+    assert all(isinstance(v, float) for v in phase[nan_ch + 1 :])
+
+
+def test_vna_route_sp1_calibrated_with_phase(agg_primed):
+    """Route-level: /api/vna?mode=sp1 serves the sp1 pane through the
+    same Flask envelope as ant/rec, with phase_deg present."""
+    panda = agg_primed.transport_panda
+    _, sp1_trace = _sp1_delay_trace()
+    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+
+    body = client_for(agg_primed).get("/api/vna?mode=sp1").get_json()
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["available"] is True
+    assert data["mode"] == "sp1"
+    assert len(data["phase_deg"]) == _VNA_NFREQ
+    assert len(data["s11_db"]) == _VNA_NFREQ
+    # Unit-magnitude trace: |S11| = 1 -> 0 dB across the band.
+    for v in data["s11_db"]:
+        assert v == pytest.approx(0.0, abs=1e-9)
+    assert data["stale"] is False
+
+
+def test_vna_payload_sp1_empty_before_first_bundle(agg_primed):
+    """agg_primed never publishes a VNA bundle, so last_vna_sp1 is
+    still None — the 'no measurement received yet' path."""
+    from eigsep_observing.live_status.app import _vna_payload
+
+    payload = _vna_payload(agg_primed.snapshot(), "sp1", now=time.time())
+    assert payload["available"] is False
+    assert payload["reason"] == "no measurement received yet"
 
 
 def test_vna_drain_drops_payload_with_unknown_mode(agg_primed, caplog):
