@@ -50,6 +50,12 @@ parser.add_argument(
     default=225e6,
     help="Lowpass filter cutoff limiting the injected noise band",
 )
+parser.add_argument(
+    "--inputs",
+    nargs="+",
+    default=["0", "1"],
+    help="SNAP inputs (auto-correlation indices) to record",
+)
 args = parser.parse_args()
 
 transport = Transport(host=args.redis_host, port=args.redis_port)
@@ -70,7 +76,7 @@ freqs, _ = calc_freqs_dfreq(
     float(header["sample_rate"]) * 1e6, int(header["nchan"])
 )
 
-pairs = ["0", "1"]
+pairs = args.inputs
 attens = []
 spectra = {p: [] for p in pairs}
 acc_cnts = []
