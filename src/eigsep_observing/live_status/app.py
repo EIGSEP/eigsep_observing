@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 
 CELSIUS_TO_KELVIN = 273.15
-T_REF_K = 290.0  # IEEE ENR reference temperature
+ENR_REF_K = 290.0  # IEEE ENR reference temperature
 
 
 def _default_ori_motor():
@@ -103,62 +103,133 @@ def _header_input_to_ant(header: Optional[dict]) -> dict[str, str]:
     return _input_to_ant(header.get("wiring"))
 
 
+def _cal_finite_float(cal_cfg: dict, key: str) -> Optional[float]:
+    """Finite-float calibration knob from the config, or ``None``.
+
+    An absent key returns ``None`` silently — a missing cal block is a
+    legitimate "cal off" state. A present but non-coercible or
+    non-finite value is a config contract violation and logs at ERROR.
+    """
+    raw = cal_cfg.get(key)
+    if raw is None:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.error(
+            "Live-status cal: %s=%r is not coercible to float; "
+            "calibration disabled until obs_config is fixed.",
+            key,
+            raw,
+        )
+        return None
+    if not math.isfinite(val):
+        logger.error(
+            "Live-status cal: %s=%r is not finite; "
+            "calibration disabled until obs_config is fixed.",
+            key,
+            raw,
+        )
+        return None
+    return val
+
+
+def _snapshot_temp_c(
+    state: StateSnapshot, stream: str, field: str
+) -> Optional[float]:
+    """Latest ``stream.field`` temperature (°C) from the snapshot.
+
+    Returns ``None`` when the stream or field is absent or ``None`` —
+    ``None`` is contractual for sensor dropouts (e.g. a dead/shorted
+    rfswitch thermistor channel, or ADC saturation below ~8.5 °C; see
+    the ``rfswitch_therm`` schema in ``io.py``), so it disables the cal
+    without an ERROR. A present, non-``None`` value that doesn't
+    coerce to float is a producer/schema contract violation and logs
+    at ERROR.
+    """
+    entry = state.metadata_snapshot.get(stream)
+    raw = entry.get(field) if isinstance(entry, dict) else None
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.error(
+            "Live-status cal: %s.%s=%r is not coercible to float; "
+            "producer/schema contract violation (must be float or None "
+            "per SENSOR_SCHEMAS).",
+            stream,
+            field,
+            raw,
+        )
+        return None
+
+
 def _solve_calibration(
     state: StateSnapshot, obs_cfg: dict, now: float
 ) -> tuple[Optional[dict], dict]:
     """Build per-channel ``(gain, t_rx)`` for the dashboard cal toggle.
 
     Coefficients are solved from the most recent ``RFNON``/``RFAMB``
-    pair — ``RFAMB`` (ambient load) is the cold reference, ``RFNON``
-    (noise diode on) the hot reference. ``RFNOFF`` stays cached and its
-    age is retained in ``meta`` for offline cross-check / API
-    consumers, but it no longer feeds the solve.
+    pair — ``RFAMB`` (ambient load, at the measured ``t_amb_*``
+    temperature) is the cold reference; ``RFNON`` (noise diode on) the
+    hot one, at the noise-source pad's measured physical temperature
+    (``t_ns_*``) plus the attenuated diode excess
+    ``T_ENR = 290 K · 10^((ENR_dB − atten_dB)/10)``. ``RFNOFF`` stays
+    cached and its age is retained in ``meta`` for offline cross-check
+    / API consumers, but it no longer feeds the solve.
 
     Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
-    can't run (missing cache, missing T_LOAD, missing config); the
-    ``meta`` dict is always returned and exposes the cached pair ages
-    so the frontend can render a "cal is N seconds old" indicator. We
-    intentionally do not gate on cache age: the ``RFANT`` dwell is an
-    hour, so any fixed threshold either rejects nearly every antenna
-    integration or is so loose it adds nothing. The "switch has stopped
-    cycling" failure mode is already covered by ``on_schedule`` in the
-    rfswitch payload.
+    can't run (missing cache, missing reference temperature, missing
+    config); the ``meta`` dict is always returned and exposes the
+    cached pair ages so the frontend can render a "cal is N seconds
+    old" indicator. We intentionally do not gate on cache age: the
+    ``RFANT`` dwell is an hour, so any fixed threshold either rejects
+    nearly every antenna integration or is so loose it adds nothing.
+    The "switch has stopped cycling" failure mode is already covered
+    by ``on_schedule`` in the rfswitch payload.
     """
     cal_cfg = obs_cfg.get("calibration") or {}
 
-    raw_enr_db = cal_cfg.get("noise_diode_enr_db")
-    try:
-        enr_db = float(raw_enr_db) if raw_enr_db is not None else None
-    except (TypeError, ValueError):
-        logger.error(
-            "Live-status cal: noise_diode_enr_db=%r is not coercible to "
-            "float; calibration disabled until obs_config is fixed.",
-            raw_enr_db,
-        )
-        enr_db = None
-    if enr_db is not None and not math.isfinite(enr_db):
-        logger.error(
-            "Live-status cal: noise_diode_enr_db=%r is not finite; "
-            "calibration disabled until obs_config is fixed.",
-            raw_enr_db,
-        )
-        enr_db = None
+    enr_db = _cal_finite_float(cal_cfg, "noise_diode_enr_db")
+    atten_db = _cal_finite_float(cal_cfg, "noise_source_atten_db")
+    enr_eff_db = (
+        enr_db - atten_db
+        if enr_db is not None and atten_db is not None
+        else None
+    )
+    t_enr_k = (
+        ENR_REF_K * 10.0 ** (enr_eff_db / 10.0)
+        if enr_eff_db is not None
+        else None
+    )
 
-    t_enr_k = T_REF_K * 10.0 ** (enr_db / 10.0) if enr_db is not None else None
-
-    # Which metadata stream carries the calibration load's temperature.
-    # Default is the LOAD channel's stream; the knob exists for the
-    # hot-swap contingency where the LOAD module rides the LNA connector
-    # and publishes as tempctrl_lna (see OPERATIONS.md "Tempctrl channel
-    # descope and hot-swap").
-    t_load_stream = cal_cfg.get("t_load_stream") or "tempctrl_load"
+    # Which metadata streams carry the two reference temperatures.
+    # t_ns_*: physical temperature of the noise-source attenuator — the
+    # RF-switch PCB thermistor nearest the pad (channel assignment is
+    # config, see obs_config.yaml; the reading may be None when the
+    # channel is dead/shorted or ADC-saturated). t_amb_*: the RFAMB
+    # ambient load, riding the LOAD Peltier stream; the tempctrl
+    # hot-swap contingency re-points it at tempctrl_lna (see
+    # OPERATIONS.md "Tempctrl channel descope and hot-swap").
+    t_ns_stream = cal_cfg.get("t_ns_stream") or "rfswitch_therm"
+    t_ns_field = cal_cfg.get("t_ns_field") or "temp_therm2"
+    t_amb_stream = cal_cfg.get("t_amb_stream") or "tempctrl_load"
+    t_amb_field = cal_cfg.get("t_amb_field") or "T_now"
 
     meta: dict = {
         "stale": True,
         "reason": None,
-        "t_load_k": None,
-        "t_load_stream": t_load_stream,
+        "t_ns_k": None,
+        "t_amb_k": None,
+        "t_hot_k": None,
+        "t_ns_stream": t_ns_stream,
+        "t_ns_field": t_ns_field,
+        "t_amb_stream": t_amb_stream,
+        "t_amb_field": t_amb_field,
         "noise_diode_enr_db": enr_db,
+        "noise_source_atten_db": atten_db,
+        "enr_eff_db": enr_eff_db,
         "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
         "last_rfnon_age_s": None,
@@ -168,6 +239,9 @@ def _solve_calibration(
 
     if enr_db is None:
         meta["reason"] = "noise_diode_enr_db missing or non-numeric"
+        return None, meta
+    if atten_db is None:
+        meta["reason"] = "noise_source_atten_db missing or non-numeric"
         return None, meta
 
     rfamb = state.last_rfamb_pairs
@@ -183,26 +257,43 @@ def _solve_calibration(
     if state.last_rfamb_unix is not None:
         meta["last_rfamb_age_s"] = max(0.0, now - state.last_rfamb_unix)
 
-    load_entry = state.metadata_snapshot.get(t_load_stream)
-    load_t_now = (
-        load_entry.get("T_now") if isinstance(load_entry, dict) else None
-    )
-    try:
-        load_t_now_f = float(load_t_now) if load_t_now is not None else None
-    except (TypeError, ValueError):
-        logger.error(
-            "Live-status cal: %s.T_now=%r is not coercible to "
-            "float; producer/schema contract violation (T_now must be "
-            "float per SENSOR_SCHEMAS).",
-            t_load_stream,
-            load_t_now,
+    t_ns_c = _snapshot_temp_c(state, t_ns_stream, t_ns_field)
+    if t_ns_c is None:
+        meta["reason"] = (
+            f"{t_ns_stream}.{t_ns_field} missing or None "
+            "(sensor dead/saturated, or producer offline)"
         )
-        load_t_now_f = None
-    if load_t_now_f is None:
-        meta["reason"] = f"{t_load_stream}.T_now missing or non-numeric"
         return None, meta
-    t_load_k = load_t_now_f + CELSIUS_TO_KELVIN
-    meta["t_load_k"] = t_load_k
+    t_amb_c = _snapshot_temp_c(state, t_amb_stream, t_amb_field)
+    if t_amb_c is None:
+        meta["reason"] = (
+            f"{t_amb_stream}.{t_amb_field} missing or None "
+            "(sensor dead/saturated, or producer offline)"
+        )
+        return None, meta
+
+    t_ns_k = t_ns_c + CELSIUS_TO_KELVIN
+    t_amb_k = t_amb_c + CELSIUS_TO_KELVIN
+    t_hot_k = t_ns_k + t_enr_k
+    meta["t_ns_k"] = t_ns_k
+    meta["t_amb_k"] = t_amb_k
+    meta["t_hot_k"] = t_hot_k
+
+    if t_hot_k <= t_amb_k:
+        # Reachable from config alone (an oversized noise_source_atten_db
+        # shrinks t_enr_k below the ns/amb temperature gap) — log loudly
+        # so the operator fixes the knobs instead of trusting a junk cal.
+        logger.error(
+            "Live-status cal: hot reference t_hot_k=%r is not above "
+            "ambient t_amb_k=%r; check noise_diode_enr_db / "
+            "noise_source_atten_db in obs_config.",
+            t_hot_k,
+            t_amb_k,
+        )
+        meta["reason"] = (
+            "hot reference not above ambient (check ENR/atten config)"
+        )
+        return None, meta
 
     coeffs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     for pair, amb_arr in rfamb.items():
@@ -216,16 +307,16 @@ def _solve_calibration(
             p_amb = amb_arr[0].astype(np.float64)
             p_on = on_arr[0].astype(np.float64)
             try:
-                gain, t_rx = compute_gain_trx(p_on, p_amb, t_load_k, t_enr_k)
+                gain, t_rx = compute_gain_trx(p_on, p_amb, t_hot_k, t_amb_k)
             except ValueError as exc:
-                # Outer guards force `t_enr_k` finite and positive, so this
+                # The pre-loop guard forces `t_hot_k > t_amb_k`, so this
                 # path is only reachable via a logic regression — log loudly.
                 logger.error(
                     "Live-status cal: compute_gain_trx failed for pair %r "
-                    "(t_load_k=%r, t_enr_k=%r): %s",
+                    "(t_hot_k=%r, t_amb_k=%r): %s",
                     pair,
-                    t_load_k,
-                    t_enr_k,
+                    t_hot_k,
+                    t_amb_k,
                     exc,
                 )
                 continue
