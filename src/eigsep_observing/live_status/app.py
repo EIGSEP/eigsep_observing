@@ -813,9 +813,9 @@ def _config_payload(
 
     ``obs_cfg`` here is the aggregator's *effective* config: the local
     YAML with the panda-reality slice (``tempctrl_settings``, ``use_*``
-    gates, ``corr_ntimes``, ``calibration.t_load_stream``) overridden
-    by the panda's Redis ``ConfigStore`` upload once one has landed
-    (issue #194). ``config_source`` records which side supplied that
+    gates, ``corr_ntimes``, the ``calibration`` t_ns_*/t_amb_* routing
+    knobs) overridden by the panda's Redis ``ConfigStore`` upload once
+    one has landed (issue #194). ``config_source`` records which side supplied that
     slice — ``"panda_upload"`` when an upload has been seen on this
     Redis, ``"local_file"`` when none ever has — and
     ``config_upload_unix`` dates it (the upload persists after panda
@@ -883,8 +883,9 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     def api_corr():
         state = aggregator.snapshot()
         calibrated = request.args.get("calibrated") == "1"
-        # Effective config so the display calibration's t_load_stream
-        # follows a hot-swap announced via the panda's config upload.
+        # Effective config so the display calibration's t_ns_*/t_amb_*
+        # reference-temperature routing follows a hot-swap announced
+        # via the panda's config upload.
         return jsonify(
             _envelope(
                 _corr_payload(

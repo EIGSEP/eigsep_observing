@@ -225,8 +225,8 @@ class StateSnapshot:
     # its config to this Redis. The dashboard reads ``switch_schedule``
     # from here rather than from the on-disk YAML, so a parked switch
     # with no panda running shows no countdown. The panda-reality slice
-    # (``tempctrl_settings``, ``use_*`` gates, ``corr_ntimes``,
-    # ``calibration.t_load_stream``) is additionally merged over the
+    # (``tempctrl_settings``, ``use_*`` gates, ``corr_ntimes``, the
+    # ``calibration`` t_ns_*/t_amb_* routing knobs) is merged over the
     # local YAML into ``aggregator.obs_cfg_effective`` so signal gating
     # and config-derived bands follow what panda is actually running
     # (issue #194).

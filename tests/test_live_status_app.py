@@ -1062,7 +1062,7 @@ def test_panda_upload_regates_signals_and_thresholds():
             },
             "calibration": {
                 **OBS_CFG["calibration"],
-                "t_load_stream": "tempctrl_lna",
+                "t_amb_stream": "tempctrl_lna",
             },
         }
         ConfigStore(panda).upload(upload)
@@ -1076,10 +1076,10 @@ def test_panda_upload_regates_signals_and_thresholds():
             29.0,
             31.0,
         ]
-        # calibration.t_load_stream was plucked from the upload; the
+        # calibration.t_amb_stream was plucked from the upload; the
         # ENR knob stays dashboard-local.
         cal = agg.obs_cfg_effective["calibration"]
-        assert cal["t_load_stream"] == "tempctrl_lna"
+        assert cal["t_amb_stream"] == "tempctrl_lna"
         assert (
             cal["noise_diode_enr_db"]
             == OBS_CFG["calibration"]["noise_diode_enr_db"]
@@ -1168,16 +1168,17 @@ def test_panda_upload_malformed_keeps_previous_gating(agg_primed, caplog):
     assert agg.thresholds is not th_good
 
 
-def test_corr_route_calibrated_t_load_stream_follows_upload(agg_primed):
-    """Hot-swap contingency end-to-end: the panda upload names
-    ``tempctrl_lna`` as the cal-load stream; the calibrated corr route
-    must read T_LOAD from that stream without a dashboard restart."""
+def test_corr_route_calibrated_t_amb_stream_follows_upload(agg_primed):
+    """Hot-swap contingency end-to-end: the panda upload re-points the
+    ambient-reference stream at ``tempctrl_lna`` (the moved LOAD module
+    publishes there); the calibrated corr route must read T_amb from
+    that stream without a dashboard restart."""
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
     upload = {
         **OBS_CFG,
         "calibration": {
             **OBS_CFG["calibration"],
-            "t_load_stream": "tempctrl_lna",
+            "t_amb_stream": "tempctrl_lna",
         },
     }
     ConfigStore(agg_primed.transport_panda).upload(upload)
@@ -1187,10 +1188,10 @@ def test_corr_route_calibrated_t_load_stream_follows_upload(agg_primed):
     app.config.update(TESTING=True)
     body = app.test_client().get("/api/corr?calibrated=1").get_json()
     meta = body["data"]["calibration_meta"]
-    assert meta["t_load_stream"] == "tempctrl_lna"
+    assert meta["t_amb_stream"] == "tempctrl_lna"
     # tempctrl_lna's T_now is 25.1 C in the fixture (vs LOAD's 25.0) —
     # proof the solve read the swapped stream, not the default.
-    assert meta["t_load_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
+    assert meta["t_amb_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
 
 
 def test_file_route(client):

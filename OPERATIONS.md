@@ -345,8 +345,8 @@ the LNA connector):**
      block's `target_C` / `hysteresis_C` / `clamp` / `cooling_enabled` /
      `Kp` / `Ki` — the physical module is the same, only the channel
      (pins + stream name) changed.
-   - `calibration.t_load_stream: tempctrl_lna` — the Y-factor
-     calibration's load-temperature reference now rides the
+   - `calibration.t_amb_stream: tempctrl_lna` — the Y-factor
+     calibration's ambient-load temperature reference now rides the
      LNA-connector stream.
 4. One-time Redis cleanup so the retired `tempctrl_load` stream doesn't
    emit throttled staleness warnings on the ground side: delete its
@@ -355,8 +355,9 @@ the LNA connector):**
    set entry.
 5. Restart `panda_observe`. The live-status dashboard follows on its
    own: signal gating, tempctrl bands, and the display calibration's
-   `t_load_stream` prefer the panda's Redis config upload over the
-   dashboard host's local file, so the restarted `panda_observe`'s
+   `t_ns_*`/`t_amb_*` reference routing prefer the panda's Redis
+   config upload over the dashboard host's local file, so the
+   restarted `panda_observe`'s
    upload re-gates the dashboard within a tick — no dashboard-side
    config edit or restart. During the swap window itself the dashboard
    still renders the *last* upload's tiles (empty for the retired
