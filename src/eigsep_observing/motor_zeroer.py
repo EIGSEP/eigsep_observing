@@ -48,6 +48,8 @@ class MotorZeroer:
     ``enforce_limits`` is passed to the internally built ``MotorClient``;
     it is ignored when an external ``motor_client`` is supplied (that
     client's own ``enforce_limits`` governs).
+    ``az_step0_fallback`` is forwarded to the internally built
+    :class:`MotorHomer` (ignored when an external ``homer`` is supplied).
     """
 
     def __init__(
@@ -60,6 +62,7 @@ class MotorZeroer:
         el_dn_delay_us=600,
         source="motor_zeroer",
         enforce_limits=True,
+        az_step0_fallback=False,
         motor_client=None,
         homer=None,
         confirm_starts_home=False,
@@ -99,6 +102,7 @@ class MotorZeroer:
                 transport,
                 motor_client=motor_client,
                 source=source,
+                az_step0_fallback=az_step0_fallback,
             )
         self._homer = homer
         # Enter/y commit semantics: False (motor_manual) zeroes the
@@ -191,12 +195,13 @@ class MotorZeroer:
 
         No-op if a home is already in flight or the manager is
         unreachable. The thread runs :meth:`MotorHomer.home`
-        (coarse approach, then closed-loop convergence onto the pot's
-        0° voltage and IMU-level el, re-truing the step counters) and
-        clears :attr:`is_homing` when it returns — normally, on a
-        :meth:`cancel_home`, or after a logged error. A missing pot
-        calibration surfaces as an actionable :attr:`notice`; there is
-        deliberately no silent step-0 fallback.
+        (az: coarse approach plus at most one pot-referenced corrective
+        jog; el: closed-loop convergence onto IMU-level — each re-trues
+        its own step counter on success) and clears :attr:`is_homing`
+        when it returns — normally, on a :meth:`cancel_home`, or after a
+        logged error. A missing pot calibration surfaces as an actionable
+        :attr:`notice`; a dead potmon skips az unless
+        ``az_step0_fallback`` was set.
 
         ``axes`` (a non-empty subset of ``("az", "el")``, default both)
         restricts the home to the given axes — the other axis is never

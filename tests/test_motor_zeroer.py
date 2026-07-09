@@ -651,3 +651,13 @@ def test_last_home_result_reset_on_new_home(client):
     assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
     assert zeroer.last_home_result is None
     zeroer.cancel_home()
+
+
+def test_zeroer_forwards_az_step0_fallback():
+    z = MotorZeroer(DummyTransport(), az_step0_fallback=True)
+    assert z._homer.az_step0_fallback is True
+
+
+def test_zeroer_default_no_az_step0_fallback():
+    z = MotorZeroer(DummyTransport())
+    assert z._homer.az_step0_fallback is False
