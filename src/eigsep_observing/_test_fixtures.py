@@ -308,6 +308,11 @@ def _potmon_avg_entry(pot_az_voltage):
         # bool→any reduction over all-False mid-range samples; the
         # fixture voltages (~1.5 V) sit far from both ADC rails.
         "pot_az_near_rail": False,
+        # SP1 failsafe termination, steady-state SHORT (pin LOW). The
+        # str field exercises the unanimous-str reduction; the raw int
+        # rides along per the additive-handler contract.
+        "sp1_term": 0,
+        "sp1_term_name": "SHORT",
     }
 
 

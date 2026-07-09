@@ -928,6 +928,9 @@ _PELTIER_SCHEMA = {
 # flag is the stream-level tell that the absolute azimuth reference is
 # at risk. The bool→`any` reduction is the fault-flag worst case: an
 # integration where any sample was near a rail is flagged.
+# The producer composition also carries the SP1 failsafe termination
+# fields added by `_pot_redis_handler` from the firmware's `sp1_term`
+# (picohost >= 4.4) — see the schema entries below.
 SENSOR_SCHEMAS = {
     "imu_el": _IMU_EL_SCHEMA,
     "imu_az": _IMU_AZ_SCHEMA,
@@ -942,6 +945,17 @@ SENSOR_SCHEMAS = {
         "pot_az_cal_slope": float,
         "pot_az_cal_intercept": float,
         "pot_az_near_rail": bool,
+        # SP1 failsafe termination (picohost >= 4.4): raw pin level on
+        # the potmon pico's GPIO 27 (0 = SHORT cap, the failsafe;
+        # 1 = OPEN) plus the host-derived name. The str field is the
+        # primary consumer surface: its first-if-unanimous-else-
+        # "UNKNOWN" reduction flags a mid-integration flip exactly like
+        # the rfswitch state string. The int rides along raw (additive
+        # handler contract); its min reduction is not meaningful across
+        # a flip — use the name. NOT an invariant field: it legitimately
+        # changes when the observing cycle toggles the termination.
+        "sp1_term": int,
+        "sp1_term_name": str,
     },
     "rfswitch": {
         "sensor_name": str,
@@ -1147,14 +1161,16 @@ VNA_S11_CAL_KEYS = frozenset({"cal:VNAO", "cal:VNAS", "cal:VNAL"})
 
 # Per-mode required DUT keys on the VNA payload (in addition to the cal
 # keys above). The ``"ant"`` mode measures antenna, load, noise, the
-# ambient load (``amb``, path VNAAMB) and the Spare-1 port (``sp1``,
-# path VNASP1 — see ``switch_connections`` in obs_config for what is
-# physically connected); ``"rec"`` measures the receiver. These come
-# from ``VNA.measure_ant`` / ``VNA.measure_dut`` / ``VNA.measure_rec``
-# and must not regress without an explicit update here — downstream
+# ambient load (``amb``, path VNAAMB) and the Spare-1 cable twice —
+# ``sp1_short`` and ``sp1_open``, path VNASP1 with the failsafe
+# termination driven to SHORT then OPEN via the potmon pico (see
+# ``switch_connections`` in obs_config for what is physically
+# connected); ``"rec"`` measures the receiver. These come from
+# ``VNA.measure_ant`` / ``VNA.measure_dut`` / ``VNA.measure_rec`` and
+# must not regress without an explicit update here — downstream
 # consumers key on these names.
 VNA_S11_MODE_DATA_KEYS = {
-    "ant": frozenset({"ant", "load", "noise", "amb", "sp1"}),
+    "ant": frozenset({"ant", "load", "noise", "amb", "sp1_short", "sp1_open"}),
     "rec": frozenset({"rec"}),
 }
 
