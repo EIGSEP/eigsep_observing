@@ -23,7 +23,7 @@ dependencies = [
   "pyyaml",
   "flask",
   "plotly",
-  "picohost>=4.2",
+  "picohost>=4.3",
   "eigsep-vna>=1.4",
   "eigsep_redis>=2.3",
 ]

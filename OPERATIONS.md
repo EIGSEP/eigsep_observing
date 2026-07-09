@@ -365,3 +365,44 @@ Note: after any tempctrl Pico reboot, firmware defaults to
 the cached flags — a brief `status="error"` burst on the retired stream
 is expected and harmless (schema-valid rows, at most one spurious
 health-check warning).
+
+## Orientation calibration recipe
+
+Azimuth is pot-referenced (`potmon`); elevation is IMU-referenced
+(`imu_el`, plus `imu_az`'s el-only `|θ|` as a cross-check). The
+picohost-4.3 az descope retired accel-derived `imu_az` azimuth — at
+level, azimuth rotation is rotation about gravity and unobservable to
+an accelerometer (2026-07-08 field data: ~20x noise amplification for
+a few degrees of tilt). See CLAUDE.md's "IMU mode" section for the
+schema-level detail.
+
+Three commands, run in order (all picohost CLI entry points, run
+against the running `pico-manager`; step 3 is this repo's
+`motor_manual`):
+
+1. **`calibrate-pot --mode auto`** — in-box, motor-driven pot sweep.
+   Defines az 0 = pot 0° (writes the slope/intercept to `PotCalStore`).
+2. **`calibrate-imu`** — auto-driven single elevation sweep. Defines
+   el 0 = the pose where the IMUs read most "down", derived from the
+   sweep itself (no operator-eyeballed level needed). **The az
+   turntable must be parked at az home during this sweep** — the
+   `imu_az` `el_deg` section of the fit is gated on the pot reading
+   within ~10° of the calibrated zero; `imu_el` is azimuth-invariant
+   and calibrates regardless of az position.
+3. **`motor_manual` → `h` + confirm** — drives the closed-loop
+   `MotorHomer` onto the cal-defined home (pot 0° az / IMU-level el)
+   and re-zeros the step counters there.
+
+**Order matters**: run step 1 before step 2. `calibrate-imu`'s
+`imu_az` section needs a calibrated, home-parked pot to gate against;
+running it before `calibrate-pot`, or with the turntable off home,
+still calibrates `imu_el` correctly but silently drops the `imu_az`
+cross-check section from the saved fit.
+
+**A stale motor zero is a warning, not a failure.** If step 2's
+derived level sits more than ~10° from the motor's current zero
+position, it logs a warning ("motor zero may be stale; home after
+saving") but still saves the fit — the fit is independent of the
+motor's step-counter zero. Run step 3 afterward to re-zero the
+counters against the newly-saved cal-defined home; it is not a
+prerequisite for steps 1–2 to succeed.
