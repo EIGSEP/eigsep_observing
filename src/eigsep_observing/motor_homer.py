@@ -28,6 +28,9 @@ from .motor_limits import read_motor_limits
 logger = logging.getLogger(__name__)
 
 _AZ_GAIN_FALLBACK_DEG_PER_VOLT = 90.0
+# Matches the pico metadata producer cadence (~200 ms) so consecutive
+# integrated-read samples are distinct snapshot frames, not rereads.
+_POT_SAMPLE_INTERVAL_S = 0.2
 
 
 @dataclass
@@ -114,12 +117,30 @@ class MotorHomer:
         Seconds to wait after a jog before re-reading sensors
         (default 10.0).
     damping : float
-        Fraction of the residual applied per corrective jog (default 0.5).
+        Fraction of the residual applied per corrective jog
+        (el loop only; default 0.5).
     max_iters : int
-        Maximum correction iterations before giving up (default 6).
+        Maximum correction iterations before giving up
+        (el loop only; default 6).
+    az_integrate_s : float
+        Seconds of pot samples averaged per az reading (default 2.0,
+        ~10 samples at the 200 ms producer cadence) to beat down pot
+        noise before deciding on the single corrective jog.
+    az_diverge_deg : float
+        Allowed growth of the pot's distance from home past its
+        closest approach during an az move before the divergence
+        guard halts the motor (default 20.0 — above the known ~7°
+        1/rev pot nonlinearity; hardware tuning expected).
+    az_step0_fallback : bool
+        When the potmon is not publishing, ``True`` parks az at step
+        0 open-loop (position unverified, ``degraded``); ``False``
+        (default) skips az motion entirely — with the pot dead the
+        pot-voltage fence is inert too, so a blind move is the
+        dangerous case and must be opted into.
     az_gain_deg_per_volt : float or None
-        Override for the az pot gain (deg/V).  When ``None`` the gain
-        is read from ``PotCalStore`` (``abs(slope)``), with a fallback
+        Signed override for the az pot slope (deg/V); the sign sets
+        the corrective-jog direction.  When ``None`` the slope
+        is read from ``PotCalStore``, with a fallback
         of ``_AZ_GAIN_FALLBACK_DEG_PER_VOLT`` (90.0) when the store is
         empty or unreachable.
     reset_count : bool
@@ -143,6 +164,9 @@ class MotorHomer:
         settle_s=10.0,
         damping=0.5,
         max_iters=6,
+        az_integrate_s=2.0,
+        az_diverge_deg=20.0,
+        az_step0_fallback=False,
         az_gain_deg_per_volt=None,
         reset_count=True,
         enforce_limits=True,
@@ -160,6 +184,9 @@ class MotorHomer:
         self.settle_s = settle_s
         self.damping = damping
         self.max_iters = max_iters
+        self.az_integrate_s = az_integrate_s
+        self.az_diverge_deg = az_diverge_deg
+        self.az_step0_fallback = az_step0_fallback
         self.az_gain_deg_per_volt = az_gain_deg_per_volt
         self.reset_count = reset_count
         self.logger = logger
@@ -222,28 +249,33 @@ class MotorHomer:
                 "re-run calibrate-pot."
             )
 
-    def _az_gain(self):
-        """Deg/volt magnitude for the az potentiometer.
+    def _az_slope(self):
+        """Signed slope (deg/V) of the az potentiometer cal.
 
-        Priority: constructor override → PotCalStore abs(slope) →
-        ``_AZ_GAIN_FALLBACK_DEG_PER_VOLT`` (90.0).
+        Priority: constructor override -> PotCalStore slope ->
+        ``_AZ_GAIN_FALLBACK_DEG_PER_VOLT`` (+90.0). The sign is
+        load-bearing: the single corrective jog has no trial-and-error
+        sign detection, so direction comes entirely from the cal's
+        sign convention (cal angle is fit against motor az degrees,
+        so ``m * dV`` is already a motor-frame jog).
         """
         if self.az_gain_deg_per_volt is not None:
-            return abs(self.az_gain_deg_per_volt)
+            return float(self.az_gain_deg_per_volt)
         cal = self._pot_cal()
         if cal is not None:
-            return abs(cal[0])
+            return cal[0]
         self.logger.warning(
-            "No pot calibration for az gain; using fallback %.1f deg/V",
+            "No pot calibration for az slope; using fallback %.1f deg/V",
             _AZ_GAIN_FALLBACK_DEG_PER_VOLT,
         )
         return _AZ_GAIN_FALLBACK_DEG_PER_VOLT
 
     def _az_residual_deg(self, v_home, pot_v):
-        """Degrees to jog so the pot returns to its home voltage.
+        """Signed degrees to jog so the pot returns to its home voltage.
 
-        The sign convention: positive residual → need to jog positive az.
-        Returns ``None`` when no pot reading is available.
+        ``m * (v_home - pot_v)``, where ``m`` is the signed cal slope
+        — positive residual means jog positive az. Returns ``None``
+        when no pot reading is available.
 
         Parameters
         ----------
@@ -255,7 +287,7 @@ class MotorHomer:
         if pot_v is None:
             return None
         dv = v_home - pot_v
-        return dv * self._az_gain()
+        return dv * self._az_slope()
 
     def _el_residual(self, el_est):
         """Elevation residual in degrees and whether it is magnitude-only.
@@ -302,19 +334,50 @@ class MotorHomer:
     # Task C5: sensor read, settle, and converge loop
     # ------------------------------------------------------------------
 
-    def _read_sensors(self):
-        """Return ``(pot_v, el_est)`` from the snapshot reader.
-
-        ``pot_v`` is the current az pot voltage (``None`` if absent or
-        on exception).  ``el_est`` is an :class:`~.el_sensor.ElEstimate`
-        from the two IMU streams (``el_deg=None`` when both are absent).
-        """
+    def _read_pot_once(self):
+        """Current ``pot_az_voltage`` from the snapshot, or ``None``
+        when absent or on a reader error. Single sample — the guard's
+        per-poll read; see :meth:`_read_pot_integrated` for the
+        noise-averaged version."""
         try:
-            pot_v = (self.snapshot.get("potmon") or {}).get("pot_az_voltage")
+            return (self.snapshot.get("potmon") or {}).get("pot_az_voltage")
         except Exception:
-            pot_v = None
-        el_est = read_el_estimate(self.snapshot, logger=self.logger)
-        return pot_v, el_est
+            return None
+
+    def _read_pot_integrated(self, stop_event=None):
+        """Mean pot voltage over ``az_integrate_s`` seconds of samples.
+
+        Samples :meth:`_read_pot_once` at the producer cadence
+        (``_POT_SAMPLE_INTERVAL_S``); dropped samples (``None``) are
+        skipped. Returns ``None`` when no sample arrived at all. A
+        set ``stop_event`` ends the window early with whatever was
+        collected.
+        """
+        n = max(1, int(round(self.az_integrate_s / _POT_SAMPLE_INTERVAL_S)))
+        samples = []
+        for i in range(n):
+            v = self._read_pot_once()
+            if v is not None:
+                samples.append(float(v))
+            if i + 1 < n:
+                if stop_event is not None:
+                    if stop_event.wait(_POT_SAMPLE_INTERVAL_S):
+                        break
+                else:
+                    time.sleep(_POT_SAMPLE_INTERVAL_S)
+        if not samples:
+            return None
+        return sum(samples) / len(samples)
+
+    def _read_el(self):
+        """Current :class:`~.el_sensor.ElEstimate` from the IMU
+        streams (``el_deg=None`` when both are absent)."""
+        return read_el_estimate(self.snapshot, logger=self.logger)
+
+    def _read_sensors(self):
+        """(pot_v, el_est) — legacy combined read; removal pending the
+        per-axis home() split."""
+        return self._read_pot_once(), self._read_el()
 
     def _settle(self, stop_event):
         """Wait ``settle_s`` seconds; uses ``stop_event.wait`` when present."""

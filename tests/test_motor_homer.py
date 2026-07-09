@@ -37,6 +37,40 @@ def test_az_residual_none_when_pot_missing():
     assert h._az_residual_deg(1.0, None) is None
 
 
+def test_az_residual_signed_slope_sets_direction():
+    """The corrective jog has no sign auto-detect, so the residual
+    must carry the cal slope's sign: residual = m * (v_home - v)."""
+    h = _homer(az_gain_deg_per_volt=-100.0)
+    # pot 1.1 V, home 1.0 V, negative slope -> +10 deg (jog positive)
+    assert h._az_residual_deg(1.0, 1.1) == pytest.approx(10.0)
+
+
+def test_read_pot_integrated_averages_samples():
+    h = _homer(az_integrate_s=0.6)  # 3 samples at the 0.2 s cadence
+    vals = iter([1.0, 2.0, 3.0, 4.0])
+    h._read_pot_once = lambda: next(vals)
+    assert h._read_pot_integrated() == pytest.approx(2.0)
+
+
+def test_read_pot_integrated_single_sample_when_zero_window():
+    h = _homer(az_integrate_s=0.0)
+    h._read_pot_once = lambda: 1.5
+    assert h._read_pot_integrated() == pytest.approx(1.5)
+
+
+def test_read_pot_integrated_none_when_no_samples():
+    h = _homer(az_integrate_s=0.0)
+    h._read_pot_once = lambda: None
+    assert h._read_pot_integrated() is None
+
+
+def test_read_pot_integrated_skips_dropouts():
+    h = _homer(az_integrate_s=0.6)
+    vals = iter([1.0, None, 3.0])
+    h._read_pot_once = lambda: next(vals)
+    assert h._read_pot_integrated() == pytest.approx(2.0)
+
+
 def test_el_residual_signed_when_primary():
     h = _homer()
     res, mag_only = h._el_residual(ElEstimate(-8.0, False, "imu_el"))
