@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.11.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.10.0...v2.11.0) (2026-07-09)
+
+
+### Features
+
+* add az only and el only scan ([661618c](https://github.com/EIGSEP/eigsep_observing/commit/661618c2d13623b4847216eb6b92abf9c08f989a))
+* descope tempctrl channels via per-channel installed flag ([#192](https://github.com/EIGSEP/eigsep_observing/issues/192)) ([000906a](https://github.com/EIGSEP/eigsep_observing/commit/000906a2b3844c55f5a4c02f555081b94a32f66d))
+* **linearity:** deploy the 2026-07-08 linear-range product ([81d806f](https://github.com/EIGSEP/eigsep_observing/commit/81d806f0871ad47aedcdcbe68f8f547b0dd1b252))
+* **linearity:** floor-subtracted fits, slope gate, --inputs flag ([908def3](https://github.com/EIGSEP/eigsep_observing/commit/908def332fcf4b1021fb53a9bf3d1766ed4141bd))
+* **linearity:** interpolate the upper bound to the threshold crossing ([e50dc75](https://github.com/EIGSEP/eigsep_observing/commit/e50dc75a7903d2fd20bb1a6ee30621640bb69d32))
+* **linearity:** merge multi-sweep inputs into one product ([7f2b340](https://github.com/EIGSEP/eigsep_observing/commit/7f2b34092479658ca72574daa72d26cf3a17c611))
+* **live-status:** style linear-range bounds by severity ([70e7091](https://github.com/EIGSEP/eigsep_observing/commit/70e7091f3e807f052f038358725f8bb5ebf248d3))
+* per-channel corr linear-range product for headers + live status ([a3657e3](https://github.com/EIGSEP/eigsep_observing/commit/a3657e33f792a57e2de48e0f9f3db557dc55d662))
+* **vna:** on-demand cmtvna.service — lazy VNA + session lifecycle ([#188](https://github.com/EIGSEP/eigsep_observing/issues/188)) ([44eb1c7](https://github.com/EIGSEP/eigsep_observing/commit/44eb1c7935fdec7e2c813ccdd26dc617be571626))
+
+
+### Bug Fixes
+
+* **linearity:** anchor linear-set selection at unit slope ([2c517b7](https://github.com/EIGSEP/eigsep_observing/commit/2c517b7c536c9396674bc52439c2459bddf03bb2))
+* **tempctrl_manual:** remove 5s watchdog probe key ([a24ed1e](https://github.com/EIGSEP/eigsep_observing/commit/a24ed1e82bd88810b3b30e7f0cae7c2f5456af02))
+
+
+### Documentation
+
+* **config:** wiring comment reflects Rx-module chain (PAMs removed) ([055ba9d](https://github.com/EIGSEP/eigsep_observing/commit/055ba9d22b49918ae993f07e5a22e8e81d271dc9))
+
 ## [2.10.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.9.0...v2.10.0) (2026-07-03)
 
 
