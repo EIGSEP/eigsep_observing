@@ -120,14 +120,16 @@ def test_az_home_voltage_raises_without_cal():
 
 
 # ---------------------------------------------------------------------------
-# home() loop tests
+# home() tests — az: single correction; el: convergence loop
 # ---------------------------------------------------------------------------
 
 
 class _FakeMotor:
-    """In-process motor whose jogs move a simulated pot voltage / el toward
-    home, so the homer's loop actually converges. gain matches the homer's
-    az gain so a damped jog shrinks the residual."""
+    """In-process motor: jogs move a simulated pot voltage / el the
+    way the rig would, so az's single correction lands exactly and
+    el's loop converges. ``dpv`` is the SIGNED cal slope the pot
+    simulation honours (positive az motion changes voltage by
+    ``delta/dpv``)."""
 
     def __init__(self, pot=1.30, el=10.0, deg_per_volt=100.0):
         self.pot = pot
@@ -135,16 +137,24 @@ class _FakeMotor:
         self.dpv = deg_per_volt
         self.homed = 0
         self.home_axes = []
+        self.home_guards = []
+        self.az_jogs = []
+        self.az_jog_guards = []
+        self.el_jogs = []
         self.reset = []
 
-    def home(self, stop_event=None, axes=("az", "el")):
+    def home(self, stop_event=None, axes=("az", "el"), guard=None):
         self.homed += 1
         self.home_axes.append(tuple(axes))
+        self.home_guards.append(guard)
 
-    def jog_az(self, delta_deg, stop_event=None):
-        self.pot += delta_deg / self.dpv  # +deg lowers residual toward v0
+    def jog_az(self, delta_deg, stop_event=None, guard=None):
+        self.az_jogs.append(delta_deg)
+        self.az_jog_guards.append(guard)
+        self.pot += delta_deg / self.dpv
 
-    def jog_el(self, delta_deg, stop_event=None):
+    def jog_el(self, delta_deg, stop_event=None, guard=None):
+        self.el_jogs.append(delta_deg)
         self.el += delta_deg  # +deg moves el toward level (0)
 
     def reset_step_position(self, az_step=0, el_step=0):
@@ -152,12 +162,13 @@ class _FakeMotor:
 
 
 def _homer_with_fake(t, fake, **kw):
+    kw.setdefault("az_gain_deg_per_volt", fake.dpv)
+    kw.setdefault("damping", 1.0)
     h = MotorHomer(
         t,
         motor_client=fake,
-        az_gain_deg_per_volt=fake.dpv,
         settle_s=0.0,
-        damping=1.0,
+        az_integrate_s=0.0,  # single pot sample per read: fake is exact
         max_iters=10,
         **kw,
     )
@@ -178,19 +189,139 @@ def test_home_raises_without_cal():
         h.home()
 
 
-def test_home_converges_onto_cal_zero_and_resets_count():
+def test_home_az_single_correction_el_loop_and_per_axis_reset():
+    """Both-axes home: az takes coarse + exactly ONE corrective jog
+    (full signed residual, no damping even though damping=0.5), el
+    converges via its loop; each axis re-zeros only its own counter,
+    az first."""
     t = DummyTransport()
-    _seed_cal(t)  # v_home = 1.0 V; el home is IMU-level (0 deg)
+    _seed_cal(t)  # v_home = 1.0 V
     fake = _FakeMotor(pot=1.30, el=10.0)
-    h = _homer_with_fake(t, fake)
+    h = _homer_with_fake(t, fake, damping=0.5)
     res = h.home()
     assert res.converged is True
-    assert abs(res.residual_az_deg) <= h.tol_az_deg
-    assert abs(res.residual_el_deg) <= h.tol_el_deg
-    # the pot itself landed at the cal's zero-angle voltage
-    assert fake.pot == pytest.approx(1.0, abs=h.tol_az_deg / fake.dpv)
-    assert fake.reset == [(0, 0)]  # re-zeroed on convergence
-    assert fake.homed >= 1  # coarse approach happened
+    assert fake.az_jogs == [pytest.approx(-30.0)]  # one full-residual jog
+    assert fake.pot == pytest.approx(1.0)
+    assert abs(fake.el) <= h.tol_el_deg
+    assert fake.home_axes == [("az",), ("el",)]  # az coarse first
+    assert fake.reset == [(0, None), (None, 0)]  # per-axis re-zero
+    assert res.iterations >= 1  # el loop ran
+
+
+def test_home_az_within_tol_after_coarse_never_jogs():
+    t = DummyTransport()
+    _seed_cal(t)
+    fake = _FakeMotor(pot=1.01, el=0.0)  # 1 deg residual < tol 3
+    h = _homer_with_fake(t, fake)
+    res = h.home(axes=("az",))
+    assert res.converged is True
+    assert fake.az_jogs == []
+    assert fake.reset == [(0, None)]
+
+
+def test_home_az_correction_direction_from_negative_slope():
+    """Negative cal slope flips the jog sign — direction is defined
+    by the pot cal, not trial and error."""
+    t = DummyTransport()
+    _seed_cal(t, m=-100.0, b=100.0)  # v_home = 1.0 V, slope -100
+    fake = _FakeMotor(pot=1.30, el=0.0, deg_per_volt=-100.0)
+    h = _homer_with_fake(t, fake)
+    res = h.home(axes=("az",))
+    assert res.converged is True
+    assert fake.az_jogs == [pytest.approx(30.0)]  # -100 * (1.0-1.3)
+    assert fake.pot == pytest.approx(1.0)
+
+
+def test_home_az_still_out_after_correction_warns_no_rezero(caplog):
+    """A stuck az (jog moves nothing) gets exactly one corrective
+    attempt, then a loud warning and NO re-zero."""
+    t = DummyTransport()
+    _seed_cal(t)
+
+    class _Stuck(_FakeMotor):
+        def jog_az(self, delta_deg, stop_event=None, guard=None):
+            self.az_jogs.append(delta_deg)  # motor doesn't move
+
+    fake = _Stuck(pot=1.30, el=0.0)
+    h = _homer_with_fake(t, fake)
+    with caplog.at_level(logging.WARNING):
+        res = h.home(axes=("az",))
+    assert res.converged is False
+    assert res.degraded is False
+    assert len(fake.az_jogs) == 1  # no second attempt, no hunting
+    assert fake.reset == []
+    assert any("not re-zeroing" in r.message for r in caplog.records)
+
+
+def test_home_az_moves_carry_divergence_guard():
+    t = DummyTransport()
+    _seed_cal(t)
+    fake = _FakeMotor(pot=1.30, el=10.0)
+    h = _homer_with_fake(t, fake)
+    h.home()
+    assert all(g is not None for g in fake.az_jog_guards)
+    # az coarse guarded; el coarse not (pot says nothing about el)
+    assert fake.home_guards[0] is not None
+    assert fake.home_guards[1] is None
+    # coarse and jog share one guard: closest approach carries over
+    assert fake.home_guards[0] is fake.az_jog_guards[0]
+
+
+def test_home_az_pot_lost_after_coarse_aborts_without_rezero(caplog):
+    """Pot dies between the coarse approach and the read: warn,
+    no jog, no re-zero, degraded."""
+    t = DummyTransport()
+    _seed_cal(t)
+
+    class _PotDies(_FakeMotor):
+        def home(self, stop_event=None, axes=("az", "el"), guard=None):
+            super().home(stop_event=stop_event, axes=axes, guard=guard)
+            self.pot = None
+
+    fake = _PotDies(pot=1.30, el=0.0)
+    h = _homer_with_fake(t, fake)
+    with caplog.at_level(logging.WARNING):
+        res = h.home(axes=("az",))
+    assert res.converged is False
+    assert res.degraded is True
+    assert fake.az_jogs == []
+    assert fake.reset == []
+    assert any("potmon lost" in r.message for r in caplog.records)
+
+
+def test_home_az_pot_missing_skips_az_by_default(caplog):
+    """Default az_step0_fallback=False: dead potmon means NO az
+    motion at all — with the pot dead the pot fence is inert too."""
+    t = DummyTransport()
+    _seed_cal(t)
+    fake = _FakeMotor()
+    h = _homer_with_fake(t, fake)
+    h.snapshot.get = lambda key: {"el_deg": fake.el} if key == "imu_el" else {}
+    with caplog.at_level(logging.WARNING):
+        res = h.home(axes=("az",))
+    assert res.degraded is True
+    assert res.converged is False
+    assert fake.home_axes == []  # az never moved
+    assert fake.az_jogs == []
+    assert fake.reset == []
+    assert any("az_step0_fallback" in r.message for r in caplog.records)
+
+
+def test_home_az_pot_missing_step0_fallback_parks_open_loop(caplog):
+    """az_step0_fallback=True: dead potmon still parks az at step 0
+    open-loop, degraded, never re-zeroed."""
+    t = DummyTransport()
+    _seed_cal(t)
+    fake = _FakeMotor()
+    h = _homer_with_fake(t, fake, az_step0_fallback=True)
+    h.snapshot.get = lambda key: {"el_deg": fake.el} if key == "imu_el" else {}
+    with caplog.at_level(logging.WARNING):
+        res = h.home(axes=("az",))
+    assert res.degraded is True
+    assert res.converged is False
+    assert fake.home_axes == [("az",)]  # open-loop park happened
+    assert fake.reset == []
+    assert any("potmon unavailable" in r.message for r in caplog.records)
 
 
 def test_home_tracks_cal_rezero_immediately():
@@ -200,11 +331,13 @@ def test_home_tracks_cal_rezero_immediately():
     _seed_cal(t, m=100.0, b=-100.0)  # v_home 1.0 V
     fake = _FakeMotor(pot=1.30, el=0.0)
     h = _homer_with_fake(t, fake)
+    # az_gain override would pin the slope; let it track the cal too
+    h.az_gain_deg_per_volt = None
     assert h.home().converged is True
-    assert fake.pot == pytest.approx(1.0, abs=h.tol_az_deg / fake.dpv)
+    assert fake.pot == pytest.approx(1.0)
     _seed_cal(t, m=100.0, b=-120.0)  # rezero: v_home now 1.2 V
     assert h.home().converged is True
-    assert fake.pot == pytest.approx(1.2, abs=h.tol_az_deg / fake.dpv)
+    assert fake.pot == pytest.approx(1.2)
 
 
 def test_home_refuses_when_cal_zero_outside_pot_window(caplog):
@@ -227,44 +360,42 @@ def test_home_refuses_when_cal_zero_outside_pot_window(caplog):
 
 
 def test_home_degrades_when_sensors_down(caplog):
+    """All sensors dead: az is skipped (pot-referenced, default no
+    fallback), el falls back to the open-loop el-only park."""
     t = DummyTransport()
     _seed_cal(t)
     fake = _FakeMotor()
-    h = MotorHomer(t, motor_client=fake)
+    h = MotorHomer(t, motor_client=fake, settle_s=0.0, az_integrate_s=0.0)
     h.snapshot.get = lambda key: {}  # nothing published
     with caplog.at_level(logging.WARNING):
         res = h.home()
     assert res.degraded is True
     assert res.converged is False
-    assert fake.homed == 1  # open-loop fallback park
+    assert fake.home_axes == [("el",)]  # el open-loop park only
+    assert fake.reset == []
     assert any("open-loop" in r.message for r in caplog.records)
 
 
-def test_mid_loop_sensor_loss_aborts_without_rezero(caplog):
-    """If all sensors go silent inside the loop, abort with degraded=True and
-    no re-zero — re-zeroing at an unverified position is a silent
-    wrong-success."""
+def test_el_mid_loop_sensor_loss_aborts_without_rezero(caplog):
+    """If the IMUs go silent inside the el loop, abort with
+    degraded=True and no re-zero — re-zeroing at an unverified
+    position is a silent wrong-success."""
     t = DummyTransport()
-    _seed_cal(t)
     fake = _FakeMotor(pot=1.30, el=10.0)
     h = _homer_with_fake(t, fake)
-    # Override _read_sensors so it returns valid data on the first pre-loop
-    # call (which happens before the main loop) and then all-None thereafter,
-    # triggering the mid-loop guard on iteration 1.
     call_count = 0
 
-    def _read_sensors_stub():
+    def _read_el_stub():
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            # first call: pre-loop check — sensors look fine, proceed to loop
-            return fake.pot, ElEstimate(fake.el, False, "imu_el")
-        # subsequent calls (inside loop): all sensors lost
-        return None, ElEstimate(None, False, "none")
+            # pre-coarse check: IMU looks fine, proceed to the loop
+            return ElEstimate(fake.el, False, "imu_el")
+        return ElEstimate(None, False, "none")
 
-    h._read_sensors = _read_sensors_stub
+    h._read_el = _read_el_stub
     with caplog.at_level(logging.WARNING):
-        result = h.home()
+        result = h.home(axes=("el",))
     assert result.converged is False
     assert result.degraded is True
     assert fake.reset == []  # step counter must NOT be re-zeroed
@@ -272,7 +403,7 @@ def test_mid_loop_sensor_loss_aborts_without_rezero(caplog):
 
 
 def test_home_az_only_converges_without_touching_el():
-    """``axes=("az",)`` converges az, never jogs el (even though el is
+    """``axes=("az",)`` corrects az, never jogs el (even though el is
     far off level), and preserves el's step counter on the re-zero."""
     t = DummyTransport()
     _seed_cal(t)
@@ -280,9 +411,10 @@ def test_home_az_only_converges_without_touching_el():
     h = _homer_with_fake(t, fake)
     res = h.home(axes=("az",))
     assert res.converged is True
+    assert res.iterations == 0  # no el loop ran
     assert fake.el == 10.0  # el never jogged
     assert res.residual_el_deg is None
-    assert fake.pot == pytest.approx(1.0, abs=h.tol_az_deg / fake.dpv)
+    assert fake.pot == pytest.approx(1.0)
     assert fake.home_axes == [("az",)]  # coarse approach az-only
     assert fake.reset == [(0, None)]  # el counter untouched
 
@@ -310,23 +442,6 @@ def test_home_invalid_axes_raises():
         h.home(axes=())
 
 
-def test_home_az_only_degrades_when_pot_missing(caplog):
-    """An az-only home cares only about the pot: with the pot silent it
-    falls back to the open-loop az-only park even though the IMU is up."""
-    t = DummyTransport()
-    _seed_cal(t)
-    fake = _FakeMotor()
-    h = _homer_with_fake(t, fake)
-    h.snapshot.get = lambda key: {"el_deg": fake.el} if key == "imu_el" else {}
-    with caplog.at_level(logging.WARNING):
-        res = h.home(axes=("az",))
-    assert res.degraded is True
-    assert res.converged is False
-    assert fake.home_axes == [("az",)]  # open-loop fallback, az only
-    assert fake.reset == []  # no re-zero at unverified position
-    assert any("open-loop" in r.message for r in caplog.records)
-
-
 def test_home_el_only_degrades_when_imu_missing(caplog):
     """An el-only home cares only about the IMUs: with both IMUs silent
     it falls back to the open-loop el-only park even though the pot is
@@ -346,19 +461,18 @@ def test_home_el_only_degrades_when_imu_missing(caplog):
     assert any("open-loop" in r.message for r in caplog.records)
 
 
-def test_az_sign_autodetect_flips_when_residual_grows():
-    # fake where +az jog INCREASES the residual (wrong initial sign) until
-    # the homer flips; convergence proves the flip happened.
+def test_el_sign_autodetect_flips_when_residual_grows():
+    # fake where +el jog INCREASES the residual (wrong initial sign)
+    # until the homer flips; convergence proves the flip happened.
     t = DummyTransport()
-    _seed_cal(t)
 
     class _Reversed(_FakeMotor):
-        def jog_az(self, delta_deg, stop_event=None):
-            self.pot -= delta_deg / self.dpv  # opposite sign
+        def jog_el(self, delta_deg, stop_event=None, guard=None):
+            self.el -= delta_deg  # opposite sign
 
-    fake = _Reversed(pot=1.20, el=0.0)
+    fake = _Reversed(pot=1.0, el=8.0)
     h = _homer_with_fake(t, fake)
-    res = h.home()
+    res = h.home(axes=("el",))
     assert res.converged is True
 
 

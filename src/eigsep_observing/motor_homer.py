@@ -1,16 +1,24 @@
-"""Closed-loop return-to-home for the motor.
+"""Return-to-home for the motor, per axis.
 
-Sibling of MotorZeroer. Home is defined by the pot calibration, not by a
-recorded pose: az home is the voltage where the calibrated pot reads 0°
-(``v_home = -b/m`` from ``PotCalStore``), el home is IMU-level (0°). home()
-runs a coarse-approach → settle → measure → damped-corrective-jog loop
-through MotorClient (inheriting the travel-limit guard) until the pot
-voltage and IMU elevation are within tolerance of those targets, then
-re-zeros the step counter. Az feedback is raw pot voltage; el feedback is
-the redundant imu_el-signed / imu_az-|θ| estimate. Because the targets are
-derived live from the cal, a recalibration (``calibrate-pot``, including
-``--mode rezero``) moves home for every consumer on the next home() call —
-there is no intermediate home-reference K/V to refresh.
+Sibling of MotorZeroer. Home is defined by the pot calibration, not by
+a recorded pose: az home is the voltage where the calibrated pot reads
+0° (``v_home = -b/m`` from ``PotCalStore``), el home is IMU-level (0°).
+
+The two axes deliberately home differently. **Az** is referenced by the
+potmon and takes a coarse open-loop approach to step 0 followed by at
+most ONE corrective jog of the full signed residual, computed from a
+noise-averaged pot read — no convergence loop, because closed-looping
+onto the pot's wander at tolerance scale just hunts sensor noise. Every
+az move runs under a divergence guard that halts the motor if the pot
+is moving *away* from home (wrong step counter or wrong-signed cal).
+**El** keeps the coarse-approach → settle → measure →
+damped-corrective-jog convergence loop against the redundant
+imu_el-signed / imu_az-|θ| estimate. Both paths go through MotorClient
+(inheriting the travel-limit guard) and re-zero their own axis' step
+counter on success. Because the targets are derived live from the cal,
+a recalibration (``calibrate-pot``, including ``--mode rezero``) moves
+home for every consumer on the next home() call — there is no
+intermediate home-reference K/V to refresh.
 """
 
 import logging
@@ -192,7 +200,7 @@ class MotorHomer:
         self.logger = logger
 
     # ------------------------------------------------------------------
-    # Pure helpers (also called by Task C5's home() loop)
+    # Pure helpers (shared by both axis paths)
     # ------------------------------------------------------------------
 
     def _pot_cal(self):
@@ -330,10 +338,6 @@ class MotorHomer:
         ok_el = res_el is None or abs(res_el) <= self.tol_el_deg
         return ok_az and ok_el
 
-    # ------------------------------------------------------------------
-    # Task C5: sensor read, settle, and converge loop
-    # ------------------------------------------------------------------
-
     def _read_pot_once(self):
         """Current ``pot_az_voltage`` from the snapshot, or ``None``
         when absent or on a reader error. Single sample — the guard's
@@ -374,11 +378,6 @@ class MotorHomer:
         streams (``el_deg=None`` when both are absent)."""
         return read_el_estimate(self.snapshot, logger=self.logger)
 
-    def _read_sensors(self):
-        """(pot_v, el_est) — legacy combined read; removal pending the
-        per-axis home() split."""
-        return self._read_pot_once(), self._read_el()
-
     def _settle(self, stop_event):
         """Wait ``settle_s`` seconds; uses ``stop_event.wait`` when present."""
         if stop_event is not None:
@@ -386,28 +385,167 @@ class MotorHomer:
         elif self.settle_s:
             time.sleep(self.settle_s)
 
+    def _home_az(self, stop_event=None):
+        """Single-correction pot-referenced az home.
+
+        Coarse open-loop drive to step 0 under the divergence guard,
+        settle, integrated pot read, then at most ONE corrective jog
+        of the full signed residual (no damping, same guard), settle,
+        final integrated read. There is deliberately no convergence
+        loop — see the module docstring. Re-zeros the az step counter
+        only when the final read is within tolerance.
+
+        Returns ``(residual_deg, converged, degraded, did_reset)``.
+        """
+        v_home = self.az_home_voltage()
+        self._check_home_in_window(v_home)
+        if self._read_pot_once() is None:
+            if self.az_step0_fallback:
+                self.logger.warning(
+                    "potmon unavailable — az home is pot-referenced; "
+                    "az_step0_fallback is set: parking az at step 0 "
+                    "open-loop (position will not be verified)."
+                )
+                self.motor_client.home(stop_event=stop_event, axes=("az",))
+            else:
+                self.logger.warning(
+                    "potmon unavailable — az home is pot-referenced; "
+                    "skipping az (set az_step0_fallback=True to park "
+                    "at step 0 open-loop instead)."
+                )
+            return float("nan"), False, True, False
+        guard = _AzDivergenceGuard(
+            self._read_pot_once,
+            v_home,
+            self._az_slope(),
+            self.az_diverge_deg,
+        )
+        # coarse approach: open-loop to step 0, halted on divergence
+        self.motor_client.home(
+            stop_event=stop_event, axes=("az",), guard=guard
+        )
+        res = float("nan")
+        for attempt in range(2):  # measure, correct once, re-measure
+            if stop_event is not None and stop_event.is_set():
+                return float("nan"), False, False, False
+            self._settle(stop_event)
+            pot_v = self._read_pot_integrated(stop_event)
+            if pot_v is None:
+                self.logger.warning(
+                    "potmon lost during az home; aborting az without "
+                    "re-zero (position unverified)."
+                )
+                return float("nan"), False, True, False
+            res = self._az_residual_deg(v_home, pot_v)
+            if abs(res) <= self.tol_az_deg:
+                break
+            if attempt == 0:
+                # the single corrective jog: full signed residual,
+                # no damping — the same guard carries its closest
+                # approach over from the coarse move
+                self.motor_client.jog_az(
+                    res, stop_event=stop_event, guard=guard
+                )
+        converged = abs(res) <= self.tol_az_deg
+        did_reset = False
+        if converged and self.reset_count:
+            self.motor_client.reset_step_position(az_step=0, el_step=None)
+            did_reset = True
+        elif not converged:
+            self.logger.warning(
+                "az home residual %.1f deg after single corrective "
+                "jog (tol %.1f deg); not re-zeroing.",
+                res,
+                self.tol_az_deg,
+            )
+        return res, converged, False, did_reset
+
+    def _home_el(self, stop_event=None):
+        """Closed-loop el home: coarse approach, then the settle →
+        measure → damped-corrective-jog loop against the IMU
+        elevation, up to ``max_iters`` iterations (semantics
+        unchanged from the original two-axis loop).
+
+        Returns ``(residual_deg, iterations, converged, degraded,
+        did_reset)``.
+        """
+        if self._read_el().el_deg is None:
+            self.logger.warning(
+                "Homing sensors unavailable; falling back to "
+                "open-loop home() — position will not be verified."
+            )
+            self.motor_client.home(stop_event=stop_event, axes=("el",))
+            return float("nan"), 0, False, True, False
+        self.motor_client.home(stop_event=stop_event, axes=("el",))
+        el_sign = 1.0
+        last_el = None
+        res_el = float("nan")
+        converged = False
+        i = 0
+        for i in range(1, self.max_iters + 1):
+            if stop_event is not None and stop_event.is_set():
+                break
+            self._settle(stop_event)
+            res_el, _ = self._el_residual(self._read_el())
+            if res_el is None:
+                self.logger.warning(
+                    "el homing lost sensor feedback mid-loop; "
+                    "aborting without re-zero (position unverified)."
+                )
+                return float("nan"), i, False, True, False
+            if abs(res_el) <= self.tol_el_deg:
+                converged = True
+                break
+            # corrective jog with sign auto-detect (needed in the
+            # magnitude-only failover; harmless when signed)
+            if last_el is not None and abs(res_el) > last_el:
+                el_sign = -el_sign
+            last_el = abs(res_el)
+            self.motor_client.jog_el(
+                el_sign * self.damping * res_el, stop_event=stop_event
+            )
+        did_reset = False
+        if converged and self.reset_count:
+            self.motor_client.reset_step_position(az_step=None, el_step=0)
+            did_reset = True
+        if not converged:
+            self.logger.warning(
+                "el homing did not converge in %d iterations "
+                "(residual %.1f deg).",
+                self.max_iters,
+                res_el if res_el is not None else float("nan"),
+            )
+        return res_el, i, converged, False, did_reset
+
     def home(self, stop_event=None, axes=("az", "el")):
-        """Drive the motor to the cal-defined home (pot 0°, IMU-level el).
+        """Drive the requested axes to the cal-defined home.
+
+        Az first (single pot-referenced correction, see
+        :meth:`_home_az`), then el (closed-loop convergence, see
+        :meth:`_home_el`). Every move blocks, so only one motor moves
+        at a time.
 
         Parameters
         ----------
         stop_event : threading.Event or None
-            When set, the loop exits at the next interruptible point.
+            When set, each axis path exits at its next interruptible
+            point; a set event also skips a not-yet-started el.
         axes : tuple of str
             Axes to home, a non-empty subset of ``("az", "el")``
             (default both). An axis not requested is never moved, its
-            residual in the result is ``None``, and its step counter is
-            preserved on the convergence re-zero. An el-only home needs
-            no pot calibration — the cal requirement is purely an az
-            concern.
+            residual in the result is ``None``, and its step counter
+            is preserved. An el-only home needs no pot calibration —
+            the cal requirement is purely an az concern.
 
         Returns
         -------
         HomeResult
-            ``converged`` is ``True`` when every requested axis'
-            residual is within tolerance; ``degraded`` is ``True`` when
-            the requested axes' sensors were unavailable and open-loop
-            fall-back was used.
+            ``converged`` is ``True`` when every requested axis ended
+            within tolerance; ``iterations`` counts el-loop
+            iterations (0 for an az-only home); ``degraded`` is
+            ``True`` when a requested axis' sensor was unavailable
+            (az: skipped or step-0 fallback per ``az_step0_fallback``;
+            el: open-loop fall-back).
 
         Raises
         ------
@@ -422,105 +560,33 @@ class MotorHomer:
         axes = validate_axes(axes)
         do_az = "az" in axes
         do_el = "el" in axes
-        v_home = None
-        if do_az:
-            v_home = self.az_home_voltage()
-            self._check_home_in_window(v_home)
-
-        pot_v, el_est = self._read_sensors()
-        has_feedback = (do_az and pot_v is not None) or (
-            do_el and el_est.el_deg is not None
-        )
-        if not has_feedback:
-            self.logger.warning(
-                "Homing sensors unavailable; falling back to open-loop "
-                "home() — position will not be verified."
-            )
-            self.motor_client.home(stop_event=stop_event, axes=axes)
-            return HomeResult(
-                False,
-                0,
-                float("nan") if do_az else None,
-                float("nan") if do_el else None,
-                degraded=True,
-                reset_count=False,
-            )
-
-        # coarse approach
-        self.motor_client.home(stop_event=stop_event, axes=axes)
-        az_sign, el_sign = 1.0, 1.0
-        last_az = last_el = None
-        res_az = float("nan") if do_az else None
-        res_el = float("nan") if do_el else None
-        converged = False
-        i = 0
-        for i in range(1, self.max_iters + 1):
-            if stop_event is not None and stop_event.is_set():
-                break
-            self._settle(stop_event)
-            pot_v, el_est = self._read_sensors()
-            res_az = self._az_residual_deg(v_home, pot_v) if do_az else None
-            res_el = self._el_residual(el_est)[0] if do_el else None
-            # An unrequested axis' residual is None by construction, so
-            # this still means "every requested axis lost feedback".
-            if res_az is None and res_el is None:
-                self.logger.warning(
-                    "Homing lost all sensor feedback mid-loop; aborting "
-                    "without re-zero (position unverified)."
-                )
-                return HomeResult(
-                    False,
-                    i,
-                    res_az,
-                    res_el,
-                    degraded=True,
-                    reset_count=False,
-                )
-            if self._within_tol(res_az, res_el):
-                converged = True
-                break
-            # az corrective jog with sign auto-detect
-            if res_az is not None and abs(res_az) > self.tol_az_deg:
-                if last_az is not None and abs(res_az) > last_az:
-                    az_sign = -az_sign
-                last_az = abs(res_az)
-                self.motor_client.jog_az(
-                    az_sign * self.damping * res_az,
-                    stop_event=stop_event,
-                )
-            # el corrective jog with sign auto-detect (needed in the
-            # magnitude-only failover; harmless when signed)
-            if res_el is not None and abs(res_el) > self.tol_el_deg:
-                if last_el is not None and abs(res_el) > last_el:
-                    el_sign = -el_sign
-                last_el = abs(res_el)
-                self.motor_client.jog_el(
-                    el_sign * self.damping * res_el,
-                    stop_event=stop_event,
-                )
-
+        res_az = res_el = None
+        iters = 0
+        az_ok = el_ok = True
+        degraded = False
         did_reset = False
-        if converged and self.reset_count:
-            # None preserves the unrequested axis' counter (firmware
-            # omits a None axis from the reset command).
-            self.motor_client.reset_step_position(
-                az_step=0 if do_az else None,
-                el_step=0 if do_el else None,
-            )
-            did_reset = True
-        if not converged:
-            self.logger.warning(
-                "Homing did not converge in %d iterations "
-                "(residual az=%.1f el=%.1f deg).",
-                self.max_iters,
-                res_az if res_az is not None else float("nan"),
-                res_el if res_el is not None else float("nan"),
-            )
+        if do_az:
+            res_az, az_ok, az_degraded, az_reset = self._home_az(stop_event)
+            degraded = degraded or az_degraded
+            did_reset = did_reset or az_reset
+        if do_el:
+            if stop_event is not None and stop_event.is_set():
+                el_ok = False
+            else:
+                (
+                    res_el,
+                    iters,
+                    el_ok,
+                    el_degraded,
+                    el_reset,
+                ) = self._home_el(stop_event)
+                degraded = degraded or el_degraded
+                did_reset = did_reset or el_reset
         return HomeResult(
-            converged,
-            i,
-            res_az,
-            res_el,
-            degraded=False,
+            converged=(not do_az or az_ok) and (not do_el or el_ok),
+            iterations=iters,
+            residual_az_deg=res_az,
+            residual_el_deg=res_el,
+            degraded=degraded,
             reset_count=did_reset,
         )
