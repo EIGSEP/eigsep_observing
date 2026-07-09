@@ -16,7 +16,7 @@ switch_schedule:  # seconds per measurement
   RFSP1_SHORT: 20  # Spare 1 port, SHORT termination, see switch_connections
   RFSP1_OPEN: 20  # Spare 1 port, OPEN termination, see switch_connections
 switch_connections:
-  SP1: "long coax cable, open end"
+  SP1: "long coax cable -> failsafe termination switch (SHORT when unpowered/default, OPEN when driven from potmon GPIO 27)"
   SP2: null
 # vna
 use_vna: true

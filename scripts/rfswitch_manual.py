@@ -8,6 +8,10 @@ production. After each switch, the script reads ``sw_state_name`` back
 from the metadata snapshot and prints it; cross-check against the
 live-status dashboard tile.
 
+The tool also drives the SP1 failsafe termination via the potmon pico
+(``s``/``o`` keys) and prints ``sp1_term_name`` read back from
+metadata.
+
 Run alongside ``scripts/live_status.py`` so you can see the rfswitch
 tile flip in the browser as you exercise each state.
 """
@@ -43,12 +47,19 @@ def _print_menu():
     for i, state in enumerate(STATES):
         print(f"  [{i:>2}] {state}")
     print("  [ c] cycle through all states (2 s dwell)")
+    print("  [ s] SP1 termination SHORT (failsafe)")
+    print("  [ o] SP1 termination OPEN")
     print("  [ q] quit")
 
 
 def _read_current_state(snapshot):
     snap = snapshot.get().get("rfswitch")
     return snap.get("sw_state_name") if snap else None
+
+
+def _read_sp1_term(snapshot):
+    snap = snapshot.get().get("potmon")
+    return snap.get("sp1_term_name") if snap else None
 
 
 def _switch(proxy, state):
@@ -85,17 +96,40 @@ def _do_switch(proxy, snapshot, state, *, settle_s=0.4):
         print(f"   metadata shows sw_state_name={seen!r} (expected {state})")
 
 
+def _do_set_term(pot_proxy, snapshot, term, *, settle_s=0.4):
+    print(f"-> SP1 termination {term}")
+    try:
+        result = pot_proxy.send_command("set_sp1_termination", state=term)
+    except (TimeoutError, RuntimeError) as exc:
+        print(
+            f"  !! SP1 termination {term} failed: {type(exc).__name__}: {exc}"
+        )
+        return
+    if result is None:
+        print("  !! SP1 termination failed: potmon unavailable")
+        return
+    time.sleep(settle_s)
+    seen = _read_sp1_term(snapshot)
+    if seen == term:
+        print(f"   metadata confirms sp1_term_name={seen}")
+    else:
+        print(f"   metadata shows sp1_term_name={seen!r} (expected {term})")
+
+
 def _cycle(proxy, snapshot, dwell_s):
     for state in STATES:
         _do_switch(proxy, snapshot, state)
         time.sleep(dwell_s)
 
 
-def _repl(proxy, snapshot, cycle_dwell_s):
+def _repl(proxy, pot_proxy, snapshot, cycle_dwell_s):
     while True:
         _print_menu()
         current = _read_current_state(snapshot)
-        print(f"Current sw_state_name: {current!r}")
+        print(
+            f"Current sw_state_name: {current!r}  "
+            f"sp1_term: {_read_sp1_term(snapshot)!r}"
+        )
         try:
             choice = input("Select> ").strip().lower()
         except EOFError:
@@ -107,6 +141,12 @@ def _repl(proxy, snapshot, cycle_dwell_s):
             return
         if choice == "c":
             _cycle(proxy, snapshot, cycle_dwell_s)
+            continue
+        if choice == "s":
+            _do_set_term(pot_proxy, snapshot, "SHORT")
+            continue
+        if choice == "o":
+            _do_set_term(pot_proxy, snapshot, "OPEN")
             continue
         try:
             idx = int(choice)
@@ -146,9 +186,14 @@ def main():
     with run_tag.session(transport, "rfswitch_manual"):
         proxy = PicoProxy("rfswitch", transport, source="rfswitch_manual")
         require_pico(proxy)
+        # potmon is a soft dependency: rfswitch bring-up must keep
+        # working with the potmon pico down. Not require_pico'd — the
+        # s/o termination keys surface unavailability at use time via
+        # _do_set_term's send_command(...) is None check.
+        pot_proxy = PicoProxy("potmon", transport, source="rfswitch_manual")
         snapshot = MetadataSnapshotReader(transport)
         try:
-            _repl(proxy, snapshot, args.cycle_dwell)
+            _repl(proxy, pot_proxy, snapshot, args.cycle_dwell)
         except KeyboardInterrupt:
             print()
 

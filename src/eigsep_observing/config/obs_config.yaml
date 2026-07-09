@@ -24,7 +24,7 @@ switch_schedule:  # seconds per measurement
 # VNA file header via the obs_config embed, so each file records the
 # wiring that was active when it was written. Update on every rewire.
 switch_connections:
-  SP1: "long coax cable, open end"  # operator: record length on install
+  SP1: "long coax cable -> failsafe termination switch (SHORT when unpowered/default, OPEN when driven from potmon GPIO 27)"  # operator: record cable length on install
   SP2: null  # unconnected
 
 # vna
