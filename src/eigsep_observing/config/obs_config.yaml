@@ -75,24 +75,39 @@ vna_position_sweep:
 # live-status first-order Y-factor calibration (display-only).
 # The dashboard's "Calibrated" toggle reads these to convert raw corr
 # power to Kelvin using the most recent RFNON / RFAMB integrations
-# (RFNOFF is still visited each cycle as an offline cross-check).
+# (RFNOFF is still visited each cycle as an offline cross-check; with
+# the diode off it should land near the pad ambient T_ns below).
 # This is intentionally not the science-grade cal — that lives in a
 # separate offline pipeline.
 #
-# Y-factor: G = (P_on − P_amb) / T_ns
-#           T_in = T_ns · (P − P_amb) / (P_on − P_amb) + T_LOAD
-# Assumes the noise diode's off-state physical temperature ≈ the
-# ambient load temperature (both sit at enclosure ambient).
-# T_ns is the diode's excess noise temperature (post-attenuator),
-# derived from the IEEE-standard ENR convention:
-# T_ns = 290 K · 10^(ENR_dB / 10).
+# Noise-source wiring: a noise diode (noise_diode_enr_db, IEEE ENR re
+# 290 K) feeds a noise_source_atten_db pad into the switch's noise
+# port. The pad's own thermal emission cancels in the diode on−off
+# difference, so the excess at the switch is
+#   T_ENR = 290 K · 10^((noise_diode_enr_db − noise_source_atten_db)/10)
+# (35 − 30 dB → effective 5 dB ≈ 917 K). The two reference planes:
+#   T_hot = T_ns + T_ENR   (RFNON; T_ns = pad physical temp, from the
+#                           RF-switch PCB thermistor nearest the pad)
+#   T_amb                  (RFAMB; ambient load temp, from tempctrl)
+# Y-factor: G = (P_on − P_amb) / (T_hot − T_amb)
+#           T_in = P / G − T_rx,  T_rx = P_amb / G − T_amb
 calibration:
-  noise_diode_enr_db: 11.0   # post-attenuator ENR (dB), referenced to 290 K
-  # Which metadata stream carries the calibration load's temperature
-  # (T_LOAD above). Change only for the hot-swap contingency where the
-  # LOAD module rides the LNA connector and publishes as tempctrl_lna —
-  # see OPERATIONS.md "Tempctrl channel descope and hot-swap".
-  t_load_stream: tempctrl_load
+  noise_diode_enr_db: 35.0  # diode ENR at its output plane (dB re 290 K)
+  noise_source_atten_db: 30.0  # pad between diode and switch (dB)
+  # Noise-source pad physical temperature (T_ns above).
+  # !!! UNVERIFIED: temp_therm2 is assumed to be the thermistor nearest
+  # !!! the noise-source pad ("thermistor 3"), but the temp_therm0/1/2
+  # !!! <-> PCB-position mapping has NOT been checked against the
+  # !!! hardware. Verify on the board and fix before field deploy.
+  # temp_therm* may be None (dead/shorted channel, or ADC saturation
+  # below ~8.5 C) — the cal disables cleanly until the reading returns.
+  t_ns_stream: rfswitch_therm
+  t_ns_field: temp_therm2
+  # Ambient-load temperature (T_amb above, the RFAMB path). The
+  # tempctrl hot-swap contingency re-points this at tempctrl_lna — see
+  # OPERATIONS.md "Tempctrl channel descope and hot-swap".
+  t_amb_stream: tempctrl_load
+  t_amb_field: T_now
 
 # tempctrl
 use_tempctrl: false

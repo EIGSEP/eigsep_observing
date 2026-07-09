@@ -54,7 +54,13 @@ OBS_CFG = {
     },
     "use_switches": True,
     "calibration": {
-        "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
+        # diode − pad → effective ENR with t_enr_k = 1500 K exactly,
+        # while still exercising the two-knob subtraction. The
+        # t_ns_* / t_amb_* knobs are left unset so the route tests
+        # cover the defaults (rfswitch_therm.temp_therm2 /
+        # tempctrl_load.T_now).
+        "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0) + 30.0,
+        "noise_source_atten_db": 30.0,
     },
 }
 
@@ -97,8 +103,9 @@ def _cross_bytes(value=5):
 def agg_primed():
     """Aggregator with state populated by SNAP + panda ticks.
 
-    Producers publish corr + adc_stats + heartbeat + rfswitch + tempctrl
-    + lidar + obs_config; the panda side also drives one observed
+    Producers publish corr + adc_stats + heartbeat + rfswitch (state +
+    PCB thermistors) + tempctrl + lidar + obs_config; the panda side
+    also drives one observed
     rfswitch transition (RFNOFF → RFANT) during the prime so
     ``rfswitch_state_entered_unix`` is latched and the dashboard's
     dwell-time / on-schedule projections have a real entry timestamp
@@ -214,6 +221,24 @@ def agg_primed():
             "clamp": 0.6,
         },
     )
+    # RF-switch PCB thermistors (full production shape per the
+    # rfswitch_therm schema in io.py). temp_therm2 is the cal's default
+    # noise-source pad reference; 25.0 C matches tempctrl_load.T_now so
+    # t_hot - t_amb == t_enr_k exactly and the cal asserts stay simple.
+    # 2.5 V is the divider midpoint a 10k NTC at 25 C actually produces.
+    panda_md.add(
+        "rfswitch_therm",
+        {
+            "sensor_name": "rfswitch_therm",
+            "status": "update",
+            "volt_therm0": 2.5,
+            "volt_therm1": 2.5,
+            "volt_therm2": 2.5,
+            "temp_therm0": 25.0,
+            "temp_therm1": 25.0,
+            "temp_therm2": 25.0,
+        },
+    )
 
     StatusWriter(panda).send("observation started", level=20)
     HeartbeatWriter(panda, name="client").set(ex=60, alive=True)
@@ -231,6 +256,7 @@ def agg_primed():
         [
             "stream:lidar",
             "stream:rfswitch",
+            "stream:rfswitch_therm",
             "stream:tempctrl_lna",
             "stream:tempctrl_load",
             "stream:status",
@@ -1015,7 +1041,7 @@ def _seed_onoff_cache(
     at a deliberately *different* power level (2x — the off-diode
     path and the ambient load genuinely differ in power on hardware)
     so any assert on an RFAMB-derived number (``gain_median``, the
-    T_LOAD round-trip) fails if the solve loop ever iterates the
+    T_amb round-trip) fails if the solve loop ever iterates the
     RFNOFF cache instead.
     """
     auto_off = np.full((1, NCHAN), p_off_value, dtype=np.int32)
@@ -1052,13 +1078,13 @@ def test_corr_route_default_returns_raw_with_no_calibration_meta(client):
     assert data.get("calibration_meta") is None
 
 
-def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
+def test_corr_route_calibrated_returns_t_amb_for_p_ant_equals_p_amb(
     agg_primed,
 ):
-    """End-to-end: with a fresh on/off cache and a known T_LOAD, an
-    RFANT integration whose power happens to equal ``P_off`` calibrates
-    out to ``T_LOAD`` (in Kelvin). This is the operator-visible sanity
-    check baked into the cal path.
+    """End-to-end: with a fresh on/amb cache and known reference
+    temperatures, an RFANT integration whose power happens to equal
+    ``P_amb`` calibrates out to ``T_amb`` (in Kelvin). This is the
+    operator-visible sanity check baked into the cal path.
     """
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
     app = create_app(agg_primed)
@@ -1067,16 +1093,24 @@ def test_corr_route_calibrated_returns_t_load_for_p_ant_equals_p_off(
 
     body = client_.get("/api/corr?calibrated=1").get_json()
     data = body["data"]
-    # tempctrl_load T_now is 25.0 C → 298.15 K. P_ant=P_off=100 in the
-    # fixture; T_in collapses to T_LOAD in Kelvin.
+    # tempctrl_load T_now is 25.0 C → 298.15 K. P_ant=P_amb=100 in the
+    # fixture; T_in collapses to T_amb in Kelvin.
     expected_k = 25.0 + 273.15
     assert data["pairs"]["0"]["mag"][0] == pytest.approx(expected_k, rel=1e-6)
     meta = data["calibration_meta"]
     assert meta["stale"] is False
-    assert meta["t_load_k"] == pytest.approx(expected_k, rel=1e-6)
+    assert meta["t_amb_k"] == pytest.approx(expected_k, rel=1e-6)
+    # The noise-source pad rides the fixture's rfswitch_therm entry
+    # (temp_therm2 = 25.0 C, matching tempctrl_load by construction).
+    assert meta["t_ns_k"] == pytest.approx(expected_k, rel=1e-6)
+    assert meta["t_hot_k"] == pytest.approx(expected_k + 1500.0, rel=1e-9)
     assert meta["t_enr_k"] == pytest.approx(1500.0, rel=1e-9)
     assert meta["noise_diode_enr_db"] == pytest.approx(
-        10.0 * math.log10(1500.0 / 290.0), rel=1e-12
+        10.0 * math.log10(1500.0 / 290.0) + 30.0, rel=1e-12
+    )
+    assert meta["noise_source_atten_db"] == pytest.approx(30.0, rel=1e-12)
+    assert meta["enr_eff_db"] == pytest.approx(
+        10.0 * math.log10(1500.0 / 290.0), rel=1e-9
     )
     assert meta["last_rfamb_age_s"] is not None
     assert meta["last_rfnon_age_s"] is not None
@@ -1131,7 +1165,7 @@ def test_corr_route_calibrated_with_aged_cache_still_calibrates_and_exposes_age(
     assert meta["last_rfnon_age_s"] >= 1800.0
 
 
-def test_corr_route_calibrated_without_t_load_returns_raw_and_stale_true(
+def test_corr_route_calibrated_without_t_amb_returns_raw_and_stale_true(
     agg_primed,
 ):
     """If T_now is missing from the snapshot (sensor offline, pico
@@ -1149,6 +1183,31 @@ def test_corr_route_calibrated_without_t_load_returns_raw_and_stale_true(
     data = body["data"]
     assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
     assert data["calibration_meta"]["stale"] is True
+
+
+def test_corr_route_calibrated_with_none_thermistor_returns_raw(
+    agg_primed,
+):
+    """A ``None`` pad thermistor (dead/shorted channel or ADC
+    saturation — a schema-valid producer state, see the
+    ``rfswitch_therm`` schema in io.py) disables the cal cleanly at
+    the route level: raw values pass through, the meta block carries
+    the reason, and nothing crashes or blocks."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot["rfswitch_therm"]["temp_therm2"] = (
+            None
+        )
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    client_ = app.test_client()
+    body = client_.get("/api/corr?calibrated=1").get_json()
+    data = body["data"]
+    assert data["pairs"]["0"]["mag"][0] == pytest.approx(100.0)
+    meta = data["calibration_meta"]
+    assert meta["stale"] is True
+    assert "rfswitch_therm.temp_therm2" in meta["reason"]
 
 
 def test_corr_route_calibrated_scales_cross_magnitudes_by_gain(
@@ -1209,64 +1268,94 @@ def test_solve_calibration_bails_on_non_finite_enr_db(bad_value, agg_primed):
     assert "noise_diode_enr_db" in meta["reason"]
 
 
-def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
-    """Meta carries both configured dB and derived K."""
+def test_solve_calibration_bails_on_missing_atten_db(agg_primed):
+    """Cal block without noise_source_atten_db disables cal with a
+    clear reason — the effective ENR needs both knobs; silently
+    assuming a 0 dB pad would misscale the cal by the pad value."""
     _seed_onoff_cache(agg_primed)
-    enr_db = 6.5
-    obs_cfg = {"calibration": {"noise_diode_enr_db": enr_db}}
+    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
-    assert coeffs is not None
-    assert meta["noise_diode_enr_db"] == pytest.approx(enr_db, rel=1e-12)
-    expected_k = 290.0 * 10.0 ** (enr_db / 10.0)
-    assert meta["t_enr_k"] == pytest.approx(expected_k, rel=1e-9)
+    assert coeffs is None
+    assert "noise_source_atten_db" in meta["reason"]
+    assert "missing or non-numeric" in meta["reason"]
 
 
-def test_solve_calibration_honors_t_load_stream_knob(agg_primed):
-    """``calibration.t_load_stream`` re-points the load-temperature
-    reference at another stream — the hot-swap path where the LOAD
-    module rides the LNA connector and publishes as ``tempctrl_lna``.
-    The default ``tempctrl_load`` entry is removed to prove the knob
-    (not a fallback) satisfied the lookup."""
+@pytest.mark.parametrize("bad_value", ["oops", [1, 2], {"x": 1}])
+def test_solve_calibration_bails_on_non_numeric_atten_db(
+    bad_value, agg_primed
+):
     _seed_onoff_cache(agg_primed)
-    with agg_primed._lock:
-        snap = agg_primed.state.metadata_snapshot
-        snap["tempctrl_lna"] = dict(snap["tempctrl_load"])
-        snap.pop("tempctrl_load", None)
     obs_cfg = {
         "calibration": {
             "noise_diode_enr_db": 6.5,
-            "t_load_stream": "tempctrl_lna",
-        }
-    }
-    coeffs, meta = _solve_calibration(
-        agg_primed.state, obs_cfg, now=time.time()
-    )
-    assert coeffs is not None
-    assert meta["t_load_k"] is not None
-
-
-def test_solve_calibration_reason_names_configured_stream(agg_primed):
-    """When the configured temp-reference stream is missing, the bail
-    reason names *that* stream so a mis-typed knob is self-describing."""
-    _seed_onoff_cache(agg_primed)
-    # Remove the configured stream (agg_primed seeds both channels);
-    # tempctrl_load remains, proving the lookup follows the knob and
-    # does not fall back.
-    with agg_primed._lock:
-        agg_primed.state.metadata_snapshot.pop("tempctrl_lna", None)
-    obs_cfg = {
-        "calibration": {
-            "noise_diode_enr_db": 6.5,
-            "t_load_stream": "tempctrl_lna",
-        }
+            "noise_source_atten_db": bad_value,
+        },
     }
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
     assert coeffs is None
-    assert "tempctrl_lna" in meta["reason"]
+    assert "noise_source_atten_db" in meta["reason"]
+
+
+@pytest.mark.parametrize(
+    "bad_value", [float("nan"), float("inf"), float("-inf")]
+)
+def test_solve_calibration_bails_on_non_finite_atten_db(bad_value, agg_primed):
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": bad_value,
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "noise_source_atten_db" in meta["reason"]
+
+
+def test_solve_calibration_meta_exposes_both_db_and_kelvin(agg_primed):
+    """Meta carries the configured dB knobs and the derived values."""
+    _seed_onoff_cache(agg_primed)
+    enr_db = 36.5
+    atten_db = 30.0
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": enr_db,
+            "noise_source_atten_db": atten_db,
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    assert meta["noise_diode_enr_db"] == pytest.approx(enr_db, rel=1e-12)
+    assert meta["noise_source_atten_db"] == pytest.approx(atten_db, rel=1e-12)
+    assert meta["enr_eff_db"] == pytest.approx(enr_db - atten_db, rel=1e-12)
+    expected_k = 290.0 * 10.0 ** ((enr_db - atten_db) / 10.0)
+    assert meta["t_enr_k"] == pytest.approx(expected_k, rel=1e-9)
+
+
+def test_solve_calibration_effective_enr_feeds_t_enr(agg_primed):
+    """The field wiring: 35 dB diode into a 30 dB pad → effective
+    5 dB, T_ENR = 290 · 10^0.5 ≈ 917 K at the switch port."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 35.0,
+            "noise_source_atten_db": 30.0,
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    assert meta["enr_eff_db"] == pytest.approx(5.0, rel=1e-12)
+    assert meta["t_enr_k"] == pytest.approx(290.0 * 10.0**0.5, rel=1e-9)
 
 
 def test_solve_calibration_requires_amb_and_non(agg_primed):
@@ -1276,7 +1365,12 @@ def test_solve_calibration_requires_amb_and_non(agg_primed):
     _seed_onoff_cache(agg_primed)
     with agg_primed._lock:
         agg_primed.state.last_rfamb_pairs = None
-    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
     coeffs, meta = _solve_calibration(
         agg_primed.state, obs_cfg, now=time.time()
     )
@@ -1292,10 +1386,12 @@ def test_solve_calibration_solves_from_rfamb_not_rfnoff(agg_primed):
     of the RFAMB-derived (250-100)/1500 = 0.1 — this pins the loop's
     data source, not just the presence gate."""
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
-    # t_enr_k = 1500 K exactly, matching OBS_CFG's calibration block.
+    # t_enr_k = 1500 K exactly, matching OBS_CFG's calibration block;
+    # the fixture's t_ns == t_amb so t_hot − t_amb == t_enr_k.
     obs_cfg = {
         "calibration": {
-            "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0),
+            "noise_diode_enr_db": 10.0 * math.log10(1500.0 / 290.0) + 30.0,
+            "noise_source_atten_db": 30.0,
         },
     }
     coeffs, meta = _solve_calibration(
@@ -1305,6 +1401,116 @@ def test_solve_calibration_solves_from_rfamb_not_rfnoff(agg_primed):
     assert meta["gain_median"] == pytest.approx(0.1, rel=1e-6)
     gain, _ = coeffs["0"]
     np.testing.assert_allclose(gain, 0.1, rtol=1e-6)
+
+
+def test_solve_calibration_honors_t_ns_and_t_amb_knobs(agg_primed):
+    """Both reference-temperature sources re-point via config — stream
+    and field — with no silent fallback to the defaults. Both are sent
+    to tempctrl_lna (T_now = 25.1 C in the fixture) while the default
+    streams are removed from the snapshot, so a solve that fell back
+    to rfswitch_therm / tempctrl_load would bail instead of solving."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot.pop("rfswitch_therm", None)
+        agg_primed.state.metadata_snapshot.pop("tempctrl_load", None)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+            "t_ns_stream": "tempctrl_lna",
+            "t_ns_field": "T_now",
+            "t_amb_stream": "tempctrl_lna",
+            "t_amb_field": "T_now",
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is not None
+    expected_k = 25.1 + 273.15
+    assert meta["t_ns_k"] == pytest.approx(expected_k, rel=1e-9)
+    assert meta["t_amb_k"] == pytest.approx(expected_k, rel=1e-9)
+    assert meta["t_ns_stream"] == "tempctrl_lna"
+    assert meta["t_amb_stream"] == "tempctrl_lna"
+
+
+def test_solve_calibration_none_thermistor_disables_cal_cleanly(
+    agg_primed, caplog
+):
+    """A ``None`` pad thermistor is a schema-valid producer state
+    (dead/shorted channel or ADC saturation below ~8.5 C — see the
+    ``rfswitch_therm`` schema in io.py), not a contract violation:
+    the cal disables with a named reason and NO ERROR log."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot["rfswitch_therm"]["temp_therm2"] = (
+            None
+        )
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        coeffs, meta = _solve_calibration(
+            agg_primed.state, obs_cfg, now=time.time()
+        )
+    assert coeffs is None
+    assert meta["stale"] is True
+    assert "rfswitch_therm.temp_therm2" in meta["reason"]
+    assert not caplog.records
+
+
+def test_solve_calibration_reason_names_missing_t_ns_source(agg_primed):
+    """An absent noise-source thermistor stream names the configured
+    stream.field in the reason so the operator knows which producer
+    (or knob) to chase."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot.pop("rfswitch_therm", None)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
+    coeffs, meta = _solve_calibration(
+        agg_primed.state, obs_cfg, now=time.time()
+    )
+    assert coeffs is None
+    assert "rfswitch_therm.temp_therm2" in meta["reason"]
+
+
+def test_solve_calibration_bails_when_hot_not_above_ambient(
+    agg_primed, caplog
+):
+    """A hot reference at or below the ambient load is reachable from
+    config alone (an oversized pad shrinks T_ENR below the ns/amb
+    temperature gap) — the cal must refuse with an ERROR instead of
+    solving a negative-denominator gain. Board thermistor is set well
+    below the load temp and the pad eats the diode down to ~0.13 K."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot["rfswitch_therm"]["temp_therm2"] = (
+            10.0
+        )
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 40.0,
+        },
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        coeffs, meta = _solve_calibration(
+            agg_primed.state, obs_cfg, now=time.time()
+        )
+    assert coeffs is None
+    assert "hot reference not above ambient" in meta["reason"]
+    assert any(
+        "not above" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
 
 
 def test_solve_calibration_logs_error_on_non_numeric_enr_db(
@@ -1336,6 +1542,27 @@ def test_solve_calibration_logs_error_on_non_finite_enr_db(agg_primed, caplog):
     )
 
 
+def test_solve_calibration_logs_error_on_non_numeric_atten_db(
+    agg_primed, caplog
+):
+    """Non-coercible noise_source_atten_db is a config contract
+    violation; CLAUDE.md requires it surface at ERROR, not just in
+    meta.reason."""
+    _seed_onoff_cache(agg_primed)
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": "not-a-number",
+        },
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
+    assert any(
+        "noise_source_atten_db" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
 def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
     agg_primed, caplog
 ):
@@ -1347,7 +1574,12 @@ def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
         agg_primed.state.metadata_snapshot["tempctrl_load"] = {
             "T_now": "warm-ish",
         }
-    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
@@ -1355,11 +1587,39 @@ def test_solve_calibration_logs_error_on_non_numeric_load_t_now(
     )
 
 
+def test_solve_calibration_logs_error_on_non_numeric_thermistor(
+    agg_primed, caplog
+):
+    """A non-float, non-None pad thermistor value is a producer/schema
+    contract violation (unlike ``None``, which is contractual) — it
+    must surface at ERROR naming the configured stream.field."""
+    _seed_onoff_cache(agg_primed)
+    with agg_primed._lock:
+        agg_primed.state.metadata_snapshot["rfswitch_therm"]["temp_therm2"] = (
+            "warm-ish"
+        )
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
+    with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
+        coeffs, meta = _solve_calibration(
+            agg_primed.state, obs_cfg, now=time.time()
+        )
+    assert coeffs is None
+    assert any(
+        "rfswitch_therm.temp_therm2" in r.message and r.levelname == "ERROR"
+        for r in caplog.records
+    )
+
+
 def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
     agg_primed, caplog, monkeypatch
 ):
     """The ``compute_gain_trx`` ValueError arm is unreachable in normal
-    operation (the outer guard forces ``t_enr_k`` finite/positive), so
+    operation (the pre-loop guard forces ``t_hot_k > t_amb_k``), so
     this guards a regression of those guards. Force the path with a
     monkeypatched solver."""
     from eigsep_observing.live_status import app as app_mod
@@ -1369,7 +1629,12 @@ def test_solve_calibration_logs_error_on_compute_gain_trx_failure(
 
     monkeypatch.setattr(app_mod, "compute_gain_trx", boom)
     _seed_onoff_cache(agg_primed)
-    obs_cfg = {"calibration": {"noise_diode_enr_db": 6.5}}
+    obs_cfg = {
+        "calibration": {
+            "noise_diode_enr_db": 6.5,
+            "noise_source_atten_db": 0.0,
+        },
+    }
     with caplog.at_level("ERROR", logger="eigsep_observing.live_status.app"):
         _solve_calibration(agg_primed.state, obs_cfg, now=time.time())
     assert any(
