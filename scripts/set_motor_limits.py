@@ -12,7 +12,7 @@ change; unspecified fields keep their stored values. Use
 fences (sets the field to None).
 
   set_motor_limits.py --show
-  set_motor_limits.py --az-limits -180 180 --el-limits -30 30 \\
+  set_motor_limits.py --az-limits -200 200 --el-limits -30 30 \\
       --pot-az-v 0.2 3.1 --imu-el -30 30
   set_motor_limits.py --el-limits -30 30 --no-pot-fence --no-imu-fence
 """
@@ -57,8 +57,8 @@ def run(transport, args):
             return window_arg
         return existing.get(key, default)
 
-    az = _resolve(args.az_limits, False, "az_limits_deg", [-180.0, 180.0])
-    el = _resolve(args.el_limits, False, "el_limits_deg", [-180.0, 180.0])
+    az = _resolve(args.az_limits, False, "az_limits_deg", [-200.0, 200.0])
+    el = _resolve(args.el_limits, False, "el_limits_deg", [-200.0, 200.0])
     pot = _resolve(args.pot_az_v, args.no_pot_fence, "pot_az_v_limits", None)
     imu = _resolve(args.imu_el, args.no_imu_fence, "imu_el_limits_deg", None)
     publish_motor_limits(

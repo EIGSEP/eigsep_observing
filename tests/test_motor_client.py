@@ -515,10 +515,12 @@ def test_motor_limit_error_is_valueerror():
     assert issubclass(MotorLimitError, ValueError)
 
 
-def test_default_limits_are_symmetric_180():
+def test_default_limits_are_symmetric_200():
+    # ±200 rather than ±180: headroom past the wrap point so recovery
+    # moves and homing from just beyond ±180 aren't refused.
     mc = _client()
-    assert mc.az_limits_deg == (-180.0, 180.0)
-    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.az_limits_deg == (-200.0, 200.0)
+    assert mc.el_limits_deg == (-200.0, 200.0)
     assert mc.pot_az_v_limits is None
     assert mc.imu_el_limits_deg is None
 
@@ -558,7 +560,7 @@ def test_absolute_target_deg_beyond_limit_raises_before_send():
     mc = _client_seeded()
     with patch.object(mc._proxy, "send_command") as send:
         with pytest.raises(MotorLimitError):
-            mc.move_to(az_deg=200.0)
+            mc.move_to(az_deg=205.0)  # outside the ±200 default
         send.assert_not_called()
 
 
@@ -573,10 +575,10 @@ def test_absolute_target_deg_within_limit_sends():
 
 
 def test_relative_jog_past_limit_uses_absolute_result():
-    # current target 175 deg -> a +10 jog lands at 185 -> blocked
+    # current target 195 deg -> a +10 jog lands at 205 -> blocked
     cal = MotorClient(DummyTransport())._cal
-    steps_175 = cal.deg_to_steps(175.0)
-    mc = _client_seeded(az_target=steps_175)
+    steps_195 = cal.deg_to_steps(195.0)
+    mc = _client_seeded(az_target=steps_195)
     with patch.object(mc._proxy, "send_command") as send:
         with pytest.raises(MotorLimitError):
             mc.jog_az(10.0)
@@ -786,8 +788,8 @@ def test_explicit_kwarg_overrides_kv():
 
 def test_hardcoded_default_when_no_kv_no_kwarg():
     mc = MotorClient(DummyTransport())  # nothing published
-    assert mc.az_limits_deg == (-180.0, 180.0)
-    assert mc.el_limits_deg == (-180.0, 180.0)
+    assert mc.az_limits_deg == (-200.0, 200.0)
+    assert mc.el_limits_deg == (-200.0, 200.0)
     assert mc.pot_az_v_limits is None
     assert mc.imu_el_limits_deg is None
 
@@ -833,4 +835,4 @@ def test_load_stored_limits_malformed_payload_degrades_to_empty():
     t = DummyTransport()
     publish_json(t, "motor_limits", ["not", "a", "dict"])
     mc = MotorClient(t)
-    assert mc.az_limits_deg == (-180.0, 180.0)
+    assert mc.az_limits_deg == (-200.0, 200.0)
