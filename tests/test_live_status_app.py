@@ -985,6 +985,9 @@ def test_config_route_schedule_empty_when_no_config_in_redis():
         # But disk-backed fields still come through (Thresholds-driving
         # rendering decisions, not runtime claims).
         assert data["use_tempctrl"] is True
+        # The effective calibration block rides along for the config
+        # panel — local values here since no upload has landed.
+        assert data["calibration"] == OBS_CFG["calibration"]
     finally:
         agg.stop(timeout=1.0)
 
@@ -1102,6 +1105,13 @@ def test_panda_upload_regates_signals_and_thresholds():
         assert cfg_data["tempctrl_settings"]["LNA"]["installed"] is False
         assert cfg_data["tempctrl_settings"]["LOAD"]["target_C"] == 30.0
         assert "tempctrl_lna.T_now" not in cfg_data["thresholds"]
+        # The config panel reads the effective cal reference routing
+        # from here: plucked from the upload, ENR still dashboard-local.
+        assert cfg_data["calibration"]["t_amb_stream"] == "tempctrl_lna"
+        assert (
+            cfg_data["calibration"]["noise_diode_enr_db"]
+            == OBS_CFG["calibration"]["noise_diode_enr_db"]
+        )
     finally:
         agg.stop(timeout=1.0)
 
@@ -1218,6 +1228,21 @@ def test_config_route_exposes_thresholds_with_provenance(client):
     assert thresh["adc.rms"]["source"] == "yaml_override"
     # tempctrl_lna.T_now is derived from obs_config.
     assert thresh["tempctrl_lna.T_now"]["source"] == "derived"
+
+
+def test_index_page_includes_config_panel(client):
+    """The config panel's mount points must exist in the template —
+    tickConfig() in dashboard.js no-ops silently on a missing element,
+    so a template regression would otherwise drop the panel without
+    any test noticing."""
+    html = client.get("/").get_data(as_text=True)
+    for element_id in (
+        "config-source-tile",
+        "config-values-block",
+        "config-schedule-block",
+        "config-thresholds",
+    ):
+        assert f'id="{element_id}"' in html, element_id
 
 
 def test_envelope_shape(client):

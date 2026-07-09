@@ -840,6 +840,11 @@ def _config_payload(
         "use_tempctrl": obs_cfg.get("use_tempctrl", False),
         "use_switches": obs_cfg.get("use_switches", False),
         "use_vna": obs_cfg.get("use_vna", False),
+        # Effective calibration block so the config panel can show the
+        # reference-temperature routing a hot-swap re-pointed (the
+        # t_ns_*/t_amb_* knobs follow the upload; the ENR/pad physical
+        # constants are dashboard-local).
+        "calibration": obs_cfg.get("calibration", {}) or {},
         "thresholds": thresholds.as_dict(),
     }
 
