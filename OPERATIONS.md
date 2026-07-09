@@ -443,3 +443,32 @@ mistake — deploying the new `eigsep_observing` code without picohost
 `pyproject.toml` pip pin (`picohost>=4.4`); `pip`/`uv` refuses the
 install rather than leaving a runtime gap for `switch_loop` to fall
 into.
+
+### If the termination switch is stuck or dead
+
+A stuck or dead switch raises **no error anywhere**: the GPIO drives
+fine, so commands succeed and `sp1_term`/`sp1_term_name` keep
+reporting the *pin*, not the far end of the cable. The tell is in the
+data — a real open and short differ by ~180° in reflection phase, so
+a stuck switch makes the live-status sp1 pane's SHORT and OPEN traces
+(and the corr `RFSP1_SHORT` vs `RFSP1_OPEN` spectra) come out
+identical. Checking that the two sp1 traces actually differ is the
+deploy-day acceptance test for the switch.
+
+Escape hatches, cheapest first:
+
+- **Skip the OPEN dwell**: set `RFSP1_OPEN: 0` in `switch_schedule`
+  (zero-wait modes are skipped with a log line). `RFSP1_SHORT` keeps
+  running — cable + short cap is still a valid reflection standard,
+  i.e. exactly the pre-feature behavior. Caveat: VNA ant sweeps keep
+  toggling and publishing both traces (`sp1_open` just duplicates
+  `sp1_short` — harmless but mislabeled until the switch is fixed);
+  only `use_vna: false` stops them.
+- **Hardware failsafe**: unpowered / pin LOW = SHORT regardless of
+  software state, and a rebooted potmon pico boots the pin LOW. A
+  dead control line degrades to a permanently-SHORT cable, not an
+  unknown termination.
+- **Full rollback**: previous potmon firmware + previous
+  `eigsep_observing` release + old `RFSP1` schedule restores the
+  pre-feature system exactly; the failsafe cap keeps the cable
+  terminated throughout. Nothing in this feature is a one-way door.
