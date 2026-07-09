@@ -123,11 +123,13 @@ def _imu_avg_entry(yaw):
     }
 
 
-# Representative calibrated imu_az reading. el_deg is |theta| (>=0); the az
-# fields track yaw here as an illustrative calibrated reading. The
-# producer↔schema contract is now validated against the real handler via
-# _imu_post_handler_reading in the contract test (calibrate-imu shipped in
-# picohost 3.10). These hand-set round-trip values are retained for
+# Representative calibrated imu_az reading. el_deg is |theta| (>=0); the
+# azimuth blend (az_deg / az_from_accel_deg / az_from_yaw_deg /
+# az_blend_weight) was retired in picohost 4.3 (potmon owns azimuth;
+# accel-az is degenerate at level) so imu_az now carries only the
+# _IMU_BASE fields plus el_deg. The producer↔schema contract is
+# validated against the real handler via _imu_post_handler_reading in
+# the contract test. These hand-set round-trip values are retained for
 # exact-value assertions, the same convention as the potmon round-trip
 # golden.
 IMU_AZ_READING = {
@@ -141,17 +143,14 @@ IMU_AZ_READING = {
     "accel_y": 0.0,
     "accel_z": 9.81,
     "el_deg": 0.0,
-    "az_deg": 0.0,
-    "az_from_accel_deg": 0.0,
-    "az_from_yaw_deg": 0.0,
-    "az_blend_weight": 1.0,
 }
 
 
 def _imu_az_avg_entry(yaw):
     """One imu_az per-sample entry as avg_metadata would emit it.
 
-    az fields track yaw (see IMU_AZ_READING deviation note).
+    az fields (retired picohost 4.3) are gone; only the _IMU_BASE
+    fields plus el_deg remain.
     """
     return {
         "sensor_name": "imu_az",
@@ -164,22 +163,23 @@ def _imu_az_avg_entry(yaw):
         "accel_y": 0.0,
         "accel_z": 9.81,
         "el_deg": 0.0,
-        "az_deg": yaw,
-        "az_from_accel_deg": yaw,
-        "az_from_yaw_deg": yaw,
-        "az_blend_weight": 1.0,
     }
 
 
-# Representative imu_calibration blob, matching the picohost-3.10
+# Representative imu_calibration blob, matching the picohost-4.3
 # ImuCalStore shape (see picohost/imu_geometry.py
-# fit_calibration_from_sweeps + nearest_signed_permutation). mount_perm
-# is a list of 3 host-axis label strings; M is a 3x3 row-major matrix;
-# accel_bias is a 3-vector. `upload_time` is intentionally absent — it is
-# injected at write time by Transport.upload_dict, so the on-Redis blob
-# has it but a hand-authored "what calibrate-imu produced" fixture does
-# not. Both sections present (a full `--mode all` run); a partial fleet
-# would carry only one section.
+# fit_el_calibration + nearest_signed_permutation). Both sections
+# (imu_el and imu_az) now share the same fit_el_calibration shape —
+# the az-blend-specific keys (az_sign, az_accel_offset_deg,
+# theta_cross_deg, az_yaw_sign, az_yaw_offset_deg) were retired
+# alongside the azimuth blend in picohost 4.3 (potmon owns azimuth).
+# mount_perm is a list of 3 host-axis label strings; M is a 3x3
+# row-major matrix; accel_bias is a 3-vector. `upload_time` is
+# intentionally absent — it is injected at write time by
+# Transport.upload_dict, so the on-Redis blob has it but a
+# hand-authored "what calibrate-imu produced" fixture does not. Both
+# sections present (a full `--mode all` run); a partial fleet would
+# carry only one section.
 IMU_CALIBRATION = {
     "imu_el": {
         "accel_bias": [0.01, -0.02, 0.03],
@@ -192,13 +192,8 @@ IMU_CALIBRATION = {
         "accel_bias": [-0.04, 0.05, -0.06],
         "accel_scale": 0.998,
         "M": [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
-        "az_sign": 1.0,
-        "az_accel_offset_deg": 12.5,
-        "theta_cross_deg": 20.0,
         "mount_perm": ["-y", "+x", "+z"],
         "mount_misalign_deg": 1.3,
-        "az_yaw_sign": -1.0,
-        "az_yaw_offset_deg": 47.0,
     },
     "metadata": {
         "timestamp": "2026-06-29T12:00:00+00:00",

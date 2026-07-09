@@ -810,12 +810,13 @@ def _validate_corr_header(header):
 #
 # IMU schemas reflect the BNO085 UART RVC mode introduced in picohost
 # 1.0.0: only yaw/pitch/roll orientation and acceleration are reported.
-# The two physical IMU picos now emit different field sets:
-# imu_el (panda elevation, app_id 3) adds gravity-derived signed elevation;
-# imu_az (antenna azimuth, app_id 6) adds |theta| elevation plus the azimuth
-# blend (accel-based + yaw-based, registered to the pot).
-# All derived fields are float->float (mean reduction); all are None when
-# uncalibrated.
+# The two physical IMU picos share the same derived field name but
+# different sign semantics: imu_el (panda elevation, app_id 3) adds
+# gravity-derived signed elevation; imu_az (antenna azimuth turntable,
+# app_id 6) adds |theta| elevation only — the accel/yaw azimuth blend
+# was retired in picohost 4.3 (azimuth is owned by potmon; accel-az is
+# degenerate at level). All derived fields are float->float (mean
+# reduction); all are None when uncalibrated.
 _IMU_BASE = {
     "sensor_name": str,
     "status": str,
@@ -831,17 +832,8 @@ _IMU_BASE = {
 # imu_el (panda elevation, app_id 3): gravity-derived signed elevation.
 _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
-# imu_az (antenna azimuth, app_id 6): |theta| elevation plus the azimuth
-# blend (accel-based + yaw-based, registered to the pot). All float ->
-# float->mean reduction; all None when uncalibrated.
-_IMU_AZ_SCHEMA = {
-    **_IMU_BASE,
-    "el_deg": float,
-    "az_deg": float,
-    "az_from_accel_deg": float,
-    "az_from_yaw_deg": float,
-    "az_blend_weight": float,
-}
+# imu_az (antenna azimuth turntable, app_id 6): |theta| elevation only.
+_IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
 # tempctrl publishes two flat streams (one per Peltier channel), each
 # matching this schema. The producer is
