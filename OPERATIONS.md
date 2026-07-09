@@ -415,6 +415,15 @@ line. The potmon dependency is soft (no `require_pico` at startup), so
 rfswitch bring-up keeps working with the potmon pico down; only the
 `s`/`o` keys themselves report the failure, at use time.
 
+Bench-validate before trusting the failsafe in the field:
+- Confirm the termination switch's settle time is negligible against
+  the VNA sweep start — potmon has no settle state machine (unlike
+  rfswitch's `UNKNOWN` transition window), so `sp1_term` reports the
+  driven pin level immediately after a toggle.
+- With GPIO 27 driven HIGH (OPEN), confirm the GPIO 26 az-pot ADC
+  reading shows no DC shift before trusting azimuth during OPEN
+  dwells — potmon has a documented ADC-mux crosstalk history.
+
 Deploy order for a new install or upgrade:
 
 1. Flash the potmon pico with SP1-termination-capable firmware first.
@@ -424,5 +433,13 @@ Deploy order for a new install or upgrade:
 3. Deploy the updated `obs_config.yaml` (`RFSP1_SHORT`/`RFSP1_OPEN`
    schedule keys) and restart `panda_observe`.
 
-Deploying the config before the picohost upgrade lands would leave
-`switch_loop` unable to resolve the new modes' termination step.
+Two failure modes motivate that ordering. Deploying the new
+`obs_config.yaml` before the `eigsep_observing` code upgrade lands:
+the old code's `OBS_MODES` has no `RFSP1_SHORT`/`RFSP1_OPEN` entries,
+so the `switch_loop` key check rejects the whole schedule (not just
+the two new keys) and switching refuses to run. The other ordering
+mistake — deploying the new `eigsep_observing` code without picohost
+>= 4.4 already on the panda — is prevented outright by the
+`pyproject.toml` pip pin (`picohost>=4.4`); `pip`/`uv` refuses the
+install rather than leaving a runtime gap for `switch_loop` to fall
+into.

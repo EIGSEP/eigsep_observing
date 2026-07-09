@@ -48,7 +48,6 @@ OBS_MODES = {
     "RFSP1_SHORT": ("RFSP1", SP1_TERM_SHORT),
     "RFSP1_OPEN": ("RFSP1", SP1_TERM_OPEN),
 }
-VALID_OBS_MODES = set(OBS_MODES)
 
 
 class PandaClient:

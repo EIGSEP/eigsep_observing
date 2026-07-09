@@ -1389,14 +1389,20 @@ def _avg_rfswitch_metadata(value):
 # the saved value (`any` for bools, `"UNKNOWN"` for strings) so
 # downstream can detect the issue from the file alone. Note that
 # rfswitch's raw `sw_state` int and human-readable `sw_state_name` are
-# both handled by _avg_rfswitch_metadata, not _avg_sensor_values. Every
-# int field reaching _avg_sensor_values is either in _INVARIANT_FIELDS
+# both handled by _avg_rfswitch_metadata, not _avg_sensor_values. Most
+# int fields reaching _avg_sensor_values are either in _INVARIANT_FIELDS
 # (where `min` is a no-op-on-agreement safety net behind the invariant
 # ERROR log path) or in _MAX_REDUCED_FIELDS (legitimately-varying
 # worst-case counters, where the saved `max` encodes the disagreement
-# silently, like bool `any`). A future schema int that is neither gets
-# `min` with the disagreement silently captured rather than logged —
-# decide which set it belongs in when adding it.
+# silently, like bool `any`). A third category is a raw int that rides
+# along a paired name/str field which is the actual consumer surface —
+# e.g. potmon's `sp1_term` (raw GPIO level), whose `sp1_term_name` is
+# what downstream reads; such an int can stay out of both sets, taking
+# the plain `min` default with the disagreement left for the str
+# field's own "UNKNOWN" reduction to surface. A future schema int that
+# fits none of the three gets `min` with the disagreement silently
+# captured rather than logged — decide which category it belongs in
+# when adding it.
 # ----------------------------------------------------------------------
 _INVARIANT_FIELDS = frozenset(
     {"sensor_name", "app_id", "watchdog_timeout_ms", "boot_id"}

@@ -3105,9 +3105,27 @@ def test_obs_modes_cover_paths_and_sp1_pair():
     assert OBS_MODES["RFSP1_OPEN"] == ("RFSP1", "OPEN")
 
 
-def test_boot_asserts_short_termination(client):
-    # PandaClient.__init__ drives SHORT at boot (failsafe re-assert).
-    assert _wait_potmon_term(client, "SHORT")
+def test_boot_asserts_short_termination(client, dummy_cfg):
+    # Vacuous as a bare "assert SHORT right after construction":
+    # PotMonEmulator.__init__ already defaults sp1_term to SHORT
+    # (mirroring the real hardware failsafe), so that assertion would
+    # pass even with PandaClient's boot-time
+    # `_safe_set_sp1_term(SP1_TERM_SHORT)` block deleted. Drive the
+    # termination to OPEN first, then construct a second client against
+    # the SAME already-running manager/device — a plain PandaClient,
+    # not another DummyPandaClient, since DummyPandaClient spins up a
+    # brand-new manager + fresh emulator that boots to SHORT on its
+    # own and would just reintroduce the same vacuousness one level
+    # up. This pins the boot-time re-assert itself, not the emulator's
+    # boot state.
+    assert client._apply_obs_mode("RFSP1_OPEN")
+    assert _wait_potmon_term(client, "OPEN")
+
+    second = PandaClient(client.transport, cfg=dummy_cfg)
+    try:
+        assert _wait_potmon_term(second, "SHORT")
+    finally:
+        second.stop()
 
 
 def test_apply_obs_mode_drives_both_knobs(client):
