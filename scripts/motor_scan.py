@@ -10,6 +10,12 @@ The scan grid is configured per axis from the command line via
 ``--az_start/--az_stop/--az_step`` and the ``--el_*`` equivalents
 (degrees). Bounds are inclusive of the stop endpoint, so e.g.
 ``--az_start 0 --az_stop 180 --az_step 5`` sweeps 0..180 in 5 deg steps.
+
+``--axis`` selects which axis is swept: ``both`` (default) runs the
+full 2-D grid, while ``az`` or ``el`` sweep a single axis and hold the
+other fixed at ``--el`` / ``--az`` respectively (default 0). In a
+single-axis scan the held axis's ``--*_start/stop/step`` flags are
+ignored.
 """
 
 from argparse import ArgumentParser
@@ -52,6 +58,49 @@ def _axis_range(start, stop, step):
     return np.arange(start, stop + step / 2.0, step)
 
 
+def _build_grid(args):
+    """Resolve ``(az_range, el_range, el_first)`` from CLI args.
+
+    For ``--axis both`` the full 2-D grid is built from both sets of
+    bounds and ``--el_first`` is honored. For a single-axis scan the
+    swept axis is built from its ``--<axis>_start/stop/step`` bounds
+    while the other axis collapses to a single hold point (``--el`` for
+    an az scan, ``--az`` for an el scan). ``el_first`` is then forced so
+    the swept axis is the inner (fast) loop, which preserves the
+    ``pause_s`` sweep semantics; the held axis's bound/step flags are
+    ignored. Bad bounds still raise from ``_axis_range`` before any
+    hardware is touched.
+    """
+    if args.axis == "az":
+        az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
+        el_range = np.array([args.el], dtype=float)
+        return az_range, el_range, False
+    if args.axis == "el":
+        el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
+        az_range = np.array([args.az], dtype=float)
+        return az_range, el_range, True
+    az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
+    el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
+    return az_range, el_range, args.el_first
+
+
+def _describe_grid(args, az_range, el_range):
+    """One-line human summary of the resolved scan grid for the log."""
+    az = (
+        f"az {args.az_start:g}..{args.az_stop:g} step {args.az_step:g} "
+        f"({len(az_range)} pts)"
+    )
+    el = (
+        f"el {args.el_start:g}..{args.el_stop:g} step {args.el_step:g} "
+        f"({len(el_range)} pts)"
+    )
+    if args.axis == "az":
+        return f"{az}, el held at {args.el:g}"
+    if args.axis == "el":
+        return f"{el}, az held at {args.az:g}"
+    return f"{az}, {el}"
+
+
 def _prompt_go_home(motor):
     """On a Ctrl-C interrupt, offer to drive back to (0, 0).
 
@@ -82,8 +131,7 @@ def _prompt_go_home(motor):
 def main(transport, args):
     # Build (and validate) the grid before touching hardware so bad
     # bounds fail fast without opening a run_tag session.
-    az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
-    el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
+    az_range, el_range, el_first = _build_grid(args)
     require_pico(PicoProxy("motor", transport, source="motor_scan"))
     with run_tag.session(transport, "motor_scan"):
         status = StatusWriter(transport)
@@ -92,18 +140,7 @@ def main(transport, args):
         started = time.monotonic()
         status.send("motor_scan started")
         logger.info("motor_scan started")
-        logger.info(
-            "Scan grid: az %g..%g step %g (%d pts), "
-            "el %g..%g step %g (%d pts)",
-            args.az_start,
-            args.az_stop,
-            args.az_step,
-            len(az_range),
-            args.el_start,
-            args.el_stop,
-            args.el_step,
-            len(el_range),
-        )
+        logger.info("Scan grid: %s", _describe_grid(args, az_range, el_range))
 
         try:
             motor.set_delay()
@@ -111,7 +148,7 @@ def main(transport, args):
             motor.scan(
                 az_range_deg=az_range,
                 el_range_deg=el_range,
-                el_first=args.el_first,
+                el_first=el_first,
                 repeat_count=args.count,
                 pause_s=args.pause_s,
                 sleep_between=args.sleep_s,
@@ -138,9 +175,19 @@ def _parse_args():
     )
     add_redis_args(parser)
     parser.add_argument(
+        "--axis",
+        choices=("az", "el", "both"),
+        default="both",
+        help=(
+            "Which axis to sweep: 'az' (elevation held at --el), 'el' "
+            "(azimuth held at --az), or 'both' (default, full 2-D grid)."
+        ),
+    )
+    parser.add_argument(
         "--el_first",
         action="store_true",
-        help="Scan az as outer loop (el is the fast axis); default is az fast.",
+        help="Scan az as outer loop (el is the fast axis); default is az "
+        "fast. Ignored unless --axis both.",
     )
     parser.add_argument(
         "--az_start",
@@ -161,6 +208,12 @@ def _parse_args():
         help="Azimuth grid step size in degrees (default: 5).",
     )
     parser.add_argument(
+        "--az",
+        type=float,
+        default=0.0,
+        help="Azimuth hold position in degrees when --axis el (default: 0).",
+    )
+    parser.add_argument(
         "--el_start",
         type=float,
         default=-180.0,
@@ -177,6 +230,12 @@ def _parse_args():
         type=float,
         default=5.0,
         help="Elevation grid step size in degrees (default: 5).",
+    )
+    parser.add_argument(
+        "--el",
+        type=float,
+        default=0.0,
+        help="Elevation hold position in degrees when --axis az (default: 0).",
     )
     parser.add_argument(
         "--count",
