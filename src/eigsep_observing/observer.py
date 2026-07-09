@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 # throttle in eigsep_redis.MetadataStreamReader.
 _DRAIN_WARN_INTERVAL_S = 60.0
 
+# During a panda outage, every touch of the dead host is a
+# multi-second failed TCP connect. Probing once per this window (vs
+# once per ~1 s integration) keeps the corr loop at full cadence —
+# "corr is sacred" — while reconnection stays implicit with at most
+# this much extra latency.
+_PANDA_REPROBE_INTERVAL_S = 30.0
+
 
 def _tick_liveness_deadline(deadline, liveness_timeout, reason):
     """Advance the SNAP-liveness deadline; log loudly when it expires.
@@ -392,6 +399,7 @@ class EigObserver:
         # panda_observe stopped) still drains live sensor metadata.
         metadata_stream_down = False
         last_drain_warn_monotonic = 0.0
+        last_panda_probe_monotonic = 0.0
         try:
             while not self.stop_event.is_set():
                 if file.counter == 0:
@@ -492,17 +500,32 @@ class EigObserver:
                 # ConnectionError is the real "panda unreachable" signal;
                 # corr stays sacred (metadata=None).
                 if metadata_stream_down:
-                    # On reconnect, jump every metadata stream past the
-                    # outage backlog so the next drain picks up the
-                    # producer's "now". Keeps the metadata cadence aligned
-                    # with corr integrations instead of smearing
-                    # historical readings into the current row.
-                    try:
-                        self.metadata_stream.skip_to_latest()
-                    except redis.exceptions.ConnectionError:
-                        # Bounced again between the skip attempt and the
-                        # drain; treat as still-down and try next
-                        # iteration.
+                    # Re-probing a dead panda costs seconds per attempt
+                    # (failed TCP connect) and at corr cadence that
+                    # starves the writer below the producer rate —
+                    # eventually losing corr rows to the stream cap.
+                    # Probe at most once per _PANDA_REPROBE_INTERVAL_S;
+                    # between probes, land the row immediately with
+                    # SNAP-side metadata only.
+                    now_mono = time.monotonic()
+                    probe_ok = False
+                    if (
+                        now_mono - last_panda_probe_monotonic
+                        >= _PANDA_REPROBE_INTERVAL_S
+                    ):
+                        last_panda_probe_monotonic = now_mono
+                        # On reconnect, jump every metadata stream past
+                        # the outage backlog so the next drain picks up
+                        # the producer's "now". Keeps the metadata
+                        # cadence aligned with corr integrations instead
+                        # of smearing historical readings into the
+                        # current row.
+                        try:
+                            self.metadata_stream.skip_to_latest()
+                            probe_ok = True
+                        except redis.exceptions.ConnectionError:
+                            probe_ok = False
+                    if not probe_ok:
                         metadata = {}
                         adc = self.adc_metadata_stream.drain()
                         if adc:
