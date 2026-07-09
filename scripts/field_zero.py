@@ -1,10 +1,14 @@
-"""Field zero: verify the pot tracks, set the operational az/el zero, and
-re-pin the pot calibration intercept with the box in its hanging pose.
+"""Field zero: verify the pot tracks, then home-and-zero at the
+cal-defined home (pot 0°, IMU-level el).
 
 Self-contained active driver (see scripts/CLAUDE.md): claims run_tag,
 talks to hardware only via PicoProxy, requires pico-manager. Performs
-pot-slip pre-check, interactive jog-to-zero, motor-origin reset, and
-pot intercept re-pin.
+pot-slip pre-check and interactive jog (recovery/inspection); the
+confirm action drives the closed-loop homer onto the pot calibration's
+zero-angle voltage and IMU-level elevation, resetting the step counters
+there. The pot calibration is the single az-home authority and is never
+modified here — a deliberate intercept re-pin lives in
+``calibrate-pot --mode rezero``.
 """
 
 import curses
@@ -22,7 +26,6 @@ from eigsep_observing import (
     MotorZeroer,
     run_tag,
 )
-from eigsep_observing.home_ref import publish_home_ref
 from eigsep_observing._scripts_util import (
     add_redis_args,
     build_transport,
@@ -44,10 +47,11 @@ def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
     slip: "warn" at ``warn``, "fail" at ``fail`` fractional shortfall.
     An overshoot of at least ``warn`` returns "overshoot" — the pot
     swung MORE than the stored slope predicts, which a slipping
-    coupling cannot do; it means the stored slope is stale, and it
-    must never block zeroing (the zero is slope-independent: home_ref
-    stores raw v0 and the re-pin keeps the slope). A non-positive
-    expected swing is unusable -> "fail".
+    coupling cannot do; it means the stored slope is stale. That warns
+    without blocking (a stale slope skews the cal-derived home target,
+    so re-run calibrate-pot when convenient, but the pot still tracks
+    and homing still converges on *a* well-defined point). A
+    non-positive expected swing is unusable -> "fail".
     """
     if expected_dv <= 0:
         return "fail"
@@ -62,13 +66,14 @@ def slip_verdict(expected_dv, measured_dv, *, warn=0.05, fail=0.10):
 
 
 def _prompt_override(expected_dv, measured_dv):
-    """Ask the operator whether to zero despite a failed slip check.
+    """Ask the operator whether to proceed despite a failed slip check.
 
     Field reality: a slipping/odd pot coupling often cannot be fixed
-    on the rig, and the zero itself is slope-independent, so the
-    operator gets the final say — with the numbers in hand, before
-    the probe move has to be repeated. Returns True only on an
-    explicit y/yes; EOF (non-interactive stdin) is No.
+    on the rig, and the operator gets the final say — with the numbers
+    in hand, before the probe move has to be repeated. A slipping pot
+    makes the pot-referenced home unreliable, so the override is a
+    deliberate, logged degraded mode. Returns True only on an explicit
+    y/yes; EOF (non-interactive stdin) is No.
     """
     print(
         f"POT SLIP DETECTED: measured {measured_dv:.3f} V vs "
@@ -79,36 +84,6 @@ def _prompt_override(expected_dv, measured_dv):
     except EOFError:
         return False
     return answer.strip().lower() in ("y", "yes")
-
-
-def rezero_pot(transport, pot_proxy, v0):
-    """Re-pin the pot intercept at home voltage v0, keeping the stored slope.
-
-    angle = m*V + b, with b chosen so angle(v0) = 0  ->  b = -m*v0.
-    Persists (BGSAVE) and pushes the new cal to the live pico.
-    Returns (m, b).
-    """
-    store = PotCalStore(transport)
-    cal = store.get()
-    if not cal or "pot_az" not in cal:
-        raise RuntimeError(
-            "No stored pot calibration; run "
-            "calibrate-pot --mode azimuth first."
-        )
-    m = float(cal["pot_az"][0])
-    b = -m * float(v0)
-    cal["pot_az"] = [m, b]
-    cal.setdefault("metadata", {})["mode"] = "field_zero_rezero"
-    store.upload(cal)
-    transport.r.bgsave()
-    try:
-        pot_proxy.send_command("set_calibration", pot_az_params=[m, b])
-    except (TimeoutError, RuntimeError):
-        logger.warning(
-            "Live push of pot cal failed; cal is stored in Redis and "
-            "will apply on the next PicoManager restart."
-        )
-    return m, b
 
 
 def _pot_voltage(snapshot):
@@ -147,16 +122,6 @@ def run_slip_check(motor_client, snapshot, slope_m, move_deg=30.0):
     return slip_verdict(expected_dv, measured_dv), expected_dv, measured_dv
 
 
-def _write_home_ref(transport, snapshot, v0):
-    """Write the home reference K/V after a confirmed zero.
-
-    Records the pot voltage at the zeroed position (slope-independent
-    az reference) and the current IMU elevation (None when uncalibrated).
-    """
-    el = (snapshot.get().get("imu_el") or {}).get("el_deg")
-    publish_home_ref(transport, pot_az_voltage_v0=v0, imu_el_deg_home=el)
-
-
 def _render(screen, zeroer, snapshot, deg):
     az, el, connected = zeroer.status_text()
     pot = snapshot.get().get("potmon") or {}
@@ -182,46 +147,51 @@ def _render(screen, zeroer, snapshot, deg):
     screen.addstr(
         7,
         0,
-        "u/d EL | l/r AZ | +/- step | Enter=zero(confirm) | q=quit",
+        "u/d EL | l/r AZ | +/- step | Enter=home&zero(confirm) | q=quit",
     )
     if zeroer.pending_zero:
         screen.addstr(
-            9, 0, ">>> ZERO HERE? 'y' confirm, any other key cancels <<<"
+            9,
+            0,
+            ">>> HOME & ZERO? drives to pot 0 deg / IMU level; "
+            "'y' confirm, any other key cancels <<<",
         )
+    elif zeroer.is_homing:
+        screen.addstr(9, 0, ">>> HOMING to cal zero... any key cancels <<<")
     if zeroer.notice:
         width = screen.getmaxyx()[1]
         screen.addstr(11, 0, f"! {zeroer.notice}"[: width - 1])
     screen.refresh()
 
 
-def _curses_main(screen, zeroer, snapshot, pot_proxy, transport, deg):
+def _curses_main(screen, zeroer, snapshot, deg):
+    """Pump keystrokes until quit or a converged home-and-zero.
+
+    Returns the :class:`~eigsep_observing.motor_homer.HomeResult` of a
+    converged confirm-committed home, or ``None`` when the operator
+    quits without one. An unconverged / cancelled / refused home does
+    NOT exit — the operator keeps jogging (the reason is on the notice
+    line) and can re-confirm.
+    """
     curses.noecho()
     screen.timeout(100)
+    home_committed = False
     try:
         while True:
             _render(screen, zeroer, snapshot, deg)
-            deg, should_exit, zeroed = zeroer.handle_key(screen.getch(), deg)
+            deg, should_exit, committed = zeroer.handle_key(
+                screen.getch(), deg
+            )
+            if committed:
+                home_committed = True
+            if home_committed and not zeroer.is_homing:
+                result = zeroer.last_home_result
+                if result is not None and result.converged:
+                    logger.info("Home & zero complete: %s", result)
+                    return result
+                home_committed = False
             if should_exit:
-                if zeroed:
-                    v0 = _pot_voltage(snapshot)
-                    if v0 is None:
-                        logger.warning(
-                            "Motor origin reset, but pot re-pin SKIPPED: "
-                            "potmon not publishing pot_az_voltage. Re-pin "
-                            "once potmon is back (calibrate-pot --mode "
-                            "rezero)."
-                        )
-                    else:
-                        m, b = rezero_pot(transport, pot_proxy, v0)
-                        _write_home_ref(transport, snapshot, v0)
-                        logger.info(
-                            "Zeroed: motor origin reset; pot re-pinned "
-                            "m=%.3f b=%.3f at v0=%.4f",
-                            m,
-                            b,
-                            v0,
-                        )
-                break
+                return None
     finally:
         zeroer.cancel_home()
         zeroer.halt()
@@ -229,7 +199,7 @@ def _curses_main(screen, zeroer, snapshot, pot_proxy, transport, deg):
 
 def _parse_args():
     p = ArgumentParser(
-        description="Field zero: verify pot, set az/el zero, re-pin cal"
+        description="Field zero: verify pot, home-and-zero at cal home"
     )
     p.add_argument("--dummy", action="store_true")
     add_redis_args(p)
@@ -331,13 +301,23 @@ def main():
         zeroer = MotorZeroer(
             transport,
             source="field_zero",
-            enforce_limits=not args.override_limits,
+            motor_client=mc,
+            confirm_starts_home=True,
         )
         zeroer.set_delay()
         zeroer.halt()
-        curses.wrapper(
-            _curses_main, zeroer, snapshot, pot_proxy, transport, args.deg
-        )
+        result = curses.wrapper(_curses_main, zeroer, snapshot, args.deg)
+        if result is not None:
+            msg = (
+                f"Home & zero complete in {result.iterations} "
+                f"iteration(s): residual az={result.residual_az_deg} "
+                f"el={result.residual_el_deg} deg; step counters "
+                f"reset={result.reset_count}."
+            )
+        else:
+            msg = "Exited without a converged home & zero."
+        print(msg)
+        logger.info(msg)
 
 
 if __name__ == "__main__":

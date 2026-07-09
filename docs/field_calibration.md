@@ -120,10 +120,15 @@ It runs in order:
 1. **Pot-slip pre-check** — a known there-and-back move vs. the expected pot
    voltage swing. ≥5% short → **warn**; ≥10% short → **abort** (this is the
    over-tightened/slipping-pot failure mode — back the pot mount off so the
-   shaft turns freely, then retry).
-2. **Jog** to the operational az/el zero (live motor/pot/IMU readout).
-3. **Confirm** (Enter, then `y`) → resets the motor step origin **and** re-pins
-   the pot intercept (`b = -m·v0`), then `BGSAVE`s and pushes the new cal live.
+   shaft turns freely, then retry; an operator override prompt allows a
+   deliberate, logged proceed).
+2. **Jog** (optional) — recovery/inspection with live motor/pot/IMU readout.
+   Jogging does **not** define home; home is fixed by the pot calibration.
+3. **Confirm** (Enter, then `y`) → drives the closed-loop homer to the
+   cal-defined home (az where the calibrated pot reads 0°, el at IMU-level)
+   and resets the motor step origin there on convergence. The pot calibration
+   is never modified by this step — a deliberate intercept re-pin is
+   `calibrate-pot --mode rezero`.
 
 Tuning: `--move-deg` (slip-probe size, default 30) and `--deg` (initial jog
 step).
@@ -136,9 +141,12 @@ step).
   `boot_id`), and pot/IMU calibration persist via `dump.rdb`. So usually you
   **just verify** on the orientation card. Re-run `field_zero.py` only if the
   box was remounted or the pot-slip check fails.
-- **After a pot remount or a failed slip check:** re-run `field_zero.py`
-  (re-pins the intercept; the slope from the lab still holds unless the gearing
-  changed).
+- **After a pot remount or a failed slip check:** fix the coupling, then
+  re-pin the intercept with `calibrate-pot --mode rezero` (the slope from the
+  lab still holds unless the gearing changed) and re-run `field_zero.py` to
+  home-and-zero. Because home is derived from the cal, the re-pin moves home
+  for every consumer immediately — `motor_home.py`, the `h` key, and
+  `panda_observe`'s post-scan homing.
 - **After an IMU remount:** re-run `calibrate-imu` (the mount changed).
 
 ---

@@ -2,10 +2,19 @@ import logging
 
 import pytest
 from eigsep_redis.testing import DummyTransport
+from picohost.buses import PotCalStore
 
 from eigsep_observing.el_sensor import ElEstimate
-from eigsep_observing.home_ref import publish_home_ref
 from eigsep_observing.motor_homer import HomeResult, MotorHomer
+from eigsep_observing.motor_limits import publish_motor_limits
+
+
+def _seed_cal(t, m=100.0, b=-100.0):
+    """Store a pot cal whose zero-angle voltage is v_home = -b/m.
+
+    Defaults give v_home = 1.0 V, matching the fake motor below.
+    """
+    PotCalStore(t).upload({"pot_az": [m, b]})
 
 
 def _homer(**kw):
@@ -14,34 +23,26 @@ def _homer(**kw):
 
 def test_az_residual_volts_times_gain():
     h = _homer(az_gain_deg_per_volt=100.0)
-    ref = {"pot_az_voltage_v0": 1.0, "imu_el_deg_home": 0.0}
     # pot reads 1.1 V, home is 1.0 V -> -0.1 V -> -10 deg residual
-    assert h._az_residual_deg(ref, 1.1) == pytest.approx(-10.0)
+    assert h._az_residual_deg(1.0, 1.1) == pytest.approx(-10.0)
 
 
 def test_az_residual_none_when_pot_missing():
     h = _homer(az_gain_deg_per_volt=100.0)
-    ref = {"pot_az_voltage_v0": 1.0, "imu_el_deg_home": 0.0}
-    assert h._az_residual_deg(ref, None) is None
+    assert h._az_residual_deg(1.0, None) is None
 
 
 def test_el_residual_signed_when_primary():
-    from eigsep_observing.el_sensor import ElEstimate
-
     h = _homer()
-    ref = {"pot_az_voltage_v0": 1.0, "imu_el_deg_home": 0.0}
-    res, mag_only = h._el_residual(ref, ElEstimate(-8.0, False, "imu_el"))
-    assert res == pytest.approx(8.0)  # home(0) - (-8) = +8
+    res, mag_only = h._el_residual(ElEstimate(-8.0, False, "imu_el"))
+    assert res == pytest.approx(8.0)  # level(0) - (-8) = +8
     assert mag_only is False
 
 
 def test_el_residual_magnitude_only_failover():
-    from eigsep_observing.el_sensor import ElEstimate
-
     h = _homer()
-    ref = {"pot_az_voltage_v0": 1.0, "imu_el_deg_home": 0.0}
-    res, mag_only = h._el_residual(ref, ElEstimate(8.0, True, "imu_az"))
-    # magnitude-only: drive |el| toward |home|(0): residual magnitude 8
+    res, mag_only = h._el_residual(ElEstimate(8.0, True, "imu_az"))
+    # magnitude-only: drive |el| toward level (0): residual magnitude 8
     assert abs(res) == pytest.approx(8.0)
     assert mag_only is True
 
@@ -66,8 +67,21 @@ def test_home_result_constructible():
     assert r.converged is True
 
 
+def test_az_home_voltage_derived_from_cal():
+    t = DummyTransport()
+    _seed_cal(t, m=200.0, b=-300.0)  # angle = 200 v - 300 = 0 at 1.5 V
+    h = MotorHomer(t, motor_client=object())
+    assert h.az_home_voltage() == pytest.approx(1.5)
+
+
+def test_az_home_voltage_raises_without_cal():
+    h = MotorHomer(DummyTransport(), motor_client=object())
+    with pytest.raises(RuntimeError, match="calibrate-pot"):
+        h.az_home_voltage()
+
+
 # ---------------------------------------------------------------------------
-# Task C5: home() loop tests
+# home() loop tests
 # ---------------------------------------------------------------------------
 
 
@@ -90,7 +104,7 @@ class _FakeMotor:
         self.pot += delta_deg / self.dpv  # +deg lowers residual toward v0
 
     def jog_el(self, delta_deg, stop_event=None):
-        self.el += delta_deg  # +deg moves el toward home(0)
+        self.el += delta_deg  # +deg moves el toward level (0)
 
     def reset_step_position(self, az_step=0, el_step=0):
         self.reset.append((az_step, el_step))
@@ -117,28 +131,63 @@ def _homer_with_fake(t, fake, **kw):
     return h
 
 
-def test_home_raises_without_reference():
+def test_home_raises_without_cal():
     h = MotorHomer(DummyTransport(), motor_client=_FakeMotor())
-    with pytest.raises(RuntimeError, match="home"):
+    with pytest.raises(RuntimeError, match="calibrate-pot"):
         h.home()
 
 
-def test_home_converges_and_resets_count():
+def test_home_converges_onto_cal_zero_and_resets_count():
     t = DummyTransport()
-    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    _seed_cal(t)  # v_home = 1.0 V; el home is IMU-level (0 deg)
     fake = _FakeMotor(pot=1.30, el=10.0)
     h = _homer_with_fake(t, fake)
     res = h.home()
     assert res.converged is True
     assert abs(res.residual_az_deg) <= h.tol_az_deg
     assert abs(res.residual_el_deg) <= h.tol_el_deg
+    # the pot itself landed at the cal's zero-angle voltage
+    assert fake.pot == pytest.approx(1.0, abs=h.tol_az_deg / fake.dpv)
     assert fake.reset == [(0, 0)]  # re-zeroed on convergence
     assert fake.homed >= 1  # coarse approach happened
 
 
+def test_home_tracks_cal_rezero_immediately():
+    """A recal (new intercept) moves home for the next home() call — no
+    intermediate K/V to refresh."""
+    t = DummyTransport()
+    _seed_cal(t, m=100.0, b=-100.0)  # v_home 1.0 V
+    fake = _FakeMotor(pot=1.30, el=0.0)
+    h = _homer_with_fake(t, fake)
+    assert h.home().converged is True
+    assert fake.pot == pytest.approx(1.0, abs=h.tol_az_deg / fake.dpv)
+    _seed_cal(t, m=100.0, b=-120.0)  # rezero: v_home now 1.2 V
+    assert h.home().converged is True
+    assert fake.pot == pytest.approx(1.2, abs=h.tol_az_deg / fake.dpv)
+
+
+def test_home_refuses_when_cal_zero_outside_pot_window(caplog):
+    """A cal whose zero-angle voltage lies outside the rig's pot fence is
+    broken; refuse before moving rather than driving into the fence."""
+    t = DummyTransport()
+    _seed_cal(t, m=100.0, b=-100.0)  # v_home 1.0 V
+    publish_motor_limits(
+        t,
+        az_limits_deg=[-180.0, 180.0],
+        el_limits_deg=[-180.0, 180.0],
+        pot_az_v_limits=[1.5, 2.5],  # window excludes v_home
+        imu_el_limits_deg=None,
+    )
+    fake = _FakeMotor(pot=2.0, el=0.0)
+    h = _homer_with_fake(t, fake)
+    with pytest.raises(RuntimeError, match="outside"):
+        h.home()
+    assert fake.homed == 0  # never moved
+
+
 def test_home_degrades_when_sensors_down(caplog):
     t = DummyTransport()
-    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    _seed_cal(t)
     fake = _FakeMotor()
     h = MotorHomer(t, motor_client=fake)
     h.snapshot.get = lambda key: {}  # nothing published
@@ -152,9 +201,10 @@ def test_home_degrades_when_sensors_down(caplog):
 
 def test_mid_loop_sensor_loss_aborts_without_rezero(caplog):
     """If all sensors go silent inside the loop, abort with degraded=True and
-    no re-zero — re-zeroing at an unverified position is a silent wrong-success."""
+    no re-zero — re-zeroing at an unverified position is a silent
+    wrong-success."""
     t = DummyTransport()
-    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    _seed_cal(t)
     fake = _FakeMotor(pot=1.30, el=10.0)
     h = _homer_with_fake(t, fake)
     # Override _read_sensors so it returns valid data on the first pre-loop
@@ -184,7 +234,7 @@ def test_az_sign_autodetect_flips_when_residual_grows():
     # fake where +az jog INCREASES the residual (wrong initial sign) until
     # the homer flips; convergence proves the flip happened.
     t = DummyTransport()
-    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    _seed_cal(t)
 
     class _Reversed(_FakeMotor):
         def jog_az(self, delta_deg, stop_event=None):
@@ -197,7 +247,7 @@ def test_az_sign_autodetect_flips_when_residual_grows():
 
 
 # ---------------------------------------------------------------------------
-# Task D2: enforce_limits threading
+# enforce_limits threading
 # ---------------------------------------------------------------------------
 
 

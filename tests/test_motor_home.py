@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from eigsep_observing.home_ref import publish_home_ref
 from eigsep_redis.testing import DummyTransport
+from picohost.buses import PotCalStore
 
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -27,11 +27,11 @@ def _load(name):
     raise FileNotFoundError(f"{name}.py not found in {_SCRIPT_DIRS}")
 
 
-def test_errors_without_home_ref():
-    """run() raises SystemExit when no home_ref has been published."""
+def test_errors_without_pot_cal():
+    """run() raises SystemExit when no pot calibration is stored."""
     motor_home = _load("motor_home")
     t = DummyTransport()
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit, match="calibrate-pot"):
         motor_home.run(t, dry_run=True)
 
 
@@ -54,7 +54,7 @@ def test_override_limits_disables_enforcement(monkeypatch):
 
     motor_home = _load("motor_home")
     t = DummyTransport()
-    publish_home_ref(t, pot_az_voltage_v0=1.0, imu_el_deg_home=0.0)
+    PotCalStore(t).upload({"pot_az": [100.0, -100.0]})  # v_home = 1.0 V
 
     captured = {}
     orig_homer = eigsep_observing.MotorHomer
