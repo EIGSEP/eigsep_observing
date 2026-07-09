@@ -19,7 +19,12 @@ from picohost.buses import ImuCalStore
 from eigsep_observing import obs_config_owner, run_tag
 from eigsep_observing._test_fixtures import IMU_CALIBRATION
 from eigsep_observing.keys import VNA_STREAM
-from eigsep_observing.vna import VnaWriter, measure_dut, measure_s11
+from eigsep_observing.vna import (
+    VnaWriter,
+    build_vna_subsystem,
+    measure_dut,
+    measure_s11,
+)
 
 
 def _make_vna(cfg, switch_fn=lambda state: None):
@@ -50,11 +55,12 @@ def test_measure_s11_helper_ant_publishes_bundle(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
 
     # ant bundle: DUT keys + OSL standards
     assert "ant" in s11 and "load" in s11 and "noise" in s11
-    assert "amb" in s11 and "sp1" in s11
+    assert "amb" in s11 and "sp1_short" in s11 and "sp1_open" in s11
     assert "cal:VNAO" in s11 and "cal:VNAS" in s11 and "cal:VNAL" in s11
     assert header["mode"] == "ant"
 
@@ -77,8 +83,11 @@ def test_measure_s11_ant_switch_sequence(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
 
+    # sp1_open reuses the VNASP1 switch path (only the far-end
+    # termination moves), so it never appears twice here.
     assert calls == [
         "VNAO",
         "VNAS",
@@ -89,6 +98,110 @@ def test_measure_s11_ant_switch_sequence(transport, dummy_cfg):
         "VNAAMB",
         "VNASP1",
     ]
+
+
+def test_measure_s11_ant_sweeps_both_sp1_terminations(transport, dummy_cfg):
+    """ant mode measures VNASP1 twice, toggling the failsafe termination
+    SHORT -> OPEN and restoring SHORT afterwards."""
+    vna = _make_vna(dummy_cfg)
+    writer, snap = _make_sinks(transport)
+    term_calls = []
+
+    s11, header, metadata = measure_s11(
+        vna,
+        "ant",
+        cfg=dummy_cfg,
+        transport=transport,
+        vna_writer=writer,
+        metadata_snapshot=snap,
+        sp1_term_fn=term_calls.append,
+    )
+    assert "sp1_short" in s11 and "sp1_open" in s11
+    assert "sp1" not in s11
+    # SHORT before the first sp1 sweep, OPEN before the second,
+    # SHORT restored at the end.
+    assert term_calls == ["SHORT", "OPEN", "SHORT"]
+
+
+def test_measure_s11_ant_requires_sp1_term_fn(transport, dummy_cfg):
+    vna = _make_vna(dummy_cfg)
+    writer, snap = _make_sinks(transport)
+
+    with pytest.raises(RuntimeError, match="sp1_term_fn"):
+        measure_s11(
+            vna,
+            "ant",
+            cfg=dummy_cfg,
+            transport=transport,
+            vna_writer=writer,
+            metadata_snapshot=snap,
+        )
+
+
+def test_measure_s11_ant_restores_short_even_on_sweep_error(
+    transport, dummy_cfg
+):
+    """The failsafe restore is best-effort but must still be attempted
+    (and must not mask the original error) when the SP1 sweep itself
+    raises."""
+    vna = _make_vna(dummy_cfg)
+    writer, snap = _make_sinks(transport)
+    term_calls = []
+
+    original_measure_dut = vna.measure_dut
+
+    def boom(state):
+        if state == "VNASP1":
+            raise RuntimeError("VNASP1 sweep boom")
+        return original_measure_dut(state)
+
+    with patch.object(vna, "measure_dut", side_effect=boom):
+        with pytest.raises(RuntimeError, match="VNASP1 sweep boom"):
+            measure_s11(
+                vna,
+                "ant",
+                cfg=dummy_cfg,
+                transport=transport,
+                vna_writer=writer,
+                metadata_snapshot=snap,
+                sp1_term_fn=term_calls.append,
+            )
+    # Only the SHORT-before-sweep call happened before the sweep
+    # raised, but the finally block still restores SHORT.
+    assert term_calls == ["SHORT", "SHORT"]
+
+
+def test_measure_s11_ant_logs_warning_if_short_restore_fails(
+    transport, dummy_cfg, caplog
+):
+    """A failure restoring SHORT in the finally block must not mask the
+    original success — it only logs a warning."""
+    vna = _make_vna(dummy_cfg)
+    writer, snap = _make_sinks(transport)
+
+    calls = []
+
+    def flaky_term(state):
+        calls.append(state)
+        if len(calls) == 3:  # the final restore-to-SHORT call
+            raise RuntimeError("potmon offline")
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.vna")
+    s11, header, metadata = measure_s11(
+        vna,
+        "ant",
+        cfg=dummy_cfg,
+        transport=transport,
+        vna_writer=writer,
+        metadata_snapshot=snap,
+        sp1_term_fn=flaky_term,
+    )
+    assert "sp1_short" in s11 and "sp1_open" in s11
+    assert calls == ["SHORT", "OPEN", "SHORT"]
+    assert any(
+        "Failed to restore SP1 termination to SHORT" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 def test_measure_s11_helper_rec_publishes_bundle(transport, dummy_cfg):
@@ -135,6 +248,7 @@ def test_measure_s11_helper_contract_violation_fires_callback_and_publishes(
             transport=transport,
             vna_writer=writer,
             metadata_snapshot=snap,
+            sp1_term_fn=lambda term: None,
             on_contract_violation=on_violation,
         )
 
@@ -165,6 +279,7 @@ def test_measure_s11_helper_default_callback_logs_warning(
             transport=transport,
             vna_writer=writer,
             metadata_snapshot=snap,
+            sp1_term_fn=lambda term: None,
         )
 
     warns = [
@@ -225,6 +340,7 @@ def test_measure_s11_helper_injects_published_owner(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
 
     assert header["obs_config_owner"] == "panda_observe"
@@ -245,6 +361,7 @@ def test_measure_s11_helper_embeds_imu_calibration(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
 
     assert header["imu_calibration"]["imu_el"] == IMU_CALIBRATION["imu_el"]
@@ -303,6 +420,7 @@ def test_measure_s11_helper_uses_mode_specific_power(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
     assert vna.power_dBm == dummy_cfg["vna_settings"]["power_dBm"]["ant"]
 
@@ -319,6 +437,7 @@ def test_measure_s11_helper_freqs_match_setup(transport, dummy_cfg):
         transport=transport,
         vna_writer=writer,
         metadata_snapshot=snap,
+        sp1_term_fn=lambda term: None,
     )
     freqs = np.asarray(header["freqs"], dtype=float)
     assert freqs[0] == pytest.approx(dummy_cfg["vna_settings"]["fstart"])
@@ -427,6 +546,52 @@ def test_build_vna_subsystem_real_stops_service_on_build_failure(
         assert events == ["start", "stop"]
     finally:
         mgr.stop()
+
+
+def test_build_vna_subsystem_defers_potmon_to_use_time(
+    monkeypatch, transport, dummy_cfg
+):
+    """potmon is deliberately NOT required at build time: rec-only /
+    probe-only sessions must work with the potmon pico down. Only an
+    actual sp1_term_fn call (ant mode) surfaces the absence, as a
+    clear RuntimeError."""
+    from eigsep_observing.testing import client as testing_client
+
+    # Register every dummy pico EXCEPT potmon, so its heartbeat is
+    # absent exactly the way require_pico / PicoProxy.is_available
+    # would see a dead potmon pico.
+    no_potmon = {
+        name: cls
+        for name, cls in testing_client.DUMMY_PICO_CLASSES.items()
+        if name != "potmon"
+    }
+    monkeypatch.setattr(testing_client, "DUMMY_PICO_CLASSES", no_potmon)
+
+    sub = build_vna_subsystem(
+        transport, dummy_cfg_vna(dummy_cfg), source="test", dummy=True
+    )
+    try:
+        # (a) the build succeeded despite potmon being down; (b) the
+        # deferred failure is loud and names the missing pico.
+        with pytest.raises(RuntimeError, match="potmon"):
+            sub.sp1_term_fn("SHORT")
+    finally:
+        sub.cleanup()
+
+
+def test_build_vna_subsystem_sp1_term_fn_rejects_invalid_name(
+    transport, dummy_cfg
+):
+    """The sp1_term_fn closure validates the termination name
+    client-side (ValueError) before any proxy round-trip."""
+    sub = build_vna_subsystem(
+        transport, dummy_cfg_vna(dummy_cfg), source="test", dummy=True
+    )
+    try:
+        with pytest.raises(ValueError, match="Invalid SP1 termination"):
+            sub.sp1_term_fn("BOGUS")
+    finally:
+        sub.cleanup()
 
 
 def test_measure_dut_helper_probes_state_no_publish(transport, dummy_cfg):

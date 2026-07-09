@@ -73,6 +73,7 @@ def _run_bundle(subsystem, cfg, transport, mode, save_dir):
             transport=transport,
             vna_writer=subsystem.vna_writer,
             metadata_snapshot=subsystem.metadata_snapshot,
+            sp1_term_fn=subsystem.sp1_term_fn,
             on_contract_violation=logger.warning,
         )
     except (RuntimeError, TimeoutError, ValueError) as exc:

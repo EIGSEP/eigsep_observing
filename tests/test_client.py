@@ -847,7 +847,9 @@ def test_measure_s11_returns_published_payload(transport, dummy_cfg):
             result = client.measure_s11("ant")
         assert isinstance(result, tuple) and len(result) == 3
         s11, header, metadata = result
-        assert set(("ant", "noise", "load", "amb", "sp1")).issubset(s11.keys())
+        assert set(
+            ("ant", "noise", "load", "amb", "sp1_short", "sp1_open")
+        ).issubset(s11.keys())
         assert {"cal:VNAO", "cal:VNAS", "cal:VNAL"}.issubset(s11.keys())
         assert header["mode"] == "ant"
         assert "freqs" in header

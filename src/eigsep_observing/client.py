@@ -854,6 +854,7 @@ class PandaClient:
             transport=self.transport,
             vna_writer=self.vna_writer,
             metadata_snapshot=self.metadata_snapshot,
+            sp1_term_fn=self._set_sp1_term,
             on_contract_violation=self._warn_with_status,
             logger=self.logger,
         )
