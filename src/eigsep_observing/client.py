@@ -1017,11 +1017,30 @@ class PandaClient:
                             result = self.motor_homer.home(
                                 stop_event=self.stop_client
                             )
-                            if not result.converged and not result.degraded:
+                            if result.degraded:
+                                self._warn_with_status(
+                                    "Post-scan homing degraded (sensor "
+                                    "unavailable); affected axis skipped "
+                                    "or parked unverified."
+                                )
+                            elif not result.converged:
                                 self._warn_with_status(
                                     "Post-scan homing did not converge; "
                                     "motors left parked."
                                 )
+                        except MotorLimitError as guard_exc:
+                            # The divergence guard / sensor fence halted
+                            # a move heading the wrong way — step
+                            # counter or cal is suspect, so do NOT
+                            # re-drive open-loop (that is the exact
+                            # dangerous move); the scan's completion
+                            # park already ran, az stays halted where
+                            # the guard stopped it.
+                            self._warn_with_status(
+                                f"Post-scan homing halted by travel "
+                                f"guard ({guard_exc}); az left halted, "
+                                "no re-park."
+                            )
                         except _MOTOR_LOOP_ERRORS as homer_exc:
                             self._warn_with_status(
                                 f"Post-scan homing failed "

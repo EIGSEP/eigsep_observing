@@ -226,6 +226,14 @@ class MotorZeroer:
             except (RuntimeError, TimeoutError) as exc:
                 self.logger.warning("home failed: %s", exc)
                 self.notice = f"home failed: {exc}"
+            else:
+                res = self.last_home_result
+                if not res.converged:
+                    self.notice = (
+                        "home incomplete: sensor unavailable (see log)"
+                        if res.degraded
+                        else "home did not converge; counters not re-zeroed"
+                    )
             finally:
                 self._homing = False
 

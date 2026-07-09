@@ -57,7 +57,12 @@ def run(transport, *, dry_run=False, override_limits=False):
 
 
 def main():
-    p = ArgumentParser(description="Closed-loop return-to-home")
+    p = ArgumentParser(
+        description=(
+            "Return-to-home (az: single pot-referenced correction; "
+            "el: closed-loop)"
+        )
+    )
     p.add_argument("--dummy", action="store_true")
     p.add_argument(
         "--dry-run",

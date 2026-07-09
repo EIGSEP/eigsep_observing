@@ -2066,6 +2066,104 @@ def test_motor_loop_failure_park_stays_open_loop(transport, dummy_cfg):
         client.stop()
 
 
+def test_motor_loop_warns_status_on_degraded_homing(transport, dummy_cfg):
+    """A degraded (but not exception-raising) homer result — e.g. az
+    skipped because the potmon is dead — must still surface a WARNING
+    on the status stream. Field deployments have no alerting besides
+    the status stream, so a silently-skipped axis is invisible without
+    this."""
+    from eigsep_observing.motor_homer import HomeResult
+
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_scan"] = {"repeat_count": 1}
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"settle_s": 0.0, "max_iters": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+
+        def fake_scan(**kwargs):
+            pass  # scan succeeds
+
+        def degraded_homer_home(stop_event=None):
+            client.stop_client.set()
+            return HomeResult(
+                converged=False,
+                iterations=0,
+                residual_az_deg=float("nan"),
+                residual_el_deg=None,
+                degraded=True,
+                reset_count=False,
+            )
+
+        _arm_status_reader(client)
+        with (
+            patch.object(client.motor_client, "scan", side_effect=fake_scan),
+            patch.object(
+                client.motor_homer, "home", side_effect=degraded_homer_home
+            ),
+        ):
+            client.motor_loop()
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "degraded" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_guard_trip_no_repark(transport, dummy_cfg):
+    """A ``MotorLimitError`` raised by the homer itself (the az
+    divergence guard tripping mid-correction) must NOT trigger an
+    open-loop re-park: re-driving az right after the guard halted a
+    move heading the wrong way would repeat the dangerous move. The
+    scan's own completion park already ran; az should stay halted
+    where the guard stopped it."""
+    from eigsep_observing.motor_client import MotorLimitError
+
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_scan"] = {"repeat_count": 1}
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"settle_s": 0.0, "max_iters": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        open_loop_calls = []
+
+        def fake_scan(**kwargs):
+            pass  # scan succeeds
+
+        def raising_homer_home(stop_event=None):
+            client.stop_client.set()
+            raise MotorLimitError("az move diverging from pot home")
+
+        def recording_open_home():
+            open_loop_calls.append(True)
+
+        _arm_status_reader(client)
+        with (
+            patch.object(client.motor_client, "scan", side_effect=fake_scan),
+            patch.object(
+                client.motor_homer, "home", side_effect=raising_homer_home
+            ),
+            patch.object(
+                client.motor_client, "home", side_effect=recording_open_home
+            ),
+        ):
+            client.motor_loop()
+
+        assert not open_loop_calls, (
+            "a travel-guard trip must NOT re-drive az open-loop"
+        )
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.WARNING
+        assert "travel guard" in status
+    finally:
+        client.stop()
+
+
 def test_motor_loop_survives_motor_limit_error(transport, dummy_cfg, caplog):
     """A ``MotorLimitError`` from ``scan`` (sensor fence or commanded-target
     guard) must not propagate out of ``motor_loop``.  It must be treated

@@ -794,7 +794,7 @@ def test_fence_sensors_passes_logger_none_to_read_el_estimate():
     """``_read_fence_sensors`` must pass ``logger=None`` to
     ``read_el_estimate`` so the "IMU elevation readings disagree" WARNING
     is not emitted at ~10 Hz on the high-frequency fence-poll path.
-    ``MotorHomer._read_sensors`` keeps ``logger=self.logger`` for the
+    ``MotorHomer._read_el`` keeps ``logger=self.logger`` for the
     settle-cadence read, which surfaces disagreement at a sane rate."""
     mc = MotorClient(DummyTransport())
     mc._reader.get = lambda key: {}

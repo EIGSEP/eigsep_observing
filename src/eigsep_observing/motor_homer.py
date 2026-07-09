@@ -320,24 +320,6 @@ class MotorHomer:
             return el_est.el_deg, True
         return -el_est.el_deg, False
 
-    def _within_tol(self, res_az, res_el):
-        """True when both residuals are within their configured tolerances.
-
-        A ``None`` residual (sensor absent) is treated as "within
-        tolerance" so a missing sensor does not block convergence on the
-        axis that is present.
-
-        Parameters
-        ----------
-        res_az : float or None
-            Azimuth residual in degrees (from ``_az_residual_deg``).
-        res_el : float or None
-            Elevation residual in degrees (from ``_el_residual``).
-        """
-        ok_az = res_az is None or abs(res_az) <= self.tol_az_deg
-        ok_el = res_el is None or abs(res_el) <= self.tol_el_deg
-        return ok_az and ok_el
-
     def _read_pot_once(self):
         """Current ``pot_az_voltage`` from the snapshot, or ``None``
         when absent or on a reader error. Single sample — the guard's

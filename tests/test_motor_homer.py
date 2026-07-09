@@ -86,14 +86,6 @@ def test_el_residual_magnitude_only_failover():
     assert mag_only is True
 
 
-def test_within_tol():
-    h = _homer(tol_az_deg=3.0, tol_el_deg=2.0)
-    assert h._within_tol(2.0, 1.0) is True
-    assert h._within_tol(4.0, 1.0) is False
-    assert h._within_tol(2.0, 3.0) is False
-    assert h._within_tol(None, 1.0) is True  # axis with no reading: skip
-
-
 def test_home_result_constructible():
     r = HomeResult(
         converged=True,
