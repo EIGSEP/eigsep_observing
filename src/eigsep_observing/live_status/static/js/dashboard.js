@@ -1027,9 +1027,16 @@ function renderAdcInCorr(adc) {
       entry.clip_frac !== null && entry.clip_frac !== undefined
         ? fmt(entry.clip_frac * 100, 2) + "%"
         : "—";
-    const inputName = pickLabel(`in${entry.input}`, entry.label);
+    // Wiring view: SNAP connector silkscreen + antenna name
+    // ("N4/c0 · viv1-N"); digital view: bare input index ("in4/c0").
+    // Both come from the physical (pre-mux) wiring manifest.
+    const digital = `in${entry.input}/c${entry.core}`;
+    const conn = entry.connector || `in${entry.input}`;
+    const wired = entry.label
+      ? `${conn}/c${entry.core} · ${entry.label}`
+      : `${conn}/c${entry.core}`;
     cell.append(
-      makeSpan("label", `${inputName}/c${entry.core}`),
+      makeSpan("label", pickLabel(digital, wired === digital ? null : wired)),
       makeSpan("value", `rms ${rmsStr}`),
       makeSpan("value", `clip ${clipStr}`),
     );
