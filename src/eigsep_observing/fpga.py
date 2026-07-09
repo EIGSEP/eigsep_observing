@@ -109,21 +109,53 @@ class _FpgaLockProxy:
     Non-callable attributes are returned without locking — they're
     pure state lookups (``host``, ``snap_ip``, etc.) that don't touch
     the transport.
+
+    Every locked call is timed, and one that waits on or holds the
+    lock longer than ``slow_call_s`` logs a WARNING with both
+    durations. This is the in-band stall detector for issue #204: a
+    lost UDP packet blocks the caller for the full tftpy timeout
+    before the retransmit (casperfpga itself only logs after a *full*
+    multi-retry ``TftpTimeout``, never for a single recovered resend),
+    and whichever thread eats that stall holds the shared lock — so a
+    long *hold* means this call stalled on the wire, while a long
+    *wait* means another thread's call did. Normal transactions are
+    single-digit ms, so the detector is silent at the corr poll's
+    ~100 Hz cadence and fires roughly once per stall event.
     """
 
-    def __init__(self, fpga, lock):
+    def __init__(self, fpga, lock, slow_call_s=0.25):
         self._fpga = fpga
         self._lock = lock
+        self._slow_call_s = slow_call_s
 
     def __getattr__(self, name):
         attr = getattr(self._fpga, name)
         if not callable(attr):
             return attr
         lock = self._lock
+        slow_call_s = self._slow_call_s
 
         def wrapped(*args, **kwargs):
+            t_request = time.perf_counter()
             with lock:
-                return attr(*args, **kwargs)
+                t_acquire = time.perf_counter()
+                try:
+                    return attr(*args, **kwargs)
+                finally:
+                    t_done = time.perf_counter()
+                    waited = t_acquire - t_request
+                    held = t_done - t_acquire
+                    if max(waited, held) > slow_call_s:
+                        logger.warning(
+                            "Slow FPGA transaction: %s held the TAPCP "
+                            "lock for %.0f ms (waited %.0f ms to "
+                            "acquire it). A hold near tapcp_timeout_s "
+                            "is a lost-packet retransmit stall "
+                            "(issue #204).",
+                            name,
+                            held * 1e3,
+                            waited * 1e3,
+                        )
 
         return wrapped
 
@@ -257,9 +289,22 @@ class EigsepFpga:
         Construct the underlying CasperFpga object. Hookable so tests
         can substitute an in-memory register backend without patching
         casperfpga itself (which may not be importable in dev envs).
+
+        ``timeout`` reaches ``TapcpTransport`` through ``CasperFpga``'s
+        kwarg forwarding (contract pinned in
+        ``tests/test_casperfpga_api.py``) and sets the per-transfer
+        tftpy socket timeout — the stall a single lost UDP packet
+        costs before the retransmit. The casperfpga default of 3 s
+        spans 2–3 integration windows at ``corr_acc_len=2**28``, which
+        was the periodic "Dropped 2 integration(s)" of issue #204.
+        Transaction-level retries (8 in the fork's ``read``) are
+        unaffected, so a genuinely dead SNAP still fails loudly —
+        only ~10x faster.
         """
         return casperfpga.CasperFpga(
-            self.cfg["snap_ip"], transport=TapcpTransport
+            self.cfg["snap_ip"],
+            transport=TapcpTransport,
+            timeout=self.cfg.get("tapcp_timeout_s", 0.25),
         )
 
     def _wrap_fpga(self, raw):
