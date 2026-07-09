@@ -131,6 +131,18 @@
     <h2>Event log (status stream)</h2>
     <ul id="status-log"></ul>
   </section>
+
+  <section class="card wide">
+    <div class="card-header">
+      <h2>Config (effective)</h2>
+      <span class="tile" id="config-source-tile" title="Where the dashboard's signal gating and config-derived threshold bands come from. 'panda upload' = the panda-reality slice (use_* gates, tempctrl settings, corr_ntimes, cal-load stream) follows the obs_config that panda_observe (or a sibling script) last uploaded to the panda Redis; the age is that upload's age, and the upload persists after the script exits (last-run intent). 'local file' = no upload has ever landed on this Redis, so the dashboard falls back to its own obs_config.yaml. Refreshes every 30 s.">Config: ?</span>
+    </div>
+    <div class="two-col-grid">
+      <div id="config-values-block" class="col-block"></div>
+      <div id="config-schedule-block" class="col-block"></div>
+    </div>
+    <div id="config-thresholds" class="config-thresholds"></div>
+  </section>
 </main>
 
 <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
