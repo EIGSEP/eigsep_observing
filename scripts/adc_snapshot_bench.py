@@ -9,9 +9,8 @@ not regress the corr-poll latency past the acceptance bar:
 
   * Loaded ``corr_acc_cnt`` p99 within ~2x baseline.
   * Loaded corr-thread lock-wait p99 <= 30 ms.
-  * Zero ``Missed N integration(s)`` warnings.
-  * Zero ``Read of acc_cnt=X FAILED to complete`` errors.
-  * Zero ``Disabling adc_*_publisher`` warnings.
+  * Zero ``Dropped N integration(s)`` / torn-read warnings.
+  * Zero ``Disabling adc_*`` publisher warnings.
 
 Pre-conditions: SNAP is reachable at ``--snap-ip``, has been programmed
 and synced (e.g. via ``eigsep-fpga-init --reinit``), and is producing
@@ -104,11 +103,12 @@ class _LogCounter(logging.Handler):
     a substring match is sufficient.
     """
 
+    # "Dropped" covers both loss modes in ``_read_integrations``
+    # (fell-behind and torn read); "Disabling adc_" covers all three
+    # snapshot-tick latch messages (grab, adc_snapshot, adc_stats).
     PHRASES = (
-        "Missed",
-        "FAILED to complete",
-        "Disabling adc_stats publisher",
-        "Disabling adc_snapshot publisher",
+        "Dropped",
+        "Disabling adc_",
     )
 
     def __init__(self):
@@ -232,10 +232,10 @@ def main():
         collector=collector,
     )
 
-    # The corr loop is gated on is_synchronized for the stats publisher
-    # branch; assume the SNAP was synced by eigsep-fpga-init and stamp
-    # the cached value. sync_time only needs to be present, not exact —
-    # it's not used in the timing measurement itself.
+    # The snapshot loop is gated on is_synchronized; assume the SNAP
+    # was synced by eigsep-fpga-init and stamp the cached value.
+    # sync_time only needs to be present, not exact — it's not used in
+    # the timing measurement itself.
     fpga.is_synchronized = True
     fpga.sync_time = time.time()
 

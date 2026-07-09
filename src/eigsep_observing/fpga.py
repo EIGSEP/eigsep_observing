@@ -263,10 +263,12 @@ class EigsepFpga:
         self.is_synchronized = False
 
         # ADC diagnostic publishers are best-effort and degrade
-        # gracefully: a bitstream that lacks ``input_rms_*`` (adc_stats)
-        # or has an incompatible snapshot BRAM (adc_snapshot) flips the
-        # corresponding flag off on first failure so the per-integration
-        # ERROR spam doesn't drown the journal. Restart to retry.
+        # gracefully. Both products of the snapshot tick — the raw
+        # frame stream (adc_snapshot) and the per-core stats derived
+        # from the same frames (adc_stats) — latch off on first
+        # failure so repeated-failure spam doesn't drown the journal:
+        # a snapshot-BRAM grab failure kills both, a publish failure
+        # kills only its own surface. Restart to retry.
         self._adc_stats_enabled = True
         self._adc_snapshot_enabled = True
         self._corr_health_enabled = True
@@ -1184,37 +1186,93 @@ class EigsepFpga:
         )
         return data
 
-    def _publish_adc_stats(self):
+    def _grab_adc_frames(self):
         """
-        Read per-core stats from the on-FPGA ``rms_levels`` register and
-        publish them on the metadata bus.
+        Pull one snapshot frame per antenna pair off the FPGA.
 
-        Called from ``_read_integrations`` on every corr integration.
+        The single FPGA-touching call of the snapshot tick; the raw
+        frames feed both ``_publish_adc_snapshot`` and
+        ``_publish_adc_stats``, so the TAPCP cost is paid once per
+        tick. Returns ``(n_ant_pairs, 2, n_samples)`` int8, or None on
+        failure — which latches *both* publishers off (neither can do
+        anything without frames) with a single WARNING.
+        """
+        try:
+            n_snap_inputs = self.inp.nstreams // 2
+            # Each "antenna" in the Input block is two SNAP inputs
+            # (x/y pol); iterate over snap-input pairs regardless of
+            # wiring labels so an unconfigured slot still publishes
+            # whatever the FPGA returns (useful for bench debug).
+            frames = []
+            for ant_idx in range(n_snap_inputs // 2):
+                x, y = self.inp.get_adc_snapshot(ant_idx)
+                frames.append(np.stack([x, y]).astype(np.int8))
+            return np.stack(frames)  # (n_ant_pairs, 2, n_samples)
+        except Exception as e:
+            self._adc_snapshot_enabled = False
+            self._adc_stats_enabled = False
+            self.logger.warning(
+                "Disabling adc_snapshot and adc_stats publishers for "
+                "this run after snapshot grab failure: %s. Restart "
+                "eigsep-observe to retry. (Likely cause: bitstream's "
+                "snapshot BRAM is incompatible with the consumer.)",
+                e,
+            )
+            return None
+
+    def _publish_adc_stats(self, data):
+        """
+        Reduce ADC snapshot frames to per-core stats and publish them
+        on the metadata bus.
+
+        Called from ``_publish_snapshots_loop`` with the frames grabbed
+        by ``_grab_adc_frames``; touches no FPGA register itself. The
+        flashed bitstreams carry no ``input_rms_*`` registers (the RMS
+        block was dropped from the fengine design long ago), so the
+        hardware-accumulator path this replaces could never work —
+        deriving the stats from the snapshot samples uses hardware
+        that actually exists. ~1024 samples per core puts the RMS
+        statistical error near 2%, plenty for a level diagnostic.
+
         First failure flips ``_adc_stats_enabled`` off and emits a
         single WARNING; subsequent calls no-op until restart. Corr
         data is sacred, and a missing ADC stats row is strictly
         diagnostic.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Raw ADC samples, shape ``(n_ant_pairs, 2, n_samples)``,
+            int8 — one snapshot grab.
         """
         if not self._adc_stats_enabled:
             return
         try:
-            means, powers, rmss = self.inp.get_stats(sum_cores=False)
             payload = {"sensor_name": "adc_stats", "status": "update"}
-            # get_stats returns 12 values where indices 2N and 2N+1 are
-            # the interleaved ADC cores of snap input N. Label with the
-            # same input index the corr file uses for autos.
-            for i in range(len(means)):
-                n, c = i // 2, i % 2
-                payload[f"input{n}_core{c}_mean"] = float(means[i])
-                payload[f"input{n}_core{c}_power"] = float(powers[i])
-                payload[f"input{n}_core{c}_rms"] = float(rmss[i])
+            # Flatten (pair, pol) to the snap-input index the corr
+            # file uses for autos: pair p carries inputs 2p and 2p+1.
+            samples = data.reshape(-1, data.shape[-1]).astype(np.float64)
+            for n in range(samples.shape[0]):
+                for c in range(2):
+                    # Consecutive samples alternate between the ADC's
+                    # two interleaved cores, so the even/odd split
+                    # separates them — same 2N/2N+1 core convention
+                    # the retired register block used. Core *identity*
+                    # (which physical core is 0) is not pinned down;
+                    # for the interleave-imbalance diagnostic only the
+                    # split matters.
+                    core = samples[n, c::2]
+                    mean = core.mean()
+                    power = np.mean(core**2)
+                    payload[f"input{n}_core{c}_mean"] = float(mean)
+                    payload[f"input{n}_core{c}_power"] = float(power)
+                    payload[f"input{n}_core{c}_rms"] = float(np.sqrt(power))
             self.adc_metadata_writer.add("adc_stats", payload)
         except Exception as e:
             self._adc_stats_enabled = False
             self.logger.warning(
                 "Disabling adc_stats publisher for this run after "
-                "failure: %s. Restart eigsep-observe to retry. "
-                "(Likely cause: bitstream lacks input_rms_* registers.)",
+                "failure: %s. Restart eigsep-observe to retry.",
                 e,
             )
 
@@ -1260,51 +1318,41 @@ class EigsepFpga:
             )
 
     def _publish_diagnostics_loop(self, period):
-        """Background thread: publish corr-loop diagnostics (the
-        adc_stats stream and the corr_health K/V) every ``period``
-        seconds until ``self.event`` is set. Gated on
+        """Background thread: publish the corr_health K/V every
+        ``period`` seconds until ``self.event`` is set. Gated on
         ``is_synchronized`` so pre-sync noise doesn't fill the
-        diagnostics surfaces.
+        diagnostics surface.
 
-        Moving these off the per-integration read path keeps the hot
-        loop — which must finish each readout before the FPGA
-        overwrites the BRAM — free of an extra FPGA register read
-        (``get_stats``) and Redis write on every cycle. That overhead
-        is fixed per integration, so it eats a growing fraction of the
-        window as ``corr_acc_len`` (and thus the integration time) is
-        lowered. ``get_stats`` still serializes against the hot loop
-        via the FPGA lock proxy when it runs, but at this throttled
-        cadence it burdens roughly one cycle per ``period`` instead of
-        every cycle."""
+        corr_health only snapshots in-memory counters — no FPGA
+        register access, no lock-proxy contention with the hot corr
+        read loop — so a 1 s cadence is free. adc_stats used to ride
+        this loop but is snapshot-derived now and publishes on the
+        (much slower) snapshot tick in ``_publish_snapshots_loop``,
+        keeping all TAPCP-touching diagnostics on one throttle."""
         while not self.event.wait(period):
             if not self.is_synchronized:
                 continue
-            self._publish_adc_stats()
             self._publish_corr_health()
 
-    def _publish_adc_snapshot(self):
+    def _publish_adc_snapshot(self, data):
         """
-        Pull raw ADC samples for every antenna and publish one snapshot
-        frame on the diagnostic stream.
+        Publish one raw snapshot frame on the diagnostic stream.
 
-        Called from ``_publish_snapshots_loop`` at the configured
-        cadence. First failure flips ``_adc_snapshot_enabled`` off and
-        emits a single WARNING; subsequent calls no-op until restart.
+        Called from ``_publish_snapshots_loop`` with the frames grabbed
+        by ``_grab_adc_frames``. First failure flips
+        ``_adc_snapshot_enabled`` off and emits a single WARNING;
+        subsequent calls no-op until restart.
+
+        Parameters
+        ----------
+        data : np.ndarray
+            Raw ADC samples, shape ``(n_ant_pairs, 2, n_samples)``,
+            int8 — one snapshot grab.
         """
         if not self._adc_snapshot_enabled:
             return
         try:
             ant_ids = list(self.wiring["ants"].keys())
-            n_snap_inputs = self.inp.nstreams // 2
-            # Each "antenna" in the Input block is two SNAP inputs
-            # (x/y pol); iterate over snap-input pairs regardless of
-            # wiring labels so an unconfigured slot still publishes
-            # whatever the FPGA returns (useful for bench debug).
-            frames = []
-            for ant_idx in range(n_snap_inputs // 2):
-                x, y = self.inp.get_adc_snapshot(ant_idx)
-                frames.append(np.stack([x, y]).astype(np.int8))
-            data = np.stack(frames)  # (n_ants, 2, n_samples)
             sync_time = self.sync_time if self.is_synchronized else None
             try:
                 cnt = self.fpga.read_int("corr_acc_cnt")
@@ -1328,24 +1376,31 @@ class EigsepFpga:
             self._adc_snapshot_enabled = False
             self.logger.warning(
                 "Disabling adc_snapshot publisher for this run after "
-                "failure: %s. Restart eigsep-observe to retry. "
-                "(Likely cause: bitstream's snapshot BRAM is "
-                "incompatible with the consumer.)",
+                "failure: %s. Restart eigsep-observe to retry.",
                 e,
             )
 
     def _publish_snapshots_loop(self, period):
-        """Background thread: publish one ADC snapshot every
-        ``period`` seconds until ``self.event`` is set. Gated on
-        ``is_synchronized`` so pre-sync noise doesn't fill the stream.
-        Exits early once ``_adc_snapshot_enabled`` flips off so a
-        broken bitstream doesn't keep waking the thread for a no-op."""
+        """Background thread: every ``period`` seconds until
+        ``self.event`` is set, grab one set of ADC snapshot frames and
+        feed both diagnostic surfaces — the raw frame stream
+        (``_publish_adc_snapshot``) and the per-core stats on the
+        metadata bus (``_publish_adc_stats``). One grab per tick; the
+        FPGA is touched exactly once regardless of how many surfaces
+        consume the frames. Gated on ``is_synchronized`` so pre-sync
+        noise doesn't fill the streams. Exits early once both
+        publishers latch off so a broken bitstream doesn't keep waking
+        the thread for a no-op."""
         while not self.event.wait(period):
             if not self.is_synchronized:
                 continue
-            if not self._adc_snapshot_enabled:
+            if not (self._adc_snapshot_enabled or self._adc_stats_enabled):
                 return
-            self._publish_adc_snapshot()
+            data = self._grab_adc_frames()
+            if data is None:
+                continue
+            self._publish_adc_snapshot(data)
+            self._publish_adc_stats(data)
 
     def _read_integrations(self, pairs, timeout=10):
         """
@@ -1418,9 +1473,9 @@ class EigsepFpga:
                 else:
                     self.queue.put({"data": data, "cnt": cnt})
                 # adc_stats / corr_health are published off this critical
-                # path by ``_publish_diagnostics_loop`` — an FPGA register
-                # read (``get_stats``) and a Redis write per integration
-                # were the avoidable overhead that ate the shrinking
+                # path (snapshot tick / diagnostics loop) — an FPGA
+                # register read and a Redis write per integration were
+                # the avoidable overhead that ate the shrinking
                 # readout window as ``corr_acc_len`` is lowered.
                 # ``t`` resets on a torn read too: the SNAP *is* producing
                 # (the counter advanced), so this is not a no-progress
@@ -1504,17 +1559,18 @@ class EigsepFpga:
             )
             snapshot_thd.start()
             self.logger.info(
-                f"ADC snapshot publisher started (period={snapshot_period}s)."
+                "ADC snapshot + adc_stats publishers started "
+                f"(period={snapshot_period}s)."
             )
         else:
             self.logger.info(
-                "ADC snapshot publisher disabled "
+                "ADC snapshot + adc_stats publishers disabled "
                 "(adc_snapshot_period_s is unset or 0)."
             )
 
-        # Throttled diagnostics (adc_stats + corr_health). Defaults to
-        # 1 s when the key is absent so adc_stats keeps flowing on
-        # configs predating this knob; set to 0 to disable both.
+        # Throttled corr_health K/V (FPGA-free counter snapshot for
+        # the dashboard). Defaults to 1 s when the key is absent; set
+        # to 0 to disable.
         diag_period = self.cfg.get("diagnostics_period_s", 1.0)
         if diag_period and diag_period > 0:
             diag_thd = Thread(
