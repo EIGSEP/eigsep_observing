@@ -25,7 +25,7 @@ dependencies = [
   "plotly",
   # >=4.3: tempctrl per-channel sensor_rejects in the stream fan-out
   # (pico-firmware #150); _PELTIER_SCHEMA requires the key.
-  "picohost>=4.3",
+  "picohost>=4.4",
   "eigsep-vna>=1.4",
   "eigsep_redis>=2.3",
 ]

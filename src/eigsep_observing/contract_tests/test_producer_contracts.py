@@ -241,8 +241,8 @@ def _imu_post_handler_reading(name, app_id):
     """Return an IMU reading after PicoIMU._imu_redis_handler.
 
     Composes ImuEmulator.get_status() with the real handler, which adds
-    the calibrate-imu derived fields (el_deg; az_deg + blend for
-    imu_az). The handler is run UNCALIBRATED, so derived fields are
+    the calibrate-imu derived fields (el_deg for both; imu_az's is
+    |theta|). The handler is run UNCALIBRATED, so derived fields are
     None — the genuine state of a freshly-deployed, not-yet-calibrated
     IMU, which is what the schema's None-when-uncalibrated contract
     describes. Mirrors _potmon_post_handler_reading (bypass __init__,

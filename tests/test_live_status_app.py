@@ -2240,7 +2240,6 @@ def test_metadata_payload_orientation_agree_and_diverge():
             "imu_az": {
                 "sensor_name": "imu_az",
                 "status": "update",
-                "az_deg": 100.0,
                 "el_deg": 0.0,
             },
             "imu_az_ts": now,
@@ -2248,10 +2247,12 @@ def test_metadata_payload_orientation_agree_and_diverge():
         state.metadata_snapshot_read_unix = now
         return state
 
-    # Agreeing sensors: spread = 100.5 - 100.0 = 0.5 -> "ok" (< 3).
+    # Agreeing sensors: az sources are motor (~100.004) + potmon (100.5)
+    # only (imu_az azimuth retired) -> spread ~0.5 -> "ok" (< 3).
     out = _metadata_payload(make_state(100.5), _payload_thresholds())
     ori = out["orientation"]
     assert "az" in ori["value"] and "el" in ori["value"]
+    assert "imu_az" not in ori["value"]["az"]
     assert ori["classify"]["orientation.az_spread_deg"] == "ok"
 
     # Diverging: potmon ~12 deg off -> spread > 10 -> "danger".

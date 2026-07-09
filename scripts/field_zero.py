@@ -141,8 +141,7 @@ def _render(screen, zeroer, snapshot, deg):
     screen.addstr(
         5,
         0,
-        f"imu_az: yaw={imu.get('yaw')} az={imu.get('az_deg')} "
-        f"el={imu.get('el_deg')}",
+        f"imu_az: yaw={imu.get('yaw')} el={imu.get('el_deg')}",
     )
     screen.addstr(
         7,
