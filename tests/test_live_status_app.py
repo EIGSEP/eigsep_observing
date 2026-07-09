@@ -702,6 +702,44 @@ def test_adc_route_lists_per_input_with_clip_frac(client):
     assert entries[(0, 0)]["rms"] == pytest.approx(15.0)
 
 
+def test_adc_payload_labels_are_physical_not_mux_aware():
+    """ADC snapshots tap the ADC cores upstream of the ``adc_mux_sel``
+    copy the corr datapath sees (field-verified 2026-07-09: with mux
+    on, a mux-target input reads its own floating-level RMS, not its
+    source's). Cells must therefore carry the *physical* wiring's
+    antenna name and SNAP connector label (``snap.label``), ignoring
+    the mux-aware ``input_to_ant`` map that the corr panes use — a
+    mux-aware label would claim antenna signal on a connector that
+    physically carries none.
+    """
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+    from eigsep_observing.live_status.app import _adc_payload
+
+    header = {
+        "wiring": {
+            "ants": {
+                "box": {"snap": {"input": 0, "label": "N0"}},
+                "viv1-N": {"snap": {"input": 2, "label": "N4"}},
+            }
+        },
+        # Mux-aware map claims input 1 carries box's copy — correct
+        # for corr storage keys, wrong for the pre-mux ADC tap.
+        "input_to_ant": {"0": "box", "1": "box", "2": "viv1-N"},
+    }
+    state = StateSnapshot(corr_header=header)
+    cells = {
+        (c["input"], c["core"]): c for c in _adc_payload(state)["per_input"]
+    }
+    assert cells[(0, 0)]["label"] == "box"
+    assert cells[(0, 0)]["connector"] == "N0"
+    assert cells[(2, 1)]["label"] == "viv1-N"
+    assert cells[(2, 1)]["connector"] == "N4"
+    # Unwired input: nothing is physically on that connector, so no
+    # label — even though the mux map names it.
+    assert cells[(1, 0)]["label"] is None
+    assert cells[(1, 0)]["connector"] is None
+
+
 def test_rfswitch_route(client):
     body = client.get("/api/rfswitch").get_json()
     data = body["data"]

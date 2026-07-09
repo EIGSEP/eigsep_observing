@@ -88,6 +88,28 @@ def _input_to_ant(wiring: Optional[dict]) -> dict[str, str]:
     return out
 
 
+def _input_to_snap_label(wiring: Optional[dict]) -> dict[str, str]:
+    """Invert ``wiring["ants"]`` to ``{snap_input_str: connector}``,
+    where connector is the SNAP SMA silkscreen label carried in
+    ``snap.label`` (e.g. ``"N0"``, ``"E6"``).
+
+    Permissive like :func:`_input_to_ant`: entries missing
+    ``snap.input`` or ``snap.label`` are skipped, absent wiring
+    returns an empty map.
+    """
+    if not wiring:
+        return {}
+    out: dict[str, str] = {}
+    for spec in (wiring.get("ants") or {}).values():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        label = snap.get("label")
+        if inp is None or label is None:
+            continue
+        out[str(inp)] = str(label)
+    return out
+
+
 def _header_input_to_ant(header: Optional[dict]) -> dict[str, str]:
     """Effective ``{input_str: antenna}`` map for a corr header.
 
@@ -525,16 +547,20 @@ def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
 
 def _adc_payload(state: StateSnapshot) -> dict:
     adc_stats = state.adc_stats_latest or {}
-    # Prefer the corr header's effective input->antenna map (mux-aware,
-    # written on every state-changing FPGA call); fall back to the ADC
-    # sidecar wiring so standalone snapshots still carry labels when corr
-    # publishing is paused.
+    # ADC snapshots tap the ADC cores *upstream* of the adc_mux_sel
+    # copy the corr datapath sees (field-verified 2026-07-09: with mux
+    # on, a mux-target input reads its own floating-level RMS, not its
+    # source's). So label cells from the PHYSICAL wiring manifest —
+    # antenna name plus SNAP connector (``snap.label``) — never from
+    # the mux-aware input_to_ant map the corr panes use, which would
+    # claim antenna signal on a connector that carries none. Corr
+    # header wiring is preferred; the ADC sidecar wiring keeps labels
+    # alive when corr publishing is paused.
     header = state.corr_header or {}
-    if header.get("input_to_ant"):
-        input_to_ant = _header_input_to_ant(header)
-    else:
-        sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
-        input_to_ant = _input_to_ant(header.get("wiring") or sidecar_wiring)
+    sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
+    wiring = header.get("wiring") or sidecar_wiring
+    input_to_ant = _input_to_ant(wiring)
+    input_to_connector = _input_to_snap_label(wiring)
     per_input = []
     for n in range(6):
         for c in range(2):
@@ -550,6 +576,7 @@ def _adc_payload(state: StateSnapshot) -> dict:
                     "power": power,
                     "clip_frac": state.adc_clip_fraction.get(str(n)),
                     "label": input_to_ant.get(str(n)),
+                    "connector": input_to_connector.get(str(n)),
                 }
             )
     return {
