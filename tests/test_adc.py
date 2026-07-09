@@ -1,16 +1,20 @@
 """Tests for the ADC diagnostic path: AdcSnapshot writer/reader
 round-trip, adc_stats schema reduction through ``avg_metadata``, and
-the per-integration / periodic publish hooks in ``EigsepFpga``.
+the snapshot-tick publish hooks in ``EigsepFpga``.
 
-The FPGA-level tests patch ``Input.get_stats`` / ``Input.get_adc_snapshot``
-with scoped ``patch.object`` rather than replacing ``fpga.inp`` wholesale
-— the real ``Input`` block runs unchanged against ``DummyFpga``, and
-only the values returned by those two methods need to be deterministic
-for the assertions below.
+The FPGA-level tests patch ``Input.get_adc_snapshot`` (the one
+FPGA-touching call) with scoped ``patch.object`` rather than replacing
+``fpga.inp`` wholesale — the real ``Input`` block runs unchanged
+against ``DummyFpga``, and only the sample values need to be
+deterministic for the assertions below. Stats math is asserted against
+an independent numpy reduction of the same frames, so an
+interleave-indexing bug in the producer cannot hide behind a mirrored
+fixture.
 """
 
+import json
 import logging
-from threading import Event
+from threading import Event, Thread
 from unittest.mock import patch
 
 import numpy as np
@@ -42,6 +46,20 @@ def _seed_reader_cursor(transport):
     ``CorrReader.seek("0-0")`` — consumer-first rewind — for a reader
     whose structural surface is just ``{"read"}``."""
     transport.set_last_read_id(ADC_SNAPSHOT_STREAM, "0")
+
+
+def _make_frames(n_pairs=3, n_samples=2048):
+    """Deterministic int8 frames shaped like ``_grab_adc_frames``
+    output: ``(n_pairs, 2, n_samples)``.
+
+    The value pattern has period coprime to 2, so the even/odd (core
+    0/1) interleaves carry different statistics — identical cores
+    would let a core-indexing bug in ``_publish_adc_stats`` pass
+    unnoticed.
+    """
+    n = n_pairs * 2 * n_samples
+    vals = (np.arange(n) * 7 + 11) % 251 - 125
+    return vals.astype(np.int8).reshape(n_pairs, 2, n_samples)
 
 
 class TestAdcSnapshotRoundTrip:
@@ -138,57 +156,127 @@ class TestAdcStatsSchemaReduction:
         assert avg["input0_core0_power"] == pytest.approx(10.0)
 
 
-class TestPublishAdcStats:
-    def test_publish_writes_expected_schema_fields(self, fpga):
-        means = np.linspace(-1.0, 1.0, 12)
-        powers = np.linspace(0.5, 2.0, 12)
-        rmss = np.sqrt(powers)
-        with patch.object(
-            fpga.inp, "get_stats", return_value=(means, powers, rmss)
-        ):
-            fpga._publish_adc_stats()
-        # Read back via the metadata snapshot hash — the writer wrote
-        # there as part of ``MetadataWriter.add``.
-        import json
+class TestGrabAdcFrames:
+    """``_grab_adc_frames`` is the single FPGA-touching call of the
+    snapshot tick; both publishers consume its output."""
 
+    def test_grab_stacks_all_antenna_pairs(self, fpga):
+        pols = [
+            (
+                np.full(2048, 2 * i, dtype=np.int8),
+                np.full(2048, 2 * i + 1, dtype=np.int8),
+            )
+            for i in range(3)
+        ]
+        with patch.object(
+            fpga.inp, "get_adc_snapshot", side_effect=pols
+        ) as snap:
+            out = fpga._grab_adc_frames()
+        assert snap.call_count == 3
+        assert out.shape == (3, 2, 2048)
+        assert out.dtype == np.int8
+        # Row order is the snap-input order the corr file uses for
+        # autos: pair p carries inputs 2p (x) and 2p+1 (y).
+        for i in range(3):
+            assert (out[i, 0] == 2 * i).all()
+            assert (out[i, 1] == 2 * i + 1).all()
+
+    def test_grab_failure_disables_both_publishers_one_warning(
+        self, fpga, caplog
+    ):
+        caplog.set_level(logging.WARNING)
+        with patch.object(
+            fpga.inp,
+            "get_adc_snapshot",
+            side_effect=RuntimeError("bram gone"),
+        ):
+            # Must not raise — corr data is sacred.
+            out = fpga._grab_adc_frames()
+        assert out is None
+        assert fpga._adc_snapshot_enabled is False
+        assert fpga._adc_stats_enabled is False
+        assert "bram gone" in caplog.text
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "Disabling" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+
+class TestPublishAdcStats:
+    """``_publish_adc_stats`` derives per-core stats from snapshot
+    frames — no FPGA access of its own (the flashed bitstreams carry
+    no ``input_rms_*`` registers; see the 2026-07-09 eigsep-backend
+    diagnosis)."""
+
+    def test_publish_writes_per_core_stats_from_frames(self, fpga):
+        frames = _make_frames()
+        fpga._publish_adc_stats(frames)
         raw = fpga.transport.r.hget("metadata", "adc_stats")
         assert raw is not None
         payload = json.loads(raw)
         assert payload["sensor_name"] == "adc_stats"
         assert payload["status"] == "update"
-        for i in range(12):
-            n, c = i // 2, i % 2
-            assert payload[f"input{n}_core{c}_mean"] == pytest.approx(means[i])
-            assert payload[f"input{n}_core{c}_power"] == pytest.approx(
-                powers[i]
-            )
-            assert payload[f"input{n}_core{c}_rms"] == pytest.approx(rmss[i])
+        # Independent reduction: snap input n is row n of the
+        # flattened (pair, pol) axis; core c is the even/odd sample
+        # interleave.
+        flat = frames.reshape(-1, frames.shape[-1]).astype(np.float64)
+        for n in range(6):
+            for c in range(2):
+                core = flat[n, c::2]
+                power = np.mean(core**2)
+                assert payload[f"input{n}_core{c}_mean"] == pytest.approx(
+                    core.mean()
+                )
+                assert payload[f"input{n}_core{c}_power"] == pytest.approx(
+                    power
+                )
+                assert payload[f"input{n}_core{c}_rms"] == pytest.approx(
+                    np.sqrt(power)
+                )
+
+    def test_payload_validates_against_sensor_schema(self, fpga):
+        frames = _make_frames()
+        fpga._publish_adc_stats(frames)
+        payload = json.loads(fpga.transport.r.hget("metadata", "adc_stats"))
+        violations = io._validate_metadata(
+            payload, io.SENSOR_SCHEMAS["adc_stats"]
+        )
+        assert violations == []
 
     def test_publish_failure_disables_publisher_with_warning(
         self, fpga, caplog
     ):
         caplog.set_level(logging.WARNING)
         with patch.object(
-            fpga.inp, "get_stats", side_effect=RuntimeError("FPGA dead")
+            fpga.adc_metadata_writer,
+            "add",
+            side_effect=RuntimeError("redis down"),
         ):
             # Must not raise — corr data is sacred.
-            fpga._publish_adc_stats()
+            fpga._publish_adc_stats(_make_frames())
         assert fpga._adc_stats_enabled is False
+        # The raw-snapshot publisher is independent; a stats-side
+        # failure must not take it down.
+        assert fpga._adc_snapshot_enabled is True
         assert "Disabling adc_stats publisher" in caplog.text
-        assert "FPGA dead" in caplog.text
+        assert "redis down" in caplog.text
 
     def test_publish_after_disable_is_no_op(self, fpga, caplog):
         caplog.set_level(logging.WARNING)
         with patch.object(
-            fpga.inp, "get_stats", side_effect=RuntimeError("FPGA dead")
-        ) as get_stats:
-            fpga._publish_adc_stats()  # first call: fails, disables
-            assert get_stats.call_count == 1
+            fpga.adc_metadata_writer,
+            "add",
+            side_effect=RuntimeError("redis down"),
+        ) as add:
+            fpga._publish_adc_stats(_make_frames())  # fails, disables
+            assert add.call_count == 1
             assert fpga._adc_stats_enabled is False
-            # Subsequent calls must not touch the FPGA again.
-            fpga._publish_adc_stats()
-            fpga._publish_adc_stats()
-            assert get_stats.call_count == 1
+            # Subsequent calls must not touch the writer again.
+            fpga._publish_adc_stats(_make_frames())
+            fpga._publish_adc_stats(_make_frames())
+            assert add.call_count == 1
         # Only one WARNING line for the whole run.
         warnings = [
             r
@@ -200,17 +288,12 @@ class TestPublishAdcStats:
 
 class TestPublishAdcSnapshot:
     def test_publish_snapshot_writes_frame_with_sidecar(self, fpga):
-        # Two inputs per "antenna" in the Input block; DummyFpga has
-        # ``nstreams=12`` so 3 antennas × 2 pols per antenna.
-        fake_pol = np.arange(2048, dtype=np.int8)
-        with patch.object(
-            fpga.inp, "get_adc_snapshot", return_value=(fake_pol, fake_pol)
-        ):
-            fpga._publish_adc_snapshot()
+        frames = _make_frames()
+        fpga._publish_adc_snapshot(frames)
         reader = AdcSnapshotReader(fpga.transport)
         _seed_reader_cursor(fpga.transport)
         data, sidecar = reader.read(timeout=1)
-        assert data.shape == (3, 2, 2048)
+        np.testing.assert_array_equal(data, frames)
         assert data.dtype == np.int8
         assert sidecar["wiring"]["ants"]  # non-empty
         assert "unix_ts" in sidecar
@@ -220,28 +303,31 @@ class TestPublishAdcSnapshot:
     ):
         caplog.set_level(logging.WARNING)
         with patch.object(
-            fpga.inp,
-            "get_adc_snapshot",
-            side_effect=RuntimeError("snapshot bram misaligned"),
+            fpga.adc_snapshot_writer,
+            "add",
+            side_effect=RuntimeError("stream write refused"),
         ):
-            fpga._publish_adc_snapshot()
+            fpga._publish_adc_snapshot(_make_frames())
         assert fpga._adc_snapshot_enabled is False
+        # Stats are derived from the same frames but publish on their
+        # own bus; a raw-side failure must not take them down.
+        assert fpga._adc_stats_enabled is True
         assert "Disabling adc_snapshot publisher" in caplog.text
-        assert "snapshot bram misaligned" in caplog.text
+        assert "stream write refused" in caplog.text
 
     def test_publish_snapshot_after_disable_is_no_op(self, fpga, caplog):
         caplog.set_level(logging.WARNING)
         with patch.object(
-            fpga.inp,
-            "get_adc_snapshot",
-            side_effect=RuntimeError("snapshot bram misaligned"),
-        ) as snap:
-            fpga._publish_adc_snapshot()  # first call: fails, disables
-            assert snap.call_count == 1
+            fpga.adc_snapshot_writer,
+            "add",
+            side_effect=RuntimeError("stream write refused"),
+        ) as add:
+            fpga._publish_adc_snapshot(_make_frames())  # fails, disables
+            assert add.call_count == 1
             assert fpga._adc_snapshot_enabled is False
-            fpga._publish_adc_snapshot()
-            fpga._publish_adc_snapshot()
-            assert snap.call_count == 1
+            fpga._publish_adc_snapshot(_make_frames())
+            fpga._publish_adc_snapshot(_make_frames())
+            assert add.call_count == 1
         warnings = [
             r
             for r in caplog.records
@@ -300,7 +386,9 @@ class TestObserveSnapshotThread:
         calls = self._run_observe_with_mocked_threads(fpga)
         targets = [kwargs.get("target") for _, kwargs in calls]
         assert fpga._publish_snapshots_loop not in targets
-        assert "ADC snapshot publisher disabled" in caplog.text
+        # The skip message must name both casualties — adc_stats rides
+        # the snapshot tick now.
+        assert "adc_stats publishers disabled" in caplog.text
 
     def test_snapshot_thread_skipped_when_period_zero(self, fpga, caplog):
         fpga.cfg["adc_snapshot_period_s"] = 0
@@ -310,9 +398,53 @@ class TestObserveSnapshotThread:
         assert fpga._publish_snapshots_loop not in targets
 
 
-class TestPublishSnapshotsLoopShutdown:
-    """``_publish_snapshots_loop`` must exit cleanly on ``event.set()``
-    without publishing pre-sync garbage."""
+class TestPublishSnapshotsLoop:
+    """One grab per tick feeds both publishers; the loop exits once
+    both are latched off and skips ticks pre-sync."""
+
+    def _run_loop_briefly(self, fpga, period=0.02, runtime=0.1):
+        t = Thread(
+            target=fpga._publish_snapshots_loop,
+            args=(period,),
+            daemon=True,
+        )
+        t.start()
+        import time as _time
+
+        _time.sleep(runtime)
+        fpga.event.set()
+        t.join(timeout=1)
+        return t
+
+    def test_one_grab_feeds_both_publishers(self, fpga):
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        frames = _make_frames()
+        with (
+            patch.object(
+                fpga, "_grab_adc_frames", return_value=frames
+            ) as grab,
+            patch.object(fpga, "_publish_adc_snapshot") as snap,
+            patch.object(fpga, "_publish_adc_stats") as stats,
+        ):
+            self._run_loop_briefly(fpga)
+        assert grab.call_count >= 1
+        assert snap.call_count == grab.call_count
+        assert stats.call_count == grab.call_count
+        snap.assert_called_with(frames)
+        stats.assert_called_with(frames)
+
+    def test_failed_grab_publishes_nothing(self, fpga):
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        with (
+            patch.object(fpga, "_grab_adc_frames", return_value=None),
+            patch.object(fpga, "_publish_adc_snapshot") as snap,
+            patch.object(fpga, "_publish_adc_stats") as stats,
+        ):
+            self._run_loop_briefly(fpga)
+        snap.assert_not_called()
+        stats.assert_not_called()
 
     def test_loop_exits_on_event(self, fpga):
         fpga.event = Event()
@@ -322,15 +454,14 @@ class TestPublishSnapshotsLoopShutdown:
         fpga.event.set()
         fpga._publish_snapshots_loop(0.01)  # returns cleanly
 
-    def test_loop_exits_when_publisher_disabled(self, fpga):
-        """Once ``_adc_snapshot_enabled`` flips off the loop must
-        return rather than spin forever calling a no-op publisher."""
+    def test_loop_exits_when_both_publishers_disabled(self, fpga):
+        """Once both latches flip off the loop must return rather
+        than keep grabbing frames nobody will publish."""
         fpga.event = Event()
         fpga.is_synchronized = True
         fpga._adc_snapshot_enabled = False
-        from threading import Thread as RealThread
-
-        t = RealThread(
+        fpga._adc_stats_enabled = False
+        t = Thread(
             target=fpga._publish_snapshots_loop,
             args=(0.01,),
             daemon=True,
@@ -339,31 +470,28 @@ class TestPublishSnapshotsLoopShutdown:
         t.join(timeout=1)
         assert not t.is_alive()
 
-    def test_loop_skips_publish_when_unsynced(self, fpga):
+    def test_loop_keeps_grabbing_when_only_snapshot_disabled(self, fpga):
+        """adc_stats alone still justifies the FPGA grab."""
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        fpga._adc_snapshot_enabled = False
+        frames = _make_frames()
+        with (
+            patch.object(
+                fpga, "_grab_adc_frames", return_value=frames
+            ) as grab,
+            patch.object(fpga, "_publish_adc_stats") as stats,
+        ):
+            self._run_loop_briefly(fpga)
+        assert grab.call_count >= 1
+        assert stats.call_count == grab.call_count
+
+    def test_loop_skips_grab_when_unsynced(self, fpga):
         fpga.event = Event()
         fpga.is_synchronized = False
-        calls = []
-        with patch.object(
-            fpga,
-            "_publish_adc_snapshot",
-            side_effect=lambda: calls.append(1),
-        ):
-            # Start the loop in a thread; it waits period, sees
-            # unsynced, continues. Set event after a moment to exit.
-            from threading import Thread as RealThread
-
-            t = RealThread(
-                target=fpga._publish_snapshots_loop,
-                args=(0.02,),
-                daemon=True,
-            )
-            t.start()
-            import time as _time
-
-            _time.sleep(0.1)  # let several loop iterations elapse
-            fpga.event.set()
-            t.join(timeout=1)
-        assert calls == []
+        with patch.object(fpga, "_grab_adc_frames") as grab:
+            self._run_loop_briefly(fpga)
+        grab.assert_not_called()
 
 
 class TestPublishCorrHealth:
@@ -418,48 +546,36 @@ class TestPublishCorrHealth:
 
 
 class TestDiagnosticsLoop:
-    def test_loop_publishes_both_diagnostics_when_synced(self, fpga):
+    """The diagnostics loop is corr_health-only: adc_stats moved to
+    the snapshot tick, so this loop never touches the FPGA."""
+
+    def _run_loop_briefly(self, fpga, period=0.02, runtime=0.1):
+        t = Thread(
+            target=fpga._publish_diagnostics_loop,
+            args=(period,),
+            daemon=True,
+        )
+        t.start()
+        import time as _time
+
+        _time.sleep(runtime)
+        fpga.event.set()
+        t.join(timeout=1)
+
+    def test_loop_publishes_corr_health_only_when_synced(self, fpga):
         fpga.event = Event()
         fpga.is_synchronized = True
         with (
-            patch.object(fpga, "_publish_adc_stats") as adc_stats,
             patch.object(fpga, "_publish_corr_health") as corr_health,
+            patch.object(fpga, "_publish_adc_stats") as adc_stats,
         ):
-            from threading import Thread as RealThread
-
-            t = RealThread(
-                target=fpga._publish_diagnostics_loop,
-                args=(0.02,),
-                daemon=True,
-            )
-            t.start()
-            import time as _time
-
-            _time.sleep(0.1)  # let several loop iterations elapse
-            fpga.event.set()
-            t.join(timeout=1)
-        assert adc_stats.call_count >= 1
+            self._run_loop_briefly(fpga)
         assert corr_health.call_count >= 1
+        adc_stats.assert_not_called()
 
     def test_loop_skips_publish_when_unsynced(self, fpga):
         fpga.event = Event()
         fpga.is_synchronized = False
-        with (
-            patch.object(fpga, "_publish_adc_stats") as adc_stats,
-            patch.object(fpga, "_publish_corr_health") as corr_health,
-        ):
-            from threading import Thread as RealThread
-
-            t = RealThread(
-                target=fpga._publish_diagnostics_loop,
-                args=(0.02,),
-                daemon=True,
-            )
-            t.start()
-            import time as _time
-
-            _time.sleep(0.1)
-            fpga.event.set()
-            t.join(timeout=1)
-        adc_stats.assert_not_called()
+        with patch.object(fpga, "_publish_corr_health") as corr_health:
+            self._run_loop_briefly(fpga)
         corr_health.assert_not_called()
