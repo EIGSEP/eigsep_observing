@@ -281,7 +281,7 @@ def test_motor_manual_helpers_exist():
 def test_motor_manual_build_zeroer_override_limits():
     """_build_zeroer with override_limits=True builds enforce_limits=False."""
     mm = _load("motor_manual")
-    ns = Namespace(override_limits=True)
+    ns = Namespace(override_limits=True, az_step0_fallback=False)
     zeroer = mm._build_zeroer(DummyTransport(), ns)
     assert zeroer._motor_client.enforce_limits is False
 
@@ -289,7 +289,7 @@ def test_motor_manual_build_zeroer_override_limits():
 def test_motor_manual_build_zeroer_default_enforces_limits():
     """_build_zeroer with override_limits=False preserves enforce_limits=True."""
     mm = _load("motor_manual")
-    ns = Namespace(override_limits=False)
+    ns = Namespace(override_limits=False, az_step0_fallback=False)
     zeroer = mm._build_zeroer(DummyTransport(), ns)
     assert zeroer._motor_client.enforce_limits is True
 
@@ -300,6 +300,23 @@ def test_motor_manual_parse_args_accepts_override_limits(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["motor_manual", "--override-limits"])
     args = mm._parse_args()
     assert args.override_limits is True
+
+
+def test_motor_manual_parse_args_accepts_az_step0_fallback(monkeypatch):
+    """_parse_args recognises --az-step0-fallback flag (default off)."""
+    mm = _load("motor_manual")
+    monkeypatch.setattr(sys, "argv", ["motor_manual", "--az-step0-fallback"])
+    assert mm._parse_args().az_step0_fallback is True
+    monkeypatch.setattr(sys, "argv", ["motor_manual"])
+    assert mm._parse_args().az_step0_fallback is False
+
+
+def test_motor_manual_build_zeroer_forwards_az_step0_fallback():
+    """_build_zeroer threads the flag through to the homer."""
+    mm = _load("motor_manual")
+    ns = Namespace(override_limits=False, az_step0_fallback=True)
+    zeroer = mm._build_zeroer(DummyTransport(), ns)
+    assert zeroer._homer.az_step0_fallback is True
 
 
 # ---------------------------------------------------------------------

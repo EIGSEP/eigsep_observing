@@ -30,12 +30,28 @@ class _BlockingHomer:
     def __init__(self):
         self.home_calls = 0
         self.last_stop_event = None
+        self.last_axes = None
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
+        from eigsep_observing.motor_homer import HomeResult
+
         self.home_calls += 1
         self.last_stop_event = stop_event
+        self.last_axes = tuple(axes)
         if stop_event is not None:
             stop_event.wait(timeout=2.0)
+        # Mirrors the real ``MotorHomer.home``'s cancellation shape: a
+        # stop-event interruption never converges but is not
+        # "degraded" (that flag is reserved for sensor unavailability,
+        # e.g. dead potmon/IMU) — see ``_home_az``/``_home_el``.
+        return HomeResult(
+            converged=False,
+            iterations=0,
+            residual_az_deg=None,
+            residual_el_deg=None,
+            degraded=False,
+            reset_count=False,
+        )
 
 
 def _wait_until(pred, timeout=2.0, interval=0.05):
@@ -361,9 +377,21 @@ def test_handle_key_h_runs_homer_in_background(client):
             self.home_calls = 0
             self.last_stop_event = None
 
-        def home(self, stop_event=None):
+        def home(self, stop_event=None, axes=("az", "el")):
+            from eigsep_observing.motor_homer import HomeResult
+
             self.home_calls += 1
             self.last_stop_event = stop_event
+            # The real homer always returns a HomeResult (never None);
+            # _run's else-branch reads .converged off it.
+            return HomeResult(
+                converged=True,
+                iterations=1,
+                residual_az_deg=0.0,
+                residual_el_deg=0.0,
+                degraded=False,
+                reset_count=False,
+            )
 
     fake = _RecordingHomer()
     zeroer = MotorZeroer(client.transport, homer=fake)
@@ -392,6 +420,40 @@ def test_handle_key_h_sets_homing_and_any_key_cancels(client):
     assert zeroed is False
     assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
     assert motor._emulator.azimuth.target_pos == before
+
+
+def test_handle_key_h_homes_both_axes(client):
+    """'h' keeps its home-both behavior: the homer gets both axes."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("az", "el")
+    assert zeroer.homing_axes == ("az", "el")
+    zeroer.cancel_home()
+
+
+def test_handle_key_a_homes_az_only(client):
+    """'a' starts a background az-only home; ``homing_axes`` feeds the
+    UI banner."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("a"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("az",)
+    assert zeroer.homing_axes == ("az",)
+    zeroer.cancel_home()
+
+
+def test_handle_key_e_homes_el_only(client):
+    """'e' starts a background el-only home."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("e"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("el",)
+    assert zeroer.homing_axes == ("el",)
+    zeroer.cancel_home()
 
 
 def test_handle_key_h_ignored_when_unavailable(client, monkeypatch):
@@ -471,7 +533,7 @@ def test_zeroer_passes_enforce_limits_to_motor_client():
 class _LimitTrippingHomer:
     """Stand-in ``MotorHomer`` whose ``home`` trips the sensor fence."""
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         raise MotorLimitError(
             "pot_az_voltage 2.900 V outside safe window [0.500, 2.500]; "
             "refusing az move."
@@ -546,7 +608,7 @@ class _ConvergingHomer:
     def __init__(self):
         self.home_calls = 0
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         from eigsep_observing.motor_homer import HomeResult
 
         self.home_calls += 1
@@ -615,3 +677,87 @@ def test_last_home_result_reset_on_new_home(client):
     assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
     assert zeroer.last_home_result is None
     zeroer.cancel_home()
+
+
+def test_zeroer_forwards_az_step0_fallback():
+    z = MotorZeroer(DummyTransport(), az_step0_fallback=True)
+    assert z._homer.az_step0_fallback is True
+
+
+def test_zeroer_default_no_az_step0_fallback():
+    z = MotorZeroer(DummyTransport())
+    assert z._homer.az_step0_fallback is False
+
+
+# ---------------------------------------------------------------------------
+# start_home notice: unconverged/degraded results must reach the curses UI
+# ---------------------------------------------------------------------------
+
+
+class _ResultHomer:
+    """Stand-in ``MotorHomer`` that returns a fixed ``HomeResult``.
+
+    The manual scripts run with ``console=False``, so log warnings are
+    invisible mid-session; ``notice`` is the curses UI's only channel.
+    """
+
+    def __init__(self, result):
+        self._result = result
+        self.home_calls = 0
+
+    def home(self, stop_event=None, axes=("az", "el")):
+        self.home_calls += 1
+        return self._result
+
+
+def test_home_notice_set_on_degraded_result(client):
+    """A degraded (sensor-unavailable) home result must surface an
+    actionable notice — a dead potmon skipping az must not pass
+    silently in a manual session."""
+    from eigsep_observing.motor_homer import HomeResult
+
+    fake = _ResultHomer(
+        HomeResult(
+            converged=False,
+            iterations=0,
+            residual_az_deg=float("nan"),
+            residual_el_deg=None,
+            degraded=True,
+            reset_count=False,
+        )
+    )
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert "sensor unavailable" in zeroer.notice
+
+
+def test_home_notice_set_on_unconverged_result(client):
+    """A non-degraded home that simply failed to converge (e.g. the
+    iteration budget was exhausted) must also surface a notice, worded
+    distinctly from the degraded/sensor-unavailable case."""
+    from eigsep_observing.motor_homer import HomeResult
+
+    fake = _ResultHomer(
+        HomeResult(
+            converged=False,
+            iterations=5,
+            residual_az_deg=3.0,
+            residual_el_deg=2.0,
+            degraded=False,
+            reset_count=False,
+        )
+    )
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert "did not converge" in zeroer.notice
+
+
+def test_home_notice_stays_none_on_converged_result(client):
+    """A converged home must not set any notice."""
+    fake = _ConvergingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert zeroer.notice is None
