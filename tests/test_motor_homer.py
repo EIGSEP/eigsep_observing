@@ -5,7 +5,12 @@ from eigsep_redis.testing import DummyTransport
 from picohost.buses import PotCalStore
 
 from eigsep_observing.el_sensor import ElEstimate
-from eigsep_observing.motor_homer import HomeResult, MotorHomer
+from eigsep_observing.motor_client import MotorLimitError
+from eigsep_observing.motor_homer import (
+    HomeResult,
+    MotorHomer,
+    _AzDivergenceGuard,
+)
 from eigsep_observing.motor_limits import publish_motor_limits
 
 
@@ -331,3 +336,53 @@ def test_az_sign_autodetect_flips_when_residual_grows():
 def test_homer_passes_enforce_limits_to_motor_client():
     h = MotorHomer(DummyTransport(), enforce_limits=False)
     assert h.motor_client.enforce_limits is False
+
+
+# ---------------------------------------------------------------------------
+# az divergence guard
+# ---------------------------------------------------------------------------
+
+
+def _guard_over(values, v_home=1.0, slope=100.0, diverge_deg=20.0):
+    it = iter(values)
+    return _AzDivergenceGuard(lambda: next(it), v_home, slope, diverge_deg)
+
+
+def test_divergence_guard_trips_after_min_plus_threshold():
+    # dist(deg): 50, 20, 10(min), 30 (=min+20, no trip), 35 (>min+20)
+    g = _guard_over([1.5, 1.2, 1.1, 1.3, 1.35])
+    for _ in range(4):
+        g()
+    with pytest.raises(MotorLimitError, match="diverging"):
+        g()
+
+
+def test_divergence_guard_monotonic_approach_never_trips():
+    g = _guard_over([1.5, 1.4, 1.3, 1.2, 1.1, 1.0])
+    for _ in range(6):
+        g()  # must not raise
+
+
+def test_divergence_guard_overshoot_past_home_trips():
+    # crosses home (dist -> 0) then keeps going: trips once past
+    # min + threshold. dists: 20, 10, 0(min), 10, 20 (=min+20, no
+    # trip — strictly greater), then 30 trips.
+    g = _guard_over([1.2, 1.1, 1.0, 0.9, 0.8, 0.7])
+    for _ in range(5):
+        g()
+    with pytest.raises(MotorLimitError, match="diverging"):
+        g()
+
+
+def test_divergence_guard_skips_missing_samples():
+    g = _guard_over([1.2, None, 1.19])
+    for _ in range(3):
+        g()  # None sample is skipped, no state change, no trip
+
+
+def test_divergence_guard_negative_slope_uses_magnitude():
+    g = _guard_over([1.2, 1.1, 1.45], slope=-100.0)
+    g()
+    g()  # min dist 10 deg
+    with pytest.raises(MotorLimitError, match="diverging"):
+        g()  # 45 deg > 10 + 20

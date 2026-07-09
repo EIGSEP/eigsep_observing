@@ -22,7 +22,7 @@ from eigsep_redis import MetadataSnapshotReader
 from picohost.buses import PotCalStore
 
 from .el_sensor import read_el_estimate
-from .motor_client import MotorClient, validate_axes
+from .motor_client import MotorClient, MotorLimitError, validate_axes
 from .motor_limits import read_motor_limits
 
 logger = logging.getLogger(__name__)
@@ -38,6 +38,60 @@ class HomeResult:
     residual_el_deg: Optional[float]
     degraded: bool
     reset_count: bool
+
+
+class _AzDivergenceGuard:
+    """Halt an az move that is driving the pot away from home.
+
+    Instances are the zero-arg ``guard`` callables polled by
+    :meth:`MotorClient._wait_for_stop` at fence cadence during a
+    move. The guard tracks the closest approach ``|v - v_home|``
+    seen so far; once the current distance exceeds that minimum by
+    more than ``diverge_deg`` (converted through the cal slope
+    magnitude) it raises :class:`MotorLimitError`, which halts the
+    motor mid-flight. This catches a wrong step counter (post-reboot)
+    or a wrong-signed cal long before the ±limit fence would, and the
+    min-so-far form also stops a move that reaches home and keeps
+    going. Missing pot samples are skipped — the guard only acts on
+    live readings, matching the sensor fence's convention (so it is
+    inert exactly when the pot fence is inert).
+
+    Parameters
+    ----------
+    read_pot : callable
+        Zero-arg callable returning the current pot voltage or
+        ``None`` when unavailable.
+    v_home : float
+        Az home target voltage.
+    slope_deg_per_volt : float
+        Signed cal slope; only its magnitude is used here.
+    diverge_deg : float
+        Allowed growth of ``|v - v_home|`` past the closest approach,
+        in degrees, before the move is halted.
+    """
+
+    def __init__(self, read_pot, v_home, slope_deg_per_volt, diverge_deg):
+        self._read_pot = read_pot
+        self._v_home = v_home
+        self._deg_per_volt = abs(slope_deg_per_volt)
+        self._diverge_deg = diverge_deg
+        self._min_dist_deg = None
+
+    def __call__(self):
+        v = self._read_pot()
+        if v is None:
+            return
+        dist_deg = abs(v - self._v_home) * self._deg_per_volt
+        if self._min_dist_deg is None or dist_deg < self._min_dist_deg:
+            self._min_dist_deg = dist_deg
+            return
+        if dist_deg - self._min_dist_deg > self._diverge_deg:
+            raise MotorLimitError(
+                f"az move diverging from pot home: |pot - home| grew "
+                f"to {dist_deg:.1f} deg from a closest approach of "
+                f"{self._min_dist_deg:.1f} deg "
+                f"(> {self._diverge_deg:.1f} deg allowance); halting."
+            )
 
 
 class MotorHomer:
