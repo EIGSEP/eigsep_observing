@@ -722,9 +722,10 @@ def test_consumer_role_surfaces_are_structural():
 def test_int32_redis_round_trip(obs_server, obs_client):
     """Int32 data survives add_corr_data → read_corr_data bit-for-bit.
 
-    Mirrors the production pattern: consumer (server) blocks on
-    read_corr_data *before* the producer (client) writes, matching
-    the EigObserver ↔ EigsepFpga interaction.
+    Mirrors the production order: the consumer's cursor is resolved
+    *before* the producer writes, matching the EigObserver ↔
+    EigsepFpga interaction (the observer starts reading first, then
+    integrations arrive).
     """
     data = generate_data(ntimes=1, reshape=False)
     # Convert one time-step to bytes (the wire format)
@@ -739,15 +740,17 @@ def test_int32_redis_round_trip(obs_server, obs_client):
     # test_fpga.py:test_synchronize) — this test only exercises the
     # raw corr payload round-trip.
     obs_client.corr.add(raw, cnt=0, sync_time=1713200000.0, dtype=dtype)
-    # Consumer blocks first (like EigObserver), producer writes after
-    # (like EigsepFpga) — same pattern as test_status.
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        read_future = executor.submit(
-            obs_server.corr_reader.read, pairs=pairs, unpack=True
-        )
-        time.sleep(0.1)  # let consumer block
-        obs_client.corr.add(raw, cnt=42, sync_time=1713200000.0, dtype=dtype)
-        acc_cnt, read_data = read_future.result(timeout=5.0)
+    # Resolve the consumer cursor at the current stream tail — exactly
+    # what the first blocking read does internally — so the read below
+    # returns the entry pushed after it, like EigObserver would.
+    # Single-threaded on purpose: an earlier version parked the read
+    # in a worker thread and synchronized with time.sleep, which
+    # flaked on stalled CI runners.
+    obs_server.transport.get_last_read_id(CORR_STREAM)
+    obs_client.corr.add(raw, cnt=42, sync_time=1713200000.0, dtype=dtype)
+    acc_cnt, read_data = obs_server.corr_reader.read(
+        pairs=pairs, unpack=True, timeout=5
+    )
     assert acc_cnt == 42
     for p in pairs:
         original = np.frombuffer(raw[p], dtype=dtype)
@@ -767,6 +770,14 @@ def test_corr_reader_skips_producer_backlog(obs_server, obs_client):
     Pins the "only pull data after observer is on" guarantee implemented
     by ``Transport._streams_from_set`` falling back to
     ``XINFO last-generated-id`` on cache miss.
+
+    Single-threaded on purpose: the first read must come up *empty* —
+    tier 2 resolved the cursor past the backlog, and a regression
+    would return cnt=1 here instead of timing out — and it caches the
+    resolved cursor on the transport. The second read then returns
+    exactly the post-resolution entry. An earlier version parked the
+    read in a worker thread and synchronized with time.sleep, which
+    flaked on stalled CI runners.
     """
     data = generate_data(ntimes=1, reshape=False)
     raw = {p: d[0].tobytes() for p, d in data.items()}
@@ -774,13 +785,12 @@ def test_corr_reader_skips_producer_backlog(obs_server, obs_client):
     # Seed a backlog; cnt=1 would be returned first if tier 2 regressed.
     obs_client.corr.add(raw, cnt=1, sync_time=1713200000.0, dtype=">i4")
     obs_client.corr.add(raw, cnt=2, sync_time=1713200000.0, dtype=">i4")
-    # Start the reader blocking first, then push. If tier 2 works the
-    # read blocks past the backlog and returns the post-start entry.
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        fut = executor.submit(obs_server.corr_reader.read, pairs=pairs)
-        time.sleep(0.1)  # let reader block
-        obs_client.corr.add(raw, cnt=99, sync_time=1713200000.0, dtype=">i4")
-        acc_cnt, _ = fut.result(timeout=5.0)
+    with pytest.raises(TimeoutError, match="stream:corr"):
+        obs_server.corr_reader.read(pairs=pairs, timeout=0.1)
+    # A blocking read returns the next entry pushed after cursor
+    # resolution — not the backlog.
+    obs_client.corr.add(raw, cnt=99, sync_time=1713200000.0, dtype=">i4")
+    acc_cnt, _ = obs_server.corr_reader.read(pairs=pairs, timeout=5)
     assert acc_cnt == 99
 
 
