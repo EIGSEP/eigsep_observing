@@ -5,7 +5,7 @@ import json
 import h5py
 import numpy as np
 
-from eigsep_observing.vna import save_vna_manual_h5
+from eigsep_observing.vna import save_vna_dut_h5, save_vna_manual_h5
 
 
 def _ant_payload(nfreq=8):
@@ -144,3 +144,42 @@ def test_save_vna_manual_h5_keeps_raw_when_calibration_fails(tmp_path, caplog):
         "calibration failed" in rec.getMessage().lower()
         for rec in caplog.records
     )
+
+
+def _dut_payload(nfreq=8, state="VNAAMB"):
+    """Synthesize a payload shaped like measure_dut(state) would return."""
+    rng = np.random.default_rng(2)
+    s11 = rng.standard_normal(nfreq) + 1j * rng.standard_normal(nfreq)
+    header = {
+        "mode": f"dut:{state}",
+        "freqs": np.linspace(1e6, 250e6, nfreq).tolist(),
+        "fstart": 1e6,
+        "fstop": 250e6,
+        "npoints": nfreq,
+        "ifbw": 100.0,
+        "power_dBm": 0.0,
+        "metadata_snapshot_unix": 1716304400.0,
+        "run_tag": "vna_manual_test",
+        "run_started_at_unix": 1716304200.0,
+        "obs_config": {"vna_ip": "127.0.0.1"},
+    }
+    metadata = {"rfswitch": {"sw_state_name": state}}
+    return s11, header, metadata
+
+
+def test_save_vna_dut_h5_round_trips(tmp_path):
+    s11, header, metadata = _dut_payload(state="VNAAMB")
+    path = save_vna_dut_h5(
+        s11, header, metadata, save_dir=tmp_path, state="VNAAMB"
+    )
+    assert path.name.startswith("vna_dut_VNAAMB_")
+    with h5py.File(path, "r") as f:
+        np.testing.assert_array_equal(f["raw/VNAAMB"][:], s11)
+        np.testing.assert_allclose(f["freqs"][:], header["freqs"])
+        # a probe has no OSL standards: no calibrated group
+        assert "calibrated" not in f
+        assert f.attrs["mode"] == "dut:VNAAMB"
+        assert f.attrs["run_tag"] == "vna_manual_test"
+        assert json.loads(f.attrs["obs_config"]) == header["obs_config"]
+        meta = f["metadata_snapshot"]
+        assert json.loads(meta.attrs["rfswitch"]) == metadata["rfswitch"]

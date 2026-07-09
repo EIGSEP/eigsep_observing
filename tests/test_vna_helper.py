@@ -19,7 +19,7 @@ from picohost.buses import ImuCalStore
 from eigsep_observing import obs_config_owner, run_tag
 from eigsep_observing._test_fixtures import IMU_CALIBRATION
 from eigsep_observing.keys import VNA_STREAM
-from eigsep_observing.vna import VnaWriter, measure_s11
+from eigsep_observing.vna import VnaWriter, measure_dut, measure_s11
 
 
 def _make_vna(cfg, switch_fn=lambda state: None):
@@ -427,3 +427,41 @@ def test_build_vna_subsystem_real_stops_service_on_build_failure(
         assert events == ["start", "stop"]
     finally:
         mgr.stop()
+
+
+def test_measure_dut_helper_probes_state_no_publish(transport, dummy_cfg):
+    switched = []
+    vna = _make_vna(dummy_cfg, switch_fn=switched.append)
+    _, snap = _make_sinks(transport)
+
+    s11, header, metadata = measure_dut(
+        vna,
+        "VNAAMB",
+        cfg=dummy_cfg,
+        transport=transport,
+        metadata_snapshot=snap,
+    )
+
+    assert switched == ["VNAAMB"]
+    assert np.iscomplexobj(s11)
+    assert len(s11) == dummy_cfg["vna_settings"]["npoints"]
+    assert header["mode"] == "dut:VNAAMB"
+    # same provenance overlays as measure_s11 (empty redis → sentinels)
+    assert header["run_tag"] == "UNKNOWN"
+    assert header["obs_config"] == dict(dummy_cfg)
+    assert "metadata_snapshot_unix" in header
+    assert isinstance(metadata, dict)
+    # a lone probe is a local artifact only: nothing on the VNA stream
+    assert transport.r.xlen(VNA_STREAM) == 0
+
+
+def test_measure_dut_helper_requires_initialized_vna(transport, dummy_cfg):
+    _, snap = _make_sinks(transport)
+    with pytest.raises(RuntimeError, match="VNA not initialized"):
+        measure_dut(
+            None,
+            "VNAANT",
+            cfg=dummy_cfg,
+            transport=transport,
+            metadata_snapshot=snap,
+        )

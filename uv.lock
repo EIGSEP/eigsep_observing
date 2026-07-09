@@ -347,7 +347,7 @@ wheels = [
 
 [[package]]
 name = "eigsep-observing"
-version = "2.10.0"
+version = "2.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "eigsep-redis" },
@@ -389,7 +389,7 @@ requires-dist = [
     { name = "ipython", marker = "extra == 'interactive'" },
     { name = "matplotlib" },
     { name = "numpy" },
-    { name = "picohost", specifier = ">=4.1" },
+    { name = "picohost", specifier = ">=4.2" },
     { name = "plotly" },
     { name = "pyserial-mock", marker = "extra == 'dev'" },
     { name = "pytest", marker = "extra == 'dev'" },
@@ -1337,7 +1337,7 @@ wheels = [
 
 [[package]]
 name = "picohost"
-version = "4.1.0"
+version = "4.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "eigsep-redis" },
@@ -1347,9 +1347,9 @@ dependencies = [
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pyserial" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/05/47/ffc02fc9d191df421372321ad5a298333889c23f1f7d42cc4f9b4fcfb032/picohost-4.1.0.tar.gz", hash = "sha256:78f87fa4a2a4400cbc4adfc60b3d4105fb0ceda7930d84d38fb6940ddd4b8ec3", size = 189324, upload-time = "2026-07-03T05:30:54.291Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/21/e4/797c1638a077c4991fb62d4cf4c3edb7c58c5e6c72bdd71ca7eee89fea3c/picohost-4.2.0.tar.gz", hash = "sha256:be4583b77e4dc41d65e50691c78082e1be1820915003af1a798d1fa595908ef4", size = 193005, upload-time = "2026-07-08T16:58:50.667Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/96/52/8d76202026a90a37dcf9751195382de77a00ed6cda33e4f3873f1d3f5636/picohost-4.1.0-py3-none-any.whl", hash = "sha256:9073e191b7b871d43f32c7c3b71875f144c7faeda63040b29a96a45036317499", size = 111604, upload-time = "2026-07-03T05:30:52.97Z" },
+    { url = "https://files.pythonhosted.org/packages/34/ec/f87ab73efed4ab529b1830a0524ff222d8acbebb54db30bd3837f7cbd67f/picohost-4.2.0-py3-none-any.whl", hash = "sha256:1afe9f9b62687edf47f8ff138dbba633733e6b1bfb358063585cf7aed82854d9", size = 113070, upload-time = "2026-07-08T16:58:49.451Z" },
 ]
 
 [[package]]
