@@ -46,9 +46,9 @@ def _load(name):
 
 def _scan_args(**overrides):
     """A small-grid arg namespace for driving ``motor_scan.main``
-    quickly. Grid bounds default to a 3-point az/el sweep."""
+    quickly. Grid bounds default to a 3-point az/el sweep; the
+    ``--az``/``--el`` hold flags default to unset (full 2-D grid)."""
     base = dict(
-        axis="both",
         el_first=False,
         count=1,
         pause_s=None,
@@ -56,11 +56,11 @@ def _scan_args(**overrides):
         az_start=-1.0,
         az_stop=1.0,
         az_step=1.0,
-        az=0.0,
+        az=None,
         el_start=-1.0,
         el_stop=1.0,
         el_step=1.0,
-        el=0.0,
+        el=None,
     )
     base.update(overrides)
     return Namespace(**base)
@@ -132,77 +132,128 @@ def test_motor_scan_parse_args_accepts_scan_bounds(monkeypatch):
     assert (args.el_start, args.el_stop, args.el_step) == (-45.0, 45.0, 15.0)
 
 
-def _capture_scan_kwargs(mc, monkeypatch):
-    """Replace ``MotorClient.scan`` with a spy that records the kwargs
-    ``motor_scan.main`` hands it and does nothing else. Returns the dict
-    the kwargs land in."""
-    captured = {}
+def _capture_moves(mc, monkeypatch):
+    """Spy on ``MotorClient.move_to`` and ``MotorClient.scan``, making
+    both no-ops. Returns ``(moves, scan_calls)``: the per-call kwargs
+    dicts recorded for each."""
+    moves = []
+    scan_calls = []
+
+    def fake_move_to(self, **kwargs):
+        moves.append(kwargs)
 
     def fake_scan(self, **kwargs):
-        captured.update(kwargs)
+        scan_calls.append(kwargs)
 
+    monkeypatch.setattr(mc.MotorClient, "move_to", fake_move_to)
     monkeypatch.setattr(mc.MotorClient, "scan", fake_scan)
-    return captured
+    return moves, scan_calls
 
 
-def test_motor_scan_axis_az_sweeps_az_and_holds_el(client, monkeypatch):
-    """``--axis az`` sweeps the azimuth grid while elevation collapses to
-    the single ``--el`` hold point; el is the single-point outer loop
-    (el_first False) so azimuth is the swept inner axis."""
+def test_motor_scan_el_flag_moves_el_once_then_sweeps_az(client, monkeypatch):
+    """``--el`` selects the az-sweep mode: one move takes elevation to
+    the hold angle, then azimuth repositions to the sweep start and
+    runs to the stop. ``MotorClient.scan`` (home + serpentine) is
+    bypassed entirely."""
     mc = _load("motor_scan")
-    captured = _capture_scan_kwargs(mc, monkeypatch)
-    mc.main(client.transport, _scan_args(axis="az", el=30.0))
-    np.testing.assert_allclose(captured["az_range_deg"], [-1.0, 0.0, 1.0])
-    np.testing.assert_allclose(captured["el_range_deg"], [30.0])
-    assert captured["el_first"] is False
+    moves, scan_calls = _capture_moves(mc, monkeypatch)
+    mc.main(client.transport, _scan_args(el=30.0))
+    assert moves == [{"el_deg": 30.0}, {"az_deg": -1.0}, {"az_deg": 1.0}]
+    assert scan_calls == []
 
 
-def test_motor_scan_axis_el_sweeps_el_and_holds_az(client, monkeypatch):
-    """``--axis el`` sweeps the elevation grid while azimuth collapses to
-    the single ``--az`` hold point; az is the single-point outer loop
-    (el_first True) so elevation is the swept inner axis."""
+def test_motor_scan_az_flag_moves_az_once_then_sweeps_el(client, monkeypatch):
+    """``--az`` is the mirrored el-sweep at a fixed azimuth."""
     mc = _load("motor_scan")
-    captured = _capture_scan_kwargs(mc, monkeypatch)
-    mc.main(client.transport, _scan_args(axis="el", az=15.0))
-    np.testing.assert_allclose(captured["el_range_deg"], [-1.0, 0.0, 1.0])
-    np.testing.assert_allclose(captured["az_range_deg"], [15.0])
-    assert captured["el_first"] is True
+    moves, scan_calls = _capture_moves(mc, monkeypatch)
+    mc.main(client.transport, _scan_args(az=15.0))
+    assert moves == [{"az_deg": 15.0}, {"el_deg": -1.0}, {"el_deg": 1.0}]
+    assert scan_calls == []
 
 
-def test_motor_scan_axis_both_builds_full_grid(client, monkeypatch):
-    """``--axis both`` (the default) sweeps both full grids and forwards
-    ``--el_first`` unchanged."""
+def test_motor_scan_single_axis_same_direction_every_pass(client, monkeypatch):
+    """Repeat passes re-run start -> stop identically — no serpentine
+    direction reversal between passes."""
     mc = _load("motor_scan")
-    captured = _capture_scan_kwargs(mc, monkeypatch)
-    mc.main(client.transport, _scan_args(axis="both", el_first=True))
-    np.testing.assert_allclose(captured["az_range_deg"], [-1.0, 0.0, 1.0])
-    np.testing.assert_allclose(captured["el_range_deg"], [-1.0, 0.0, 1.0])
-    assert captured["el_first"] is True
+    moves, _ = _capture_moves(mc, monkeypatch)
+    mc.main(client.transport, _scan_args(el=30.0, count=2))
+    assert [m["az_deg"] for m in moves[1:]] == [-1.0, 1.0, -1.0, 1.0]
 
 
-def test_motor_scan_parse_args_axis_defaults_to_both(monkeypatch):
-    """``--axis`` defaults to 'both' with az/el hold points at 0."""
+def test_motor_scan_single_axis_stepped_grid_with_pause(client, monkeypatch):
+    """``--pause_s`` steps the sweep axis through every grid point
+    (dwelling at each) instead of one continuous start-to-stop move."""
+    mc = _load("motor_scan")
+    moves, _ = _capture_moves(mc, monkeypatch)
+    mc.main(client.transport, _scan_args(el=30.0, pause_s=0.0))
+    assert [m["az_deg"] for m in moves[1:]] == [-1.0, 0.0, 1.0]
+
+
+def test_motor_scan_single_axis_never_homes(client, monkeypatch):
+    """End-to-end against the dummy manager: the single-axis sweep
+    neither homes at start nor at completion — when done the rig stays
+    parked with the held axis at its hold angle."""
+    mc = _load("motor_scan")
+    home_calls = {"n": 0}
+
+    def fake_home(self, *a, **kw):
+        home_calls["n"] += 1
+
+    monkeypatch.setattr(mc.MotorClient, "home", fake_home)
+    mc.main(client.transport, _scan_args(el=1.0))
+    assert home_calls["n"] == 0
+
+
+def test_motor_scan_both_hold_flags_is_an_error(client):
+    """``--az`` and ``--el`` together are ambiguous (which axis
+    sweeps?) and must fail fast before any hardware or run_tag is
+    touched."""
+    mc = _load("motor_scan")
+    with pytest.raises(ValueError):
+        mc.main(client.transport, _scan_args(az=1.0, el=2.0))
+    assert run_tag.read(client.transport) == {
+        "run_tag": None,
+        "run_started_at_unix": None,
+    }
+
+
+def test_motor_scan_default_full_grid_forwards_to_scan(client, monkeypatch):
+    """With neither hold flag the script keeps the original behavior:
+    the full 2-D grid is handed to ``MotorClient.scan`` with
+    ``--el_first`` forwarded unchanged."""
+    mc = _load("motor_scan")
+    moves, scan_calls = _capture_moves(mc, monkeypatch)
+    mc.main(client.transport, _scan_args(el_first=True))
+    assert moves == []
+    (kwargs,) = scan_calls
+    np.testing.assert_allclose(kwargs["az_range_deg"], [-1.0, 0.0, 1.0])
+    np.testing.assert_allclose(kwargs["el_range_deg"], [-1.0, 0.0, 1.0])
+    assert kwargs["el_first"] is True
+
+
+def test_motor_scan_parse_args_hold_flags_default_none(monkeypatch):
+    """There is no ``--axis`` flag; the ``--az``/``--el`` hold flags
+    default to unset, which selects the full 2-D grid."""
     mc = _load("motor_scan")
     monkeypatch.setattr(sys, "argv", ["motor_scan"])
     args = mc._parse_args()
-    assert args.axis == "both"
-    assert args.az == 0.0
-    assert args.el == 0.0
+    assert not hasattr(args, "axis")
+    assert args.az is None
+    assert args.el is None
 
 
-def test_motor_scan_parse_args_axis_and_hold_flags(monkeypatch):
-    """``--axis az`` parses, and the ``--el`` hold flag coexists with the
-    ``--el_start/stop/step`` and ``--az_*`` bound flags without an
-    argparse prefix clash."""
+def test_motor_scan_parse_args_hold_flag_coexists_with_bounds(monkeypatch):
+    """The ``--el`` hold flag coexists with the ``--el_start/stop/step``
+    and ``--az_*`` bound flags without an argparse prefix clash."""
     mc = _load("motor_scan")
     monkeypatch.setattr(
         sys,
         "argv",
-        ["motor_scan", "--axis", "az", "--el", "30", "--az_stop", "90"],
+        ["motor_scan", "--el", "30", "--az_stop", "90"],
     )
     args = mc._parse_args()
-    assert args.axis == "az"
     assert args.el == 30.0
+    assert args.az is None
     assert args.az_stop == 90.0
 
 
