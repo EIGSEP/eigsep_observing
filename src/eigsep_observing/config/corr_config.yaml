@@ -4,11 +4,15 @@ snap_ip: "10.10.10.12"
 # so it sets the stall cost of a single lost packet on the SNAP link.
 # casperfpga's default of 3 s spans 2-3 integration windows at
 # corr_acc_len 2**28 and was the root cause of the periodic
-# "Dropped 2 integration(s)" warnings (issue #204). 0.25 s is ~100x
-# the observed per-block readout cadence, so only a genuinely lost
-# packet ever waits this long; casperfpga's 8 transaction-level
+# "Dropped 2 integration(s)" warnings (issue #204). At corr_acc_len
+# 2**26 the boundary margin is only ~165 ms (268 ms window minus the
+# ~103 ms readout), so even 0.25 s turns every lost packet into one
+# torn-read drop (~3.7% loss measured 2026-07-09); 0.1 s keeps a
+# single-loss stall inside the window (0 drops in the same-day A/B)
+# while still ~40x the per-block readout cadence, so only a genuinely
+# lost packet ever waits this long. casperfpga's 8 transaction-level
 # retries are unaffected. Absent -> defaults to 0.25.
-tapcp_timeout_s: 0.25
+tapcp_timeout_s: 0.1
 fpg_file: "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg"  # path to fpg file
 fpg_version: [2, 4]  # major, minor
 sample_rate: 500.0  # in MHz
@@ -18,8 +22,11 @@ use_noise: false  # use digital noise instead of ADC data
 adc_gain: 4
 fft_shift: 0x015F
 #corr_acc_len: 0x10000000  # 2**28 fabric clocks (250 MHz): 1 tick / 1.074 s
-corr_acc_len: 0x08000000  # 2**27 fabric clocks (250 MHz): 1 tick / 0.537 s
-#corr_acc_len: 0x04000000  # 2**26 fabric clocks: 1 tick / 0.268 s
+#corr_acc_len: 0x08000000  # 2**27 fabric clocks (250 MHz): 1 tick / 0.537 s
+# 2**26 requires tapcp_timeout_s <= ~0.15: the ~165 ms boundary margin
+# must absorb a full retransmit stall or every lost packet drops one
+# integration (see tapcp_timeout_s note above).
+corr_acc_len: 0x04000000  # 2**26 fabric clocks (250 MHz): 1 tick / 0.268 s
 corr_scalar: 512  # 2**9 - 8 bits after binary point so 2**9 = 1
 corr_word: 4  # 4 bytes per word
 # acc_bins / avg_even_odd are DECLARED defaults only. The producer
