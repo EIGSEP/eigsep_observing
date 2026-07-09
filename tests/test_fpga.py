@@ -1341,8 +1341,10 @@ class TestMakeFpgaTapcpTimeout:
 
     def test_default_config_ships_the_knob(self):
         """The shipped corr_config.yaml sets the knob explicitly so
-        the field value is visible in the file, not just in code."""
-        assert default_config["tapcp_timeout_s"] == 0.25
+        the field value is visible in the file, not just in code.
+        0.1 s (below the code default 0.25 s) is required by the
+        2**26 acc_len tick's ~165 ms boundary margin."""
+        assert default_config["tapcp_timeout_s"] == 0.1
 
 
 _MUX_DEPLOY_WIRING = {

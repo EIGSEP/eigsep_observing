@@ -41,9 +41,12 @@ class TestCalcInttime:
 
     def test_load_config_computes_dump_period(self):
         # corr_config.yaml declares the v2.4 layout (acc_bins: 1); the
-        # computed integration_time must still be the dump period.
+        # computed integration_time must still be the dump period
+        # (2**26 fabric clocks -> 0.268 s tick).
         cfg = load_config(get_config_path("corr_config.yaml"))
-        assert cfg["integration_time"] == pytest.approx(1.073741824, rel=1e-12)
+        assert cfg["integration_time"] == pytest.approx(
+            0.268435456, rel=1e-12
+        )
 
 
 class TestRequirePandaDecorator:
