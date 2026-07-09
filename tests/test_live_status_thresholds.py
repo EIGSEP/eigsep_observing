@@ -13,6 +13,7 @@ from eigsep_observing.live_status import (
     SIGNAL_REGISTRY,
     Thresholds,
     default_thresholds,
+    effective_obs_cfg,
     enabled_signals,
 )
 
@@ -402,3 +403,169 @@ def test_rfswitch_therm_classifies_unknown_without_band():
     # No config-derived and no bundled-YAML band -> grey "unknown" tile.
     th = Thresholds(OBS_CFG_TEMPCTRL_OFF, CORR_HEADER)
     assert th.classify("rfswitch_therm.temp_therm0", 30.0) == "unknown"
+
+
+# ---------------------------------------------------------------------
+# effective_obs_cfg — prefer-Redis-with-local-fallback (issue #194)
+# ---------------------------------------------------------------------
+
+
+# Local-file layer for the merge tests. Carries the panda-reality keys
+# (use_* gates, tempctrl_settings, corr_ntimes, calibration) plus a
+# dashboard-local key (corr_save_dir) and switch_schedule, which is
+# deliberately NOT merged — the rfswitch payload reads the schedule
+# straight from the upload with no local fallback.
+OBS_CFG_LOCAL = {
+    "corr_save_dir": "/media/eigsep/T7/data",
+    "corr_ntimes": 240,
+    "use_switches": True,
+    "use_vna": True,
+    "use_motor": False,
+    "use_tempctrl": True,
+    "switch_schedule": {"RFANT": 3600, "RFNON": 60},
+    "calibration": {
+        "noise_diode_enr_db": 11.0,
+        "t_load_stream": "tempctrl_load",
+    },
+    "tempctrl_settings": {
+        "LNA": {"installed": True, "target_C": 25.0, "hysteresis_C": 0.5},
+        "LOAD": {"installed": True, "target_C": 25.0, "hysteresis_C": 0.5},
+    },
+}
+
+
+def _panda_upload(**overrides):
+    """A full-obs_config upload as ``ConfigStore.get`` returns it: the
+    panda uploads its entire config dict and ``Transport.upload_dict``
+    stamps ``upload_time``. Built from the local fixture so
+    unspecified keys agree — the realistic field case is two copies of
+    the same file drifting on a few keys.
+    """
+    cfg = {**OBS_CFG_LOCAL, "upload_time": 1e9}
+    cfg.update(overrides)
+    return cfg
+
+
+def test_effective_obs_cfg_no_upload_returns_local_copy():
+    out = effective_obs_cfg(OBS_CFG_LOCAL, None)
+    assert out == OBS_CFG_LOCAL
+    assert out is not OBS_CFG_LOCAL  # copy, not alias
+    # An empty dict (never a real upload shape) also means "no upload".
+    assert effective_obs_cfg(OBS_CFG_LOCAL, {}) == OBS_CFG_LOCAL
+
+
+def test_effective_obs_cfg_upload_wins_on_panda_reality_keys():
+    upload = _panda_upload(
+        use_tempctrl=False,
+        use_motor=True,
+        corr_ntimes=480,
+        tempctrl_settings={
+            "LNA": {"installed": False},
+            "LOAD": {"installed": True, "target_C": 30.0},
+        },
+    )
+    out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
+    assert out["use_tempctrl"] is False
+    assert out["use_motor"] is True
+    assert out["corr_ntimes"] == 480
+    assert out["tempctrl_settings"] == upload["tempctrl_settings"]
+
+
+def test_effective_obs_cfg_dashboard_local_keys_survive():
+    # corr_save_dir is not panda reality (the corr writer runs on the
+    # ground PC); the upload_time stamp must not leak into the merged
+    # config either.
+    upload = _panda_upload(corr_save_dir="/panda/side/path")
+    out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
+    assert out["corr_save_dir"] == OBS_CFG_LOCAL["corr_save_dir"]
+    assert "upload_time" not in out
+
+
+def test_effective_obs_cfg_missing_upload_keys_fall_back_to_local():
+    # Deliberately partial upload (production uploads carry the full
+    # obs_config): models an older producer that predates a key — the
+    # local value must survive rather than the field dropping.
+    upload = {"upload_time": 1e9, "use_tempctrl": False}
+    out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
+    assert out["use_tempctrl"] is False
+    assert out["corr_ntimes"] == OBS_CFG_LOCAL["corr_ntimes"]
+    assert out["tempctrl_settings"] == OBS_CFG_LOCAL["tempctrl_settings"]
+
+
+def test_effective_obs_cfg_plucks_only_t_load_stream_from_calibration():
+    upload = _panda_upload(
+        calibration={
+            "noise_diode_enr_db": 99.0,  # panda copy drifted
+            "t_load_stream": "tempctrl_lna",  # hot-swap step 3
+        }
+    )
+    out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
+    cal = out["calibration"]
+    assert cal["t_load_stream"] == "tempctrl_lna"
+    # The ENR is a dashboard-local display-cal knob, not panda reality.
+    assert cal["noise_diode_enr_db"] == 11.0
+    # The local dict's nested section was copied, not mutated in place.
+    assert OBS_CFG_LOCAL["calibration"]["t_load_stream"] == "tempctrl_load"
+
+
+def test_effective_obs_cfg_switch_schedule_not_merged():
+    # switch_schedule keeps its stricter no-fallback contract in
+    # _rfswitch_payload (read straight from the upload); the merged
+    # config must not paper over that with the upload's copy.
+    upload = _panda_upload(switch_schedule={"RFANT": 60})
+    out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
+    assert out["switch_schedule"] == OBS_CFG_LOCAL["switch_schedule"]
+
+
+# ---------------------------------------------------------------------
+# with_obs_cfg (panda config upload path)
+# ---------------------------------------------------------------------
+
+
+def test_thresholds_with_obs_cfg_recomputes_bands_and_gating():
+    th = Thresholds(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
+    assert "tempctrl_lna.T_now" in th.registry
+
+    new_cfg = {
+        "use_tempctrl": True,
+        "corr_ntimes": 240,
+        "tempctrl_settings": {
+            "LNA": {
+                "installed": False,
+                "enable": False,
+                "target_C": 25.0,
+                "hysteresis_C": 0.5,
+                "clamp": 0.6,
+            },
+            "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
+        },
+    }
+    th2 = th.with_obs_cfg(new_cfg)
+    # Gating followed the new config: the descoped channel is gone...
+    assert "tempctrl_lna.T_now" not in th2.registry
+    # ...and the live channel's band moved to the new setpoint.
+    assert th2.bands["tempctrl_load.T_now"]["healthy"] == [29.0, 31.0]
+    # The corr header carried over — cadence band unchanged.
+    assert th2.bands["corr.acc_cadence_s"] == th.bands["corr.acc_cadence_s"]
+
+
+def test_thresholds_with_obs_cfg_preserves_yaml_override_and_danger_k():
+    yaml_overrides = {
+        "adc.rms": {"healthy": [10.0, 20.0], "danger": [5.0, 30.0]},
+        "tempctrl.danger_k_C": 7.0,
+    }
+    th = Thresholds(
+        OBS_CFG_TEMPCTRL_ON, CORR_HEADER, yaml_overrides=yaml_overrides
+    )
+    new_cfg = {
+        "use_tempctrl": True,
+        "corr_ntimes": 240,
+        "tempctrl_settings": {
+            "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
+            "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
+        },
+    }
+    th2 = th.with_obs_cfg(new_cfg)
+    assert th2.bands["adc.rms"]["healthy"] == [10.0, 20.0]
+    # Non-default danger half-width survived the rebuild (30 ± 7).
+    assert th2.bands["tempctrl_load.T_now"]["danger"] == [23.0, 37.0]
