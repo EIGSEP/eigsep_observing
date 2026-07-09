@@ -46,20 +46,22 @@ snap_id: C000122
 # snap_id: C000069  # spare SNAP
 ants:
   box-air:  # suspended box
-    tx: {id: null}  # fill at install
-    rx: {id: null}  # one of Rx 1-8; fill at install
+    tx: {id: 2}
+    rx: {id: 2}  # Rx 2
     snap: {input: 0, label: N0}
   box-gnd:  # ground box
-    tx: {id: null}
-    rx: {id: null}
+    tx: {id: 1}
+    rx: {id: 3}  # Rx 3
     snap: {input: 2, label: N4}
   viv-N:
+    # One dual-pol FEM serves both viv-N and viv-E; id unknown — fill
+    # both entries with the same id, then run republish_header.py.
     fem: {id: null, pol: N}
-    rx: {id: null}
+    rx: {id: 5}  # Rx 5
     snap: {input: 4, label: N8}
   viv-E:
-    fem: {id: null, pol: E}
-    rx: {id: null}
+    fem: {id: null, pol: E}  # same FEM module as viv-N
+    rx: {id: 7}  # Rx 7
     snap: {input: 5, label: E10}
   # input 1 (label E2): unwired.
   # input 3 (label E6): reserved for a possible additional chain. If
