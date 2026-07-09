@@ -250,8 +250,8 @@ const corrXaxis = {
   nticks: 8,
 };
 
-// Plotly log axes take ranges in log10. [-2, 9] mirrors the legacy
-// live_plotter ylim of (1e-2, 1e9); fixed range avoids autoscale jitter.
+// Plotly log axes take ranges in log10. [1, 9] spans 1e1–1e9, keeping
+// raw counts well in view; fixed range avoids autoscale jitter.
 // ``exponentformat: "e"`` renders ticks as 1e6 / 1e9 (matplotlib-style)
 // rather than plotly's default SI suffixes (1M / 1G / 1B).
 // Calibrated mode swaps to a linear y-axis in Kelvin and lets plotly
@@ -263,7 +263,7 @@ const magLayoutRaw = {
   yaxis: {
     title: "Amplitude [arb. units]",
     type: "log",
-    range: [-2, 9],
+    range: [1, 9],
     exponentformat: "e",
   },
   showlegend: true,
