@@ -178,8 +178,18 @@ def _imu_az_avg_entry(yaw):
 # intentionally absent — it is injected at write time by
 # Transport.upload_dict, so the on-Redis blob has it but a
 # hand-authored "what calibrate-imu produced" fixture does not. Both
-# sections present (a full `--mode all` run); a partial fleet would
-# carry only one section.
+# sections present: `calibrate-imu`'s single auto-driven el sweep
+# fits both imu_el (always) and imu_az (only when the az turntable was
+# parked at its calibrated home during the sweep, per the
+# `_pot_az_home_gate` in picohost/calibrate_imu.py — an off-home /
+# uncalibrated pot drops the imu_az section and this fixture would
+# carry only imu_el). `mode` is one of picohost's `calibrate-imu`
+# CLI modes ("auto"/"manual", not the retired three-sweep "all");
+# `n_stops` is the auto-mode el-stop count (12 -> 13 stops over
+# +/-180); `derived_home_motor_deg`/`pot_az_home_deg` are the fit's
+# derived-level home offset and the pot reading at az-home stamped at
+# save time (see fit_el_calibration's `report["home_offset_motor_deg"]`
+# and calibrate_imu.py's `_pot_az_home_gate`).
 IMU_CALIBRATION = {
     "imu_el": {
         "accel_bias": [0.01, -0.02, 0.03],
@@ -197,8 +207,11 @@ IMU_CALIBRATION = {
     },
     "metadata": {
         "timestamp": "2026-06-29T12:00:00+00:00",
-        "mode": "all",
+        "mode": "auto",
         "n_samples": 200,
+        "n_stops": 12,
+        "derived_home_motor_deg": 2.1,
+        "pot_az_home_deg": 0.3,
     },
 }
 

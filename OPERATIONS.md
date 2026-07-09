@@ -394,15 +394,26 @@ against the running `pico-manager`; step 3 is this repo's
    and re-zeros the step counters there.
 
 **Order matters**: run step 1 before step 2. `calibrate-imu`'s
-`imu_az` section needs a calibrated, home-parked pot to gate against;
-running it before `calibrate-pot`, or with the turntable off home,
-still calibrates `imu_el` correctly but silently drops the `imu_az`
-cross-check section from the saved fit.
+`imu_az` section needs a calibrated, home-parked pot to gate against.
+Running it before `calibrate-pot`, or with the turntable off home,
+does **not** silently drop the `imu_az` section: the gate prints a
+warning to stderr and prompts `Continue imu_el-only? [y / Enter to
+abort]:`. The default (Enter) **aborts the entire calibration**,
+including `imu_el`; only an explicit `y` continues with `imu_el`
+alone, dropping the `imu_az` cross-check section from the saved fit.
 
 **A stale motor zero is a warning, not a failure.** If step 2's
 derived level sits more than ~10° from the motor's current zero
 position, it logs a warning ("motor zero may be stale; home after
-saving") but still saves the fit — the fit is independent of the
-motor's step-counter zero. Run step 3 afterward to re-zero the
+saving"), but the warning does not bypass or auto-trigger saving —
+saving a calibration always goes through the same `Save this
+calibration? [y/N]:` confirm, warning or not; the fit is independent
+of the motor's step-counter zero. Run step 3 afterward to re-zero the
 counters against the newly-saved cal-defined home; it is not a
 prerequisite for steps 1–2 to succeed.
+
+**Expect cross-check FLAG rows near el 0 and ±180°.** `imu_az`'s
+`|θ|` estimator has an intrinsic near-pole floor (~10–20° with a
+single-sweep cal, dominated by the along-axis accel-bias component a
+single el sweep cannot observe) — `imu_el` is the el authority, and
+`imu_az` is a cross-check/failover only.
