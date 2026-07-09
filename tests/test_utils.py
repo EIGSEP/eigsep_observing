@@ -6,11 +6,44 @@ import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing.utils import (
+    calc_inttime,
     configure_eig_logger,
     get_config_path,
+    load_config,
     require_panda,
     require_snap,
 )
+
+
+class TestCalcInttime:
+    """Vacc dump-period semantics of calc_inttime.
+
+    ``corr_acc_len`` counts FPGA fabric clocks, and the SNAP fabric
+    runs at ``sample_rate / 2`` (demux-2: the ADC delivers two samples
+    per fabric clock). The dump period is therefore
+    ``acc_len * 2 / sample_rate`` regardless of whether the firmware
+    emits even/odd banks (v2.3, acc_bins=2) or a single spectrum
+    (v2.4, acc_bins=1). Measured on hardware 2026-07-09 (fpg v2.4):
+    240-row files land every ~257.7 s = 240 x 1.0737 s.
+    """
+
+    def test_dump_period_production_registers(self):
+        assert calc_inttime(500e6, 2**28) == pytest.approx(
+            1.073741824, rel=1e-12
+        )
+
+    def test_readout_mode_cannot_enter_timing(self):
+        # acc_bins describes the readout payload structure, not the
+        # timing; the v2.4 header bug (t_int halved, times drifting to
+        # 2x wall clock) came from multiplying it into this formula.
+        with pytest.raises(TypeError):
+            calc_inttime(500e6, 2**28, acc_bins=1)
+
+    def test_load_config_computes_dump_period(self):
+        # corr_config.yaml declares the v2.4 layout (acc_bins: 1); the
+        # computed integration_time must still be the dump period.
+        cfg = load_config(get_config_path("corr_config.yaml"))
+        assert cfg["integration_time"] == pytest.approx(1.073741824, rel=1e-12)
 
 
 class TestRequirePandaDecorator:

@@ -38,7 +38,10 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
-          fail_ci_if_error: true
+          # Codecov-side failures (e.g. the 2026-07-09 "BAD signature"
+          # CDN skew on the `latest` CLI) must not red-X the test job —
+          # coverage upload is best-effort, the tests already passed.
+          fail_ci_if_error: false
       - name: Upload test results
         if: ${{ !cancelled() && github.actor != 'dependabot[bot]' }}
         uses: codecov/codecov-action@v7

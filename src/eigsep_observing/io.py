@@ -802,8 +802,9 @@ def _validate_corr_header(header):
 #
 # Type → averaging policy in _avg_sensor_values:
 #   float → np.mean over non-error samples (the "real" averaging path)
-#   int   → min over non-error samples (worst-case for cal levels;
-#           no-op for the constants)
+#   int   → min over non-error samples (no-op for the invariant
+#           constants), except _MAX_REDUCED_FIELDS → max (worst-case
+#           for reject counters)
 #   bool  → any over non-error samples (worst-case for fault flags)
 #   str   → first value if unanimous, else "UNKNOWN"
 # See _avg_sensor_values for details and the rationale per type.
@@ -879,6 +880,16 @@ _PELTIER_SCHEMA = {
     "sensor_tripped": bool,
     "stall_tripped": bool,
     "runaway_tripped": bool,
+    # Rate-guard reject counter (pico-firmware #150): the rate guard is
+    # control-only, so rejected-but-plausible conversions are still
+    # reported (status="update", real values) with this per-channel
+    # counter as the cross-check marker. It increments once per
+    # consecutive rejected sample and resets to 0 on an accepted one,
+    # so any nonzero value inside an integration means at least one
+    # averaged-in sample was rate-guard-rejected. Reduces via max —
+    # see _MAX_REDUCED_FIELDS; the default int min would wash a
+    # mid-integration burst back to 0 and delete the marker.
+    "sensor_rejects": int,
     # Asymmetric-clamp safety setting (False forbids drive<0). Reduces
     # via `any` like every other bool config field; a mid-integration
     # toggle is an operator action and rare enough that surfacing
@@ -1353,18 +1364,30 @@ def _avg_rfswitch_metadata(value):
 # reduction in _avg_sensor_values already encodes the disagreement in
 # the saved value (`any` for bools, `"UNKNOWN"` for strings) so
 # downstream can detect the issue from the file alone. Note that
-# post-picohost-1.0.0, every `int` field in SENSOR_SCHEMAS reaching
-# _avg_sensor_values is in _INVARIANT_FIELDS — rfswitch's raw
-# `sw_state` int and human-readable `sw_state_name` are both handled
-# by _avg_rfswitch_metadata, not _avg_sensor_values. The int `min`
-# reduction is therefore a no-op-on-agreement safety net behind the
-# invariant ERROR log path; if a future schema adds a legitimately
-# varying int, the disagreement is silently captured by `min` rather
-# than logged.
+# rfswitch's raw `sw_state` int and human-readable `sw_state_name` are
+# both handled by _avg_rfswitch_metadata, not _avg_sensor_values. Every
+# int field reaching _avg_sensor_values is either in _INVARIANT_FIELDS
+# (where `min` is a no-op-on-agreement safety net behind the invariant
+# ERROR log path) or in _MAX_REDUCED_FIELDS (legitimately-varying
+# worst-case counters, where the saved `max` encodes the disagreement
+# silently, like bool `any`). A future schema int that is neither gets
+# `min` with the disagreement silently captured rather than logged —
+# decide which set it belongs in when adding it.
 # ----------------------------------------------------------------------
 _INVARIANT_FIELDS = frozenset(
     {"sensor_name", "app_id", "watchdog_timeout_ms", "boot_id"}
 )
+
+# Int fields that reduce via max() instead of min(). These are the
+# legitimately-varying ints: worst-case counters where an integration
+# that saw even one nonzero sample must stay identifiable after
+# reduction. The producer resets such counters to 0 on every good
+# sample, so `min` would wash a mid-integration burst back to 0 and
+# delete the marker from the corr record. Disagreement is silent by
+# design — the saved max already encodes it, exactly like bool `any`.
+# Today: tempctrl's per-channel rate-guard reject counter (issue #207,
+# pico-firmware #150).
+_MAX_REDUCED_FIELDS = frozenset({"sensor_rejects"})
 _INVARIANT_LOG_THROTTLE_S = 60.0
 _last_invariant_log = {}  # {(app_name, field): unix_timestamp}
 
@@ -1421,7 +1444,8 @@ def _avg_sensor_values(value, schema=None, *, app_name=""):
     type  reduction                                              filter errored?
     ====  ====================================================  =========================
     float ``np.mean`` over surviving samples                    yes
-    int   ``min`` over surviving samples (worst-case)           yes
+    int   ``min`` over surviving samples (worst-case); ``max``  yes
+          for :data:`_MAX_REDUCED_FIELDS` (reject counters)
     bool  ``any`` over surviving samples (fault-flag worst-case)yes
     str   first value if unanimous, else ``"UNKNOWN"``          yes
     ====  ====================================================  =========================
@@ -1520,7 +1544,10 @@ def _avg_sensor_values(value, schema=None, *, app_name=""):
             else:
                 if data_key in _INVARIANT_FIELDS and len(set(ints)) > 1:
                     _log_invariant_disagreement(app_name, data_key, ints)
-                avg[data_key] = min(ints)
+                if data_key in _MAX_REDUCED_FIELDS:
+                    avg[data_key] = max(ints)
+                else:
+                    avg[data_key] = min(ints)
         elif typ is bool:
             bools = [s for s in survivors if isinstance(s, bool)]
             avg[data_key] = any(bools) if bools else None

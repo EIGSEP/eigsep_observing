@@ -4,6 +4,7 @@ from .signals import (
     Signal,
     SIGNAL_REGISTRY,
     default_thresholds,
+    effective_obs_cfg,
     enabled_signals,
 )
 from .thresholds import Thresholds
@@ -16,5 +17,6 @@ __all__ = [
     "Thresholds",
     "create_app",
     "default_thresholds",
+    "effective_obs_cfg",
     "enabled_signals",
 ]

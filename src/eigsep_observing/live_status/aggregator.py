@@ -24,10 +24,15 @@ Design notes
   VNA thread (:data:`_VNA_BLOCK_S`), which parks inside Redis between
   ~1/hour sweeps and wakes for the stop check on each timeout.
 
-- **Threshold recompute.** When ``corr_header["integration_time"]``
-  changes (re-sync), :meth:`_recompute_thresholds` rebuilds
-  :attr:`thresholds` so cadence and file-heartbeat bands track the
-  current run.
+- **Threshold recompute.** Two independent dirty flags rebuild
+  :attr:`thresholds`: when ``corr_header["integration_time"]``
+  changes (re-sync; :meth:`_maybe_recompute_thresholds`, SNAP tick),
+  cadence and file-heartbeat bands track the current run; when the
+  panda's Redis config upload changes
+  (:meth:`_maybe_recompute_config`, panda tick), signal gating and
+  the config-derived bands follow :attr:`obs_cfg_effective` — the
+  local YAML with the panda-reality slice overridden by the upload
+  (prefer-Redis-with-local-fallback, issue #194).
 
 - **Exception policy.** A transient reader exception (network blip,
   stream not yet registered, JSON decode hiccup) is caught per-call so
@@ -72,7 +77,7 @@ from ..snap_reinit import read as read_snap_reinit
 from ..utils import calc_freqs_dfreq
 from ..vna import VnaReader
 from ..vna_calibration import VnaCache
-from .signals import SIGNAL_REGISTRY
+from .signals import SIGNAL_REGISTRY, effective_obs_cfg
 from .snap_probe import probe_snap_fpga
 from .thresholds import Thresholds
 
@@ -219,7 +224,12 @@ class StateSnapshot:
     # (key ``"config"``). ``None`` when no panda script has ever uploaded
     # its config to this Redis. The dashboard reads ``switch_schedule``
     # from here rather than from the on-disk YAML, so a parked switch
-    # with no panda running shows no countdown.
+    # with no panda running shows no countdown. The panda-reality slice
+    # (``tempctrl_settings``, ``use_*`` gates, ``corr_ntimes``, the
+    # ``calibration`` t_ns_*/t_amb_* routing knobs) is merged over the
+    # local YAML into ``aggregator.obs_cfg_effective`` so signal gating
+    # and config-derived bands follow what panda is actually running
+    # (issue #194).
     # ``panda_config_upload_unix`` carries the ``upload_time`` field that
     # ``Transport.upload_dict`` stamps on every upload, so the dashboard
     # can show operators how old the published config is.
@@ -329,10 +339,16 @@ class LiveStatusAggregator:
     obs_cfg
         Loaded ``obs_config.yaml``. Read for ``corr_save_dir``,
         ``corr_ntimes``, ``use_tempctrl``, ``tempctrl_settings``
-        — Thresholds/signal-enablement plumbing. The active
-        ``switch_schedule`` comes from the panda's ``ConfigStore``
-        (Redis), not from this dict, so the dashboard's "next change"
-        countdown reflects what panda is actually running.
+        — Thresholds/signal-enablement plumbing. This dict is the
+        *local-fallback* layer only: once a panda script uploads its
+        config to the panda ``ConfigStore`` (Redis), the panda-reality
+        slice of that upload is merged over it into
+        :attr:`obs_cfg_effective` (see
+        :func:`signals.effective_obs_cfg`), which is what gating,
+        bands, and the display calibration actually consume. The
+        active ``switch_schedule`` likewise comes from the upload, so
+        the dashboard's "next change" countdown reflects what panda is
+        actually running.
     thresholds
         Optional pre-built :class:`Thresholds`. If ``None``, one is
         built from the bundled YAML and the first corr header seen.
@@ -361,6 +377,16 @@ class LiveStatusAggregator:
         self.transport_snap = transport_snap
         self.transport_panda = transport_panda
         self.obs_cfg = dict(obs_cfg)
+        # Effective config = local YAML with the panda-reality slice
+        # overridden by the panda's Redis upload once one lands (issue
+        # #194). Starts as a plain copy; _maybe_recompute_config swaps
+        # in a freshly-merged dict (never mutated in place, so Flask
+        # handlers can read the reference without the lock).
+        self.obs_cfg_effective = effective_obs_cfg(self.obs_cfg, None)
+        # Last upload merged into obs_cfg_effective — the dirty flag
+        # for _maybe_recompute_config (dict equality; uploads land once
+        # per panda session against a ~4 Hz tick).
+        self._merged_panda_cfg: Optional[dict] = None
         self._snap_tick_s = snap_tick_s
         self._panda_tick_s = panda_tick_s
         self._snap_fpga_probe_interval_s = snap_fpga_probe_interval_s
@@ -884,6 +910,49 @@ class LiveStatusAggregator:
         self.thresholds = self.thresholds.with_header(header)
         self._thresholds_int_time = new_int_time
 
+    def _maybe_recompute_config(self, panda_cfg: dict) -> None:
+        """Refresh obs_cfg_effective + thresholds on a new upload.
+
+        Called under ``self._lock`` from ``_panda_tick`` whenever the
+        panda ``ConfigStore`` read returned a config. Dirty flag is
+        dict equality against the last upload merged — cheap at the
+        ~4 Hz tick (uploads change once per panda session), and robust
+        to a producer that violates the ``upload_time`` stamp contract
+        (the stamp is display plumbing, not the change detector).
+
+        Rebuilding via :meth:`Thresholds.with_obs_cfg` preserves the
+        YAML override layer and the current corr header; the sibling
+        integration-time flag (``_thresholds_int_time``) is untouched
+        because the header didn't change. Both rebuild sites swap the
+        ``self.thresholds`` reference under the same lock, so the two
+        drain threads can't lose each other's update.
+        """
+        if panda_cfg == self._merged_panda_cfg:
+            return
+        # Record the upload before attempting the rebuild so a junk
+        # config logs one ERROR, not one per ~4 Hz tick; a corrected
+        # upload differs and retries.
+        self._merged_panda_cfg = panda_cfg
+        merged = effective_obs_cfg(self.obs_cfg, panda_cfg)
+        try:
+            thresholds = self.thresholds.with_obs_cfg(merged)
+        except Exception as exc:
+            # Narrow safety net (logs loudly per CLAUDE.md): the
+            # dashboard is the field's only alerting surface, so a
+            # malformed upload must not half-apply — keep the previous
+            # gating/bands/effective-config trio intact until the
+            # producer is fixed.
+            logger.error(
+                "panda config upload cannot build thresholds (%s); "
+                "keeping previous gating and bands. Producer contract: "
+                "obs_config tempctrl_settings/corr_ntimes must be "
+                "numeric per config/obs_config.yaml.",
+                exc,
+            )
+            return
+        self.obs_cfg_effective = merged
+        self.thresholds = thresholds
+
     def _maybe_load_linear_range(self, s: StateSnapshot) -> None:
         """Populate the per-channel linear-range bounds on ``s``.
 
@@ -1094,6 +1163,7 @@ class LiveStatusAggregator:
                         exc,
                     )
                     s.panda_config_upload_unix = None
+                self._maybe_recompute_config(panda_cfg)
 
             if host_h is not None:
                 s.host_health_panda = host_h
@@ -1301,6 +1371,7 @@ class LiveStatusAggregator:
             "transport_snap",
             "transport_panda",
             "obs_cfg",
+            "obs_cfg_effective",
             "corr_reader",
             "corr_config",
             "adc_snapshot_reader",

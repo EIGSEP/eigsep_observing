@@ -289,3 +289,52 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
 .adc-cell:nth-last-child(2) {
   border-bottom: none;
 }
+
+/* Config panel: effective-config values, uploaded switch schedule, and
+   the threshold-band table. Refreshed on its own slow cadence (see
+   CONFIG_POLL_MS in dashboard.js) — config changes once per panda
+   session, not per integration. */
+.config-thresholds {
+  margin-top: 12px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.config-thresholds h3 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.config-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.config-table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 2px 12px 4px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-table td {
+  padding: 2px 12px 2px 0;
+  border-bottom: 1px solid var(--border);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  white-space: nowrap;
+}
+
+/* Signal names and provenance tags read better in the page font; the
+   numeric band columns keep the mono value styling. */
+.config-table td.signal,
+.config-table td.source {
+  font-family: inherit;
+}
+
+.config-table td.source { color: var(--muted); }
+
+.config-table tr:last-child td { border-bottom: none; }

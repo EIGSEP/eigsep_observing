@@ -359,7 +359,6 @@ class EigsepFpga:
         self.cfg["integration_time"] = calc_inttime(
             self.cfg["sample_rate"] * 1e6,
             self.cfg["corr_acc_len"],
-            acc_bins=acc_bins,
         )
 
     @property
@@ -421,7 +420,6 @@ class EigsepFpga:
         t_int = calc_inttime(
             sample_rate * 1e6,  # in Hz
             corr_acc_len,
-            acc_bins=acc_bins,
         )
         m = {
             "snap_ip": self.cfg["snap_ip"],

@@ -33,7 +33,13 @@ import numpy as np
 import pytest
 import yaml
 from picohost import PicoPotentiometer
-from picohost.base import PicoIMU, PicoLidar, PicoPeltier, PicoRFSwitch
+from picohost.base import (
+    PicoIMU,
+    PicoLidar,
+    PicoPeltier,
+    PicoRFSwitch,
+    redis_handler,
+)
 from picohost.motor import PicoMotor
 from picohost.testing import (
     ImuEmulator,
@@ -94,21 +100,30 @@ def _potmon_post_handler_reading():
 
 
 def _motor_post_handler_reading():
-    """Return a motor reading after _motor_redis_handler.
+    """Return a motor reading after the full publish boundary.
 
     The actual ``motor`` producer is the composition
     ``MotorEmulator.get_status()`` + ``PicoMotor._motor_redis_handler``
-    — the emulator (and the C firmware) emit position fields as
-    ``int`` (raw step counts), and the device handler is where they
-    are coerced to ``float`` so the consumer-side reduction picks the
-    float→mean policy rather than int→min. The contract this test
-    enforces is the *post-handler* shape (what reaches Redis), so the
-    fixture has to compose the two. Mirrors
-    ``_potmon_post_handler_reading``.
+    + the ``picohost.base.redis_handler`` publish closure. The emulator
+    (and the C firmware) emit position fields as ``int`` (raw step
+    counts); since picohost 4.3 the float cast lives in the publish
+    closure (``PicoMotor._REDIS_FLOAT_FIELDS``), not in
+    ``_motor_redis_handler`` itself, so the consumer-side reduction
+    picks the float→mean policy rather than int→min. The contract this
+    test enforces is the shape that reaches Redis, so the fixture
+    composes all three, with a capture-only writer standing in for the
+    ``MetadataWriter``. Mirrors ``_potmon_post_handler_reading``.
     """
+
+    class _CaptureWriter:
+        def add(self, name, data):
+            captured.update(data)
+
     motor = PicoMotor.__new__(PicoMotor)
     captured = {}
-    motor._base_redis_handler = lambda d: captured.update(d)
+    motor._base_redis_handler = redis_handler(
+        _CaptureWriter(), PicoMotor._REDIS_FLOAT_FIELDS
+    )
     # The handler also drives the position checkpoint / boot-detection
     # path (picohost 3.7.0); a None store makes it inert. This test is
     # about the published payload shape, not the checkpoint logic —
