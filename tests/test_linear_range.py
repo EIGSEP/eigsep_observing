@@ -150,3 +150,46 @@ def test_extra_live_header_fields_ignored():
     freely between measurement and deployment."""
     live = dict(HEADER, sync_time=0.0, run_tag="manual-session")
     assert linear_range.validate_operating_point(HEADER, live) == []
+
+
+# ---------------------------------------------------------------------
+# acc_len_rescale — display-only guide-for-the-eye ratio
+# ---------------------------------------------------------------------
+
+
+def test_acc_len_rescale_acc_len_only_mismatch():
+    """Product at 2**28, live at 2**26 — the deployment case: counts
+    are 4x smaller, so the bounds rescale by 0.25."""
+    live = dict(HEADER, corr_acc_len=HEADER["corr_acc_len"] // 4)
+    assert linear_range.acc_len_rescale(HEADER, live) == pytest.approx(0.25)
+
+
+def test_acc_len_rescale_full_match_is_none():
+    """No mismatch means no rescale is needed — consumers use the
+    bounds as-is."""
+    assert linear_range.acc_len_rescale(HEADER, dict(HEADER)) is None
+
+
+def test_acc_len_rescale_additional_mismatch_is_none():
+    """acc_len plus any other operating-point difference stays a hard
+    omit — the ratio only transfers between otherwise-identical
+    operating points."""
+    live = dict(
+        HEADER,
+        corr_acc_len=HEADER["corr_acc_len"] // 4,
+        adc_gain=HEADER["adc_gain"] + 1,
+    )
+    assert linear_range.acc_len_rescale(HEADER, live) is None
+
+
+def test_acc_len_rescale_other_field_only_is_none():
+    live = dict(HEADER, adc_gain=HEADER["adc_gain"] + 1)
+    assert linear_range.acc_len_rescale(HEADER, live) is None
+
+
+@pytest.mark.parametrize("bad", ["DIFFERENT", None, 0, -(2**26)])
+def test_acc_len_rescale_non_positive_or_non_numeric_is_none(bad):
+    live = dict(HEADER, corr_acc_len=bad)
+    if bad is None:
+        del live["corr_acc_len"]
+    assert linear_range.acc_len_rescale(HEADER, live) is None

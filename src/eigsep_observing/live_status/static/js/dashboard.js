@@ -419,23 +419,28 @@ function updateCorr(corr) {
     // the min bound only marks the bottom of the *verified* range;
     // cold cal states (load, noise-off) legitimately sit at or below
     // it, so it stays a faint informational dotted line.
+    // linear_range_scale set = the bounds were rescaled from a
+    // different corr_acc_len as a guide for the eye; surface that on
+    // the plot via a legend entry so the approximation is visible.
+    const lrScale = corr.linear_range_scale;
+    const lrSuffix = lrScale ? ` (×${lrScale} approx)` : "";
     magTraces.push({
       x: freqs,
       y: corr.linear_max,
       type: "scatter",
       mode: "lines",
-      name: "linear range max",
+      name: "linear range max" + lrSuffix,
       line: { dash: "dash", width: 1.5, color: LINEAR_MAX_WARN_COLOR },
       opacity: 0.9,
       hoverinfo: "skip",
-      showlegend: false,
+      showlegend: !!lrScale,
     });
     magTraces.push({
       x: freqs,
       y: corr.linear_min,
       type: "scatter",
       mode: "lines",
-      name: "linear range min",
+      name: "linear range min" + lrSuffix,
       line: { dash: "dot", width: 1, color: activeTheme.font },
       opacity: 0.35,
       hoverinfo: "skip",
