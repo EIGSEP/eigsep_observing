@@ -143,17 +143,38 @@ class Thresholds:
         Used by the aggregator when ``integration_time`` changes (e.g.
         after a re-sync). The old instance is discarded.
         """
-        # Reconstruct self._yaml_overrides with the danger-k entry if it
-        # was supplied — __init__ consumes it via dict.pop.
-        overrides = dict(self._yaml_overrides)
-        if self.tempctrl_danger_k_C != _DEFAULT_TEMPCTRL_DANGER_K_C:
-            overrides["tempctrl.danger_k_C"] = self.tempctrl_danger_k_C
         return Thresholds(
             obs_cfg=self.obs_cfg,
             corr_header=corr_header,
-            yaml_overrides=overrides,
+            yaml_overrides=self._rebuild_overrides(),
             registry=self._registry_arg,
         )
+
+    def with_obs_cfg(self, obs_cfg: dict) -> "Thresholds":
+        """Return a new Thresholds reflecting an updated obs_config.
+
+        Used by the aggregator when the panda's Redis config upload
+        changes (issue #194), so signal gating and the config-derived
+        bands follow the merged effective config. The old instance is
+        discarded.
+        """
+        return Thresholds(
+            obs_cfg=obs_cfg,
+            corr_header=self.corr_header,
+            yaml_overrides=self._rebuild_overrides(),
+            registry=self._registry_arg,
+        )
+
+    def _rebuild_overrides(self) -> dict:
+        """Reconstruct the yaml_overrides dict for a with_* rebuild.
+
+        ``__init__`` consumes the danger-k entry via ``dict.pop``, so a
+        non-default value must be re-injected for the new instance.
+        """
+        overrides = dict(self._yaml_overrides)
+        if self.tempctrl_danger_k_C != _DEFAULT_TEMPCTRL_DANGER_K_C:
+            overrides["tempctrl.danger_k_C"] = self.tempctrl_danger_k_C
+        return overrides
 
     def _resolve_band(self, name: str, derived: dict) -> dict:
         """Merge derived + YAML override for one signal."""

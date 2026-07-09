@@ -229,6 +229,61 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
 }
 
 
+# Top-level obs_config keys that describe panda-side reality: the
+# dashboard prefers the panda's Redis ConfigStore upload for these and
+# falls back to its local YAML when no upload has ever landed (issue
+# #194). ``switch_schedule`` is deliberately absent — it keeps the
+# stricter no-fallback contract in ``_rfswitch_payload`` (a parked
+# switch with no panda shows no countdown). ``corr_ntimes`` rides along
+# because the file-heartbeat band derives from it and the upload is the
+# obs_config actually embedded in file headers.
+PANDA_REALITY_KEYS = (
+    "use_switches",
+    "use_vna",
+    "use_motor",
+    "use_tempctrl",
+    "tempctrl_settings",
+    "corr_ntimes",
+)
+
+# Nested (section, field) pairs plucked individually from the upload.
+# Only ``calibration.t_load_stream`` follows panda reality (it names
+# the stream the hot-swapped LOAD module publishes on);
+# ``calibration.noise_diode_enr_db`` stays dashboard-local — it's a
+# display-cal tuning knob, not a claim about what panda is running.
+PANDA_REALITY_NESTED = (("calibration", "t_load_stream"),)
+
+
+def effective_obs_cfg(local_cfg: dict, panda_cfg: Optional[dict]) -> dict:
+    """Merge the panda-reality slice of the Redis upload over local.
+
+    Returns a new dict: ``local_cfg`` with every
+    :data:`PANDA_REALITY_KEYS` key (and :data:`PANDA_REALITY_NESTED`
+    field) that is present in ``panda_cfg`` overridden by the upload's
+    value. ``panda_cfg`` falsy (no upload ever landed on this Redis)
+    returns a plain copy of ``local_cfg`` — the local fallback is
+    load-bearing: the dashboard is precisely the tool you reach for
+    when ``panda_observe`` isn't running.
+
+    Keys absent from the upload keep their local value, so an older
+    producer that predates a config field degrades to local rather
+    than dropping the field.
+    """
+    out = dict(local_cfg)
+    if not panda_cfg:
+        return out
+    for key in PANDA_REALITY_KEYS:
+        if key in panda_cfg:
+            out[key] = panda_cfg[key]
+    for section, field_ in PANDA_REALITY_NESTED:
+        panda_section = panda_cfg.get(section)
+        if isinstance(panda_section, dict) and field_ in panda_section:
+            merged_section = dict(out.get(section) or {})
+            merged_section[field_] = panda_section[field_]
+            out[section] = merged_section
+    return out
+
+
 def enabled_signals(
     obs_cfg: dict, registry: Optional[dict[str, Signal]] = None
 ) -> dict[str, Signal]:

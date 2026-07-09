@@ -8,6 +8,7 @@ are deterministic.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 
@@ -922,6 +923,9 @@ def test_config_route_surfaces_redis_schedule_and_upload_time(client):
     assert data["config_upload_unix"] is not None
     # upload_time must be a Unix timestamp near now.
     assert abs(data["config_upload_unix"] - time.time()) < 60.0
+    # Provenance: an upload has landed, so the panda-reality slice of
+    # the config panel comes from it (issue #194).
+    assert data["config_source"] == "panda_upload"
 
 
 def test_config_route_schedule_empty_when_no_config_in_redis():
@@ -943,16 +947,224 @@ def test_config_route_schedule_empty_when_no_config_in_redis():
     try:
         agg._panda_tick()
         assert agg.state.panda_config_latest is None
+        # Local fallback is load-bearing: with no upload ever seen the
+        # effective config is exactly the local file (issue #194).
+        assert agg.obs_cfg_effective == OBS_CFG
         app = create_app(agg)
         app.config.update(TESTING=True)
         data = app.test_client().get("/api/config").get_json()["data"]
         assert data["switch_schedule"] == {}
         assert data["config_upload_unix"] is None
+        assert data["config_source"] == "local_file"
         # But disk-backed fields still come through (Thresholds-driving
         # rendering decisions, not runtime claims).
         assert data["use_tempctrl"] is True
     finally:
         agg.stop(timeout=1.0)
+
+
+# ---------------------------------------------------------------------
+# panda config upload → gating/thresholds (issue #194)
+# ---------------------------------------------------------------------
+
+
+def _tempctrl_row(stream: str, t_now: float) -> dict:
+    """One post-handler tempctrl metadata row (same shape as the
+    agg_primed fixture's)."""
+    return {
+        "sensor_name": stream,
+        "status": "update",
+        "app_id": 4,
+        "watchdog_tripped": False,
+        "watchdog_timeout_ms": 30000,
+        "T_now": t_now,
+        "timestamp": time.time(),
+        "T_target": 25.0,
+        "drive_level": 0.25,
+        "enabled": True,
+        "active": True,
+        "sensor_tripped": False,
+        "runaway_tripped": False,
+        "hysteresis": 0.5,
+        "clamp": 0.6,
+    }
+
+
+def test_panda_upload_regates_signals_and_thresholds():
+    """A panda upload that descopes LNA and moves the LOAD setpoint
+    re-gates the dashboard without a restart (issue #194): signal
+    gating, tempctrl bands, the cal-load stream, and /api/config all
+    follow the upload, while dashboard-local knobs stay from the
+    on-disk obs_cfg.
+    """
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+
+    panda_md = MetadataWriter(panda)
+    panda_md.add("tempctrl_lna", _tempctrl_row("tempctrl_lna", 25.1))
+    panda_md.add("tempctrl_load", _tempctrl_row("tempctrl_load", 25.0))
+    _rewind(
+        panda,
+        ["stream:tempctrl_lna", "stream:tempctrl_load", "stream:status"],
+    )
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+    try:
+        # Baseline: no upload yet — the local file gates.
+        agg._panda_tick()
+        assert agg.obs_cfg_effective == OBS_CFG
+        assert "tempctrl_lna.T_now" in agg.thresholds.registry
+
+        # panda_observe restarts with a diverged config: LNA descoped,
+        # LOAD setpoint moved, cal-load stream re-pointed (hot-swap).
+        upload = {
+            **OBS_CFG,
+            "tempctrl_settings": {
+                "LNA": {
+                    "installed": False,
+                    "enable": False,
+                    "target_C": 25.0,
+                    "hysteresis_C": 0.5,
+                    "clamp": 0.6,
+                },
+                "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
+            },
+            "calibration": {
+                **OBS_CFG["calibration"],
+                "t_load_stream": "tempctrl_lna",
+            },
+        }
+        ConfigStore(panda).upload(upload)
+        th_before = agg.thresholds
+        agg._panda_tick()
+
+        # Gating followed the upload: LNA tiles gone, LOAD band moved.
+        assert agg.thresholds is not th_before
+        assert "tempctrl_lna.T_now" not in agg.thresholds.registry
+        assert agg.thresholds.bands["tempctrl_load.T_now"]["healthy"] == [
+            29.0,
+            31.0,
+        ]
+        # calibration.t_load_stream was plucked from the upload; the
+        # ENR knob stays dashboard-local.
+        cal = agg.obs_cfg_effective["calibration"]
+        assert cal["t_load_stream"] == "tempctrl_lna"
+        assert (
+            cal["noise_diode_enr_db"]
+            == OBS_CFG["calibration"]["noise_diode_enr_db"]
+        )
+
+        app = create_app(agg)
+        app.config.update(TESTING=True)
+        client_ = app.test_client()
+
+        # /api/metadata: the descoped channel's snapshot entry lingers
+        # in the Redis hash until the OPERATIONS.md cleanup step, but
+        # it classifies against nothing; the live channel still does.
+        md = client_.get("/api/metadata").get_json()["data"]
+        assert md["tempctrl_lna"]["classify"] == {}
+        assert "tempctrl_load.T_now" in md["tempctrl_load"]["classify"]
+
+        # /api/config: effective values + provenance.
+        cfg_data = client_.get("/api/config").get_json()["data"]
+        assert cfg_data["config_source"] == "panda_upload"
+        assert cfg_data["tempctrl_settings"]["LNA"]["installed"] is False
+        assert cfg_data["tempctrl_settings"]["LOAD"]["target_C"] == 30.0
+        assert "tempctrl_lna.T_now" not in cfg_data["thresholds"]
+    finally:
+        agg.stop(timeout=1.0)
+
+
+def test_panda_config_recompute_only_on_upload_change(agg_primed):
+    """The merge is dirty-flagged on the upload content: re-reading the
+    same upload every tick must not churn out new Thresholds
+    instances, and a genuinely new upload must swap them."""
+    agg = agg_primed
+    th1 = agg.thresholds
+    cfg1 = agg.obs_cfg_effective
+    agg._panda_tick()  # same upload still in Redis
+    assert agg.thresholds is th1
+    assert agg.obs_cfg_effective is cfg1
+
+    # New upload with a different corr_ntimes: the file-heartbeat band
+    # follows (integration_time 0.27 came from the SNAP-side header and
+    # is preserved across the config rebuild).
+    ConfigStore(agg.transport_panda).upload({**OBS_CFG, "corr_ntimes": 480})
+    agg._panda_tick()
+    assert agg.thresholds is not th1
+    assert agg.obs_cfg_effective["corr_ntimes"] == 480
+    file_dur = 0.27 * 480
+    assert agg.thresholds.bands["file.seconds_since_write"][
+        "healthy"
+    ] == pytest.approx([0.0, 1.5 * file_dur])
+
+
+def test_panda_upload_malformed_keeps_previous_gating(agg_primed, caplog):
+    """A junk upload (non-numeric target_C) must not half-apply: the
+    effective config and thresholds keep the last-good state, one
+    ERROR names the contract violation (not one per ~4 Hz tick), and
+    a corrected upload recovers."""
+    agg = agg_primed
+    th_good = agg.thresholds
+    cfg_good = agg.obs_cfg_effective
+    bad = {
+        **OBS_CFG,
+        "tempctrl_settings": {
+            "LNA": {"target_C": "not-a-number", "hysteresis_C": 0.5},
+            "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5},
+        },
+    }
+    ConfigStore(agg.transport_panda).upload(bad)
+    with caplog.at_level(logging.ERROR):
+        agg._panda_tick()
+        assert agg.thresholds is th_good
+        assert agg.obs_cfg_effective is cfg_good
+        assert any(
+            "cannot build thresholds" in r.getMessage() for r in caplog.records
+        )
+
+        # Dirty flag remembers the bad upload: no repeat ERROR spam.
+        caplog.clear()
+        agg._panda_tick()
+        assert not any(
+            "cannot build thresholds" in r.getMessage() for r in caplog.records
+        )
+
+    # A corrected upload differs from the recorded bad one → recovers.
+    ConfigStore(agg.transport_panda).upload({**OBS_CFG, "corr_ntimes": 480})
+    agg._panda_tick()
+    assert agg.obs_cfg_effective["corr_ntimes"] == 480
+    assert agg.thresholds is not th_good
+
+
+def test_corr_route_calibrated_t_load_stream_follows_upload(agg_primed):
+    """Hot-swap contingency end-to-end: the panda upload names
+    ``tempctrl_lna`` as the cal-load stream; the calibrated corr route
+    must read T_LOAD from that stream without a dashboard restart."""
+    _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    upload = {
+        **OBS_CFG,
+        "calibration": {
+            **OBS_CFG["calibration"],
+            "t_load_stream": "tempctrl_lna",
+        },
+    }
+    ConfigStore(agg_primed.transport_panda).upload(upload)
+    agg_primed._panda_tick()
+
+    app = create_app(agg_primed)
+    app.config.update(TESTING=True)
+    body = app.test_client().get("/api/corr?calibrated=1").get_json()
+    meta = body["data"]["calibration_meta"]
+    assert meta["t_load_stream"] == "tempctrl_lna"
+    # tempctrl_lna's T_now is 25.1 C in the fixture (vs LOAD's 25.0) —
+    # proof the solve read the swapped stream, not the default.
+    assert meta["t_load_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
 
 
 def test_file_route(client):

@@ -36,7 +36,6 @@ from .calibration import (
 from ..io import pair_label
 from ..vna_calibration import VnaCache, calibrate_s11
 from .orientation import compute_orientation
-from .signals import enabled_signals
 from .thresholds import Thresholds
 
 
@@ -391,9 +390,13 @@ def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
             age_s = None
         status = value.get("status") if isinstance(value, dict) else None
         classify_by_sig: dict[str, str] = {}
-        # For every registered signal whose "domain" matches this
-        # sensor, run the classifier on the matching field.
-        for sig_name, sig in enabled_signals(thresholds.obs_cfg).items():
+        # For every enabled signal whose "domain" matches this sensor,
+        # run the classifier on the matching field. ``registry`` is the
+        # enabled-filtered view of the signal registry, built from the
+        # same obs_cfg the Thresholds instance was — the aggregator
+        # rebuilds it when the panda's config upload changes, so gating
+        # follows panda reality (issue #194).
+        for sig_name, sig in thresholds.registry.items():
             domain, _, field_ = sig_name.partition(".")
             if domain != sensor:
                 continue
@@ -717,19 +720,29 @@ def _config_payload(
 ) -> dict:
     """Surface configuration to the dashboard.
 
-    ``switch_schedule`` and ``config_upload_unix`` come from the
-    panda-side ``ConfigStore`` (Redis), so the panel shows what panda
-    last uploaded. They persist after panda exits — operators can read
-    ``config_upload_unix`` to see how stale the published config is.
-    The other fields (``tempctrl_settings``, ``corr_*``, ``use_*``)
-    still come from the on-disk ``obs_config.yaml`` the dashboard was
-    started with; they drive ``Thresholds`` rendering decisions, not
-    runtime claims about what panda is doing.
+    ``obs_cfg`` here is the aggregator's *effective* config: the local
+    YAML with the panda-reality slice (``tempctrl_settings``, ``use_*``
+    gates, ``corr_ntimes``, ``calibration.t_load_stream``) overridden
+    by the panda's Redis ``ConfigStore`` upload once one has landed
+    (issue #194). ``config_source`` records which side supplied that
+    slice — ``"panda_upload"`` when an upload has been seen on this
+    Redis, ``"local_file"`` when none ever has — and
+    ``config_upload_unix`` dates it (the upload persists after panda
+    exits, so during a manual-swap window it reflects last-run intent).
+
+    ``switch_schedule`` keeps its stricter no-fallback contract: it
+    comes only from the upload, so a parked switch with no panda ever
+    running shows no countdown.
     """
     panda_cfg = state.panda_config_latest or {}
     return {
         "switch_schedule": panda_cfg.get("switch_schedule", {}) or {},
         "config_upload_unix": state.panda_config_upload_unix,
+        "config_source": (
+            "panda_upload"
+            if state.panda_config_latest is not None
+            else "local_file"
+        ),
         "tempctrl_settings": obs_cfg.get("tempctrl_settings", {}) or {},
         "corr_save_dir": obs_cfg.get("corr_save_dir"),
         "corr_ntimes": obs_cfg.get("corr_ntimes"),
@@ -754,9 +767,12 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
 
     @app.route("/")
     def index():
+        # Effective view so any future template use of obs_cfg follows
+        # panda reality like the API routes do. Rendered once per page
+        # load — freshness rides on the aggregator's panda tick.
         return render_template(
             "index.html",
-            obs_cfg=aggregator.obs_cfg,
+            obs_cfg=aggregator.obs_cfg_effective,
         )
 
     @app.route("/plotly.min.js")
@@ -776,10 +792,14 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     def api_corr():
         state = aggregator.snapshot()
         calibrated = request.args.get("calibrated") == "1"
+        # Effective config so the display calibration's t_load_stream
+        # follows a hot-swap announced via the panda's config upload.
         return jsonify(
             _envelope(
                 _corr_payload(
-                    state, calibrated=calibrated, obs_cfg=aggregator.obs_cfg
+                    state,
+                    calibrated=calibrated,
+                    obs_cfg=aggregator.obs_cfg_effective,
                 )
             )
         )
@@ -823,7 +843,9 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
         return jsonify(
             _envelope(
                 _config_payload(
-                    state, aggregator.obs_cfg, aggregator.thresholds
+                    state,
+                    aggregator.obs_cfg_effective,
+                    aggregator.thresholds,
                 )
             )
         )

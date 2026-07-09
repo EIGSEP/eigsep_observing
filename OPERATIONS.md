@@ -353,9 +353,16 @@ the LNA connector):**
    stream key (`stream:tempctrl_load`), its `metadata` hash fields
    (`tempctrl_load`, `tempctrl_load_ts`), and its `metadata_streams`
    set entry.
-5. Restart `panda_observe`, and restart the live-status dashboard after
-   updating **its** copy of `obs_config.yaml` too — signal gating reads
-   the dashboard host's local file, not the panda's upload.
+5. Restart `panda_observe`. The live-status dashboard follows on its
+   own: signal gating, tempctrl bands, and the display calibration's
+   `t_load_stream` prefer the panda's Redis config upload over the
+   dashboard host's local file, so the restarted `panda_observe`'s
+   upload re-gates the dashboard within a tick — no dashboard-side
+   config edit or restart. During the swap window itself the dashboard
+   still renders the *last* upload's tiles (empty for the retired
+   channel); they self-heal at this step. Still sync the dashboard
+   host's `obs_config.yaml` when convenient — it remains the fallback
+   when no upload has ever landed on the panda Redis.
 6. Verify with `pico_preflight` (the retired row reads "no stream
    (channel uninstalled or producer fault)") and the dashboard cal
    panel.
