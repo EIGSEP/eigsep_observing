@@ -904,3 +904,46 @@ def test_load_stored_limits_malformed_payload_degrades_to_empty():
     publish_json(t, "motor_limits", ["not", "a", "dict"])
     mc = MotorClient(t)
     assert mc.az_limits_deg == (-200.0, 200.0)
+
+
+# ---------------------------------------------------------------------------
+# Task-1 additions: guard callable plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_wait_for_stop_guard_halts_and_raises(client):
+    """A guard raising MotorLimitError aborts the wait, halts the
+    motor, and re-raises — same contract as the sensor fence."""
+    motor = _motor(client.transport)
+    assert _wait_until_motor_status_available(motor)
+
+    def tripping_guard():
+        raise MotorLimitError("diverging")
+
+    with patch.object(motor, "halt") as halt:
+        with pytest.raises(MotorLimitError, match="diverging"):
+            motor._wait_for_stop(timeout=0.5, guard=tripping_guard)
+    halt.assert_called_once()
+
+
+def test_home_and_jogs_forward_guard(client):
+    """home() / jog_az() / jog_el() forward ``guard`` to
+    _send_and_wait for every axis move they issue."""
+    motor = _motor(client.transport)
+    assert _wait_until_motor_status_available(motor)
+    seen = []
+
+    def recording_send(action, **kwargs):
+        seen.append((action, kwargs.get("guard")))
+
+    sentinel = object()
+    with patch.object(motor, "_send_and_wait", side_effect=recording_send):
+        motor.home(guard=sentinel)
+        motor.jog_az(1.0, guard=sentinel)
+        motor.jog_el(-1.0, guard=sentinel)
+    assert [(a, g is sentinel) for a, g in seen] == [
+        ("az_target_steps", True),
+        ("el_target_steps", True),
+        ("az_move_deg", True),
+        ("el_move_deg", True),
+    ]
