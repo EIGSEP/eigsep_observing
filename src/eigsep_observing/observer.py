@@ -504,8 +504,14 @@ class EigObserver:
                     # (failed TCP connect) and at corr cadence that
                     # starves the writer below the producer rate —
                     # eventually losing corr rows to the stream cap.
-                    # Probe at most once per _PANDA_REPROBE_INTERVAL_S;
-                    # between probes, land the row immediately with
+                    # Probe at most once per _PANDA_REPROBE_INTERVAL_S,
+                    # timed from when the previous probe *returned*
+                    # (not when it started): a probe that itself blocks
+                    # longer than the interval (redis-py's retry policy
+                    # can push a failed connect past 30s against a
+                    # SYN-blackholed host) must still buy a full
+                    # cooldown of gated fast iterations afterward.
+                    # Between probes, land the row immediately with
                     # SNAP-side metadata only.
                     now_mono = time.monotonic()
                     probe_ok = False
@@ -513,7 +519,6 @@ class EigObserver:
                         now_mono - last_panda_probe_monotonic
                         >= _PANDA_REPROBE_INTERVAL_S
                     ):
-                        last_panda_probe_monotonic = now_mono
                         # On reconnect, jump every metadata stream past
                         # the outage backlog so the next drain picks up
                         # the producer's "now". Keeps the metadata
@@ -525,6 +530,8 @@ class EigObserver:
                             probe_ok = True
                         except redis.exceptions.ConnectionError:
                             probe_ok = False
+                        finally:
+                            last_panda_probe_monotonic = time.monotonic()
                     if not probe_ok:
                         metadata = {}
                         adc = self.adc_metadata_stream.drain()
