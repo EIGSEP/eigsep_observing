@@ -718,6 +718,74 @@ def test_reset_step_position_sends_command():
 
 
 # ---------------------------------------------------------------------------
+# Per-axis home (axes=...)
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(pred, timeout=2.0, interval=0.05):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False
+
+
+def test_home_az_only_leaves_el(client):
+    """``home(axes=("az",))`` drives az to step 0 and never touches el."""
+    motor_client = _motor(client.transport)
+    motor = client._manager.picos["motor"]
+    motor_client.move_to(az_deg=2.0, el_deg=2.0)
+    el_target = motor._emulator.elevation.target_pos
+    assert el_target != 0
+    motor_client.home(axes=("az",))
+    assert motor._emulator.azimuth.target_pos == 0
+    assert motor._emulator.azimuth.position == 0
+    assert motor._emulator.elevation.target_pos == el_target
+    assert motor._emulator.elevation.position == el_target
+
+
+def test_home_el_only_leaves_az(client):
+    """``home(axes=("el",))`` drives el to step 0 and never touches az."""
+    motor_client = _motor(client.transport)
+    motor = client._manager.picos["motor"]
+    motor_client.move_to(az_deg=2.0, el_deg=2.0)
+    az_target = motor._emulator.azimuth.target_pos
+    assert az_target != 0
+    motor_client.home(axes=("el",))
+    assert motor._emulator.elevation.target_pos == 0
+    assert motor._emulator.elevation.position == 0
+    assert motor._emulator.azimuth.target_pos == az_target
+    assert motor._emulator.azimuth.position == az_target
+
+
+def test_home_invalid_axes_raises():
+    mc = MotorClient(DummyTransport())
+    with pytest.raises(ValueError, match="axes"):
+        mc.home(axes=("foo",))
+    with pytest.raises(ValueError, match="axes"):
+        mc.home(axes=())
+
+
+def test_reset_step_position_none_preserves_other_axis(client):
+    """``az_step``/``el_step`` of ``None`` skips that axis' counter.
+
+    Characterizes the firmware contract the per-axis homer relies on:
+    ``picohost.PicoMotor.reset_step_position`` omits a ``None`` axis
+    from the command, so its counter is untouched.
+    """
+    mc = _motor(client.transport)
+    motor = client._manager.picos["motor"]
+    mc.move_to(az_deg=2.0, el_deg=2.0)
+    el_pos = motor._emulator.elevation.position
+    assert el_pos != 0
+    mc.reset_step_position(az_step=0, el_step=None)
+    assert _wait_until(lambda: motor._emulator.azimuth.position == 0)
+    assert motor._emulator.elevation.position == el_pos
+    assert motor._emulator.elevation.target_pos == el_pos
+
+
+# ---------------------------------------------------------------------------
 # _read_fence_sensors: IMU cross-check logger suppression
 # ---------------------------------------------------------------------------
 

@@ -30,10 +30,12 @@ class _BlockingHomer:
     def __init__(self):
         self.home_calls = 0
         self.last_stop_event = None
+        self.last_axes = None
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         self.home_calls += 1
         self.last_stop_event = stop_event
+        self.last_axes = tuple(axes)
         if stop_event is not None:
             stop_event.wait(timeout=2.0)
 
@@ -361,7 +363,7 @@ def test_handle_key_h_runs_homer_in_background(client):
             self.home_calls = 0
             self.last_stop_event = None
 
-        def home(self, stop_event=None):
+        def home(self, stop_event=None, axes=("az", "el")):
             self.home_calls += 1
             self.last_stop_event = stop_event
 
@@ -392,6 +394,40 @@ def test_handle_key_h_sets_homing_and_any_key_cancels(client):
     assert zeroed is False
     assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
     assert motor._emulator.azimuth.target_pos == before
+
+
+def test_handle_key_h_homes_both_axes(client):
+    """'h' keeps its home-both behavior: the homer gets both axes."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("az", "el")
+    assert zeroer.homing_axes == ("az", "el")
+    zeroer.cancel_home()
+
+
+def test_handle_key_a_homes_az_only(client):
+    """'a' starts a background az-only home; ``homing_axes`` feeds the
+    UI banner."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("a"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("az",)
+    assert zeroer.homing_axes == ("az",)
+    zeroer.cancel_home()
+
+
+def test_handle_key_e_homes_el_only(client):
+    """'e' starts a background el-only home."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.handle_key(ord("e"), 1.0)
+    assert _wait_until(lambda: fake.last_axes is not None, timeout=1.0)
+    assert fake.last_axes == ("el",)
+    assert zeroer.homing_axes == ("el",)
+    zeroer.cancel_home()
 
 
 def test_handle_key_h_ignored_when_unavailable(client, monkeypatch):
@@ -471,7 +507,7 @@ def test_zeroer_passes_enforce_limits_to_motor_client():
 class _LimitTrippingHomer:
     """Stand-in ``MotorHomer`` whose ``home`` trips the sensor fence."""
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         raise MotorLimitError(
             "pot_az_voltage 2.900 V outside safe window [0.500, 2.500]; "
             "refusing az move."
@@ -546,7 +582,7 @@ class _ConvergingHomer:
     def __init__(self):
         self.home_calls = 0
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         from eigsep_observing.motor_homer import HomeResult
 
         self.home_calls += 1

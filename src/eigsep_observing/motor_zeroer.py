@@ -108,6 +108,7 @@ class MotorZeroer:
         # last_home_result for the outcome.
         self._confirm_starts_home = confirm_starts_home
         self._homing = False
+        self._homing_axes = ("az", "el")
         self._home_thread = None
         self._home_stop = None
         # HomeResult of the last completed background home; None while
@@ -125,6 +126,14 @@ class MotorZeroer:
         that jog/zero keys are currently inert.
         """
         return self._homing
+
+    @property
+    def homing_axes(self):
+        """Axes targeted by the current (or most recent) background
+        home. The curses layer reads this while :attr:`is_homing` to
+        render an axis-specific banner.
+        """
+        return self._homing_axes
 
     @property
     def pending_zero(self):
@@ -177,7 +186,7 @@ class MotorZeroer:
         self._proxy.send_command("halt")
         self._proxy.send_command("reset_step_position", az_step=0, el_step=0)
 
-    def start_home(self):
+    def start_home(self, axes=("az", "el")):
         """Begin driving to the cal-defined home in a background thread.
 
         No-op if a home is already in flight or the manager is
@@ -188,9 +197,15 @@ class MotorZeroer:
         :meth:`cancel_home`, or after a logged error. A missing pot
         calibration surfaces as an actionable :attr:`notice`; there is
         deliberately no silent step-0 fallback.
+
+        ``axes`` (a non-empty subset of ``("az", "el")``, default both)
+        restricts the home to the given axes — the other axis is never
+        moved and keeps its step counter. See :meth:`MotorHomer.home`.
         """
         if self._homing or not self.is_available:
             return
+        axes = tuple(axes)
+        self._homing_axes = axes
         self._home_stop = threading.Event()
         self._homing = True
         self.last_home_result = None
@@ -198,7 +213,7 @@ class MotorZeroer:
         def _run():
             try:
                 self.last_home_result = self._homer.home(
-                    stop_event=self._home_stop
+                    stop_event=self._home_stop, axes=axes
                 )
             except MotorLimitError as exc:
                 self.logger.warning("home denied: %s", exc)
@@ -309,10 +324,12 @@ class MotorZeroer:
             return deg_state + 1, False, False
         if key == "-":
             return max(0.1, deg_state - 1), False, False
-        if key == "h":
-            # Start driving back to step 0 in the background; start_home
-            # no-ops if the manager is unreachable.
-            self.start_home()
+        if key in ("h", "a", "e"):
+            # Start driving to the cal-defined home in the background:
+            # 'h' homes both axes, 'a' azimuth only, 'e' elevation only.
+            # start_home no-ops if the manager is unreachable.
+            axes = {"h": ("az", "el"), "a": ("az",), "e": ("el",)}[key]
+            self.start_home(axes=axes)
             return deg_state, False, False
         if key in ("u", "d", "l", "r"):
             if not self.is_available:

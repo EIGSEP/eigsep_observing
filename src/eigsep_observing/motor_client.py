@@ -35,6 +35,18 @@ class MotorLimitError(ValueError):
     axis outside its configured safe-travel window."""
 
 
+def validate_axes(axes):
+    """Return ``axes`` as a tuple, or raise ``ValueError`` unless it is a
+    non-empty subset of ``("az", "el")``. Shared by the per-axis ``home``
+    entry points (:meth:`MotorClient.home`, ``MotorHomer.home``)."""
+    axes = tuple(axes)
+    if not axes or any(a not in ("az", "el") for a in axes):
+        raise ValueError(
+            f"axes must be a non-empty subset of ('az', 'el'); got {axes!r}"
+        )
+    return axes
+
+
 class MotorClient:
     """Drive the motor pico through ``PicoManager`` via Redis.
 
@@ -196,8 +208,12 @@ class MotorClient:
 
     def reset_step_position(self, az_step=0, el_step=0):
         """Define the current physical pose as the given step counts
-        (default origin). No motion — intentionally bypasses the travel
-        guard; used by MotorHomer to re-zero the count at converged home."""
+        (default origin). ``None`` for either axis leaves that axis'
+        counter untouched (``picohost.PicoMotor.reset_step_position``
+        omits a ``None`` axis from the firmware command) — that is how a
+        single-axis home re-zeros only its own counter. No motion —
+        intentionally bypasses the travel guard; used by MotorHomer to
+        re-zero the count at converged home."""
         self._proxy.send_command(
             "reset_step_position", az_step=az_step, el_step=el_step
         )
@@ -514,32 +530,43 @@ class MotorClient:
                 target_deg=target_deg,
             )
 
-    def home(self, stop_event=None):
-        """Drive both axes to step position 0, one at a time.
+    def home(self, stop_event=None, axes=("az", "el")):
+        """Drive the requested axes to step position 0, one at a time.
 
-        Only one motor moves at once: az homes first, then el. Running
-        both simultaneously is a mechanical-safety hazard on the rig
-        and matches the historical ``picohost`` script behavior.
+        Only one motor moves at once: az homes first, then el (when
+        both are requested). Running both simultaneously is a
+        mechanical-safety hazard on the rig and matches the historical
+        ``picohost`` script behavior.
 
-        ``stop_event`` (optional) enables cooperative cancellation: a
-        set event halts the in-flight axis and skips the next one, so a
-        background home (``motor_manual.py``) can be aborted mid-move.
+        Parameters
+        ----------
+        stop_event : threading.Event or None
+            Cooperative cancellation: a set event halts the in-flight
+            axis and skips any remaining one, so a background home
+            (``motor_manual.py``) can be aborted mid-move.
+        axes : tuple of str
+            Axes to home, a non-empty subset of ``("az", "el")``
+            (default both). The drive order is always az before el
+            regardless of the order given here.
+
+        Raises
+        ------
+        ValueError
+            If ``axes`` is empty or names an unknown axis.
         """
+        axes = validate_axes(axes)
         self._await_initial_status()
-        self._send_and_wait(
-            "az_target_steps",
-            label="home az",
-            target_steps=0,
-            stop_event=stop_event,
-        )
-        if stop_event is not None and stop_event.is_set():
-            return
-        self._send_and_wait(
-            "el_target_steps",
-            label="home el",
-            target_steps=0,
-            stop_event=stop_event,
-        )
+        for axis in ("az", "el"):
+            if axis not in axes:
+                continue
+            if stop_event is not None and stop_event.is_set():
+                return
+            self._send_and_wait(
+                f"{axis}_target_steps",
+                label=f"home {axis}",
+                target_steps=0,
+                stop_event=stop_event,
+            )
 
     def jog_az(self, delta_deg, *, stop_event=None):
         """Jog az by ``delta_deg`` degrees, blocking until the move stops.

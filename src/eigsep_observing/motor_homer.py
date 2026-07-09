@@ -22,7 +22,7 @@ from eigsep_redis import MetadataSnapshotReader
 from picohost.buses import PotCalStore
 
 from .el_sensor import read_el_estimate
-from .motor_client import MotorClient
+from .motor_client import MotorClient, validate_axes
 from .motor_limits import read_motor_limits
 
 logger = logging.getLogger(__name__)
@@ -269,51 +269,72 @@ class MotorHomer:
         elif self.settle_s:
             time.sleep(self.settle_s)
 
-    def home(self, stop_event=None):
+    def home(self, stop_event=None, axes=("az", "el")):
         """Drive the motor to the cal-defined home (pot 0°, IMU-level el).
 
         Parameters
         ----------
         stop_event : threading.Event or None
             When set, the loop exits at the next interruptible point.
+        axes : tuple of str
+            Axes to home, a non-empty subset of ``("az", "el")``
+            (default both). An axis not requested is never moved, its
+            residual in the result is ``None``, and its step counter is
+            preserved on the convergence re-zero. An el-only home needs
+            no pot calibration — the cal requirement is purely an az
+            concern.
 
         Returns
         -------
         HomeResult
-            ``converged`` is ``True`` when both residuals are within
-            tolerance; ``degraded`` is ``True`` when sensors were
-            unavailable and open-loop fall-back was used.
+            ``converged`` is ``True`` when every requested axis'
+            residual is within tolerance; ``degraded`` is ``True`` when
+            the requested axes' sensors were unavailable and open-loop
+            fall-back was used.
 
         Raises
         ------
         RuntimeError
-            When no pot calibration is stored, or when the cal's
-            zero-angle voltage falls outside the configured pot limit
-            window (broken cal — refuse before moving).
+            When az is requested and no pot calibration is stored, or
+            when the cal's zero-angle voltage falls outside the
+            configured pot limit window (broken cal — refuse before
+            moving).
+        ValueError
+            If ``axes`` is empty or names an unknown axis.
         """
-        v_home = self.az_home_voltage()
-        self._check_home_in_window(v_home)
+        axes = validate_axes(axes)
+        do_az = "az" in axes
+        do_el = "el" in axes
+        v_home = None
+        if do_az:
+            v_home = self.az_home_voltage()
+            self._check_home_in_window(v_home)
 
         pot_v, el_est = self._read_sensors()
-        if pot_v is None and el_est.el_deg is None:
+        has_feedback = (do_az and pot_v is not None) or (
+            do_el and el_est.el_deg is not None
+        )
+        if not has_feedback:
             self.logger.warning(
                 "Homing sensors unavailable; falling back to open-loop "
                 "home() — position will not be verified."
             )
-            self.motor_client.home(stop_event=stop_event)
+            self.motor_client.home(stop_event=stop_event, axes=axes)
             return HomeResult(
                 False,
                 0,
-                float("nan"),
-                float("nan"),
+                float("nan") if do_az else None,
+                float("nan") if do_el else None,
                 degraded=True,
                 reset_count=False,
             )
 
-        self.motor_client.home(stop_event=stop_event)  # coarse approach
+        # coarse approach
+        self.motor_client.home(stop_event=stop_event, axes=axes)
         az_sign, el_sign = 1.0, 1.0
         last_az = last_el = None
-        res_az = res_el = float("nan")
+        res_az = float("nan") if do_az else None
+        res_el = float("nan") if do_el else None
         converged = False
         i = 0
         for i in range(1, self.max_iters + 1):
@@ -321,8 +342,10 @@ class MotorHomer:
                 break
             self._settle(stop_event)
             pot_v, el_est = self._read_sensors()
-            res_az = self._az_residual_deg(v_home, pot_v)
-            res_el, _ = self._el_residual(el_est)
+            res_az = self._az_residual_deg(v_home, pot_v) if do_az else None
+            res_el = self._el_residual(el_est)[0] if do_el else None
+            # An unrequested axis' residual is None by construction, so
+            # this still means "every requested axis lost feedback".
             if res_az is None and res_el is None:
                 self.logger.warning(
                     "Homing lost all sensor feedback mid-loop; aborting "
@@ -361,7 +384,12 @@ class MotorHomer:
 
         did_reset = False
         if converged and self.reset_count:
-            self.motor_client.reset_step_position(az_step=0, el_step=0)
+            # None preserves the unrequested axis' counter (firmware
+            # omits a None axis from the reset command).
+            self.motor_client.reset_step_position(
+                az_step=0 if do_az else None,
+                el_step=0 if do_el else None,
+            )
             did_reset = True
         if not converged:
             self.logger.warning(
