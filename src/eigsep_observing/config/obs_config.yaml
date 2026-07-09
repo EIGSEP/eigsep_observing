@@ -16,7 +16,8 @@ switch_schedule:  # seconds per measurement
   RFNOFF: 60  # noise source off (offline cross-check)
   RFNON: 60  # noise source on (Y-factor hot reference)
   RFAMB: 60  # ambient load (Y-factor cold reference)
-  RFSP1: 60  # Spare 1 port, see switch_connections
+  RFSP1_SHORT: 60  # Spare 1 port, SHORT termination, see switch_connections
+  RFSP1_OPEN: 60  # Spare 1 port, OPEN termination, see switch_connections
 
 # What is physically connected to the spare rfswitch ports right now.
 # Purely descriptive — no code reads it. It rides into every corr and

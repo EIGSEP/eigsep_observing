@@ -13,7 +13,8 @@ switch_schedule:  # seconds per measurement
   RFNOFF: 20  # noise source off (offline cross-check)
   RFNON: 20  # noise source on (Y-factor hot reference)
   RFAMB: 20  # ambient load (Y-factor cold reference)
-  RFSP1: 20  # Spare 1 port, see switch_connections
+  RFSP1_SHORT: 20  # Spare 1 port, SHORT termination, see switch_connections
+  RFSP1_OPEN: 20  # Spare 1 port, OPEN termination, see switch_connections
 switch_connections:
   SP1: "long coax cable, open end"
   SP2: null
