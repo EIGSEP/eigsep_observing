@@ -10,6 +10,12 @@ first-order-calibrated S11 (ideal +1/-1/0 OSL — the same calibration
 ``eigsep_observing.vna_calibration.calibrate_s11`` applies on the
 dashboard).
 
+``d STATE`` (e.g. ``d VNAANT``) takes a one-off raw probe of a single
+switch path via ``cmt_vna.VNA.measure_dut`` — no OSL, saved locally
+only (the VNA stream protocol is bundle-shaped, so probes are not
+published). ``--once`` runs any one command non-interactively and
+exits, e.g. ``vna_manual.py --once d VNAANT``.
+
 Follows the bring-up contract in ``scripts/CLAUDE.md``: builds only
 the minimal VNA producer subsystem via
 :func:`eigsep_observing.vna.build_vna_subsystem`, never a
@@ -41,7 +47,9 @@ from eigsep_observing._scripts_util import (
 from eigsep_observing.utils import configure_eig_logger, get_config_path
 from eigsep_observing.vna import (
     build_vna_subsystem,
+    measure_dut,
     measure_s11,
+    save_vna_dut_h5,
     save_vna_manual_h5,
 )
 
@@ -83,6 +91,8 @@ def _print_menu(last_summary):
         print(f"Last bundle: {last_summary}")
     print("  [a] antenna bundle  (OSL + VNAANT + VNANOFF + VNANON)")
     print("  [r] receiver bundle (OSL + VNARF)")
+    print('  [d STATE] one-off probe of one switch path (e.g. "d VNAANT");')
+    print("            raw-only local .h5, no OSL, not published to Redis")
     print("  [q] quit")
 
 
@@ -113,28 +123,65 @@ def _run_bundle(subsystem, cfg, transport, mode, save_dir):
     return f"{mode} saved {path.name}  (|Γ|_{mode}_mean={db:.1f} dB)"
 
 
+def _run_dut(subsystem, cfg, transport, state, save_dir):
+    try:
+        s11, header, metadata = measure_dut(
+            subsystem.vna,
+            state,
+            cfg=cfg,
+            transport=transport,
+            metadata_snapshot=subsystem.metadata_snapshot,
+        )
+    except (RuntimeError, TimeoutError, ValueError) as exc:
+        return f"!! dut {state} probe failed: {type(exc).__name__}: {exc}"
+    try:
+        path = save_vna_dut_h5(
+            s11, header, metadata, save_dir=save_dir, state=state
+        )
+    except OSError as exc:
+        return f"!! dut {state} measured but local save failed: {exc}"
+    db = _summary_db(s11)
+    return f"dut {state} saved {path.name}  (|Γ|_mean={db:.1f} dB)"
+
+
+def _dispatch(tokens, subsystem, cfg, transport, save_dir):
+    """Run one command; ``tokens`` is the whitespace-split input.
+
+    Shared by the REPL and ``--once``: ``("a",)`` / ``("r",)`` run a
+    bundle, ``("d", "<STATE>")`` runs a one-off probe. Returns a
+    one-line summary; failures start with ``!!``, unrecognized input
+    with ``??``.
+    """
+    cmd = tokens[0].lower()
+    if cmd in ("a", "r") and len(tokens) == 1:
+        mode = "ant" if cmd == "a" else "rec"
+        return _run_bundle(subsystem, cfg, transport, mode, save_dir)
+    if cmd == "d" and len(tokens) == 2:
+        state = tokens[1].upper()
+        return _run_dut(subsystem, cfg, transport, state, save_dir)
+    return f"?? unrecognized command: {' '.join(tokens)!r}"
+
+
 def _repl(subsystem, cfg, transport, save_dir):
     last = ""
     while True:
         _print_menu(last)
         try:
-            choice = input("Select> ").strip().lower()
+            choice = input("Select> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
         if choice == "":
             continue
-        if choice == "q":
+        if choice.lower() == "q":
             return
-        if choice in ("a", "r"):
-            mode = "ant" if choice == "a" else "rec"
-            try:
-                last = _run_bundle(subsystem, cfg, transport, mode, save_dir)
-            except KeyboardInterrupt:
-                last = f"!! {mode} bundle interrupted"
-            print(last)
-            continue
-        print(f"  ?? unrecognized input: {choice!r}")
+        try:
+            last = _dispatch(
+                tuple(choice.split()), subsystem, cfg, transport, save_dir
+            )
+        except KeyboardInterrupt:
+            last = f"!! {choice} interrupted"
+        print(last)
 
 
 def _parse_args():
@@ -166,6 +213,17 @@ def _parse_args():
             "obs_config.yaml, or dummy_config.yaml with --dummy."
         ),
     )
+    parser.add_argument(
+        "--once",
+        nargs="+",
+        default=None,
+        metavar="CMD",
+        help=(
+            "Run one command non-interactively and exit (non-zero on "
+            "failure). Same tokens as the REPL: 'a', 'r', or 'd STATE' "
+            "— e.g. --once d VNAANT for a one-off antenna-path probe."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -195,8 +253,20 @@ def main():
     )
     with run_tag.session(transport, "vna_manual"):
         try:
-            _print_banner(cfg, args.save_dir)
-            _repl(subsystem, cfg, transport, args.save_dir)
+            if args.once is not None:
+                line = _dispatch(
+                    tuple(args.once),
+                    subsystem,
+                    cfg,
+                    transport,
+                    args.save_dir,
+                )
+                print(line)
+                if line.startswith(("!!", "??")):
+                    raise SystemExit(1)
+            else:
+                _print_banner(cfg, args.save_dir)
+                _repl(subsystem, cfg, transport, args.save_dir)
         finally:
             subsystem.cleanup()
 

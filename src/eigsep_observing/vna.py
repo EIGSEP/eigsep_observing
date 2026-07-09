@@ -264,6 +264,39 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     )
 
 
+def _stamp_provenance(header, transport, cfg):
+    """Overlay Redis-side provenance onto a VNA header, in place.
+
+    The shared header block for every VNA capture: snapshot timestamp,
+    active ``run_tag``, ``obs_config`` ownership, the full ``cfg``, and
+    the IMU calibration. Absent Redis state lands as the sentinel
+    ``"UNKNOWN"`` / ``0.0`` values so headers stay schema-shaped.
+    """
+    header["metadata_snapshot_unix"] = time.time()
+    tag = run_tag.read(transport)
+    owner = obs_config_owner.read_owner(transport)
+    header["run_tag"] = (
+        tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
+    )
+    header["run_started_at_unix"] = (
+        tag["run_started_at_unix"]
+        if tag["run_started_at_unix"] is not None
+        else 0.0
+    )
+    header["obs_config_owner"] = (
+        owner["owner"] if owner["owner"] is not None else "UNKNOWN"
+    )
+    header["obs_config_owner_uploaded_unix"] = (
+        owner["uploaded_at_unix"]
+        if owner["uploaded_at_unix"] is not None
+        else 0.0
+    )
+    header["obs_config"] = dict(cfg)
+    cal = imu_calibration.read_calibration(transport)
+    header["imu_calibration"] = cal
+    header["imu_calibration_upload_unix"] = imu_calibration.upload_unix(cal)
+
+
 def measure_s11(
     vna,
     mode,
@@ -365,29 +398,7 @@ def measure_s11(
 
     header = vna.header
     header["mode"] = mode
-    header["metadata_snapshot_unix"] = time.time()
-    tag = run_tag.read(transport)
-    owner = obs_config_owner.read_owner(transport)
-    header["run_tag"] = (
-        tag["run_tag"] if tag["run_tag"] is not None else "UNKNOWN"
-    )
-    header["run_started_at_unix"] = (
-        tag["run_started_at_unix"]
-        if tag["run_started_at_unix"] is not None
-        else 0.0
-    )
-    header["obs_config_owner"] = (
-        owner["owner"] if owner["owner"] is not None else "UNKNOWN"
-    )
-    header["obs_config_owner_uploaded_unix"] = (
-        owner["uploaded_at_unix"]
-        if owner["uploaded_at_unix"] is not None
-        else 0.0
-    )
-    header["obs_config"] = dict(cfg)
-    cal = imu_calibration.read_calibration(transport)
-    header["imu_calibration"] = cal
-    header["imu_calibration_upload_unix"] = imu_calibration.upload_unix(cal)
+    _stamp_provenance(header, transport, cfg)
     metadata = metadata_snapshot.get()
 
     violations = _validate_vna_s11_header(header) + _validate_vna_s11_data(
@@ -403,6 +414,78 @@ def measure_s11(
     vna_writer.add(s11, header=header, metadata=metadata)
     logger.info("Vna data added to redis")
     return s11, header, metadata
+
+
+def measure_dut(vna, state, *, cfg, transport, metadata_snapshot):
+    """Run one one-off S11 probe of an arbitrary switch path.
+
+    The bring-up companion to :func:`measure_s11`: routes the RF
+    switch to ``state`` via ``cmt_vna.VNA.measure_dut`` and takes a
+    single sweep — no OSL standards and no publish on the VNA stream.
+    The stream protocol is bundle-shaped (OSL + DUT + validated
+    header), so a lone probe trace is a local artifact only; keep it
+    with :func:`save_vna_dut_h5`.
+
+    Power is whatever the VNA is currently set to
+    (``build_vna_subsystem`` applies ``vna_settings`` with the ``ant``
+    power); set ``vna.power_dBm`` first if a different level is
+    needed.
+
+    Parameters
+    ----------
+    vna : cmt_vna.VNA
+        Configured VNA instance with ``switch_fn`` already wired.
+    state : str
+        Switch path name, passed verbatim to the switch (e.g.
+        ``"VNAANT"``, ``"VNANON"``).
+    cfg : dict
+        Observing config, embedded into the header as ``obs_config``.
+    transport : eigsep_redis.Transport
+        Used to read the active ``run_tag`` for the header overlay.
+    metadata_snapshot : eigsep_redis.MetadataSnapshotReader
+        Captures the panda-side metadata at the moment of the probe.
+
+    Returns
+    -------
+    s11 : np.ndarray
+        Complex S11 sweep of the selected path.
+    header : dict
+        Instrument header plus the provenance overlays of
+        :func:`measure_s11`; ``mode`` is ``"dut:<state>"``.
+    metadata : dict
+        Panda-side metadata snapshot captured at probe time.
+
+    Raises
+    ------
+    RuntimeError
+        If ``vna`` is ``None``.
+    """
+    if vna is None:
+        raise RuntimeError(
+            "VNA not initialized. Open a VNA session first "
+            "(PandaClient.vna_open()/vna_session(), or "
+            "build_vna_subsystem)."
+        )
+    logger.info("Measuring one-off DUT S11: %s", state)
+    s11 = vna.measure_dut(state)
+    header = vna.header
+    header["mode"] = f"dut:{state}"
+    _stamp_provenance(header, transport, cfg)
+    metadata = metadata_snapshot.get()
+    return s11, header, metadata
+
+
+def _write_json_attrs(target, mapping, skip=()):
+    """Write a dict onto an h5 node's attrs, JSON-encoding nested values."""
+    for k, v in mapping.items():
+        if k in skip:
+            continue
+        if isinstance(v, (dict, list, tuple)):
+            target.attrs[k] = json.dumps(v)
+        elif isinstance(v, np.ndarray):
+            target.attrs[k] = json.dumps(v.tolist())
+        else:
+            target.attrs[k] = v
 
 
 def save_vna_manual_h5(s11, header, metadata, *, save_dir, mode):
@@ -480,23 +563,51 @@ def save_vna_manual_h5(s11, header, metadata, *, save_dir, mode):
         f.create_dataset(
             "freqs", data=np.asarray(header["freqs"], dtype=float)
         )
-        for k, v in header.items():
-            if k in {"freqs", "mode"}:
-                continue
-            if isinstance(v, (dict, list, tuple)):
-                f.attrs[k] = json.dumps(v)
-            elif isinstance(v, np.ndarray):
-                f.attrs[k] = json.dumps(v.tolist())
-            else:
-                f.attrs[k] = v
+        _write_json_attrs(f, header, skip={"freqs", "mode"})
         f.attrs["mode"] = mode
         f.attrs["vna_manual_script_version"] = "1"
-        meta_grp = f.create_group("metadata_snapshot")
-        for k, v in (metadata or {}).items():
-            if isinstance(v, (dict, list, tuple)):
-                meta_grp.attrs[k] = json.dumps(v)
-            elif isinstance(v, np.ndarray):
-                meta_grp.attrs[k] = json.dumps(v.tolist())
-            else:
-                meta_grp.attrs[k] = v
+        _write_json_attrs(f.create_group("metadata_snapshot"), metadata or {})
+    return path
+
+
+def save_vna_dut_h5(s11, header, metadata, *, save_dir, state):
+    """Write one one-off DUT probe to a local HDF5 file.
+
+    Raw-only companion to :func:`save_vna_manual_h5` for
+    :func:`measure_dut` captures: the sweep under ``/raw/<state>``,
+    the freq axis under ``/freqs``, the header on root attrs, and the
+    metadata snapshot under ``/metadata_snapshot/`` attrs. There is no
+    ``/calibrated/`` group — a probe carries no OSL standards to
+    calibrate against.
+
+    Parameters
+    ----------
+    s11 : np.ndarray
+        Complex S11 sweep from :func:`measure_dut`.
+    header : dict
+        Header from :func:`measure_dut`. Must contain ``"freqs"``.
+    metadata : dict
+        Panda metadata snapshot captured at probe time.
+    save_dir : pathlib.Path
+        Directory the file is written into. Must already exist.
+    state : str
+        Switch path name; used in the filename and dataset name.
+
+    Returns
+    -------
+    pathlib.Path
+        The path of the file that was written.
+    """
+    save_dir = Path(save_dir)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = save_dir / f"vna_dut_{state}_{stamp}.h5"
+    with h5py.File(path, "w") as f:
+        f.create_group("raw").create_dataset(state, data=np.asarray(s11))
+        f.create_dataset(
+            "freqs", data=np.asarray(header["freqs"], dtype=float)
+        )
+        _write_json_attrs(f, header, skip={"freqs", "mode"})
+        f.attrs["mode"] = header.get("mode", f"dut:{state}")
+        f.attrs["vna_manual_script_version"] = "1"
+        _write_json_attrs(f.create_group("metadata_snapshot"), metadata or {})
     return path
