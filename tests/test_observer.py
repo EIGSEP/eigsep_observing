@@ -1830,6 +1830,139 @@ def test_record_corr_data_drain_failure_error_is_throttled(
 
 
 @patch("eigsep_observing.io.File")
+def test_record_corr_data_outage_probe_cooldown(
+    mock_file_class, observer_both, caplog
+):
+    """During a panda outage the corr loop must NOT touch the panda
+    every integration: each failed touch is a multi-second TCP
+    connect against a dead host, which starved the writer to ~18 s
+    per ~1 s integration in the field (2026-07-09) — a corr-is-sacred
+    violation once the corr stream cap starts eating the backlog.
+    Within one _PANDA_REPROBE_INTERVAL_S window: exactly one failed
+    drain (sets the down flag) + exactly one failed probe, then zero
+    panda touches while rows keep landing at full cadence.
+    """
+    import redis.exceptions
+
+    observer = observer_both
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 6:
+            observer.stop_event.set()
+        return (123, mock_data)
+
+    drain_calls = [0]
+
+    def failing_drain(*a, **kw):
+        drain_calls[0] += 1
+        raise redis.exceptions.ConnectionError("down")
+
+    skip_calls = [0]
+
+    def failing_skip(*a, **kw):
+        skip_calls[0] += 1
+        raise redis.exceptions.ConnectionError("down")
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+        patch.object(
+            observer.metadata_stream, "drain", side_effect=failing_drain
+        ),
+        patch.object(
+            observer.metadata_stream,
+            "skip_to_latest",
+            side_effect=failing_skip,
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    assert read_count[0] >= 6, "loop didn't iterate enough"
+    # Corr cadence is untouched: one row per corr entry.
+    assert mock_file.add_data.call_count == read_count[0]
+    # Panda touches are bounded: the flag-setting drain failure plus
+    # exactly one probe; all later iterations are inside the cooldown.
+    assert drain_calls[0] == 1, drain_calls
+    assert skip_calls[0] == 1, skip_calls
+    # Gated rows carry no panda metadata.
+    assert mock_file.add_data.call_args.kwargs["metadata"] is None, (
+        mock_file.add_data.call_args
+    )
+
+
+@patch("eigsep_observing.io.File")
+def test_record_corr_data_probe_resumes_after_cooldown(
+    mock_file_class, observer_both, caplog
+):
+    """The cooldown gate must reopen: with the reprobe interval
+    patched to zero, every down-iteration probes again — proving the
+    gate is a timer, not a latch (reconnection stays implicit).
+    """
+    import redis.exceptions
+
+    observer = observer_both
+    observer.corr_config.upload_header({"sync_time": 1713200000.0})
+
+    mock_file = Mock()
+    mock_file.counter = 0
+    mock_file.__len__ = Mock(return_value=0)
+    mock_file_class.return_value = mock_file
+
+    mock_data = generate_data(ntimes=1)
+
+    read_count = [0]
+
+    def read_side_effect(*a, **kw):
+        read_count[0] += 1
+        if read_count[0] >= 5:
+            observer.stop_event.set()
+        return (123, mock_data)
+
+    skip_calls = [0]
+
+    def failing_skip(*a, **kw):
+        skip_calls[0] += 1
+        raise redis.exceptions.ConnectionError("down")
+
+    caplog.set_level(logging.WARNING, logger="eigsep_observing.observer")
+    with (
+        patch("eigsep_observing.observer._PANDA_REPROBE_INTERVAL_S", 0.0),
+        patch.object(
+            observer.corr_reader, "read", side_effect=read_side_effect
+        ),
+        patch.object(
+            observer.metadata_stream,
+            "drain",
+            side_effect=redis.exceptions.ConnectionError("down"),
+        ),
+        patch.object(
+            observer.metadata_stream,
+            "skip_to_latest",
+            side_effect=failing_skip,
+        ),
+    ):
+        observer.record_corr_data("/tmp/test", ntimes=1, timeout=5)
+
+    assert read_count[0] >= 5, "loop didn't iterate enough"
+    # Interval 0 → every down-iteration after the first probes again.
+    assert skip_calls[0] == read_count[0] - 1, skip_calls
+    assert mock_file.add_data.call_count == read_count[0]
+
+
+@patch("eigsep_observing.io.File")
 def test_record_corr_data_skip_to_tail_on_panda_recover(
     mock_file_class, observer_both, transport_panda, caplog
 ):
