@@ -58,13 +58,15 @@ class MotorClient:
         move reliably one-axis-at-a-time.
     az_limits_deg : tuple of (float, float) or _UNSET
         Inclusive ``(min, max)`` azimuth travel limits in degrees.
-        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-180.0,
-        180.0)``. Commands that would violate these bounds raise
-        :class:`MotorLimitError`.
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-200.0,
+        200.0)`` (±200 rather than ±180 for headroom past the wrap
+        point, so recovery moves and homing from just beyond ±180
+        aren't refused). Commands that would violate these bounds
+        raise :class:`MotorLimitError`.
     el_limits_deg : tuple of (float, float) or _UNSET
         Inclusive ``(min, max)`` elevation travel limits in degrees.
-        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-180.0,
-        180.0)``. Commands that would violate these bounds raise
+        Precedence: explicit kwarg > MotorLimitStore K/V > ``(-200.0,
+        200.0)``. Commands that would violate these bounds raise
         :class:`MotorLimitError`.
     pot_az_v_limits : tuple of (float, float) or None or _UNSET
         Inclusive ``(min, max)`` safe voltage range for the azimuth
@@ -127,10 +129,10 @@ class MotorClient:
         self.start_timeout_s = start_timeout_s
         stored = self._load_stored_limits(transport)
         self.az_limits_deg = self._resolve_limit(
-            az_limits_deg, stored.get("az_limits_deg"), (-180.0, 180.0)
+            az_limits_deg, stored.get("az_limits_deg"), (-200.0, 200.0)
         )
         self.el_limits_deg = self._resolve_limit(
-            el_limits_deg, stored.get("el_limits_deg"), (-180.0, 180.0)
+            el_limits_deg, stored.get("el_limits_deg"), (-200.0, 200.0)
         )
         self.pot_az_v_limits = self._resolve_limit(
             pot_az_v_limits, stored.get("pot_az_v_limits"), None

@@ -5,10 +5,9 @@ import sys
 import pytest
 
 from eigsep_redis.testing import DummyTransport
-from picohost.buses import PotCalStore
 
-from eigsep_observing import MotorLimitError
-from eigsep_observing.home_ref import read_home_ref
+from eigsep_observing import MotorLimitError, MotorZeroer
+from eigsep_observing.motor_homer import HomeResult
 
 _spec = importlib.util.spec_from_file_location(
     "field_zero",
@@ -38,36 +37,12 @@ def test_slip_verdict_bands():
     assert field_zero.slip_verdict(1.0, 1.50) == "overshoot"  # gross
 
 
-def test_rezero_pot_pins_intercept():
-    t = _make_dummy_transport()
-    PotCalStore(t).upload({"pot_az": [200.0, -999.0]})  # stale intercept
-
-    class FakeProxy:
-        def __init__(self):
-            self.calls = []
-
-        def send_command(self, *a, **k):
-            self.calls.append((a, k))
-
-    proxy = FakeProxy()
-    m, b = field_zero.rezero_pot(t, proxy, v0=1.5)
-    assert m == 200.0
-    assert b == -200.0 * 1.5  # b = -m*v0 = -300.0
-    assert PotCalStore(t).get()["pot_az"] == [200.0, -300.0]
-    assert proxy.calls
-    assert proxy.calls[0][0][0] == "set_calibration"
-    assert proxy.calls[0][1]["pot_az_params"] == [200.0, -300.0]
-
-
-def test_rezero_pot_raises_without_stored_cal():
-    t = DummyTransport()
-
-    class FakeProxy:
-        def send_command(self, *a, **k):
-            pass
-
-    with pytest.raises(RuntimeError):
-        field_zero.rezero_pot(t, FakeProxy(), v0=1.5)
+def test_rezero_pot_is_gone():
+    """The intercept re-pin is no longer a side effect of zeroing; it
+    lives only in calibrate-pot --mode rezero as a deliberate recal.
+    field_zero must not carry a rezero path at all."""
+    assert not hasattr(field_zero, "rezero_pot")
+    assert not hasattr(field_zero, "_write_home_ref")
 
 
 def test_run_slip_check_uses_pot_swing():
@@ -114,8 +89,8 @@ def test_run_slip_check_probe_denied_exits_cleanly():
     class Motor:
         def jog_az(self, d, **k):
             raise MotorLimitError(
-                "az move to 184.0 deg outside safe window "
-                "[-180.0, 180.0]; refusing to send az_move_deg."
+                "az move to 204.0 deg outside safe window "
+                "[-200.0, 200.0]; refusing to send az_move_deg."
             )
 
     with pytest.raises(SystemExit, match="denied by travel limit"):
@@ -155,14 +130,112 @@ def test_prompt_override_eof_is_no(monkeypatch):
     assert field_zero._prompt_override(0.150, 0.050) is False
 
 
-def test_write_home_ref_stores_pot_and_imu():
-    t = DummyTransport()
+# ---------------------------------------------------------------------------
+# _curses_main: confirm commits a home-and-zero, UI exits on convergence
+# ---------------------------------------------------------------------------
 
-    class FakeSnapshot:
-        def get(self):
-            return {"imu_el": {"el_deg": 0.3}}
 
-    field_zero._write_home_ref(t, FakeSnapshot(), 1.7)
-    ref = read_home_ref(t)
-    assert ref["pot_az_voltage_v0"] == 1.7
-    assert ref["imu_el_deg_home"] == pytest.approx(0.3)
+class _FakeScreen:
+    """Minimal stand-in for the curses screen: replays a key sequence,
+    then idle (-1) ticks. Deviation from real curses is deliberate —
+    curses needs a tty; the loop under test only pumps keystrokes and
+    draws strings."""
+
+    def __init__(self, keys, max_ticks=500):
+        self._keys = iter(keys)
+        self._ticks = 0
+        self._max = max_ticks
+
+    def timeout(self, ms):
+        pass
+
+    def clear(self):
+        pass
+
+    def refresh(self):
+        pass
+
+    def addstr(self, *a):
+        pass
+
+    def getmaxyx(self):
+        return (24, 80)
+
+    def getch(self):
+        self._ticks += 1
+        if self._ticks > self._max:
+            raise AssertionError("UI never exited")
+        return next(self._keys, -1)
+
+
+class _EmptySnap:
+    def get(self):
+        return {}
+
+
+def test_curses_main_exits_with_result_on_converged_home(client, monkeypatch):
+    """Enter → y commits the home-and-zero; the loop stays alive while
+    the background home runs and exits returning the HomeResult once it
+    converges."""
+    monkeypatch.setattr(field_zero.curses, "noecho", lambda: None)
+
+    class _Homer:
+        def home(self, stop_event=None):
+            return HomeResult(
+                converged=True,
+                iterations=1,
+                residual_az_deg=0.5,
+                residual_el_deg=0.2,
+                degraded=False,
+                reset_count=True,
+            )
+
+    zeroer = MotorZeroer(
+        client.transport, homer=_Homer(), confirm_starts_home=True
+    )
+    screen = _FakeScreen([ord("\n"), ord("y")])
+    result = field_zero._curses_main(screen, zeroer, _EmptySnap(), 1.0)
+    assert result is not None
+    assert result.converged is True
+
+
+def test_curses_main_stays_alive_on_unconverged_home(client, monkeypatch):
+    """A home that fails to converge must NOT exit the UI — the
+    operator keeps jogging and can retry; a later q leaves with no
+    result."""
+    monkeypatch.setattr(field_zero.curses, "noecho", lambda: None)
+
+    class _Homer:
+        def home(self, stop_event=None):
+            return HomeResult(
+                converged=False,
+                iterations=6,
+                residual_az_deg=9.0,
+                residual_el_deg=0.2,
+                degraded=False,
+                reset_count=False,
+            )
+
+    zeroer = MotorZeroer(
+        client.transport, homer=_Homer(), confirm_starts_home=True
+    )
+
+    class _Screen(_FakeScreen):
+        """Enter, y, then idle until the home thread unwinds (so the q
+        cannot race the in-flight home and be swallowed as a cancel),
+        then q to leave."""
+
+        def getch(self):
+            self._ticks += 1
+            if self._ticks > self._max:
+                raise AssertionError("UI never exited")
+            nxt = next(self._keys, None)
+            if nxt is not None:
+                return nxt
+            if zeroer.is_homing or zeroer.last_home_result is None:
+                return -1
+            return ord("q")
+
+    screen = _Screen([ord("\n"), ord("y")])
+    result = field_zero._curses_main(screen, zeroer, _EmptySnap(), 1.0)
+    assert result is None

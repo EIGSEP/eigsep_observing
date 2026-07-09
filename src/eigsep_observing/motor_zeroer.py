@@ -16,6 +16,7 @@ from picohost.proxy import PicoProxy
 
 from .motor_cal import cal_motor
 from .motor_client import MotorClient, MotorLimitError
+from .motor_homer import MotorHomer
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,8 @@ class MotorZeroer:
         source="motor_zeroer",
         enforce_limits=True,
         motor_client=None,
+        homer=None,
+        confirm_starts_home=False,
     ):
         self.transport = transport
         self._proxy = PicoProxy("motor", transport, source=source)
@@ -79,10 +82,11 @@ class MotorZeroer:
         # console=False, so a log-only warning would be invisible
         # mid-session — the render loops draw this instead.
         self.notice = None
-        # "Go home" drives both axes to step 0 via the same
-        # MotorClient.home primitive motor_scan.py uses. It runs in a
-        # background thread so the curses loop keeps rendering live
-        # position; injectable for tests.
+        # "Go home" drives to the cal-defined home (pot 0°, IMU-level
+        # el) via MotorHomer, which shares this MotorClient so the
+        # travel-limit enforcement is common. It runs in a background
+        # thread so the curses loop keeps rendering live position; both
+        # are injectable for tests.
         if motor_client is None:
             motor_client = MotorClient(
                 transport,
@@ -90,9 +94,25 @@ class MotorZeroer:
                 enforce_limits=enforce_limits,
             )
         self._motor_client = motor_client
+        if homer is None:
+            homer = MotorHomer(
+                transport,
+                motor_client=motor_client,
+                source=source,
+            )
+        self._homer = homer
+        # Enter/y commit semantics: False (motor_manual) zeroes the
+        # step counters at the current pose — defining a scan origin;
+        # True (field_zero) starts the background home-and-zero at the
+        # cal-defined home instead, and the caller watches is_homing /
+        # last_home_result for the outcome.
+        self._confirm_starts_home = confirm_starts_home
         self._homing = False
         self._home_thread = None
         self._home_stop = None
+        # HomeResult of the last completed background home; None while
+        # one is in flight, after an error, or before the first home.
+        self.last_home_result = None
 
     @property
     def is_available(self):
@@ -158,22 +178,28 @@ class MotorZeroer:
         self._proxy.send_command("reset_step_position", az_step=0, el_step=0)
 
     def start_home(self):
-        """Begin driving both axes back to step 0 in a background thread.
+        """Begin driving to the cal-defined home in a background thread.
 
         No-op if a home is already in flight or the manager is
-        unreachable. The thread runs the shared
-        :meth:`MotorClient.home` (mechanically-safe az-then-el) and
+        unreachable. The thread runs :meth:`MotorHomer.home`
+        (coarse approach, then closed-loop convergence onto the pot's
+        0° voltage and IMU-level el, re-truing the step counters) and
         clears :attr:`is_homing` when it returns — normally, on a
-        :meth:`cancel_home`, or after a logged error.
+        :meth:`cancel_home`, or after a logged error. A missing pot
+        calibration surfaces as an actionable :attr:`notice`; there is
+        deliberately no silent step-0 fallback.
         """
         if self._homing or not self.is_available:
             return
         self._home_stop = threading.Event()
         self._homing = True
+        self.last_home_result = None
 
         def _run():
             try:
-                self._motor_client.home(stop_event=self._home_stop)
+                self.last_home_result = self._homer.home(
+                    stop_event=self._home_stop
+                )
             except MotorLimitError as exc:
                 self.logger.warning("home denied: %s", exc)
                 self.notice = str(exc)
@@ -230,18 +256,24 @@ class MotorZeroer:
 
         Returns
         -------
-        (new_deg, should_exit, zeroed) : tuple
+        (new_deg, should_exit, committed) : tuple
             ``new_deg`` — possibly-adjusted jog step size.
             ``should_exit`` — True when the caller should break the
             input loop.
-            ``zeroed`` — True if this keystroke committed a successful
-            zeroing. Callers use it to choose the exit message.
+            ``committed`` — True if this keystroke committed the zero
+            action. In the default origin mode that zeroing already
+            happened (and ``should_exit`` is True); in
+            ``confirm_starts_home`` mode the background home-and-zero
+            has *started* and the caller watches ``is_homing`` /
+            ``last_home_result`` for the outcome.
 
         Zeroing is two-step: Enter *arms* a confirmation
-        (``pending_zero`` becomes True) but does not zero. While armed,
-        a deliberate ``y``/``Y`` commits the zero (and exits); any other
-        key cancels back to jogging. This guards an accidental Enter
-        from redefining scan home.
+        (``pending_zero`` becomes True) but does not commit. While
+        armed, a deliberate ``y``/``Y`` commits (zero-at-pose and exit
+        in origin mode; background home-and-zero in
+        ``confirm_starts_home`` mode); any other key cancels back to
+        jogging. This guards an accidental Enter from redefining the
+        origin.
         """
         if ch == -1:
             # No keypress this tick — leave any armed prompt intact so a
@@ -319,6 +351,13 @@ class MotorZeroer:
             return deg_state, False, False
         if not self.is_available:
             return deg_state, False, False
+        if self._confirm_starts_home:
+            # Home-and-zero: the homer converges on the cal-defined
+            # home and resets the counters there. Runs in the
+            # background; do NOT exit — the caller watches is_homing /
+            # last_home_result and decides when to leave the UI.
+            self.start_home()
+            return deg_state, False, True
         try:
             self.zero()
         except (RuntimeError, TimeoutError) as exc:

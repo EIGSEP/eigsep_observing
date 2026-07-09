@@ -18,13 +18,13 @@ def _zeroer(transport):
     return MotorZeroer(transport)
 
 
-class _BlockingHomeClient:
-    """Stand-in ``MotorClient`` whose ``home`` blocks on the stop event.
+class _BlockingHomer:
+    """Stand-in ``MotorHomer`` whose ``home`` blocks on the stop event.
 
-    Lets a test observe ``is_homing == True`` deterministically (the
-    real emulator reaches step 0 too fast to catch the flag) and proves
-    the cancel path: ``home`` only returns once the ``stop_event`` is
-    set, so ``cancel_home`` unwinding the thread is observable.
+    Lets a test observe ``is_homing == True`` deterministically (a fast
+    fake returns too quickly to catch the flag) and proves the cancel
+    path: ``home`` only returns once the ``stop_event`` is set, so
+    ``cancel_home`` unwinding the thread is observable.
     """
 
     def __init__(self):
@@ -344,42 +344,41 @@ def test_handle_key_directional_jogs(client):
         assert after - before == factor * motor.deg_to_steps(1.0)
 
 
-def test_handle_key_h_drives_to_home(client):
-    """Pressing 'h' drives both axes back to step 0 via the real
-    ``MotorClient.home`` path (background thread), and clears
-    ``is_homing`` when the move completes."""
-    zeroer = _zeroer(client.transport)
-    motor = client._manager.picos["motor"]
-    zeroer.jog_az(2.0)
-    zeroer.jog_el(2.0)
-    assert _wait_until(
-        lambda: (
-            motor._emulator.azimuth.position
-            == motor._emulator.azimuth.target_pos
-            and motor._emulator.elevation.position
-            == motor._emulator.elevation.target_pos
-        ),
-        timeout=3.0,
-    )
-    assert motor._emulator.azimuth.target_pos != 0  # precondition
+def test_zeroer_builds_homer_on_shared_motor_client():
+    """The default-built homer drives the same MotorClient the jogs
+    use, so 'h' inherits the zeroer's limit enforcement."""
+    z = MotorZeroer(DummyTransport())
+    assert z._homer.motor_client is z._motor_client
 
+
+def test_handle_key_h_runs_homer_in_background(client):
+    """Pressing 'h' runs the cal-defined homer (not step-0
+    ``MotorClient.home``) in a background thread, passing the stop
+    event, and clears ``is_homing`` when it returns."""
+
+    class _RecordingHomer:
+        def __init__(self):
+            self.home_calls = 0
+            self.last_stop_event = None
+
+        def home(self, stop_event=None):
+            self.home_calls += 1
+            self.last_stop_event = stop_event
+
+    fake = _RecordingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
     zeroer.handle_key(ord("h"), 1.0)
-    assert _wait_until(
-        lambda: (
-            motor._emulator.azimuth.position == 0
-            and motor._emulator.elevation.position == 0
-        ),
-        timeout=5.0,
-    )
     assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert fake.home_calls == 1
+    assert fake.last_stop_event is not None
 
 
 def test_handle_key_h_sets_homing_and_any_key_cancels(client):
     """'h' starts a background home (``is_homing`` True); while homing,
     any subsequent key cancels it (stops the motor, unwinds the thread)
     and must NOT execute as a jog."""
-    fake = _BlockingHomeClient()
-    zeroer = MotorZeroer(client.transport, motor_client=fake)
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
 
     zeroer.handle_key(ord("h"), 1.0)
     assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
@@ -398,8 +397,8 @@ def test_handle_key_h_sets_homing_and_any_key_cancels(client):
 def test_handle_key_h_ignored_when_unavailable(client, monkeypatch):
     """When the manager is unreachable, 'h' is a no-op — no home thread
     is spawned."""
-    fake = _BlockingHomeClient()
-    zeroer = MotorZeroer(client.transport, motor_client=fake)
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
     monkeypatch.setattr(
         MotorZeroer, "is_available", property(lambda self: False)
     )
@@ -411,8 +410,8 @@ def test_handle_key_h_ignored_when_unavailable(client, monkeypatch):
 def test_handle_key_noop_during_homing_preserves_state(client):
     """A ``-1`` idle tick (getch timeout) while homing must keep the
     home running rather than silently cancelling it."""
-    fake = _BlockingHomeClient()
-    zeroer = MotorZeroer(client.transport, motor_client=fake)
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
     zeroer.handle_key(ord("h"), 1.0)
     assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
     _, should_exit, zeroed = zeroer.handle_key(-1, 1.0)
@@ -442,7 +441,7 @@ def test_zeroer_jog_inherits_travel_limit():
     transport = DummyTransport()
     cal = MotorClient(transport)._cal
     mc = MotorClient(transport)
-    steps = cal.deg_to_steps(179.0)
+    steps = cal.deg_to_steps(199.0)
     mc._motor_status = lambda: {
         "az_pos": steps,
         "az_target_pos": steps,
@@ -451,7 +450,7 @@ def test_zeroer_jog_inherits_travel_limit():
     }
     zeroer = MotorZeroer(transport, motor_client=mc)
     with pytest.raises(MotorLimitError):
-        zeroer.jog_az(5.0)  # 179 + 5 = 184 -> outside ±180
+        zeroer.jog_az(5.0)  # 199 + 5 = 204 -> outside ±200
 
 
 # ---------------------------------------------------------------------------
@@ -469,8 +468,8 @@ def test_zeroer_passes_enforce_limits_to_motor_client():
 # ---------------------------------------------------------------------------
 
 
-class _LimitTrippingHomeClient:
-    """Stand-in ``MotorClient`` whose ``home`` trips the sensor fence."""
+class _LimitTrippingHomer:
+    """Stand-in ``MotorHomer`` whose ``home`` trips the sensor fence."""
 
     def home(self, stop_event=None):
         raise MotorLimitError(
@@ -487,16 +486,16 @@ def test_handle_key_swallows_limit_error_and_sets_notice(client):
     zeroer = _zeroer(client.transport)
     motor = client._manager.picos["motor"]
     before = motor._emulator.azimuth.target_pos
-    # 200 deg from home is outside the ±180 default window.
-    new_deg, should_exit, zeroed = zeroer.handle_key(ord("l"), 200.0)
-    assert (new_deg, should_exit, zeroed) == (200.0, False, False)
+    # 205 deg from home is outside the ±200 default window.
+    new_deg, should_exit, zeroed = zeroer.handle_key(ord("l"), 205.0)
+    assert (new_deg, should_exit, zeroed) == (205.0, False, False)
     assert "outside safe window" in zeroer.notice
     assert motor._emulator.azimuth.target_pos == before  # move refused
 
 
 def test_handle_key_successful_jog_clears_notice(client):
     zeroer = _zeroer(client.transport)
-    zeroer.handle_key(ord("l"), 200.0)  # denied — notice set
+    zeroer.handle_key(ord("l"), 205.0)  # denied — notice set
     assert zeroer.notice is not None
     zeroer.handle_key(ord("l"), 1.0)  # in-window jog succeeds
     assert zeroer.notice is None
@@ -520,9 +519,99 @@ def test_start_home_survives_limit_error(client):
     """A sensor-fence trip mid-home must unwind the background thread
     cleanly (no traceback splatted over the curses screen) and surface
     the denial via ``notice``."""
-    zeroer = MotorZeroer(
-        client.transport, motor_client=_LimitTrippingHomeClient()
-    )
+    zeroer = MotorZeroer(client.transport, homer=_LimitTrippingHomer())
     zeroer.handle_key(ord("h"), 1.0)
     assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
     assert "outside safe window" in zeroer.notice
+
+
+def test_start_home_without_cal_refuses_with_notice(client):
+    """'h' with no pot calibration stored must not silently fall back
+    to a step-0 home — the real homer raises, the thread unwinds, and
+    the operator sees an actionable notice."""
+    zeroer = _zeroer(client.transport)  # default homer, no cal seeded
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert "calibrate-pot" in zeroer.notice
+
+
+# ---------------------------------------------------------------------------
+# confirm_starts_home: field_zero's Enter/y commits a home-and-zero
+# ---------------------------------------------------------------------------
+
+
+class _ConvergingHomer:
+    """Stand-in ``MotorHomer`` that converges immediately."""
+
+    def __init__(self):
+        self.home_calls = 0
+
+    def home(self, stop_event=None):
+        from eigsep_observing.motor_homer import HomeResult
+
+        self.home_calls += 1
+        return HomeResult(
+            converged=True,
+            iterations=1,
+            residual_az_deg=0.5,
+            residual_el_deg=0.2,
+            degraded=False,
+            reset_count=True,
+        )
+
+
+def test_confirm_starts_home_runs_homer_not_origin_reset(client):
+    """In confirm_starts_home mode, Enter/y starts the background home
+    (home-and-zero at the cal-defined home) instead of resetting the
+    step counters at the current pose, and does not exit the loop —
+    the caller watches ``is_homing`` / ``last_home_result``."""
+    fake = _ConvergingHomer()
+    zeroer = MotorZeroer(
+        client.transport, homer=fake, confirm_starts_home=True
+    )
+    motor = client._manager.picos["motor"]
+    zeroer.jog_az(2.0)
+    assert _wait_until(
+        lambda: (
+            motor._emulator.azimuth.position
+            == motor._emulator.azimuth.target_pos
+        ),
+        timeout=3.0,
+    )
+    off_origin = motor._emulator.azimuth.position
+    assert off_origin != 0  # precondition: away from origin
+
+    zeroer.handle_key(_KEY_ENTER, 1.0)
+    assert zeroer.pending_zero is True
+    _, should_exit, committed = zeroer.handle_key(ord("y"), 1.0)
+    assert should_exit is False
+    assert committed is True
+    assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
+    assert fake.home_calls == 1
+    assert zeroer.last_home_result is not None
+    assert zeroer.last_home_result.converged is True
+    # counters were NOT reset at the confirmed pose (the fake homer owns
+    # the reset on convergence)
+    assert motor._emulator.azimuth.position == off_origin
+
+
+def test_confirm_default_mode_still_zeroes_at_pose(client):
+    """Without confirm_starts_home (motor_manual), y keeps its
+    zero-at-pose scan-origin meaning and exits."""
+    zeroer = _zeroer(client.transport)
+    zeroer.handle_key(_KEY_ENTER, 1.0)
+    _, should_exit, zeroed = zeroer.handle_key(ord("y"), 1.0)
+    assert should_exit is True
+    assert zeroed is True
+
+
+def test_last_home_result_reset_on_new_home(client):
+    """A stale result from a previous home must not leak into a new
+    one — start_home clears it before the thread runs."""
+    fake = _BlockingHomer()
+    zeroer = MotorZeroer(client.transport, homer=fake)
+    zeroer.last_home_result = object()  # simulate a previous run
+    zeroer.handle_key(ord("h"), 1.0)
+    assert _wait_until(lambda: zeroer.is_homing, timeout=1.0)
+    assert zeroer.last_home_result is None
+    zeroer.cancel_home()

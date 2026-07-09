@@ -1,10 +1,11 @@
 """Closed-loop return-to-home. Standalone active driver (claims run_tag);
 talks to hardware only via MotorClient/PicoProxy; requires pico-manager.
 
-Drives the antenna back to the home set by field_zero, using pot-voltage
-(az) + IMU (el) feedback, settling between moves. Re-zeros the step counter
-on convergence. Run after a motor_scan / motor_manual session to re-
-establish a known position.
+Drives the antenna to the cal-defined home — az where the calibrated pot
+reads 0° (v_home = -b/m from PotCalStore), el at IMU-level — using
+pot-voltage (az) + IMU (el) feedback, settling between moves. Re-zeros the
+step counter on convergence. Run after a motor_scan / motor_manual session
+to re-establish a known position.
 """
 
 import logging
@@ -16,7 +17,6 @@ from eigsep_observing._scripts_util import (
     build_transport,
     require_pico,
 )
-from eigsep_observing.home_ref import read_home_ref
 from eigsep_observing.utils import configure_eig_logger
 
 configure_eig_logger(level=logging.INFO, console=False)
@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 
 
 def run(transport, *, dry_run=False, override_limits=False):
-    if read_home_ref(transport) is None:
-        raise SystemExit(
-            "No home reference; run field_zero to set home first."
-        )
     if override_limits:
         logger.warning(
             "Travel limits DISABLED for this session"
@@ -38,14 +34,17 @@ def run(transport, *, dry_run=False, override_limits=False):
         source="motor_home",
         enforce_limits=not override_limits,
     )
+    try:
+        v_home = homer.az_home_voltage()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc))
     require_pico(homer.motor_client._proxy)
     if dry_run:
         pot_v, el_est = homer._read_sensors()
-        ref = read_home_ref(transport)
         logger.info(
             "Dry run: pot=%s V (home %.3f), el=%s (%s)",
             pot_v,
-            ref["pot_az_voltage_v0"],
+            v_home,
             el_est.el_deg,
             el_est.source,
         )

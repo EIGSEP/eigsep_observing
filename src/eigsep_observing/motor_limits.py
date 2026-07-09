@@ -3,7 +3,7 @@
 Single source of truth read by EVERY MotorClient (autonomous observer and
 bring-up scripts alike), so the travel-limit guard is rig-wide rather than
 per-process. Set/inspected by scripts/set_motor_limits.py. Follows the
-shared _redis_json_kv sibling pattern (home_ref, run_tag, ...). Not on the
+shared _redis_json_kv sibling pattern (run_tag, corr_health, ...). Not on the
 metadata bus; NOT obs_config (so the scripts/CLAUDE.md "no ConfigStore
 upload" rule is not in play).
 """

@@ -102,17 +102,18 @@ def _describe_grid(args, az_range, el_range):
 
 
 def _prompt_go_home(motor):
-    """On a Ctrl-C interrupt, offer to drive back to (0, 0).
+    """On a Ctrl-C interrupt, offer to drive back to step (0, 0).
 
     Defaults to *No* so an interrupt leaves the motors halted in place
     (the safe abort) unless the operator explicitly opts in. A
     non-interactive stdin (``EOFError``) or a second Ctrl-C
-    (``KeyboardInterrupt``) is treated as No. When confirmed, the same
-    ``MotorClient.home`` primitive ``motor_manual.py`` uses drives the
-    return; a Ctrl-C during that move aborts it.
+    (``KeyboardInterrupt``) is treated as No. When confirmed, the
+    open-loop ``MotorClient.home`` primitive drives back to the scan
+    origin (step 0,0 — the counter zero the scan pattern is relative
+    to, not the cal-defined home); a Ctrl-C during that move aborts it.
     """
     try:
-        answer = input("Go home (0,0)? [y/N] ").strip().lower()
+        answer = input("Go to scan origin (0,0)? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         logger.info("Leaving motors in place.")
         return

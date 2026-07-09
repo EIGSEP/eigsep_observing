@@ -1,11 +1,16 @@
-"""Closed-loop return-to-known-home for the motor.
+"""Closed-loop return-to-home for the motor.
 
-Sibling of MotorZeroer. Reads the home reference (home_ref K/V), then runs
-a coarse-approach → settle → measure → damped-corrective-jog loop through
-MotorClient (inheriting the travel-limit guard) until the pot voltage and
-IMU elevation are back within tolerance of home, then re-zeros the step
-counter. Az feedback is raw pot voltage (slope-independent); el feedback is
-the redundant imu_el-signed / imu_az-|θ| estimate.
+Sibling of MotorZeroer. Home is defined by the pot calibration, not by a
+recorded pose: az home is the voltage where the calibrated pot reads 0°
+(``v_home = -b/m`` from ``PotCalStore``), el home is IMU-level (0°). home()
+runs a coarse-approach → settle → measure → damped-corrective-jog loop
+through MotorClient (inheriting the travel-limit guard) until the pot
+voltage and IMU elevation are within tolerance of those targets, then
+re-zeros the step counter. Az feedback is raw pot voltage; el feedback is
+the redundant imu_el-signed / imu_az-|θ| estimate. Because the targets are
+derived live from the cal, a recalibration (``calibrate-pot``, including
+``--mode rezero``) moves home for every consumer on the next home() call —
+there is no intermediate home-reference K/V to refresh.
 """
 
 import logging
@@ -17,8 +22,8 @@ from eigsep_redis import MetadataSnapshotReader
 from picohost.buses import PotCalStore
 
 from .el_sensor import read_el_estimate
-from .home_ref import read_home_ref
 from .motor_client import MotorClient
+from .motor_limits import read_motor_limits
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +41,7 @@ class HomeResult:
 
 
 class MotorHomer:
-    """Drive the motor back to its recorded home pose.
+    """Drive the motor to the cal-defined home (pot 0°, IMU-level el).
 
     Parameters
     ----------
@@ -109,6 +114,60 @@ class MotorHomer:
     # Pure helpers (also called by Task C5's home() loop)
     # ------------------------------------------------------------------
 
+    def _pot_cal(self):
+        """``(m, b)`` from ``PotCalStore``, or ``None`` when absent.
+
+        A cal with a zero/missing slope is treated as absent — it can
+        derive neither a home voltage nor a gain.
+        """
+        try:
+            cal = PotCalStore(self.transport).get() or {}
+        except Exception as exc:
+            self.logger.warning("PotCalStore unavailable: %s", exc)
+            return None
+        pair = cal.get("pot_az")
+        if not pair or not pair[0]:
+            return None
+        return float(pair[0]), float(pair[1])
+
+    def az_home_voltage(self):
+        """Pot voltage at the cal's zero angle — the az home target.
+
+        ``angle = m*V + b = 0`` → ``v_home = -b/m``. Raises
+        ``RuntimeError`` when no pot calibration is stored; home is
+        defined by the cal, so there is no fallback target.
+        """
+        cal = self._pot_cal()
+        if cal is None:
+            raise RuntimeError(
+                "No pot calibration; run calibrate-pot --mode azimuth first."
+            )
+        m, b = cal
+        return -b / m
+
+    def _check_home_in_window(self, v_home):
+        """Refuse a home target outside the rig's pot fence, if one is set.
+
+        A cal whose zero-angle voltage lies outside ``pot_az_v_limits``
+        is inconsistent with the rig limits — homing toward it would
+        drive into the sensor fence, so fail loudly before moving.
+        """
+        try:
+            limits = read_motor_limits(self.transport) or {}
+        except Exception:
+            return
+        window = limits.get("pot_az_v_limits")
+        if not window:
+            return
+        lo, hi = window
+        if not (lo <= v_home <= hi):
+            raise RuntimeError(
+                f"cal-derived az home voltage {v_home:.3f} V is outside "
+                f"the pot limit window [{lo:.3f}, {hi:.3f}]; the pot "
+                "calibration is inconsistent with the rig limits — "
+                "re-run calibrate-pot."
+            )
+
     def _az_gain(self):
         """Deg/volt magnitude for the az potentiometer.
 
@@ -117,21 +176,16 @@ class MotorHomer:
         """
         if self.az_gain_deg_per_volt is not None:
             return abs(self.az_gain_deg_per_volt)
-        try:
-            cal = PotCalStore(self.transport).get() or {}
-            slope = (cal.get("pot_az") or [None])[0]
-            if slope:
-                return abs(float(slope))
-        except Exception as exc:
-            self.logger.warning(
-                "PotCalStore unavailable; using az gain fallback "
-                "%.1f deg/V: %s",
-                _AZ_GAIN_FALLBACK_DEG_PER_VOLT,
-                exc,
-            )
+        cal = self._pot_cal()
+        if cal is not None:
+            return abs(cal[0])
+        self.logger.warning(
+            "No pot calibration for az gain; using fallback %.1f deg/V",
+            _AZ_GAIN_FALLBACK_DEG_PER_VOLT,
+        )
         return _AZ_GAIN_FALLBACK_DEG_PER_VOLT
 
-    def _az_residual_deg(self, ref, pot_v):
+    def _az_residual_deg(self, v_home, pot_v):
         """Degrees to jog so the pot returns to its home voltage.
 
         The sign convention: positive residual → need to jog positive az.
@@ -139,41 +193,38 @@ class MotorHomer:
 
         Parameters
         ----------
-        ref : dict
-            Home reference dict from ``read_home_ref``; must contain
-            ``pot_az_voltage_v0``.
+        v_home : float
+            Az home target voltage (from ``az_home_voltage``).
         pot_v : float or None
             Current pot voltage reading.
         """
         if pot_v is None:
             return None
-        dv = ref["pot_az_voltage_v0"] - pot_v
+        dv = v_home - pot_v
         return dv * self._az_gain()
 
-    def _el_residual(self, ref, el_est):
+    def _el_residual(self, el_est):
         """Elevation residual in degrees and whether it is magnitude-only.
 
-        Returns ``(residual_deg, magnitude_only)``.
+        Returns ``(residual_deg, magnitude_only)``. El home is the
+        constant IMU-level pose (0°), so the residual is simply the
+        negated current elevation.
 
         When the primary IMU (``imu_el``, signed) is available the
-        residual is signed: ``home_el - current_el``.  When only the
-        failover IMU (``imu_az``, magnitude-only |θ|) is available the
-        residual is a magnitude comparison: ``|current| - |home|``.
+        residual is signed: ``0 - current_el``.  When only the failover
+        IMU (``imu_az``, magnitude-only |θ|) is available the residual
+        is the magnitude itself: ``|current| - 0``.
 
         Parameters
         ----------
-        ref : dict
-            Home reference dict from ``read_home_ref``; must contain
-            ``imu_el_deg_home``.
         el_est : ElEstimate
             Current elevation estimate from ``read_el_estimate``.
         """
         if el_est.el_deg is None:
             return None, False
-        home = ref.get("imu_el_deg_home") or 0.0
         if el_est.magnitude_only:
-            return el_est.el_deg - abs(home), True
-        return home - el_est.el_deg, False
+            return el_est.el_deg, True
+        return -el_est.el_deg, False
 
     def _within_tol(self, res_az, res_el):
         """True when both residuals are within their configured tolerances.
@@ -219,7 +270,7 @@ class MotorHomer:
             time.sleep(self.settle_s)
 
     def home(self, stop_event=None):
-        """Drive the motor back to its recorded home pose.
+        """Drive the motor to the cal-defined home (pot 0°, IMU-level el).
 
         Parameters
         ----------
@@ -236,13 +287,12 @@ class MotorHomer:
         Raises
         ------
         RuntimeError
-            When no home reference is stored in Redis.
+            When no pot calibration is stored, or when the cal's
+            zero-angle voltage falls outside the configured pot limit
+            window (broken cal — refuse before moving).
         """
-        ref = read_home_ref(self.transport)
-        if ref is None:
-            raise RuntimeError(
-                "No home reference in Redis; run field_zero to set home first."
-            )
+        v_home = self.az_home_voltage()
+        self._check_home_in_window(v_home)
 
         pot_v, el_est = self._read_sensors()
         if pot_v is None and el_est.el_deg is None:
@@ -271,8 +321,8 @@ class MotorHomer:
                 break
             self._settle(stop_event)
             pot_v, el_est = self._read_sensors()
-            res_az = self._az_residual_deg(ref, pot_v)
-            res_el, _ = self._el_residual(ref, el_est)
+            res_az = self._az_residual_deg(v_home, pot_v)
+            res_el, _ = self._el_residual(el_est)
             if res_az is None and res_el is None:
                 self.logger.warning(
                     "Homing lost all sensor feedback mid-loop; aborting "

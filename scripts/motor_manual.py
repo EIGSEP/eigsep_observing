@@ -1,18 +1,26 @@
 """
-Interactive motor zeroing UI.
+Interactive motor jogging and scan-origin UI.
 
-Jog the motors into the desired home position, then Enter to begin
+Jog the motors into the desired scan origin, then Enter to begin
 zeroing the step counters. Zeroing is two-step: Enter arms a
 confirmation and 'y' commits it, so an accidental Enter can't redefine
-home. After zeroing, ``motor_scan.py`` treats the current physical
-position as ``(0, 0)``.
+the origin. After zeroing, ``motor_scan.py`` treats the current
+physical position as ``(0, 0)``.
+
+Zeroing here defines a *scan origin* (an arbitrary lab/scan pattern
+reference), which is distinct from *home*: home is defined by the pot
+calibration (az where the calibrated pot reads 0°, el at IMU-level)
+and is not operator-adjustable — 'h' drives there via the closed-loop
+homer and re-trues the step counters on convergence. Use field_zero
+for the guided home-and-zero flow.
 
 Controls:
     u / d  - jog elevation up / down
     l / r  - jog azimuth left / right
     + / -  - increase / decrease jog step size
-    h      - go home: drive both axes to step 0 (any key cancels)
-    Enter  - arm zero confirmation
+    h      - go home: pot 0 deg az, IMU-level el (any key cancels;
+             requires a pot calibration)
+    Enter  - arm zero confirmation (scan origin at current pose)
     y      - confirm and zero (after Enter); any other key cancels
     q      - quit without zeroing
 """
@@ -48,13 +56,15 @@ def _render(screen, zeroer, deg):
         screen.addstr(3, 0, "AZ pos: DISCONNECTED (waiting for reconnect)")
         screen.addstr(4, 0, "EL pos: ---")
     screen.addstr(6, 0, "u/d = jog EL | l/r = jog AZ")
-    screen.addstr(7, 0, "+/- = change step size | h = go home (0,0)")
-    screen.addstr(8, 0, "Enter = zero (asks to confirm) | q = quit")
+    screen.addstr(7, 0, "+/- = change step size | h = go home (pot 0 / level)")
+    screen.addstr(
+        8, 0, "Enter = zero scan origin (asks to confirm) | q = quit"
+    )
     if zeroer.is_homing:
         screen.addstr(
             10,
             0,
-            ">>> HOMING to (0,0)... press any key to cancel <<<",
+            ">>> HOMING to cal home... press any key to cancel <<<",
         )
     elif zeroer.pending_zero:
         screen.addstr(
@@ -98,7 +108,7 @@ def _curses_main(screen, transport, args):
         zeroer.halt()
 
     if zeroed:
-        logger.info("Step counters zeroed. Motors are at home (0, 0).")
+        logger.info("Step counters zeroed at the current pose (scan origin).")
     else:
         logger.info("Exited without zeroing.")
 
