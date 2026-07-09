@@ -825,8 +825,9 @@ class LiveStatusAggregator:
         return (last_acc_cnt, reshaped), True
 
     def _read_adc_snapshot(self) -> tuple[Optional[tuple], bool]:
-        """One AdcSnapshotReader.read poll (no waiting; ~1 Hz producer
-        entries are picked up at worst one snap_tick_s after arrival).
+        """One AdcSnapshotReader.read poll (no waiting; producer
+        entries — one per ``adc_snapshot_period_s`` — are picked up at
+        worst one snap_tick_s after arrival).
 
         Returns ``(result, ok)`` — see :meth:`_read_corr` for semantics.
         """
