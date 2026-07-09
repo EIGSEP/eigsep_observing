@@ -1,4 +1,14 @@
 snap_ip: "10.10.10.12"
+# Per-transfer TAPCP/tftpy socket timeout [s]. tftpy recovers a lost
+# UDP packet only by waiting out this timeout before retransmitting,
+# so it sets the stall cost of a single lost packet on the SNAP link.
+# casperfpga's default of 3 s spans 2-3 integration windows at
+# corr_acc_len 2**28 and was the root cause of the periodic
+# "Dropped 2 integration(s)" warnings (issue #204). 0.25 s is ~100x
+# the observed per-block readout cadence, so only a genuinely lost
+# packet ever waits this long; casperfpga's 8 transaction-level
+# retries are unaffected. Absent -> defaults to 0.25.
+tapcp_timeout_s: 0.25
 fpg_file: "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg"  # path to fpg file
 fpg_version: [2, 4]  # major, minor
 sample_rate: 500.0  # in MHz
