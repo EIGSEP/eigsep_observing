@@ -63,9 +63,24 @@ def calc_freqs_dfreq(sample_rate_Hz, nchan):
     return freqs, dfreq
 
 
-def calc_inttime(sample_rate_Hz, acc_len, acc_bins=2):
-    """Calculate time per integration [s] from sample_freq and acc_len."""
-    inttime = 1 / sample_rate_Hz * acc_len * acc_bins
+# The SNAP ADC delivers ADC_DEMUX samples per FPGA fabric clock
+# (demux-2: 500 Msps ADC, 250 MHz fabric). Registers that count
+# "clocks" (corr_acc_len, sync uptime) tick at sample_rate / ADC_DEMUX.
+ADC_DEMUX = 2
+
+
+def calc_inttime(sample_rate_Hz, acc_len):
+    """
+    Calculate time per integration [s] from sample_freq and acc_len.
+
+    ``acc_len`` (the ``corr_acc_len`` register) sets the vacc dump
+    period in FPGA fabric clocks, which run at
+    ``sample_rate / ADC_DEMUX``. The number of accumulator bins the
+    firmware emits per dump (even/odd in v2.3, one spectrum in v2.4)
+    does not enter the timing: v2.4 accumulates the same window into
+    one full-duty bin instead of two half-duty banks.
+    """
+    inttime = 1 / sample_rate_Hz * acc_len * ADC_DEMUX
     return inttime
 
 
@@ -113,7 +128,7 @@ def load_config(name, compute_inttime=True):
         Path to the configuration file.
     compute_inttime : bool
         If True, compute and inject ``integration_time`` from
-        ``sample_rate``, ``corr_acc_len``, and ``acc_bins``.
+        ``sample_rate`` and ``corr_acc_len``.
 
     Returns
     -------
@@ -127,11 +142,9 @@ def load_config(name, compute_inttime=True):
     if compute_inttime:
         sample_rate = config["sample_rate"]
         corr_acc_len = config["corr_acc_len"]
-        acc_bins = config["acc_bins"]
         config["integration_time"] = calc_inttime(
             sample_rate * 1e6,  # in Hz
             corr_acc_len,
-            acc_bins=acc_bins,
         )
     return config
 
