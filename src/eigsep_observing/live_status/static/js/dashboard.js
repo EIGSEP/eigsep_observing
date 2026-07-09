@@ -310,7 +310,7 @@ const phaseLayout = {
 // fields on each object explicitly.
 function applyThemeToLayouts() {
   const t = activeTheme;
-  for (const L of [magLayoutRaw, magLayoutCal, phaseLayout, vnaLayout]) {
+  for (const L of [magLayoutRaw, magLayoutCal, phaseLayout, vnaLayout, vnaSp1MagLayout, vnaSp1PhaseLayout]) {
     L.paper_bgcolor = t.paperBg;
     L.plot_bgcolor = t.plotBg;
     L.font = { color: t.font, size: t.fontSize };
@@ -326,6 +326,10 @@ function applyThemeToLayouts() {
   phaseLayout.yaxis.gridcolor = t.grid;
   vnaLayout.xaxis.gridcolor = t.grid;
   vnaLayout.yaxis.gridcolor = t.grid;
+  vnaSp1MagLayout.xaxis.gridcolor = t.grid;
+  vnaSp1MagLayout.yaxis.gridcolor = t.grid;
+  vnaSp1PhaseLayout.xaxis.gridcolor = t.grid;
+  vnaSp1PhaseLayout.yaxis.gridcolor = t.grid;
 }
 
 const RAD_TO_DEG = 180 / Math.PI;
@@ -336,7 +340,7 @@ let phasePlotInitialized = false;
 // Render the cal status bar above the plots. Three states:
 //   - toggle off → hidden
 //   - toggle on, cal unavailable → red "Calibration unavailable" warn bar
-//   - toggle on, cal applied → green info bar with on/off cache age
+//   - toggle on, cal applied → green info bar with on/amb cache age
 // We deliberately show the cache age unconditionally rather than gating
 // on a freshness threshold: ``RFANT`` dwells for an hour, so any threshold
 // either rejects nearly every antenna integration or is so loose it adds
@@ -357,7 +361,7 @@ function renderCalibrationBar(meta) {
     el.textContent = `Calibration unavailable — showing raw. Reason: ${meta.reason || "unknown"}`;
     return;
   }
-  const ages = [meta.last_rfnoff_age_s, meta.last_rfnon_age_s].filter(
+  const ages = [meta.last_rfamb_age_s, meta.last_rfnon_age_s].filter(
     (v) => v !== null && v !== undefined
   );
   const ageStr = ages.length ? fmtDuration(Math.max(...ages)) : "—";
@@ -366,7 +370,7 @@ function renderCalibrationBar(meta) {
       ? fmt(meta.gain_median, 3)
       : "—";
   el.className = "cal-bar info";
-  el.textContent = `Calibrated — on/off cache ${ageStr} old, gain median ${gainStr}`;
+  el.textContent = `Calibrated — on/amb cache ${ageStr} old, gain median ${gainStr}`;
 }
 
 function updateCorr(corr) {
@@ -529,6 +533,90 @@ function updateVna(vna) {
     vnaPlotInitialized = true;
   } else {
     Plotly.react("plot-vna", traces, vnaLayout, { displayModeBar: false });
+  }
+}
+
+// ---- vna sp1 (Spare-1 cable) ----------------------------------------
+
+const vnaSp1MagLayout = {
+  margin: { l: 50, r: 20, t: 10, b: 40 },
+  xaxis: { title: "Frequency [MHz]" },
+  yaxis: { title: "|S11| [dB]", autorange: true },
+  showlegend: false,
+};
+
+const vnaSp1PhaseLayout = {
+  margin: { l: 50, r: 20, t: 10, b: 40 },
+  xaxis: { title: "Frequency [MHz]" },
+  yaxis: { title: "Unwrapped phase [deg]", autorange: true },
+  showlegend: false,
+};
+
+let vnaSp1PlotsInitialized = false;
+
+function renderVnaSp1Status(vna) {
+  const el = document.getElementById("vna-sp1-status");
+  if (!el) return;
+  if (!vna) {
+    el.className = "vna-status error";
+    el.textContent = "Spare-1 pane unavailable.";
+    return;
+  }
+  if (!vna.available) {
+    el.className = "vna-status";
+    if (vna.reason === "calibration_failed") {
+      el.className = "vna-status error";
+      el.textContent =
+        "Calibration failed for sp1. Check server logs and OSL standards.";
+    } else if (vna.reason === "no measurement received yet") {
+      el.textContent = "No sp1 measurement received yet.";
+    } else {
+      el.textContent = `No data: ${vna.reason || "unknown"}.`;
+    }
+    return;
+  }
+  const ageStr = fmtDuration(vna.age_s);
+  if (vna.stale) {
+    el.className = "vna-status stale";
+    el.textContent =
+      `Spare-1 cable S11 — ${ageStr} old (stale; producer cadence is ~1/hour).`;
+  } else {
+    el.className = "vna-status";
+    el.textContent = `Spare-1 cable S11 — ${ageStr} old.`;
+  }
+}
+
+function updateVnaSp1(vna) {
+  renderVnaSp1Status(vna);
+  const opts = { displayModeBar: false };
+  if (!vna || !vna.available) {
+    if (vnaSp1PlotsInitialized) {
+      Plotly.react("plot-vna-sp1-mag", [], vnaSp1MagLayout, opts);
+      Plotly.react("plot-vna-sp1-phase", [], vnaSp1PhaseLayout, opts);
+    }
+    return;
+  }
+  const magTraces = [{
+    x: vna.freqs_mhz,
+    y: vna.s11_db,
+    type: "scatter",
+    mode: "lines",
+    line: { width: activeTheme.lineWidth },
+  }];
+  const phaseTraces = [{
+    x: vna.freqs_mhz,
+    y: vna.phase_deg,
+    type: "scatter",
+    mode: "lines",
+    line: { width: activeTheme.lineWidth },
+  }];
+  if (!vnaSp1PlotsInitialized) {
+    Plotly.newPlot("plot-vna-sp1-mag", magTraces, vnaSp1MagLayout, opts);
+    Plotly.newPlot("plot-vna-sp1-phase", phaseTraces, vnaSp1PhaseLayout, opts);
+    vnaSp1PlotsInitialized = true;
+  } else {
+    Plotly.react("plot-vna-sp1-mag", magTraces, vnaSp1MagLayout, opts);
+    Plotly.react("plot-vna-sp1-phase", phaseTraces, vnaSp1PhaseLayout, opts);
   }
 }
 
@@ -1043,12 +1131,13 @@ function renderStatusLog(entries) {
 let lastCorr = null;
 let lastAdc = null;
 let lastVna = null;
+let lastVnaSp1 = null;
 
 async function tick() {
   try {
     const corrPath = getUseCalibrated() ? "/api/corr?calibrated=1" : "/api/corr";
     const vnaPath = `/api/vna?mode=${encodeURIComponent(getVnaMode())}`;
-    const [health, corr, metadata, adc, rfswitch, file, status, vna] = await Promise.all([
+    const [health, corr, metadata, adc, rfswitch, file, status, vna, vnaSp1] = await Promise.all([
       fetchJson("/api/health"),
       fetchJson(corrPath),
       fetchJson("/api/metadata"),
@@ -1057,10 +1146,12 @@ async function tick() {
       fetchJson("/api/file"),
       fetchJson("/api/status"),
       fetchJson(vnaPath),
+      fetchJson("/api/vna?mode=sp1"),
     ]);
     lastCorr = corr.data;
     lastAdc = adc.data;
     lastVna = vna.data;
+    lastVnaSp1 = vnaSp1.data;
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
     renderTempctrlTiles(metadata.data, null);
@@ -1074,6 +1165,7 @@ async function tick() {
     renderAdcInCorr(adc.data);
     renderStatusLog(status.data);
     updateVna(vna.data);
+    updateVnaSp1(vnaSp1.data);
   } catch (e) {
     console.error("poll failed:", e);
   }
@@ -1114,6 +1206,7 @@ function applyTheme(mode) {
   applyThemeToLayouts();
   if (lastCorr) updateCorr(lastCorr); // also re-renders the phase plot
   if (lastVna) updateVna(lastVna);
+  if (lastVnaSp1) updateVnaSp1(lastVnaSp1);
 }
 
 function initThemeToggle() {

@@ -177,10 +177,12 @@ class StateSnapshot:
     rfswitch_state_entered_unix: Optional[float] = None
 
     # Most recent integration captured while the switch was settled in
-    # RFNOFF / RFNON (dwell past ``RFSWITCH_TRANSITION_WINDOW_S``). The
-    # live-status first-order Y-factor calibration reads from these.
-    # ``RFANT`` and ``UNKNOWN`` integrations never evict the caches, so
-    # the operator's "calibrated" toggle keeps painting across long
+    # RFNOFF / RFNON / RFAMB (dwell past
+    # ``RFSWITCH_TRANSITION_WINDOW_S``). The live-status first-order
+    # Y-factor calibration reads RFNON (hot) + RFAMB (cold reference);
+    # RFNOFF is cached for the dashboard cross-check only. ``RFANT``
+    # and ``UNKNOWN`` integrations never evict the caches, so the
+    # operator's "calibrated" toggle keeps painting across long
     # antenna dwells and short transition windows.
     last_rfnoff_pairs: Optional[dict[str, np.ndarray]] = None
     last_rfnoff_unix: Optional[float] = None
@@ -188,14 +190,21 @@ class StateSnapshot:
     last_rfnon_pairs: Optional[dict[str, np.ndarray]] = None
     last_rfnon_unix: Optional[float] = None
     last_rfnon_acc_cnt: Optional[int] = None
+    last_rfamb_pairs: Optional[dict[str, np.ndarray]] = None
+    last_rfamb_unix: Optional[float] = None
+    last_rfamb_acc_cnt: Optional[int] = None
 
-    # Most recent VNA payload, cached per-mode. The route handler
-    # calibrates lazily off these (see eigsep_observing.vna_calibration)
-    # so the drain thread doesn't pay the calkit cost when nobody's
-    # rendering the pane. ``ant`` and ``rec`` evict independently, so
-    # the operator can flip between them without losing the other view.
+    # Most recent VNA payload, cached per pane. ``ant`` and ``rec``
+    # come from their own bundles; ``sp1`` rides in the ant bundle and
+    # gets its own cache built from the same entry (shared OSL/freqs).
+    # The route handler calibrates lazily off these (see
+    # eigsep_observing.vna_calibration) so the drain thread doesn't pay
+    # the calkit cost when nobody's rendering the pane. The slots evict
+    # independently, so the operator can flip between panes without
+    # losing the others.
     last_vna_ant: Optional[VnaCache] = None
     last_vna_rec: Optional[VnaCache] = None
+    last_vna_sp1: Optional[VnaCache] = None
 
     # Panda status log (ring buffer).
     status_log: deque = field(
@@ -481,6 +490,11 @@ class LiveStatusAggregator:
                 last_rfnon_pairs=(
                     dict(s.last_rfnon_pairs)
                     if s.last_rfnon_pairs is not None
+                    else None
+                ),
+                last_rfamb_pairs=(
+                    dict(s.last_rfamb_pairs)
+                    if s.last_rfamb_pairs is not None
                     else None
                 ),
                 snap_fpga_reachable=s.snap_fpga_reachable,
@@ -832,17 +846,19 @@ class LiveStatusAggregator:
         acc_cnt: int,
         now: float,
     ) -> None:
-        """Cache the freshly-received integration as an RFNOFF or RFNON
-        reference if the switch has been settled in that state past the
-        physical transition window.
+        """Cache the freshly-received integration as an RFNOFF, RFNON,
+        or RFAMB reference if the switch has been settled in that
+        state past the physical transition window.
 
         ``RFANT`` and ``UNKNOWN`` (and any state still inside the
         transition window) are no-ops so the operator's first-order
-        cal keeps using the most recent valid on/off pair.
+        cal keeps using the most recent valid on/amb pair — RFNOFF
+        is cached alongside for the offline cross-check but does not
+        feed the solve.
         """
         rf = s.metadata_latest.get("rfswitch") or {}
         name = rf.get("sw_state_name") if isinstance(rf, dict) else None
-        if name not in ("RFNOFF", "RFNON"):
+        if name not in ("RFNOFF", "RFNON", "RFAMB"):
             return
         entered = s.rfswitch_state_entered_unix
         if entered is None or (now - entered) < RFSWITCH_TRANSITION_WINDOW_S:
@@ -851,10 +867,14 @@ class LiveStatusAggregator:
             s.last_rfnoff_pairs = pairs_data
             s.last_rfnoff_unix = now
             s.last_rfnoff_acc_cnt = acc_cnt
-        else:
+        elif name == "RFNON":
             s.last_rfnon_pairs = pairs_data
             s.last_rfnon_unix = now
             s.last_rfnon_acc_cnt = acc_cnt
+        else:  # RFAMB
+            s.last_rfamb_pairs = pairs_data
+            s.last_rfamb_unix = now
+            s.last_rfamb_acc_cnt = acc_cnt
 
     def _maybe_recompute_thresholds(self, header: dict) -> None:
         """Rebuild self.thresholds when integration_time changes."""
@@ -1157,28 +1177,37 @@ class LiveStatusAggregator:
             )
             return
 
-        cache = self._build_vna_cache(data, header)
-        if cache is None:
+        cache = self._build_vna_cache(data, header, dut_key=mode)
+        sp1_cache = (
+            self._build_vna_cache(data, header, dut_key="sp1")
+            if mode == "ant"
+            else None
+        )
+        if cache is None and sp1_cache is None:
             return
         with self._lock:
             if mode == "ant":
-                self.state.last_vna_ant = cache
-            else:
+                if cache is not None:
+                    self.state.last_vna_ant = cache
+                if sp1_cache is not None:
+                    self.state.last_vna_sp1 = sp1_cache
+            elif cache is not None:
                 self.state.last_vna_rec = cache
 
     @staticmethod
     def _build_vna_cache(
-        data: dict[str, np.ndarray], header: dict
+        data: dict[str, np.ndarray], header: dict, dut_key: str
     ) -> Optional[VnaCache]:
         """Project a raw VNA stream entry into a :class:`VnaCache`.
 
         Caller must have already validated ``header['mode']`` is
-        ``"ant"`` or ``"rec"``. Returns ``None`` (and logs at ERROR)
+        ``"ant"`` or ``"rec"``. ``dut_key`` selects which DUT trace to
+        project — the mode name for the primary panes, ``"sp1"`` for
+        the Spare-1 cable pane. Returns ``None`` (and logs at ERROR)
         on any further contract violation — missing data keys, missing
         ``freqs`` — so the corr / metadata panes keep painting even
         when the VNA producer publishes garbage.
         """
-        dut_key = header["mode"]
         try:
             raw_s11 = data[dut_key]
             cal_o = data["cal:VNAO"]

@@ -23,10 +23,7 @@ dependencies = [
   "pyyaml",
   "flask",
   "plotly",
-  # >=4.2: tempctrl per-channel installed flag (set_installed command +
-  # fan-out stream suppression for descoped channels).
   "picohost>=4.2",
-  # >=1.4: measure_dut (vna_manual one-off switch-path probes).
   "eigsep-vna>=1.4",
   "eigsep_redis>=2.3",
 ]

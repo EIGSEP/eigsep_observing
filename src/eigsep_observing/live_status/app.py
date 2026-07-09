@@ -108,9 +108,15 @@ def _solve_calibration(
 ) -> tuple[Optional[dict], dict]:
     """Build per-channel ``(gain, t_rx)`` for the dashboard cal toggle.
 
+    Coefficients are solved from the most recent ``RFNON``/``RFAMB``
+    pair — ``RFAMB`` (ambient load) is the cold reference, ``RFNON``
+    (noise diode on) the hot reference. ``RFNOFF`` stays cached and its
+    age is retained in ``meta`` for offline cross-check / API
+    consumers, but it no longer feeds the solve.
+
     Returns ``(coeffs, meta)`` — ``coeffs`` is ``None`` when the cal
     can't run (missing cache, missing T_LOAD, missing config); the
-    ``meta`` dict is always returned and exposes the cached on/off ages
+    ``meta`` dict is always returned and exposes the cached pair ages
     so the frontend can render a "cal is N seconds old" indicator. We
     intentionally do not gate on cache age: the ``RFANT`` dwell is an
     hour, so any fixed threshold either rejects nearly every antenna
@@ -156,6 +162,7 @@ def _solve_calibration(
         "t_enr_k": t_enr_k,
         "last_rfnoff_age_s": None,
         "last_rfnon_age_s": None,
+        "last_rfamb_age_s": None,
         "gain_median": None,
     }
 
@@ -163,16 +170,18 @@ def _solve_calibration(
         meta["reason"] = "noise_diode_enr_db missing or non-numeric"
         return None, meta
 
-    rfnoff = state.last_rfnoff_pairs
+    rfamb = state.last_rfamb_pairs
     rfnon = state.last_rfnon_pairs
-    if rfnoff is None or rfnon is None:
-        meta["reason"] = "no on/off pair cached yet"
+    if rfamb is None or rfnon is None:
+        meta["reason"] = "no on/amb pair cached yet"
         return None, meta
 
     if state.last_rfnoff_unix is not None:
         meta["last_rfnoff_age_s"] = max(0.0, now - state.last_rfnoff_unix)
     if state.last_rfnon_unix is not None:
         meta["last_rfnon_age_s"] = max(0.0, now - state.last_rfnon_unix)
+    if state.last_rfamb_unix is not None:
+        meta["last_rfamb_age_s"] = max(0.0, now - state.last_rfamb_unix)
 
     load_entry = state.metadata_snapshot.get(t_load_stream)
     load_t_now = (
@@ -196,18 +205,18 @@ def _solve_calibration(
     meta["t_load_k"] = t_load_k
 
     coeffs: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-    for pair, off_arr in rfnoff.items():
+    for pair, amb_arr in rfamb.items():
         on_arr = rfnon.get(pair)
-        if on_arr is None or off_arr.shape != on_arr.shape:
+        if on_arr is None or amb_arr.shape != on_arr.shape:
             continue
         # Autos are ``(1, NCHAN)`` int32 power; gain is solved per-channel
         # against the auto power. Cross pairs (``(1, NCHAN, 2)``) reuse
         # the same per-channel gain at apply time.
-        if off_arr.ndim == 2:
-            p_off = off_arr[0].astype(np.float64)
+        if amb_arr.ndim == 2:
+            p_amb = amb_arr[0].astype(np.float64)
             p_on = on_arr[0].astype(np.float64)
             try:
-                gain, t_rx = compute_gain_trx(p_on, p_off, t_load_k, t_enr_k)
+                gain, t_rx = compute_gain_trx(p_on, p_amb, t_load_k, t_enr_k)
             except ValueError as exc:
                 # Outer guards force `t_enr_k` finite and positive, so this
                 # path is only reachable via a logic regression — log loudly.
@@ -521,7 +530,11 @@ _VNA_STALE_AGE_S = 5400.0
 
 
 def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
-    """Calibrated VNA pane payload for ``mode in {"ant", "rec"}``.
+    """Calibrated VNA pane payload for ``mode in {"ant", "rec", "sp1"}``.
+
+    ``sp1`` (Spare-1 open-cable trace) carries an extra ``"phase_deg"``
+    field (unwrapped phase in degrees) alongside the standard
+    magnitude data — see the mode-specific block below.
 
     Calibration is computed lazily here so the drain thread never pays
     the calkit cost when the pane isn't visible. A failure of the cal
@@ -529,15 +542,18 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     surfaces ``available=false`` to the front-end — corr / metadata
     panes stay unaffected.
     """
-    if mode not in ("ant", "rec"):
+    caches: dict[str, Optional[VnaCache]] = {
+        "ant": state.last_vna_ant,
+        "rec": state.last_vna_rec,
+        "sp1": state.last_vna_sp1,
+    }
+    if mode not in caches:
         return {
             "available": False,
             "mode": mode,
             "reason": f"unknown mode {mode!r}",
         }
-    cache: Optional[VnaCache] = (
-        state.last_vna_ant if mode == "ant" else state.last_vna_rec
-    )
+    cache = caches[mode]
     if cache is None:
         return {
             "available": False,
@@ -576,7 +592,7 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     # plotly draws a gap rather than crashing on NaN/Inf.
     s11_db_list = [float(v) if np.isfinite(v) else None for v in s11_db]
     freqs_mhz = (cache.freqs * 1e-6).tolist()
-    return {
+    payload = {
         "available": True,
         "mode": mode,
         "freqs_mhz": freqs_mhz,
@@ -585,6 +601,23 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
         "stale": age_s > _VNA_STALE_AGE_S,
         "metadata_snapshot_unix": cache.metadata_snapshot_unix,
     }
+    if mode == "sp1":
+        # An open cable's phase vs. frequency is ~linear (slope = the
+        # cable's round-trip delay); unwrapping makes slope drift or
+        # ripple visible instead of sawtoothing at +-180 deg.
+        #
+        # Unwrap only the finite channels: np.unwrap cumsums phase
+        # diffs, so a single NaN would poison every later channel.
+        # Unwrapping across a NaN gap can miss a wrap inside the gap —
+        # acceptable for this display-only pane.
+        ang = np.angle(cal)
+        phase = np.full(ang.shape, np.nan)
+        finite = np.isfinite(ang)
+        phase[finite] = np.degrees(np.unwrap(ang[finite]))
+        payload["phase_deg"] = [
+            float(v) if np.isfinite(v) else None for v in phase
+        ]
+    return payload
 
 
 def _host_health_payload(

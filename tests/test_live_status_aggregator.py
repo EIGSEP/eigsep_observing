@@ -32,6 +32,7 @@ from eigsep_observing.live_status import (
     LiveStatusAggregator,
     Thresholds,
 )
+from eigsep_observing.vna import VnaWriter
 
 
 NCHAN = 1024
@@ -46,7 +47,13 @@ OBS_CFG = {
         "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
         "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
     },
-    "switch_schedule": {"RFANT": 3600, "RFNOFF": 60, "RFNON": 60},
+    "switch_schedule": {
+        "RFANT": 3600,
+        "RFNOFF": 60,
+        "RFNON": 60,
+        "RFAMB": 60,
+        "RFSP1": 60,
+    },
 }
 
 
@@ -138,6 +145,26 @@ def _make_corr_row(pairs=("0", "1", "02"), auto_value=100, cross_value=5):
             arr = np.full((NCHAN, 2, 2), cross_value, dtype=np.dtype(DTYPE))
         out[p] = arr.tobytes()
     return out
+
+
+def _make_ant_bundle(nfreq=16):
+    """Conforming ant-mode VNA bundle (all 5 DUTs + OSL)."""
+    z = np.ones(nfreq, dtype=np.complex128)
+    data = {
+        "ant": z,
+        "load": 0.5 * z,
+        "noise": 0.25 * z,
+        "amb": 0.1 * z,
+        "sp1": 0.9 * z,
+        "cal:VNAO": z,
+        "cal:VNAS": -z,
+        "cal:VNAL": 0.0 * z,
+    }
+    header = {
+        "mode": "ant",
+        "freqs": np.linspace(1e6, 250e6, nfreq).tolist(),
+    }
+    return data, header
 
 
 # ---------------------------------------------------------------------
@@ -903,6 +930,37 @@ def test_rfnon_spectrum_caches_independently_of_rfnoff(agg, seeded):
     assert state.last_rfnoff_pairs is None  # RFNOFF was never observed
 
 
+def test_rfamb_spectrum_caches_independently(agg, seeded):
+    """RFAMB integrations populate their own cal-reference cache —
+    the new Y-factor cold reference (spec: RFNON+RFAMB pair)."""
+    snap, panda = seeded
+    _publish_rfswitch(panda, "RFAMB", sw_state=13)
+    _rewind_streams(panda, ["stream:rfswitch"])
+    agg._panda_tick()
+    with agg._lock:
+        agg.state.rfswitch_state_entered_unix = time.time() - 5.0
+
+    CorrWriter(snap).add(
+        _make_corr_row(), cnt=400, sync_time=1000.0, dtype=DTYPE
+    )
+    _rewind_streams(snap, ["stream:corr"])
+
+    agg._snap_tick()
+
+    state = agg.snapshot()
+    assert state.last_rfamb_pairs is not None
+    assert "0" in state.last_rfamb_pairs
+    assert state.last_rfamb_acc_cnt == 400
+    assert state.last_rfamb_unix is not None
+    assert state.last_rfnoff_pairs is None
+    assert state.last_rfnon_pairs is None
+    # snapshot() must hand out a shallow copy of the pairs dict (same
+    # convention as last_rfnoff_pairs / last_rfnon_pairs) so a Flask
+    # handler mutating its snapshot can't corrupt the live cache.
+    state.last_rfamb_pairs.clear()
+    assert "0" in agg.snapshot().last_rfamb_pairs
+
+
 def test_corr_during_transition_window_is_not_cached(agg, seeded):
     """Spectra captured while the physical switch is mid-actuation
     (i.e. less than ``RFSWITCH_TRANSITION_WINDOW_S`` since the state
@@ -1100,6 +1158,49 @@ def test_snap_fpga_probe_unknown_when_no_host(agg, monkeypatch):
     agg._snap_tick()
     assert calls == []
     assert agg.state.snap_fpga_reachable is None
+
+
+# ---------------------------------------------------------------------
+# VNA tick — sp1 cache
+# ---------------------------------------------------------------------
+
+
+def test_vna_tick_caches_ant_and_sp1_from_one_bundle(agg, seeded):
+    """One ant-mode entry fills both the ant and sp1 VnaCache slots,
+    sharing OSL arrays and freqs."""
+    _, panda = seeded
+    data, header = _make_ant_bundle()
+    VnaWriter(panda).add(data, header=header)
+    _rewind_streams(panda, ["stream:vna"])
+
+    agg._vna_tick()
+
+    state = agg.snapshot()
+    assert state.last_vna_ant is not None
+    assert state.last_vna_sp1 is not None
+    np.testing.assert_array_equal(state.last_vna_sp1.raw_s11, data["sp1"])
+    np.testing.assert_array_equal(
+        state.last_vna_sp1.cal_o, state.last_vna_ant.cal_o
+    )
+    assert state.last_vna_rec is None
+
+
+def test_vna_tick_missing_sp1_drops_only_sp1(agg, seeded, caplog):
+    """A pre-upgrade ant bundle without sp1 still caches the ant trace;
+    the sp1 slot stays empty and the violation logs at ERROR."""
+    _, panda = seeded
+    data, header = _make_ant_bundle()
+    del data["sp1"]
+    VnaWriter(panda).add(data, header=header)
+    _rewind_streams(panda, ["stream:vna"])
+
+    with caplog.at_level(logging.ERROR):
+        agg._vna_tick()
+
+    state = agg.snapshot()
+    assert state.last_vna_ant is not None
+    assert state.last_vna_sp1 is None
+    assert any("sp1" in r.message for r in caplog.records)
 
 
 def test_snapshot_exposes_snap_fpga_fields(agg):

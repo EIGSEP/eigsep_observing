@@ -38,7 +38,7 @@
       <input type="checkbox" id="toggle-wiring">
       <span>Wiring labels</span>
     </label>
-    <label class="toggle" title="Convert spectra to Kelvin using the most recent RFNON / RFNOFF integrations (first-order Y-factor cal). Falls back to raw if the on/off cache is missing; an off-schedule switch is surfaced separately on the RF switch tile.">
+    <label class="toggle" title="Convert spectra to Kelvin using the most recent RFNON / RFAMB integrations (first-order Y-factor cal; RFAMB calibrates to T_LOAD, RFNON to T_LOAD + T_ENR). Falls back to raw if the on/amb cache is missing; an off-schedule switch is surfaced separately on the RF switch tile.">
       <input type="checkbox" id="toggle-calibrated">
       <span>Calibrated (T_sky)</span>
     </label>
@@ -74,6 +74,13 @@
     </div>
     <div id="vna-status" class="vna-status">No measurement yet.</div>
     <div id="plot-vna" class="plot"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Spare-1 cable S11 (ideal-OSL calibrated)</h2>
+    <div id="vna-sp1-status" class="vna-status">No measurement yet.</div>
+    <div id="plot-vna-sp1-mag" class="plot"></div>
+    <div id="plot-vna-sp1-phase" class="plot"></div>
   </section>
 
   <section class="card wide">

@@ -1135,12 +1135,15 @@ VNA_S11_HEADER_SCHEMA = {
 VNA_S11_CAL_KEYS = frozenset({"cal:VNAO", "cal:VNAS", "cal:VNAL"})
 
 # Per-mode required DUT keys on the VNA payload (in addition to the cal
-# keys above). The ``"ant"`` mode measures antenna, load, and noise;
-# ``"rec"`` measures the receiver. These come from ``VNA.measure_ant`` /
-# ``VNA.measure_rec`` respectively and must not regress without an
-# explicit update here — downstream consumers key on these names.
+# keys above). The ``"ant"`` mode measures antenna, load, noise, the
+# ambient load (``amb``, path VNAAMB) and the Spare-1 port (``sp1``,
+# path VNASP1 — see ``switch_connections`` in obs_config for what is
+# physically connected); ``"rec"`` measures the receiver. These come
+# from ``VNA.measure_ant`` / ``VNA.measure_dut`` / ``VNA.measure_rec``
+# and must not regress without an explicit update here — downstream
+# consumers key on these names.
 VNA_S11_MODE_DATA_KEYS = {
-    "ant": frozenset({"ant", "load", "noise"}),
+    "ant": frozenset({"ant", "load", "noise", "amb", "sp1"}),
     "rec": frozenset({"rec"}),
 }
 

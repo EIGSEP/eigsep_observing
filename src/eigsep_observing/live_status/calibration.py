@@ -3,8 +3,10 @@
 Display-only. The "real" calibration (lab-measured ENR, polynomial
 bandpass corrections, etc.) lives elsewhere; this module exists so an
 operator looking at the live dashboard can flip a toggle and see
-spectra in Kelvin, with the built-in sanity check that ``RFNOFF``
+spectra in Kelvin, with the built-in sanity check that ``RFAMB``
 calibrates to ``T_LOAD`` and ``RFNON`` to ``T_LOAD + T_ENR``.
+``RFNOFF`` is still measured every cycle and lands near ``T_LOAD``
+as an offline cross-check.
 
 Pure numpy. No Redis, no Flask, no aggregator — the route handler in
 ``app.py`` and the cache in ``aggregator.py`` are the only callers.
@@ -32,6 +34,11 @@ def compute_gain_trx(
     gain — physically a wiring or producer bug, not a real signal) are
     set to ``NaN`` so callers see a hole in the spectrum rather than
     inverted nonsense.
+
+    Under the RFNON/RFAMB pairing, ``p_off`` is the ambient-load trace;
+    the solve assumes the diode's off-state physical temperature ≈ the
+    ambient load temperature (both at enclosure ambient) — adequate
+    for this display-only first-order cal.
     """
     if not (t_enr_k > 0):
         raise ValueError(
