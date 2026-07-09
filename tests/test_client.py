@@ -1329,6 +1329,21 @@ def test_use_motor_true_builds_motor_client(transport, dummy_cfg):
         client.stop()
 
 
+def test_motor_client_receives_limit_kwargs(transport, dummy_cfg):
+    """Limit kwargs in ``motor_client_kwargs`` flow through
+    ``init_motor_client`` into the ``MotorClient`` constructor verbatim.
+    Verifies that the ``**kwargs`` splat in ``init_motor_client`` does
+    not filter travel-limit keys."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_client_kwargs"] = {"el_limits_deg": [-30.0, 30.0]}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert tuple(client.motor_client.el_limits_deg) == (-30.0, 30.0)
+    finally:
+        client.stop()
+
+
 def test_motor_loop_returns_when_motor_client_is_none(caplog, client):
     """motor_loop must return promptly when ``motor_client`` is None —
     no polling, no silent spin. The warning must ride both channels
@@ -1945,6 +1960,187 @@ def test_motor_loop_set_delay_failure_is_warning_not_fatal(
         level, status = _status_reader(client).read(timeout=1)
         assert level == logging.WARNING
         assert "Motor set_delay failed" in status
+    finally:
+        client.stop()
+
+
+def test_motor_loop_homes_closed_loop_after_scan(transport, dummy_cfg):
+    """With ``home_after_scan: true``, motor_loop calls
+    ``motor_homer.home`` (with ``stop_event``) after a successful scan.
+    The closed-loop homer is NOT called on the failure park path."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_scan"] = {"repeat_count": 1}
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"settle_s": 0.0, "max_iters": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert client.motor_homer is not None, (
+            "home_after_scan=True must build motor_homer in init_motor_client"
+        )
+        homer_calls = []
+
+        def fake_scan(**kwargs):
+            pass  # scan succeeds
+
+        def recording_homer_home(stop_event=None):
+            homer_calls.append(stop_event)
+            client.stop_client.set()
+            from eigsep_observing.motor_homer import HomeResult
+
+            return HomeResult(
+                converged=True,
+                iterations=1,
+                residual_az_deg=0.0,
+                residual_el_deg=0.0,
+                degraded=False,
+                reset_count=False,
+            )
+
+        with (
+            patch.object(client.motor_client, "scan", side_effect=fake_scan),
+            patch.object(
+                client.motor_homer, "home", side_effect=recording_homer_home
+            ),
+        ):
+            client.motor_loop()
+
+        assert len(homer_calls) == 1, (
+            f"motor_homer.home must be called once after a successful scan; "
+            f"got {len(homer_calls)} calls"
+        )
+        assert homer_calls[0] is client.stop_client, (
+            "motor_homer.home must receive stop_event=self.stop_client"
+        )
+    finally:
+        client.stop()
+
+
+def test_motor_loop_failure_park_stays_open_loop(transport, dummy_cfg):
+    """With ``home_after_scan: true``, the FAILURE/recovery park path
+    must use the open-loop ``motor_client.home()`` only — NOT the
+    closed-loop homer. The homer is for the healthy post-scan path."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 3600
+    cfg["motor_scan"] = {"repeat_count": 1}
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"settle_s": 0.0, "max_iters": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        homer_calls = []
+        open_loop_calls = []
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise TimeoutError("motor stalled")
+
+        def recording_open_home():
+            open_loop_calls.append(True)
+
+        def recording_homer_home(stop_event=None):
+            homer_calls.append(True)
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_client, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_client, "home", side_effect=recording_open_home
+            ),
+            patch.object(
+                client.motor_homer, "home", side_effect=recording_homer_home
+            ),
+        ):
+            client.motor_loop()
+
+        assert open_loop_calls, (
+            "failure park must call the open-loop motor_client.home()"
+        )
+        assert not homer_calls, (
+            "failure park must NOT call the closed-loop motor_homer.home()"
+        )
+    finally:
+        client.stop()
+
+
+def test_motor_loop_survives_motor_limit_error(transport, dummy_cfg, caplog):
+    """A ``MotorLimitError`` from ``scan`` (sensor fence or commanded-target
+    guard) must not propagate out of ``motor_loop``.  It must be treated
+    identically to a scan ``RuntimeError``: logged at ERROR on both channels,
+    followed by an open-loop park attempt, then the loop exits cleanly because
+    ``stop_client`` was set inside the raising scan stub."""
+    from eigsep_observing.motor_client import MotorLimitError
+
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["motor_interval"] = 60
+    cfg["motor_scan"] = {"repeat_count": 1}
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        home_calls = []
+
+        def raising_scan(**kwargs):
+            client.stop_client.set()
+            raise MotorLimitError("out of window")
+
+        def recording_home():
+            home_calls.append(True)
+
+        _arm_status_reader(client)
+        with (
+            patch.object(
+                client.motor_client, "scan", side_effect=raising_scan
+            ),
+            patch.object(
+                client.motor_client, "home", side_effect=recording_home
+            ),
+        ):
+            caplog.set_level("ERROR")
+            client.motor_loop()  # must return, not raise
+
+        assert home_calls == [True], (
+            "motor_loop must attempt open-loop park after MotorLimitError "
+            "so a power loss doesn't strand the rig at an arbitrary position"
+        )
+        assert any(
+            "Motor scan aborted" in r.getMessage()
+            and "MotorLimitError" in r.getMessage()
+            and r.levelname == "ERROR"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
+
+        level, status = _status_reader(client).read(timeout=1)
+        assert level == logging.ERROR
+        assert "Motor scan aborted" in status
+    finally:
+        client.stop()
+
+
+def test_invalid_motor_homer_kwargs_disables_homer(
+    transport, dummy_cfg, caplog
+):
+    """A ``motor_homer_kwargs`` with an unknown key must not raise during
+    ``PandaClient.__init__``; ``init_motor_client`` must catch the resulting
+    ``TypeError``, warn, and leave ``motor_homer`` as ``None`` so the loop
+    still works (open-loop park only)."""
+    cfg = dict(dummy_cfg)
+    cfg["use_motor"] = True
+    cfg["home_after_scan"] = True
+    cfg["motor_homer_kwargs"] = {"nonexistent_kwarg": 1}
+    caplog.set_level("WARNING")
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        assert client.motor_homer is None, (
+            "Invalid motor_homer_kwargs must disable motor_homer, not raise"
+        )
+        assert any(
+            "Invalid motor_homer_kwargs" in r.getMessage()
+            and r.levelname == "WARNING"
+            for r in caplog.records
+        ), [r.getMessage() for r in caplog.records]
     finally:
         client.stop()
 

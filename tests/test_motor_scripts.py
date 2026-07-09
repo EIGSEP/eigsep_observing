@@ -16,6 +16,8 @@ import time
 from argparse import Namespace
 from pathlib import Path
 
+from eigsep_redis.testing import DummyTransport
+
 import numpy as np
 import pytest
 import yaml
@@ -273,6 +275,31 @@ def test_motor_manual_helpers_exist():
     assert callable(mm._curses_main)
     assert callable(mm._parse_args)
     assert callable(mm._render)
+    assert callable(mm._build_zeroer)
+
+
+def test_motor_manual_build_zeroer_override_limits():
+    """_build_zeroer with override_limits=True builds enforce_limits=False."""
+    mm = _load("motor_manual")
+    ns = Namespace(override_limits=True)
+    zeroer = mm._build_zeroer(DummyTransport(), ns)
+    assert zeroer._motor_client.enforce_limits is False
+
+
+def test_motor_manual_build_zeroer_default_enforces_limits():
+    """_build_zeroer with override_limits=False preserves enforce_limits=True."""
+    mm = _load("motor_manual")
+    ns = Namespace(override_limits=False)
+    zeroer = mm._build_zeroer(DummyTransport(), ns)
+    assert zeroer._motor_client.enforce_limits is True
+
+
+def test_motor_manual_parse_args_accepts_override_limits(monkeypatch):
+    """_parse_args recognises --override-limits flag."""
+    mm = _load("motor_manual")
+    monkeypatch.setattr(sys, "argv", ["motor_manual", "--override-limits"])
+    args = mm._parse_args()
+    assert args.override_limits is True
 
 
 # ---------------------------------------------------------------------

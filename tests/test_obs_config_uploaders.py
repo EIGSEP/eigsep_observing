@@ -33,6 +33,8 @@ UPLOADER_SCRIPTS = {
 # alt-mode vna_position_sweep). Passive readouts are NOT here; they only
 # read snapshots and must coexist, so they live in RUN_TAG_EXEMPT.
 ACTIVE_DRIVER_SCRIPTS = {
+    "field_zero.py",
+    "motor_home.py",
     "vna_manual.py",
     "rfswitch_manual.py",
     "tempctrl_manual.py",
@@ -68,6 +70,12 @@ ACTIVE_DRIVER_SCRIPTS = {
 #     K/V to the local Redis, drives no hardware, and must keep
 #     running through manual sessions and corr-only operation — the
 #     same coexistence reasoning as the dashboards.
+#   - set_motor_limits.py: rig-wide motor-limit admin tool. Writes a
+#     dedicated MotorLimitStore K/V (not obs_config), drives no motor,
+#     and writes no files, so it changes none of the always-recording
+#     physical state and has no provenance to record. A one-shot config
+#     tool that must coexist with whatever is running, so it must not
+#     claim the refuse-on-conflict tag.
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
@@ -85,6 +93,7 @@ RUN_TAG_EXEMPT = {
     "pico_preflight.py",
     "clear_run_tag.py",
     "host_health.py",
+    "set_motor_limits.py",
 }
 
 

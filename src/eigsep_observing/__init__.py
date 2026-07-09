@@ -5,7 +5,8 @@ from .client import PandaClient
 from .motion_switch import MotionSwitchCoordinator
 from .observer import EigObserver
 from .fpga import EigsepFpga
-from .motor_client import MotorClient
+from .motor_client import MotorClient, MotorLimitError
+from .motor_homer import MotorHomer
 from .motor_zeroer import MotorZeroer
 from .status_log_handler import StatusStreamHandler
 from .tempctrl_client import TempCtrlClient

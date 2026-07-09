@@ -36,6 +36,19 @@ use_motor: false
 motor_interval: 3600  # seconds between scans
 motor_failure_retry_s: 60  # shorter wait after a failed scan to home
 motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
+# Motor safe-travel limits are now rig-wide in the MotorLimitStore Redis K/V,
+# set via scripts/set_motor_limits.py (read by every MotorClient). They are
+# intentionally NOT here. motor_client_kwargs may still carry non-limit
+# MotorClient kwargs (step delays, poll interval) if needed.
+motor_client_kwargs: {}
+home_after_scan: false  # closed-loop return-to-home after each scan
+motor_homer_kwargs:     # forwarded to MotorHomer (only used when home_after_scan: true)
+  tol_az_deg: 3.0
+  tol_el_deg: 2.0
+  settle_s: 10.0
+  damping: 0.5
+  max_iters: 6
+  reset_count: true
 
 # motion-switch coordination
 # When true, motor moves and RF switching mutually exclude each other
