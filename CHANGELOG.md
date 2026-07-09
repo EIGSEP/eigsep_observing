@@ -1,5 +1,40 @@
 # Changelog
 
+## [2.13.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.12.0...v2.13.0) (2026-07-09)
+
+
+### Features
+
+* field-zero + motor travel-limit guard + closed-loop homing ([#173](https://github.com/EIGSEP/eigsep_observing/issues/173)) ([790851c](https://github.com/EIGSEP/eigsep_observing/commit/790851cf6fde930325e7cf6d502311f79ab7f9ac))
+* **fpga:** derive adc_stats from ADC snapshots; drop dead register paths ([72df031](https://github.com/EIGSEP/eigsep_observing/commit/72df0316b74be0769eb45bf04e7e27dfbe62802a))
+* imu_az azimuth descope — schema, live_status, picohost&gt;=4.3 ([#213](https://github.com/EIGSEP/eigsep_observing/issues/213)) ([3fafccc](https://github.com/EIGSEP/eigsep_observing/commit/3fafccc507c6b2959def200cba5df3b665d38fdd))
+* **io:** sensor_rejects in _PELTIER_SCHEMA with max reduction ([21e9396](https://github.com/EIGSEP/eigsep_observing/commit/21e9396e5db6efa32d3e8d87c45ebf6e2d8c1c80))
+* **live_status:** config panel with gating provenance (front-end) ([ba22f04](https://github.com/EIGSEP/eigsep_observing/commit/ba22f04797cd7f6e74253f9b57353612c668e835))
+* **live_status:** gate signals/thresholds from panda's Redis config upload ([e68de53](https://github.com/EIGSEP/eigsep_observing/commit/e68de535b9eeaa76238144751d107760acbebe8f))
+* **live_status:** raise raw corr mag y-range floor to 1e1 ([130cf37](https://github.com/EIGSEP/eigsep_observing/commit/130cf371d0de46299991c8dc3debd4bf31f0de54))
+* **live_status:** SNAP connector labels + physical wiring for ADC pane ([4ff7601](https://github.com/EIGSEP/eigsep_observing/commit/4ff760156b7f0755c679bec02f4ae5eb398788b2))
+* **live_status:** two-temperature Y-factor for the new noise source ([3b05f5b](https://github.com/EIGSEP/eigsep_observing/commit/3b05f5ba8d089519fa74ff4f6f9677bd650738bb))
+* **motor:** cal-defined home (pot 0° / IMU level) + ±200° default limits ([#198](https://github.com/EIGSEP/eigsep_observing/issues/198)) ([d2e01a8](https://github.com/EIGSEP/eigsep_observing/commit/d2e01a8cc2e271b6bf15a9fe69db59376c694a50))
+* **motor:** per-axis home — 'a'/'e' keys; az single pot-referenced correction + divergence guard ([#205](https://github.com/EIGSEP/eigsep_observing/issues/205)) ([ba2b881](https://github.com/EIGSEP/eigsep_observing/commit/ba2b881f576021787196592b248ce395d1f1a3d9))
+* RFAMB/RFSP1 in the observing cycle; RFNON+RFAMB Y-factor; sp1 pane ([#195](https://github.com/EIGSEP/eigsep_observing/issues/195)) ([1dd136b](https://github.com/EIGSEP/eigsep_observing/commit/1dd136bb15a04c4d4533a0d235980a38b6098c5c))
+* wiring manifest for the next deployment (C000122, Rx modules) ([002107f](https://github.com/EIGSEP/eigsep_observing/commit/002107f16ac008bd163911787eb456ccba009836))
+* **wiring:** authoritative module ids for the 4-chain roster ([573216e](https://github.com/EIGSEP/eigsep_observing/commit/573216ed51bc4220b178b0edadc62a6227a1ce95))
+
+
+### Bug Fixes
+
+* **fpga:** 0.25 s TAPCP timeout + slow-transaction log ([#204](https://github.com/EIGSEP/eigsep_observing/issues/204)) ([e60943d](https://github.com/EIGSEP/eigsep_observing/commit/e60943dbad691c6036b10c1a49b10a405869dc59))
+* **fpga:** integration_time is the fabric-clock dump period, not per-bank ([7345125](https://github.com/EIGSEP/eigsep_observing/commit/734512545e42d7850b5170499127cdc198c28903))
+* **live_status:** re-point config-upload cal pluck at t_ns_*/t_amb_* knobs ([b591a56](https://github.com/EIGSEP/eigsep_observing/commit/b591a56767223138c5ede9324fea6774f02cfa2c))
+* **motor_scan:** simple single-axis sweeps — hold move + same-direction passes, no homing ([642841e](https://github.com/EIGSEP/eigsep_observing/commit/642841edb79f76e408b96dafdccde4c17a2d5566))
+* **observer:** anchor probe cooldown at completion, not start ([f138e31](https://github.com/EIGSEP/eigsep_observing/commit/f138e314390133c2a001437d81de122600cca8b5))
+* **observer:** gate panda re-probing to a cooldown during outages ([3ca4e4c](https://github.com/EIGSEP/eigsep_observing/commit/3ca4e4c2d34bb3d883ea00b283912297141b5b07))
+
+
+### Documentation
+
+* update 1 Hz-cadence comment rot in adc.py / aggregator ([312ffde](https://github.com/EIGSEP/eigsep_observing/commit/312ffde0b166470157be2134ec06eb028327ade4))
+
 ## [2.12.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.11.0...v2.12.0) (2026-07-09)
 
 
