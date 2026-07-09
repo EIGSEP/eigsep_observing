@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.12.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.11.0...v2.12.0) (2026-07-09)
+
+
+### Features
+
+* **vna_manual:** one-off switch-path probes + --once mode ([7ba15a5](https://github.com/EIGSEP/eigsep_observing/commit/7ba15a5e97b92ab970e38797f743048d6694b04d))
+
 ## [2.11.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.10.0...v2.11.0) (2026-07-09)
 
 
