@@ -369,8 +369,12 @@ corr plot; NaN → JSON null → Plotly line gap). Both validate
 `OPERATING_POINT_FIELDS` (adc_gain, fft_shift, corr_scalar, ...)
 against the live corr header and **omit the bounds with an ERROR
 log on any failure** — bounds from a different operating point are
-junk, and a bad product must never block corr writes. Re-fit the
-product after any operating-point change.
+junk, and a bad product must never block corr writes. One sanctioned
+display-only exception: when `corr_acc_len` is the *sole* mismatch,
+the live-status aggregator draws the bounds rescaled by the acc_len
+ratio (`acc_len_rescale`) as an approximate guide for the eye —
+WARNING logged, legend labeled with the scale; file headers still
+omit. Re-fit the product after any operating-point change.
 
 ## Testing philosophy: dummies over mocks
 

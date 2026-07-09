@@ -69,6 +69,7 @@ from ..host_health import read as read_host_health
 from ..io import RFSWITCH_TRANSITION_WINDOW_S, reshape_data
 from ..linear_range import (
     LinearRangeError,
+    acc_len_rescale,
     load_linear_range,
     validate_operating_point,
 )
@@ -133,9 +134,13 @@ class StateSnapshot:
     # product's operating point validates against the live corr
     # header. ``linear_range_key`` memoizes the (file, header-upload)
     # pair so a bad product logs one ERROR per header publish, not one
-    # per ~1 s tick.
+    # per ~1 s tick. ``corr_linear_scale`` is the acc_len-ratio the
+    # bounds were multiplied by when ``corr_acc_len`` was the only
+    # operating-point mismatch (guide-for-the-eye display mode); None
+    # when the bounds are exact.
     corr_linear_min: Optional[np.ndarray] = None
     corr_linear_max: Optional[np.ndarray] = None
+    corr_linear_scale: Optional[float] = None
     linear_range_key: Optional[tuple] = None
 
     # ADC stats stream (SNAP side, one entry per diagnostics-period
@@ -961,7 +966,10 @@ class LiveStatusAggregator:
         corr config or header was (re)read. Loads the packaged product
         named by ``corr_config["linear_range_file"]`` and validates its
         operating point against the live corr header; a failed load or
-        mismatch clears the bounds. Memoized on the (file,
+        mismatch clears the bounds, except an acc_len-only mismatch,
+        which draws them rescaled by the acc_len ratio as an
+        approximate guide for the eye (WARNING logged,
+        ``corr_linear_scale`` set). Memoized on the (file,
         ``header_upload_unix``) pair so a chronic failure logs one
         ERROR per header publish instead of one per tick (the tick
         re-reads config/header every ~1 s).
@@ -972,6 +980,7 @@ class LiveStatusAggregator:
         if not lr_file or header is None:
             s.corr_linear_min = None
             s.corr_linear_max = None
+            s.corr_linear_scale = None
             s.linear_range_key = None
             return
         key = (lr_file, header.get("header_upload_unix"))
@@ -980,6 +989,7 @@ class LiveStatusAggregator:
         s.linear_range_key = key
         s.corr_linear_min = None
         s.corr_linear_max = None
+        s.corr_linear_scale = None
         try:
             product = load_linear_range(lr_file)
         except LinearRangeError as e:
@@ -993,14 +1003,32 @@ class LiveStatusAggregator:
             return
         mismatches = validate_operating_point(product["header"], header)
         if mismatches:
-            logger.error(
-                "Linear-range operating-point mismatch for %r: %s. "
-                "Dashed bounds will be missing from the corr plot. "
-                "Re-measure the product at this operating point or "
-                "fix corr_config.",
+            scale = acc_len_rescale(product["header"], header)
+            if scale is None:
+                logger.error(
+                    "Linear-range operating-point mismatch for %r: %s. "
+                    "Dashed bounds will be missing from the corr plot. "
+                    "Re-measure the product at this operating point or "
+                    "fix corr_config.",
+                    lr_file,
+                    "; ".join(mismatches),
+                )
+                return
+            # Display-only guide for the eye: counts scale with
+            # accumulation length, but the fit floor is unverified at
+            # this operating point. File headers still omit the bounds.
+            logger.warning(
+                "Linear-range product %r was fit at a different "
+                "corr_acc_len (%s); drawing bounds scaled by %.4g as "
+                "an approximate guide for the eye. Re-measure the "
+                "product at this operating point for exact bounds.",
                 lr_file,
-                "; ".join(mismatches),
+                mismatches[0],
+                scale,
             )
+            s.corr_linear_min = product["linear_min"] * scale
+            s.corr_linear_max = product["linear_max"] * scale
+            s.corr_linear_scale = scale
             return
         s.corr_linear_min = product["linear_min"]
         s.corr_linear_max = product["linear_max"]

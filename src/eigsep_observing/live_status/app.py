@@ -457,6 +457,10 @@ def _corr_payload(
         # raw (uncalibrated) view only.
         payload["linear_min"] = _nan_to_none(state.corr_linear_min)
         payload["linear_max"] = _nan_to_none(state.corr_linear_max)
+        # acc_len-ratio the bounds were rescaled by (guide-for-the-eye
+        # mode, see aggregator._maybe_load_linear_range); null when the
+        # bounds are exact. The front end labels the curves with it.
+        payload["linear_range_scale"] = state.corr_linear_scale
     if cal_meta is not None:
         payload["calibration_meta"] = cal_meta
     return payload
