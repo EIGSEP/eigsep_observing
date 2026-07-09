@@ -231,7 +231,7 @@ directly from `SENSOR_SCHEMAS`:
 | schema type | reduction                                       | rationale |
 |-------------|-------------------------------------------------|-----------|
 | `float`     | `np.mean` over non-error survivors              | the actual averaging path; matches the integration's physical meaning |
-| `int`       | `min` over non-error survivors                  | every int field today is an invariant constant (`app_id`, `watchdog_timeout_ms`, the motor's per-boot `boot_id`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path |
+| `int`       | `min` over non-error survivors; `max` for fields in `_MAX_REDUCED_FIELDS` | invariant constants (`app_id`, `watchdog_timeout_ms`, the motor's per-boot `boot_id`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path. Worst-case counters that reset on every good sample (tempctrl's `sensor_rejects` rate-guard reject counter) take `max` instead, so an any-reject-in-window integration stays identifiable — `min` would wash the marker back to 0 |
 | `bool`      | `any` over non-error survivors                  | bool fields are fault flags (`watchdog_tripped`); `any` preserves a fault that occurred mid-integration |
 | `str`       | first value if unanimous, else `"UNKNOWN"`      | matches the rfswitch convention |
 

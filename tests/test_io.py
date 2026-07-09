@@ -897,7 +897,8 @@ def test_avg_metadata_tempctrl_watchdog_fields_survive_split():
 # Per-type reduction policy in _avg_sensor_values (Design C):
 #
 #   float → np.mean over non-error survivors
-#   int   → min over non-error survivors (worst-case for cal levels)
+#   int   → min over non-error survivors (no-op for the invariant
+#           constants); max for _MAX_REDUCED_FIELDS (reject counters)
 #   bool  → any over non-error survivors (worst-case for fault flags)
 #   str   → first if unanimous, else "UNKNOWN"
 #
@@ -951,6 +952,25 @@ def test_avg_metadata_bool_any_on_disagreement():
     ]
     result = io.avg_metadata(data)
     assert result["watchdog_tripped"] is True
+
+
+def test_avg_metadata_sensor_rejects_max_on_disagreement():
+    """``sensor_rejects`` reduces via max() — the any-reject-in-window
+    cross-check marker (issue #207). The firmware counter resets to 0
+    on every accepted sample, so the default int reduction (min, a
+    no-op for the invariant constants) would wash a mid-integration
+    reject burst back to 0 and delete the marker from the corr record."""
+    base = tempctrl_post_handler_reading("tempctrl_lna")
+    base["T_now"] = 30.0
+    base["timestamp"] = 1.0
+    data = [
+        {**base, "sensor_rejects": 0},
+        {**base, "sensor_rejects": 2},  # reject burst mid-integration
+        {**base, "sensor_rejects": 0},  # accepted sample reset the counter
+    ]
+    result = io.avg_metadata(data)
+    assert result["sensor_rejects"] == 2
+    assert isinstance(result["sensor_rejects"], int)
 
 
 def test_avg_metadata_str_unknown_on_disagreement_for_non_invariant():
