@@ -247,11 +247,20 @@ PANDA_REALITY_KEYS = (
 )
 
 # Nested (section, field) pairs plucked individually from the upload.
-# Only ``calibration.t_load_stream`` follows panda reality (it names
-# the stream the hot-swapped LOAD module publishes on);
-# ``calibration.noise_diode_enr_db`` stays dashboard-local — it's a
-# display-cal tuning knob, not a claim about what panda is running.
-PANDA_REALITY_NESTED = (("calibration", "t_load_stream"),)
+# The calibration reference-temperature *routing* knobs follow panda
+# reality: a tempctrl hot-swap re-points ``t_amb_*`` at the stream the
+# moved LOAD module publishes on, and ``t_ns_*`` names the RF-switch
+# PCB thermistor channel nearest the noise-source pad (see
+# ``_solve_calibration``). The physical constants
+# (``noise_diode_enr_db`` / ``noise_source_atten_db``) stay
+# dashboard-local — display-cal tuning knobs, not claims about what
+# panda is running.
+PANDA_REALITY_NESTED = (
+    ("calibration", "t_ns_stream"),
+    ("calibration", "t_ns_field"),
+    ("calibration", "t_amb_stream"),
+    ("calibration", "t_amb_field"),
+)
 
 
 def effective_obs_cfg(local_cfg: dict, panda_cfg: Optional[dict]) -> dict:
