@@ -343,7 +343,7 @@ class PandaClient:
         """Return the SP1 termination name potmon last published.
 
         Reads ``sp1_term_name`` from the potmon metadata snapshot
-        (picohost >= 4.4). Returns ``None`` if potmon hasn't published
+        (picohost >= 4.5). Returns ``None`` if potmon hasn't published
         or the pin level didn't map to a known name. Mirrors
         :meth:`_read_switch_mode_from_redis`.
         """

@@ -428,7 +428,7 @@ Bench-validate before trusting the failsafe in the field:
 Deploy order for a new install or upgrade:
 
 1. Flash the potmon pico with SP1-termination-capable firmware first.
-2. Upgrade `picohost` on the panda (>= 4.4) so `_pot_redis_handler`
+2. Upgrade `picohost` on the panda (>= 4.5) so `_pot_redis_handler`
    publishes `sp1_term`/`sp1_term_name` and the proxy's
    `set_sp1_termination` command exists.
 3. Deploy the updated `obs_config.yaml` (`RFSP1_SHORT`/`RFSP1_OPEN`
@@ -441,7 +441,7 @@ so the `switch_loop` key check rejects the whole schedule (not just
 the two new keys) and switching refuses to run. The other ordering
 mistake — deploying the new `eigsep_observing` code without picohost
 >= 4.4 already on the panda — is prevented outright by the
-`pyproject.toml` pip pin (`picohost>=4.4`); `pip`/`uv` refuses the
+`pyproject.toml` pip pin (`picohost>=4.5`); `pip`/`uv` refuses the
 install rather than leaving a runtime gap for `switch_loop` to fall
 into.
 

@@ -25,10 +25,10 @@ dependencies = [
   "plotly",
   # >=4.3: tempctrl per-channel sensor_rejects in the stream fan-out
   # (pico-firmware #150); _PELTIER_SCHEMA requires the key.
-  # >=4.4: potmon SP1 failsafe termination (pico-firmware #155) —
+  # >=4.5: potmon SP1 failsafe termination (pico-firmware #155) —
   # set_sp1_termination command + sp1_term/sp1_term_name in the potmon
   # stream; the potmon schema and OBS_MODES plumbing require both.
-  "picohost>=4.4",
+  "picohost>=4.5",
   "eigsep-vna>=1.4",
   "eigsep_redis>=2.3",
 ]
