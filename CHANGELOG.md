@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.14.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.13.0...v2.14.0) (2026-07-10)
+
+
+### Features
+
+* SP1 failsafe termination — observing modes, VNA short/open sweeps, live-status ([#219](https://github.com/EIGSEP/eigsep_observing/issues/219)) ([a4577b4](https://github.com/EIGSEP/eigsep_observing/commit/a4577b43bac4e5fbb27d97ac3021118eebd97baa))
+
 ## [2.13.0](https://github.com/EIGSEP/eigsep_observing/compare/v2.12.0...v2.13.0) (2026-07-09)
 
 
