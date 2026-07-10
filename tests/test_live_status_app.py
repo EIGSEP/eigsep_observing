@@ -51,7 +51,8 @@ OBS_CFG = {
         "RFNOFF": 60,
         "RFNON": 60,
         "RFAMB": 60,
-        "RFSP1": 60,
+        "RFSP1_SHORT": 60,
+        "RFSP1_OPEN": 60,
     },
     "use_switches": True,
     "calibration": {
@@ -974,6 +975,47 @@ def test_rfswitch_payload_no_countdown_when_heartbeat_dead(agg_primed):
     # But the countdown is gated on heartbeat liveness.
     assert data["next_expected_change_s"] is None
     assert data["on_schedule"] is None
+
+
+def test_rfswitch_payload_sp1_term_none_when_potmon_absent(client):
+    """No potmon metadata published yet: sp1_term is an explicit None,
+    not a missing key or an error — the dashboard tile's None-safe
+    default."""
+    data = client.get("/api/rfswitch").get_json()["data"]
+    assert data["sp1_term"] is None
+
+
+def test_api_rfswitch_carries_sp1_term(agg_primed):
+    """Once potmon publishes the SP1 failsafe termination, /api/rfswitch
+    surfaces the host-derived name string (not the raw pin int)
+    alongside the switch state."""
+    agg = agg_primed
+    MetadataWriter(agg.transport_panda).add(
+        "potmon",
+        {
+            "sensor_name": "potmon",
+            "status": "update",
+            "app_id": 2,
+            "pot_az_voltage": 1.5,
+            "pot_az_cal_slope": 200.0,
+            "pot_az_cal_intercept": -100.0,
+            "pot_az_angle": 200.0,
+            "pot_az_near_rail": False,
+            "sp1_term": 0,
+            "sp1_term_name": "SHORT",
+        },
+    )
+    # First-ever touch of "stream:potmon" on this transport: rewind so
+    # the drain sees the entry just published rather than treating it
+    # as already consumed (see _rewind's docstring / the agg_primed
+    # fixture's own rewind calls for freshly-registered streams).
+    _rewind(agg.transport_panda, ["stream:potmon"])
+    agg._panda_tick()
+
+    app = create_app(agg)
+    app.config.update(TESTING=True)
+    data = app.test_client().get("/api/rfswitch").get_json()["data"]
+    assert data["sp1_term"] == "SHORT"
 
 
 def test_config_route_surfaces_redis_schedule_and_upload_time(client):
@@ -1938,7 +1980,8 @@ def _publish_vna(
     cal_s=None,
     cal_l=None,
     metadata_snapshot_unix=None,
-    sp1=None,
+    sp1_short=None,
+    sp1_open=None,
 ):
     """Publish one synthetic VNA entry to the given transport.
 
@@ -1947,9 +1990,11 @@ def _publish_vna(
     calibrated output equals the input — which is what the route's
     s11_db assertion exploits.
 
-    ``sp1``, when given, rides in the data dict alongside the DUT
-    trace — the producer contract for ant bundles, which the
-    aggregator projects into ``last_vna_sp1``.
+    ``sp1_short``/``sp1_open``, when given, ride in the data dict
+    alongside the DUT trace — the producer contract for ant bundles
+    (Spare-1 swept under each failsafe termination), which the
+    aggregator projects into ``last_vna_sp1_short`` /
+    ``last_vna_sp1_open``.
     """
     if raw_s11 is None:
         raw_s11 = np.full(_VNA_NFREQ, 0.3 + 0.0j, dtype=complex)
@@ -1968,8 +2013,10 @@ def _publish_vna(
         "cal:VNAS": cal_s,
         "cal:VNAL": cal_l,
     }
-    if sp1 is not None:
-        data["sp1"] = sp1
+    if sp1_short is not None:
+        data["sp1_short"] = sp1_short
+    if sp1_open is not None:
+        data["sp1_open"] = sp1_open
     header = {
         "mode": mode,
         "freqs": np.linspace(50e6, 250e6, _VNA_NFREQ).tolist(),
@@ -2067,7 +2114,7 @@ def test_vna_payload_stale_flag_fires_past_threshold(agg_primed):
     assert stale["age_s"] >= _VNA_STALE_AGE_S
 
 
-# Synthetic Spare-1 open-cable round-trip delay for the sp1 tests.
+# Synthetic Spare-1 round-trip delay for the sp1_short/sp1_open tests.
 # Over the fixture band (50-250 MHz, _VNA_NFREQ channels) 15 ns gives a
 # -34.8 deg/channel phase step — small enough (< 180 deg) that the
 # unwrap is unambiguous, yet the -1080 deg total span crosses +-180 deg
@@ -2075,21 +2122,26 @@ def test_vna_payload_stale_flag_fires_past_threshold(agg_primed):
 # unwrapped one.
 _SP1_TAU_S = 15e-9
 
+_SP1_MODES = ("sp1_short", "sp1_open")
+
 
 def _sp1_delay_trace():
     """(freqs_hz, s11) for a unit-magnitude linear-delay sp1 trace.
 
     Phase is exactly -360 * f * tau degrees. The frequency axis matches
     the header ``_publish_vna`` writes, so analytic phase expectations
-    line up channel-for-channel with the payload.
+    line up channel-for-channel with the payload. Used for both
+    terminations — the two slots are independent caches, so the same
+    synthetic trace shape exercises each without loss of coverage.
     """
     freqs = np.linspace(50e6, 250e6, _VNA_NFREQ)
     return freqs, np.exp(-2j * np.pi * freqs * _SP1_TAU_S)
 
 
-def test_vna_payload_sp1_includes_unwrapped_phase(agg_primed):
-    """sp1 payloads carry unwrapped phase_deg alongside s11_db; ant
-    payloads don't (magnitude-only pane).
+@pytest.mark.parametrize("mode", _SP1_MODES)
+def test_vna_payload_sp1_includes_unwrapped_phase(agg_primed, mode):
+    """sp1_short/sp1_open payloads carry unwrapped phase_deg alongside
+    s11_db; ant payloads don't (magnitude-only pane).
 
     The trace's true phase spans -1080 deg (three full turns), so the
     assertions discriminate between implementations: a *wrapped* trace
@@ -2103,14 +2155,14 @@ def test_vna_payload_sp1_includes_unwrapped_phase(agg_primed):
     agg = agg_primed
     panda = agg.transport_panda
     freqs, sp1_trace = _sp1_delay_trace()
-    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _publish_vna(panda, "ant", **{mode: sp1_trace})
     _rewind(panda, ["stream:vna"])
     agg._vna_tick()
     state = agg.snapshot()
 
-    payload = _vna_payload(state, "sp1", now=time.time())
+    payload = _vna_payload(state, mode, now=time.time())
     assert payload["available"] is True
-    assert payload["mode"] == "sp1"
+    assert payload["mode"] == mode
     assert len(payload["phase_deg"]) == len(payload["s11_db"])
     assert all(isinstance(v, float) for v in payload["phase_deg"])
     phase = np.asarray(payload["phase_deg"])
@@ -2130,7 +2182,8 @@ def test_vna_payload_sp1_includes_unwrapped_phase(agg_primed):
     assert "phase_deg" not in ant_payload
 
 
-def test_vna_payload_sp1_nan_channel_masked_not_poisoning(agg_primed):
+@pytest.mark.parametrize("mode", _SP1_MODES)
+def test_vna_payload_sp1_nan_channel_masked_not_poisoning(agg_primed, mode):
     """One non-finite channel surfaces as a single None gap.
 
     A NaN in the sp1 trace survives calibrate_s11 element-wise (ideal
@@ -2147,11 +2200,11 @@ def test_vna_payload_sp1_nan_channel_masked_not_poisoning(agg_primed):
     _, sp1_trace = _sp1_delay_trace()
     nan_ch = 5
     sp1_trace[nan_ch] = np.nan
-    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _publish_vna(panda, "ant", **{mode: sp1_trace})
     _rewind(panda, ["stream:vna"])
     agg._vna_tick()
 
-    payload = _vna_payload(agg.snapshot(), "sp1", now=time.time())
+    payload = _vna_payload(agg.snapshot(), mode, now=time.time())
     assert payload["available"] is True
     phase = payload["phase_deg"]
     assert phase[nan_ch] is None
@@ -2159,20 +2212,22 @@ def test_vna_payload_sp1_nan_channel_masked_not_poisoning(agg_primed):
     assert all(isinstance(v, float) for v in phase[nan_ch + 1 :])
 
 
-def test_vna_route_sp1_calibrated_with_phase(agg_primed):
-    """Route-level: /api/vna?mode=sp1 serves the sp1 pane through the
-    same Flask envelope as ant/rec, with phase_deg present."""
+@pytest.mark.parametrize("mode", _SP1_MODES)
+def test_vna_route_sp1_calibrated_with_phase(agg_primed, mode):
+    """Route-level: /api/vna?mode=sp1_short|sp1_open serves the sp1
+    panes through the same Flask envelope as ant/rec, with phase_deg
+    present."""
     panda = agg_primed.transport_panda
     _, sp1_trace = _sp1_delay_trace()
-    _publish_vna(panda, "ant", sp1=sp1_trace)
+    _publish_vna(panda, "ant", **{mode: sp1_trace})
     _rewind(panda, ["stream:vna"])
     agg_primed._vna_tick()
 
-    body = client_for(agg_primed).get("/api/vna?mode=sp1").get_json()
+    body = client_for(agg_primed).get(f"/api/vna?mode={mode}").get_json()
     assert body["ok"] is True
     data = body["data"]
     assert data["available"] is True
-    assert data["mode"] == "sp1"
+    assert data["mode"] == mode
     assert len(data["phase_deg"]) == _VNA_NFREQ
     assert len(data["s11_db"]) == _VNA_NFREQ
     # Unit-magnitude trace: |S11| = 1 -> 0 dB across the band.
@@ -2181,14 +2236,45 @@ def test_vna_route_sp1_calibrated_with_phase(agg_primed):
     assert data["stale"] is False
 
 
-def test_vna_payload_sp1_empty_before_first_bundle(agg_primed):
-    """agg_primed never publishes a VNA bundle, so last_vna_sp1 is
-    still None — the 'no measurement received yet' path."""
+def test_api_vna_sp1_modes_from_one_ant_bundle(agg_primed):
+    """One ant bundle carrying both sp1_short and sp1_open fills both
+    route-level slots independently; each is available with phase_deg
+    alongside s11_db — the contract the sp1 pane's two-trace plot
+    depends on."""
+    panda = agg_primed.transport_panda
+    _, short_trace = _sp1_delay_trace()
+    _, open_trace = _sp1_delay_trace()
+    _publish_vna(panda, "ant", sp1_short=short_trace, sp1_open=open_trace)
+    _rewind(panda, ["stream:vna"])
+    agg_primed._vna_tick()
+
+    client = client_for(agg_primed)
+    for mode in _SP1_MODES:
+        payload = client.get(f"/api/vna?mode={mode}").get_json()["data"]
+        assert payload["available"] is True
+        assert payload["mode"] == mode
+        assert "phase_deg" in payload
+
+
+@pytest.mark.parametrize("mode", _SP1_MODES)
+def test_vna_payload_sp1_empty_before_first_bundle(agg_primed, mode):
+    """agg_primed never publishes a VNA bundle, so last_vna_sp1_short /
+    last_vna_sp1_open are still None — the 'no measurement received
+    yet' path."""
     from eigsep_observing.live_status.app import _vna_payload
 
-    payload = _vna_payload(agg_primed.snapshot(), "sp1", now=time.time())
+    payload = _vna_payload(agg_primed.snapshot(), mode, now=time.time())
     assert payload["available"] is False
     assert payload["reason"] == "no measurement received yet"
+
+
+def test_vna_route_old_sp1_mode_is_unknown(client):
+    """The retired bare 'sp1' mode is no longer a valid cache key — no
+    legacy alias. It must fall through to the generic unknown-mode
+    path, the same as any other bogus mode string."""
+    body = client.get("/api/vna?mode=sp1").get_json()
+    assert body["data"]["available"] is False
+    assert "unknown mode" in body["data"]["reason"]
 
 
 def test_vna_drain_drops_payload_with_unknown_mode(agg_primed, caplog):

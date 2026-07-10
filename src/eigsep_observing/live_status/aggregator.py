@@ -205,8 +205,10 @@ class StateSnapshot:
     last_rfamb_acc_cnt: Optional[int] = None
 
     # Most recent VNA payload, cached per pane. ``ant`` and ``rec``
-    # come from their own bundles; ``sp1`` rides in the ant bundle and
-    # gets its own cache built from the same entry (shared OSL/freqs).
+    # come from their own bundles; ``sp1_short``/``sp1_open`` both ride
+    # in the ant bundle — the SP1 failsafe termination is toggled
+    # between the two sweeps within one ant-mode measurement — and get
+    # their own caches built from the same entry (shared OSL/freqs).
     # The route handler calibrates lazily off these (see
     # eigsep_observing.vna_calibration) so the drain thread doesn't pay
     # the calkit cost when nobody's rendering the pane. The slots evict
@@ -214,7 +216,8 @@ class StateSnapshot:
     # losing the others.
     last_vna_ant: Optional[VnaCache] = None
     last_vna_rec: Optional[VnaCache] = None
-    last_vna_sp1: Optional[VnaCache] = None
+    last_vna_sp1_short: Optional[VnaCache] = None
+    last_vna_sp1_open: Optional[VnaCache] = None
 
     # Panda status log (ring buffer).
     status_log: deque = field(
@@ -1277,19 +1280,28 @@ class LiveStatusAggregator:
             return
 
         cache = self._build_vna_cache(data, header, dut_key=mode)
-        sp1_cache = (
-            self._build_vna_cache(data, header, dut_key="sp1")
-            if mode == "ant"
-            else None
-        )
-        if cache is None and sp1_cache is None:
+        sp1_short_cache = sp1_open_cache = None
+        if mode == "ant":
+            sp1_short_cache = self._build_vna_cache(
+                data, header, dut_key="sp1_short"
+            )
+            sp1_open_cache = self._build_vna_cache(
+                data, header, dut_key="sp1_open"
+            )
+        if (
+            cache is None
+            and sp1_short_cache is None
+            and sp1_open_cache is None
+        ):
             return
         with self._lock:
             if mode == "ant":
                 if cache is not None:
                     self.state.last_vna_ant = cache
-                if sp1_cache is not None:
-                    self.state.last_vna_sp1 = sp1_cache
+                if sp1_short_cache is not None:
+                    self.state.last_vna_sp1_short = sp1_short_cache
+                if sp1_open_cache is not None:
+                    self.state.last_vna_sp1_open = sp1_open_cache
             elif cache is not None:
                 self.state.last_vna_rec = cache
 
@@ -1301,8 +1313,9 @@ class LiveStatusAggregator:
 
         Caller must have already validated ``header['mode']`` is
         ``"ant"`` or ``"rec"``. ``dut_key`` selects which DUT trace to
-        project — the mode name for the primary panes, ``"sp1"`` for
-        the Spare-1 cable pane. Returns ``None`` (and logs at ERROR)
+        project — the mode name for the primary panes, ``"sp1_short"``
+        / ``"sp1_open"`` for the two Spare-1 cable-termination panes.
+        Returns ``None`` (and logs at ERROR)
         on any further contract violation — missing data keys, missing
         ``freqs`` — so the corr / metadata panes keep painting even
         when the VNA producer publishes garbage.

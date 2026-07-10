@@ -15,6 +15,7 @@ from eigsep_redis import (
     SingleStreamReader,
     SingleStreamWriter,
 )
+from picohost.base import PicoPotentiometer
 from picohost.proxy import PicoProxy
 
 from . import imu_calibration, obs_config_owner, run_tag, vna_service
@@ -36,8 +37,8 @@ class VnaWriter(SingleStreamWriter):
     are flattened to lists before encoding.
 
     ``maxlen`` is a dead-reader failsafe: each ``measure_s11`` call
-    produces one bundled entry (ant+load+noise+amb+sp1+OSL or
-    rec+OSL), and the ground reader drains it synchronously. 200
+    produces one bundled entry (ant+load+noise+amb+sp1_short+sp1_open
+    +OSL or rec+OSL), and the ground reader drains it synchronously. 200
     covers ~100 full ant+rec sweeps of headroom even during VNA-only
     campaigns — well beyond any realistic ground-reader outage
     window.
@@ -142,6 +143,7 @@ class VnaSubsystem:
     vna: VNA
     vna_writer: "VnaWriter"
     metadata_snapshot: MetadataSnapshotReader
+    sp1_term_fn: Callable[[str], None]
     cleanup: Callable[[], None]
 
 
@@ -152,9 +154,11 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     the configured ``cmt_vna.VNA`` (or ``DummyVNA``), wires its
     ``switch_fn`` through a ``PicoProxy("rfswitch")`` so the Pico's
     command stream arbitrates switching across concurrent producers,
-    and returns the producer bus surface (``VnaWriter``) plus the
-    consumer snapshot (``MetadataSnapshotReader``) needed to call
-    :func:`measure_s11`.
+    builds an analogous ``sp1_term_fn`` through a
+    ``PicoProxy("potmon")`` for the SP1 failsafe termination that
+    ``measure_s11(mode="ant")`` requires, and returns the producer bus
+    surface (``VnaWriter``) plus the consumer snapshot
+    (``MetadataSnapshotReader``) needed to call :func:`measure_s11`.
 
     Unlike ``PandaClient.__init__`` this:
 
@@ -182,21 +186,22 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
         Loaded obs_config (``vna_ip`` / ``vna_port`` / ``vna_timeout``
         / ``vna_settings``). Not uploaded to Redis.
     source : str
-        Identifier stamped onto the ``PicoProxy("rfswitch", ...)`` so
-        operator log lines distinguish ``vna_manual`` /
-        ``record_vna`` / etc.
+        Identifier stamped onto the ``PicoProxy("rfswitch", ...)`` /
+        ``PicoProxy("potmon", ...)`` so operator log lines distinguish
+        ``vna_manual`` / ``record_vna`` / etc.
     dummy : bool, optional
         If True, use ``DummyVNA`` and start an in-process dummy
-        ``PicoManager`` (so the ``rfswitch`` proxy resolves). The
-        manager is shut down by the returned ``cleanup`` callback. If
-        False (default), start ``cmtvna.service`` and wait for the R60
-        to answer before opening the socket; the returned ``cleanup``
-        stops the service again.
+        ``PicoManager`` (so the ``rfswitch`` and ``potmon`` proxies
+        resolve). The manager is shut down by the returned ``cleanup``
+        callback. If False (default), start ``cmtvna.service`` and wait
+        for the R60 to answer before opening the socket; the returned
+        ``cleanup`` stops the service again.
 
     Returns
     -------
     VnaSubsystem
-        Dataclass with ``vna``, ``vna_writer``, ``metadata_snapshot``
+        Dataclass with ``vna``, ``vna_writer``, ``metadata_snapshot``,
+        ``sp1_term_fn`` (pass through to ``measure_s11`` for ant mode)
         and a ``cleanup`` callable the caller must invoke on teardown
         (stops the dummy ``PicoManager`` when ``dummy=True``, stops
         ``cmtvna.service`` when ``dummy=False``).
@@ -206,14 +211,36 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
     SystemExit
         If ``rfswitch`` is not registered with ``PicoManager`` (raised
         from :func:`require_pico` with an operator-actionable message).
+        ``potmon`` is deliberately *not* required at build time — see
+        the ``sp1_term_fn`` closure below.
     """
     sw_proxy = PicoProxy("rfswitch", transport, source=source)
+    pot_proxy = PicoProxy("potmon", transport, source=source)
 
     def switch_fn(state):
         if sw_proxy.send_command("switch", state=state) is None:
             raise RuntimeError(
                 f"RF switch to {state} failed: rfswitch not registered "
                 "with PicoManager."
+            )
+
+    # Deliberate deferral: potmon availability is NOT checked at build
+    # time (no ``require_pico(pot_proxy)``). Only ant-mode bundles
+    # touch the SP1 termination, so rec-only / probe-only sessions
+    # must keep working with the potmon pico down. When an ant bundle
+    # *is* attempted, ``measure_s11`` calls this closure and the
+    # ``send_command(...) is None`` check below surfaces the absence
+    # as a clear RuntimeError at use time.
+    def sp1_term_fn(term):
+        if term not in PicoPotentiometer.SP1_TERMINATIONS:
+            raise ValueError(
+                f"Invalid SP1 termination {term!r}; valid: "
+                f"{sorted(PicoPotentiometer.SP1_TERMINATIONS)}"
+            )
+        if pot_proxy.send_command("set_sp1_termination", state=term) is None:
+            raise RuntimeError(
+                f"SP1 termination to {term} failed: potmon not "
+                "registered with PicoManager."
             )
 
     manager = None
@@ -261,6 +288,7 @@ def build_vna_subsystem(transport, cfg, *, source, dummy=False):
         vna=vna,
         vna_writer=VnaWriter(transport),
         metadata_snapshot=MetadataSnapshotReader(transport),
+        sp1_term_fn=sp1_term_fn,
         cleanup=cleanup,
     )
 
@@ -306,6 +334,7 @@ def measure_s11(
     transport,
     vna_writer,
     metadata_snapshot,
+    sp1_term_fn=None,
     on_contract_violation=None,
     logger=logger,
 ):
@@ -339,6 +368,13 @@ def measure_s11(
         Sink for the bundled S11 + header + metadata payload.
     metadata_snapshot : eigsep_redis.MetadataSnapshotReader
         Captures the panda-side metadata at the moment of publish.
+    sp1_term_fn : callable, optional
+        ``f(term: str) -> None``. Drives the Spare-1 failsafe
+        termination between ``"SHORT"`` and ``"OPEN"``; raises on
+        failure, same contract as ``vna.switch_fn``. Required for
+        ``mode="ant"`` (raises ``RuntimeError`` if ``None``); ignored
+        for ``mode="rec"``. Production callers pass
+        ``PandaClient._set_sp1_term``.
     on_contract_violation : callable, optional
         ``f(msg: str) -> None``. Called once per contract violation
         with a formatted message. Defaults to ``logger.warning``.
@@ -353,8 +389,9 @@ def measure_s11(
     -------
     s11 : dict[str, np.ndarray]
         Bundle published to Redis (raw DUT traces — ``ant``/``load``/
-        ``noise``/``amb``/``sp1`` in ant mode, ``rec`` in rec mode —
-        plus ``cal:VNAO`` / ``cal:VNAS`` / ``cal:VNAL`` standards).
+        ``noise``/``amb``/``sp1_short``/``sp1_open`` in ant mode,
+        ``rec`` in rec mode — plus ``cal:VNAO`` / ``cal:VNAS`` /
+        ``cal:VNAL`` standards).
     header : dict
         Header published alongside the bundle (instrument header plus
         ``mode``, ``metadata_snapshot_unix``, ``run_tag``,
@@ -369,7 +406,8 @@ def measure_s11(
     ValueError
         If ``mode`` is not ``"ant"`` or ``"rec"``.
     RuntimeError
-        If ``vna`` is ``None``.
+        If ``vna`` is ``None``, or if ``mode="ant"`` and
+        ``sp1_term_fn`` is ``None``.
 
     Notes
     -----
@@ -390,11 +428,36 @@ def measure_s11(
     vna.power_dBm = cfg["vna_settings"]["power_dBm"][mode]
     osl_s11 = vna.measure_OSL()
     if mode == "ant":
+        if sp1_term_fn is None:
+            raise RuntimeError(
+                "measure_s11(mode='ant') requires sp1_term_fn to drive "
+                "the SP1 failsafe termination (PandaClient passes "
+                "_set_sp1_term)."
+            )
         logger.info("Measuring antenna, noise, load S11")
         s11 = vna.measure_ant(measure_noise=True, measure_load=True)
-        logger.info("Measuring ambient-load and Spare-1 S11")
+        logger.info("Measuring ambient-load S11")
         s11["amb"] = vna.measure_dut("VNAAMB")
-        s11["sp1"] = vna.measure_dut("VNASP1")
+        try:
+            logger.info("Measuring Spare-1 S11, SHORT termination")
+            sp1_term_fn("SHORT")
+            s11["sp1_short"] = vna.measure_dut("VNASP1")
+            logger.info("Measuring Spare-1 S11, OPEN termination")
+            sp1_term_fn("OPEN")
+            # Same rfswitch path — only the far-end termination moved,
+            # so sweep again without re-switching.
+            s11["sp1_open"] = vna.measure_S11()
+        finally:
+            # Best-effort failsafe restore: must not mask a measurement
+            # error, and every observing-mode transition re-asserts
+            # SHORT anyway.
+            try:
+                sp1_term_fn("SHORT")
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to restore SP1 termination to SHORT: "
+                    f"{type(exc).__name__}: {exc}"
+                )
     else:  # mode is rec
         logger.info("Measuring receiver S11")
         s11 = vna.measure_rec()

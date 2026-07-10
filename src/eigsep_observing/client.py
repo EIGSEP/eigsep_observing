@@ -10,7 +10,7 @@ from eigsep_redis import (
     MetadataSnapshotReader,
     StatusWriter,
 )
-from picohost.base import PicoRFSwitch
+from picohost.base import PicoPotentiometer, PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 from . import vna_service
@@ -29,9 +29,25 @@ logger = logging.getLogger(__name__)
 # scripts/panda_observe.py and silently kill autonomous scanning.
 _MOTOR_LOOP_ERRORS = (TimeoutError, RuntimeError, MotorLimitError)
 
-# Valid RF switch state names, sourced from the firmware-side class so
-# that a pico firmware change flows through automatically.
-VALID_SWITCH_STATES = set(PicoRFSwitch.PATHS)
+# Observing modes: schedule / session keys resolved to
+# (rfswitch path, SP1 termination) pairs. To the operator a mode looks
+# like any other switch state; the two-pico coordination (rfswitch path
+# + potmon-driven failsafe termination on the SP1 long cable) is
+# resolved here. Every plain rfswitch path is a mode implying the
+# failsafe SHORT — re-asserted on each transition so the system
+# self-heals after a potmon reboot. RFSP1 is deliberately NOT a mode:
+# a schedule must say which reflection standard it means.
+SP1_TERM_SHORT = "SHORT"
+SP1_TERM_OPEN = "OPEN"
+OBS_MODES = {
+    **{
+        path: (path, SP1_TERM_SHORT)
+        for path in PicoRFSwitch.PATHS
+        if path != "RFSP1"
+    },
+    "RFSP1_SHORT": ("RFSP1", SP1_TERM_SHORT),
+    "RFSP1_OPEN": ("RFSP1", SP1_TERM_OPEN),
+}
 
 
 class PandaClient:
@@ -86,6 +102,12 @@ class PandaClient:
         self.sw_proxy = PicoProxy(
             "rfswitch", self.transport, source="panda_client"
         )
+        # Potmon proxy drives the SP1 failsafe termination switch
+        # (GPIO 27 on the potmon pico). Same thin Redis-key facade as
+        # sw_proxy — construction cannot fail.
+        self.pot_proxy = PicoProxy(
+            "potmon", self.transport, source="panda_client"
+        )
         # ``RLock`` (not plain ``Lock``) so the no-switch-observation
         # script can hold an outer ``switch_session`` while inner
         # ``MotorClient.scan`` re-acquires per move via
@@ -120,6 +142,16 @@ class PandaClient:
             self._error_with_status(
                 "Boot-time RFANT initialization failed; rfswitch state "
                 "is unknown."
+            )
+
+        # Boot-time invariant: SP1 termination wakes up in SHORT — the
+        # failsafe pin level a freshly-booted potmon pico drives.
+        # Best-effort like the RFANT init above; the hardware failsafe
+        # (unpowered = SHORT) covers the failure case.
+        if not self._safe_set_sp1_term(SP1_TERM_SHORT):
+            self._error_with_status(
+                "Boot-time SP1 SHORT initialization failed; termination "
+                "state unknown (hardware failsafe is SHORT)."
             )
 
         # VNA is lazy: cmtvna.service busy-loops the CPU, so it runs
@@ -248,6 +280,79 @@ class PandaClient:
             return False
         return True
 
+    def _set_sp1_term(self, term):
+        """Drive the SP1 termination through PicoManager; raise on failure.
+
+        Passed to ``measure_s11`` as ``sp1_term_fn`` — same raising
+        contract as :meth:`_switch`, so a termination failure mid-VNA
+        aborts the sequence instead of contaminating it.
+
+        Raises
+        ------
+        ValueError
+            Unknown termination name.
+        RuntimeError
+            Firmware/manager error, or potmon not registered with
+            PicoManager (``None`` from the proxy).
+        TimeoutError
+            Proxy timeout waiting for the firmware response.
+        """
+        if term not in PicoPotentiometer.SP1_TERMINATIONS:
+            raise ValueError(
+                f"Invalid SP1 termination {term!r}; valid: "
+                f"{sorted(PicoPotentiometer.SP1_TERMINATIONS)}"
+            )
+        result = self.pot_proxy.send_command("set_sp1_termination", state=term)
+        if result is None:
+            raise RuntimeError(
+                f"SP1 termination to {term} failed: potmon device not "
+                f"registered with PicoManager."
+            )
+
+    def _safe_set_sp1_term(self, term):
+        """Bool-returning wrapper around :meth:`_set_sp1_term` for loops.
+
+        Mirrors :meth:`_safe_switch`: never raises, warns on failure.
+        A failed command leaves the hardware failsafe (SHORT) in
+        charge, and the potmon stream keeps recording the true pin
+        state, so files cannot lie about the termination.
+        """
+        try:
+            self._set_sp1_term(term)
+        except (ValueError, RuntimeError, TimeoutError) as exc:
+            self.logger.warning(
+                f"SP1 termination to {term} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return False
+        return True
+
+    def _apply_obs_mode(self, mode):
+        """Drive rfswitch path + SP1 termination for one observing mode.
+
+        The observing-loop counterpart of :meth:`_safe_switch`: never
+        raises, returns ``True`` only if both commands succeeded.
+        ``mode`` must be a key of :data:`OBS_MODES` (callers validate).
+        """
+        path, term = OBS_MODES[mode]
+        path_ok = self._safe_switch(path)
+        term_ok = self._safe_set_sp1_term(term)
+        return path_ok and term_ok
+
+    def _read_sp1_term_from_redis(self):
+        """Return the SP1 termination name potmon last published.
+
+        Reads ``sp1_term_name`` from the potmon metadata snapshot
+        (picohost >= 4.5). Returns ``None`` if potmon hasn't published
+        or the pin level didn't map to a known name. Mirrors
+        :meth:`_read_switch_mode_from_redis`.
+        """
+        try:
+            snap = self.metadata_snapshot.get("potmon")
+        except KeyError:
+            return None
+        return snap.get("sp1_term_name")
+
     def _read_switch_mode_from_redis(self):
         """Return the RF switch mode string PicoManager last published.
 
@@ -274,22 +379,35 @@ class PandaClient:
 
         Acquires the switch lock via :meth:`coord.switch_section`
         (pausing ``switch_loop`` and ``vna_loop`` for the duration of
-        the block), yields a callable
-        ``sw(mode) -> bool`` that routes through :meth:`_safe_switch`, and
-        restores the mode that was active on entry when the block
+        the block), yields a callable ``sw(mode) -> bool`` that routes
+        through :meth:`_apply_obs_mode`, and restores the rfswitch path
+        and SP1 termination that were active on entry when the block
         exits. Matches the common "switch, measure, switch back" REPL
         pattern without manual bookkeeping.
 
+        The callable accepts *observing modes* — :data:`OBS_MODES` keys
+        (rfswitch paths minus ``RFSP1``, plus ``RFSP1_SHORT`` /
+        ``RFSP1_OPEN``) — not bare rfswitch path names. Plain
+        ``"RFSP1"`` is rejected: a caller must name the SP1 termination
+        explicitly.
+
         Behavior:
 
-        * The callable warns and returns ``False`` if the underlying
-          switch call fails; returns ``True`` on success.
-        * Auto-restore fires only if ``sw`` was actually called inside
-          the block, so a "just pause the loops" block leaves hardware
-          alone on exit.
+        * The callable warns and returns ``False`` if either the
+          rfswitch or SP1-termination command fails; returns ``True``
+          only if both succeeded.
+        * Auto-restore fires only if ``sw`` was called with a valid
+          mode inside the block — even a partially failed switch may
+          have moved hardware, so restore is attempted. A "just pause
+          the loops" block (or one that only passed invalid modes)
+          leaves hardware alone on exit.
         * If the rfswitch hasn't published any state on entry (the
-          session starts with an unknown mode), restore is skipped
-          with a warning — auto-guessing RFANT would be surprising.
+          session starts with an unknown mode), the path restore is
+          skipped with a warning — auto-guessing RFANT would be
+          surprising. The SP1 termination restore is not skipped in
+          this case: an unknown entry termination falls back to the
+          failsafe SHORT rather than being silently left at whatever
+          the block last set.
         * A failed restore logs a warning; the lock is released either
           way, so a stuck switch doesn't wedge the session.
 
@@ -298,24 +416,30 @@ class PandaClient:
         >>> with panda.switch_session() as sw:
         ...     sw("RFAMB")
         ...     take_measurement()
-        # rfswitch auto-restored to the mode that was active on entry
+        # rfswitch + SP1 termination auto-restored to what was active
+        # on entry
         """
         with self.coord.switch_section():
             prev_mode = self._read_switch_mode_from_redis()
+            prev_term = self._read_sp1_term_from_redis()
             switched = False
 
             def sw(mode):
                 nonlocal switched
-                if mode not in VALID_SWITCH_STATES:
+                if mode not in OBS_MODES:
                     self.logger.warning(
                         f"Invalid switch mode {mode}; valid modes are "
-                        f"{VALID_SWITCH_STATES}"
+                        f"{sorted(OBS_MODES)}"
                     )
                     return False
-                if not self._safe_switch(mode):
+                # Commands are issued from here on: even a partial
+                # failure (path moved, termination command failed) may
+                # have moved hardware, so arm the exit restore
+                # regardless of the composite result.
+                switched = True
+                if not self._apply_obs_mode(mode):
                     self.logger.warning(f"Failed to switch to {mode}")
                     return False
-                switched = True
                 return True
 
             try:
@@ -331,6 +455,22 @@ class PandaClient:
                     elif not self._safe_switch(prev_mode):
                         self.logger.warning(
                             f"switch_session: failed to restore to {prev_mode}"
+                        )
+                    # Termination restore differs from the path
+                    # restore: an unknown entry state falls back to
+                    # SHORT (the failsafe) rather than being skipped —
+                    # leaving OPEN behind silently is never right.
+                    restore_term = prev_term
+                    if restore_term not in PicoPotentiometer.SP1_TERMINATIONS:
+                        self.logger.warning(
+                            "switch_session: entry SP1 termination "
+                            "unknown; restoring failsafe SHORT."
+                        )
+                        restore_term = SP1_TERM_SHORT
+                    if not self._safe_set_sp1_term(restore_term):
+                        self.logger.warning(
+                            f"switch_session: failed to restore SP1 "
+                            f"termination to {restore_term}"
                         )
 
     def _send_heartbeat(self, ex=60):
@@ -589,7 +729,9 @@ class PandaClient:
     def switch_loop(self):
         """
         Use the RF switches to switch between sky, load, and noise
-        source measurements according to the switch schedule.
+        source measurements according to the switch schedule. Every
+        transition also asserts the mode's SP1 failsafe termination
+        (see :data:`OBS_MODES`) via :meth:`_apply_obs_mode`.
 
         Notes
         -----
@@ -613,11 +755,11 @@ class PandaClient:
                 "switching commands."
             )
             return
-        elif any(k not in VALID_SWITCH_STATES for k in schedule):
+        elif any(k not in OBS_MODES for k in schedule):
             self.logger.warning(
                 "Invalid switch keys found in schedule. Cannot execute "
                 "switching commands. Schedule keys must be in: "
-                f"{sorted(VALID_SWITCH_STATES)}."
+                f"{sorted(OBS_MODES)}."
             )
             return
         # Validate wait_time values and drop zero-wait modes into a
@@ -644,7 +786,7 @@ class PandaClient:
                 hold_lock_during_wait = mode != "RFANT"
                 with self.coord.switch_section():
                     self.logger.info(f"Switching to {mode} measurements")
-                    if not self._safe_switch(mode):
+                    if not self._apply_obs_mode(mode):
                         self._warn_with_status(f"Failed to switch to {mode}")
                     if hold_lock_during_wait and self._wait_or_stop(wait_time):
                         return
@@ -711,6 +853,7 @@ class PandaClient:
             transport=self.transport,
             vna_writer=self.vna_writer,
             metadata_snapshot=self.metadata_snapshot,
+            sp1_term_fn=self._set_sp1_term,
             on_contract_violation=self._warn_with_status,
             logger=self.logger,
         )
@@ -805,7 +948,7 @@ class PandaClient:
         for mode, wait_time in schedule.items():
             if mode == "RFANT":
                 continue
-            if mode not in VALID_SWITCH_STATES:
+            if mode not in OBS_MODES:
                 self._warn_with_status(
                     f"Calibration: invalid switch mode {mode!r}; skipping."
                 )
@@ -819,7 +962,7 @@ class PandaClient:
                 continue
             with self.coord.switch_section():
                 self.logger.info(f"Calibration dwell: {mode} for {wait_time}s")
-                if not self._safe_switch(mode):
+                if not self._apply_obs_mode(mode):
                     self._warn_with_status(
                         f"Calibration: failed to switch to {mode}"
                     )

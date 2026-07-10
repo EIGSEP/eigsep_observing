@@ -1324,6 +1324,10 @@ def test_metadata_end_to_end_round_trip():
                     "pot_az_cal_intercept": -100.0,
                     "pot_az_angle": 200.0 * (1.5 + 0.001 * i) - 100.0,
                     "pot_az_near_rail": False,
+                    # SP1 failsafe termination, steady-state SHORT —
+                    # matches _potmon_avg_entry in CORR_METADATA.
+                    "sp1_term": 0,
+                    "sp1_term_name": "SHORT",
                 },
             ],
             "stream:tempctrl_lna": [
@@ -1481,6 +1485,11 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
                     # even on an uncalibrated stream (None only when
                     # the voltage itself is missing).
                     "pot_az_near_rail": False,
+                    # Pin-derived, not cal-derived: a real int/str pair
+                    # even on an uncalibrated stream, steady-state
+                    # SHORT (same convention as _potmon_avg_entry).
+                    "sp1_term": 0,
+                    "sp1_term_name": "SHORT",
                 },
             ],
         }
@@ -1537,6 +1546,11 @@ def test_potmon_uncalibrated_end_to_end_round_trip(caplog):
             # trip as a real bool even though the stream is
             # uncalibrated (bool→any over all-False samples).
             assert row["pot_az_near_rail"] is False
+            # SP1 termination is pin-derived, so it survives the round
+            # trip even though the stream is uncalibrated (str→
+            # unanimous, int rides along).
+            assert row["sp1_term"] == 0
+            assert row["sp1_term_name"] == "SHORT"
             # The integration is clean — no errored samples.
             assert row["status"] == "update"
 

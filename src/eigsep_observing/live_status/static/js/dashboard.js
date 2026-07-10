@@ -547,74 +547,97 @@ const vnaSp1MagLayout = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
   xaxis: { title: "Frequency [MHz]" },
   yaxis: { title: "|S11| [dB]", autorange: true },
-  showlegend: false,
+  showlegend: true,
 };
 
 const vnaSp1PhaseLayout = {
   margin: { l: 50, r: 20, t: 10, b: 40 },
   xaxis: { title: "Frequency [MHz]" },
   yaxis: { title: "Unwrapped phase [deg]", autorange: true },
-  showlegend: false,
+  showlegend: true,
 };
 
 let vnaSp1PlotsInitialized = false;
 
-function renderVnaSp1Status(vna) {
+// Summarizes both SP1 terminations in one status line, e.g.
+// "Spare-1 cable S11 — SHORT 12m old · OPEN 11m old." Stale if either
+// *available* payload is stale; falls back to the single "no
+// measurement" copy only when neither termination has ever arrived.
+function renderVnaSp1Status(vnaShort, vnaOpen) {
   const el = document.getElementById("vna-sp1-status");
   if (!el) return;
-  if (!vna) {
+  if (!vnaShort && !vnaOpen) {
     el.className = "vna-status error";
     el.textContent = "Spare-1 pane unavailable.";
     return;
   }
-  if (!vna.available) {
-    el.className = "vna-status";
-    if (vna.reason === "calibration_failed") {
+  const parts = [];
+  let anyAvailable = false;
+  let anyStale = false;
+  let anyCalFailed = false;
+  for (const [vna, label] of [[vnaShort, "SHORT"], [vnaOpen, "OPEN"]]) {
+    if (!vna) continue;
+    if (!vna.available) {
+      if (vna.reason === "calibration_failed") anyCalFailed = true;
+      continue;
+    }
+    anyAvailable = true;
+    if (vna.stale) anyStale = true;
+    parts.push(`${label} ${fmtDuration(vna.age_s)} old`);
+  }
+  if (!anyAvailable) {
+    if (anyCalFailed) {
       el.className = "vna-status error";
       el.textContent =
         "Calibration failed for sp1. Check server logs and OSL standards.";
-    } else if (vna.reason === "no measurement received yet") {
-      el.textContent = "No sp1 measurement received yet.";
     } else {
-      el.textContent = `No data: ${vna.reason || "unknown"}.`;
+      el.className = "vna-status";
+      el.textContent = "No sp1 measurement received yet.";
     }
     return;
   }
-  const ageStr = fmtDuration(vna.age_s);
-  if (vna.stale) {
+  if (anyStale) {
     el.className = "vna-status stale";
     el.textContent =
-      `Spare-1 cable S11 — ${ageStr} old (stale; producer cadence is ~1/hour).`;
+      `Spare-1 cable S11 — ${parts.join(" · ")} ` +
+      "(stale; producer cadence is ~1/hour).";
   } else {
     el.className = "vna-status";
-    el.textContent = `Spare-1 cable S11 — ${ageStr} old.`;
+    el.textContent = `Spare-1 cable S11 — ${parts.join(" · ")}.`;
   }
 }
 
-function updateVnaSp1(vna) {
-  renderVnaSp1Status(vna);
+function updateVnaSp1(vnaShort, vnaOpen) {
+  renderVnaSp1Status(vnaShort, vnaOpen);
   const opts = { displayModeBar: false };
-  if (!vna || !vna.available) {
+  const magTraces = [];
+  const phaseTraces = [];
+  for (const [vna, label] of [[vnaShort, "SHORT"], [vnaOpen, "OPEN"]]) {
+    if (!vna || !vna.available) continue;
+    magTraces.push({
+      x: vna.freqs_mhz,
+      y: vna.s11_db,
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { width: activeTheme.lineWidth },
+    });
+    phaseTraces.push({
+      x: vna.freqs_mhz,
+      y: vna.phase_deg,
+      type: "scatter",
+      mode: "lines",
+      name: label,
+      line: { width: activeTheme.lineWidth },
+    });
+  }
+  if (magTraces.length === 0) {
     if (vnaSp1PlotsInitialized) {
       Plotly.react("plot-vna-sp1-mag", [], vnaSp1MagLayout, opts);
       Plotly.react("plot-vna-sp1-phase", [], vnaSp1PhaseLayout, opts);
     }
     return;
   }
-  const magTraces = [{
-    x: vna.freqs_mhz,
-    y: vna.s11_db,
-    type: "scatter",
-    mode: "lines",
-    line: { width: activeTheme.lineWidth },
-  }];
-  const phaseTraces = [{
-    x: vna.freqs_mhz,
-    y: vna.phase_deg,
-    type: "scatter",
-    mode: "lines",
-    line: { width: activeTheme.lineWidth },
-  }];
   if (!vnaSp1PlotsInitialized) {
     Plotly.newPlot("plot-vna-sp1-mag", magTraces, vnaSp1MagLayout, opts);
     Plotly.newPlot("plot-vna-sp1-phase", phaseTraces, vnaSp1PhaseLayout, opts);
@@ -1079,11 +1102,19 @@ function renderRfswitch(rf, metaEntry, thermEntry) {
       ? fmt(rf.next_expected_change_s, 0) + "s"
       : "—";
 
+  // SP1 failsafe termination (potmon), appended to the state text
+  // when the API payload carries it — absent (null) before potmon
+  // has ever published.
+  let stateText = rf.state;
+  if (rf.sp1_term) {
+    stateText += ` · SP1 term: ${rf.sp1_term}`;
+  }
+
   const row1 = document.createElement("div");
   row1.className = "metadata-row";
   row1.append(
     makeSpan("label", "state"),
-    makeSpan(tileClass(cls), rf.state),
+    makeSpan(tileClass(cls), stateText),
     makeSpan("value", timeStr)
   );
 
@@ -1319,13 +1350,17 @@ async function tickConfig() {
 let lastCorr = null;
 let lastAdc = null;
 let lastVna = null;
-let lastVnaSp1 = null;
+let lastVnaSp1Short = null;
+let lastVnaSp1Open = null;
 
 async function tick() {
   try {
     const corrPath = getUseCalibrated() ? "/api/corr?calibrated=1" : "/api/corr";
     const vnaPath = `/api/vna?mode=${encodeURIComponent(getVnaMode())}`;
-    const [health, corr, metadata, adc, rfswitch, file, status, vna, vnaSp1] = await Promise.all([
+    const [
+      health, corr, metadata, adc, rfswitch, file, status, vna,
+      vnaSp1Short, vnaSp1Open,
+    ] = await Promise.all([
       fetchJson("/api/health"),
       fetchJson(corrPath),
       fetchJson("/api/metadata"),
@@ -1334,12 +1369,14 @@ async function tick() {
       fetchJson("/api/file"),
       fetchJson("/api/status"),
       fetchJson(vnaPath),
-      fetchJson("/api/vna?mode=sp1"),
+      fetchJson("/api/vna?mode=sp1_short"),
+      fetchJson("/api/vna?mode=sp1_open"),
     ]);
     lastCorr = corr.data;
     lastAdc = adc.data;
     lastVna = vna.data;
-    lastVnaSp1 = vnaSp1.data;
+    lastVnaSp1Short = vnaSp1Short.data;
+    lastVnaSp1Open = vnaSp1Open.data;
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
     renderTempctrlTiles(metadata.data, null);
@@ -1353,7 +1390,7 @@ async function tick() {
     renderAdcInCorr(adc.data);
     renderStatusLog(status.data);
     updateVna(vna.data);
-    updateVnaSp1(vnaSp1.data);
+    updateVnaSp1(vnaSp1Short.data, vnaSp1Open.data);
   } catch (e) {
     console.error("poll failed:", e);
   }
@@ -1394,7 +1431,9 @@ function applyTheme(mode) {
   applyThemeToLayouts();
   if (lastCorr) updateCorr(lastCorr); // also re-renders the phase plot
   if (lastVna) updateVna(lastVna);
-  if (lastVnaSp1) updateVnaSp1(lastVnaSp1);
+  if (lastVnaSp1Short || lastVnaSp1Open) {
+    updateVnaSp1(lastVnaSp1Short, lastVnaSp1Open);
+  }
 }
 
 function initThemeToggle() {

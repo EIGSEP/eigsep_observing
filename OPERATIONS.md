@@ -133,7 +133,7 @@ eigsep-observe --rpi-ip 10.0.0.5 --panda-ip 10.0.0.6 \
                     │  │   PandaClient     │   │
                     │  │                   │   │
                     │  │  heartbeat_thd ────────── sets heartbeat:client
-                    │  │  switch_loop   ────────── cycles RFANT/RFNOFF/RFNON/RFAMB/RFSP1
+                    │  │  switch_loop   ────────── cycles RFANT/RFNOFF/RFNON/RFAMB/RFSP1_SHORT/RFSP1_OPEN
                     │  │  vna_loop      ────────── measures S11, writes stream:vna
                     │  │  pico threads  ────────── reads sensors, writes metadata
                     │  │                   │   │
@@ -205,7 +205,12 @@ while not stopped:                   while not stopped:
     │  wait with lock                                     │
     │  (VNA blocked)                                      │
     ├─────────────────────────────────────────────────────┤
-    │ RFSP1  (Spare-1 open cable, see switch_connections) │ 60s
+    │ RFSP1_SHORT (Spare-1, SHORT term., failsafe)        │ 60s
+    │  lock → switch                                      │
+    │  wait with lock                                     │
+    │  (VNA blocked)                                      │
+    ├─────────────────────────────────────────────────────┤
+    │ RFSP1_OPEN  (Spare-1, OPEN term., see conns.)       │ 60s
     │  lock → switch                                      │
     │  wait with lock                                     │
     │  (VNA blocked)                                      │
@@ -219,6 +224,10 @@ while not stopped:                   Managed by picohost library.
   sleep 1s                           to update the metadata hash
                                      and sensor streams.
 ```
+
+Every "lock → switch" step above also re-asserts the SP1 failsafe
+termination via potmon — SHORT for every mode except `RFSP1_OPEN`
+itself (see "SP1 failsafe termination" below).
 
 ### Observer Threads
 
@@ -373,6 +382,97 @@ Note: after any tempctrl Pico reboot, firmware defaults to
 the cached flags — a brief `status="error"` burst on the retired stream
 is expected and harmless (schema-valid rows, at most one spurious
 health-check warning).
+
+## SP1 failsafe termination
+
+The Spare-1 rfswitch port feeds a long coax cable that ends in a
+termination switch driven by the potmon pico: GPIO 27 LOW = SHORT (the
+failsafe — also the pin's power-on/unpowered default) and HIGH = OPEN.
+potmon publishes both the raw pin level (`sp1_term`) and the derived
+name (`sp1_term_name`) into the `potmon` metadata stream.
+
+`switch_schedule` (`obs_config.yaml`) accepts `RFSP1_SHORT` and
+`RFSP1_OPEN` as separate schedule keys — one dwell per reflection
+standard. Plain `RFSP1` is not a valid key: `OBS_MODES` (`client.py`)
+has no bare-`RFSP1` entry, so a schedule containing it fails the
+`switch_loop` key check and switching refuses to run. Every other mode
+— `RFANT`, `RFNOFF`, `RFNON`, `RFAMB`, and `RFSP1_SHORT` itself — also
+re-asserts the failsafe SHORT termination on its transition, so the
+system self-heals to SHORT after a potmon reboot mid-cycle; only
+`RFSP1_OPEN` ever leaves the termination driven OPEN, and only for its
+own dwell.
+
+VNA ant-mode sweeps (`measure_s11(mode="ant")`) measure Spare-1 twice
+per bundle, once at each termination, publishing the raw DUT traces as
+`sp1_short` / `sp1_open` alongside `ant`/`load`/`noise`/`amb`. The
+termination is restored to SHORT in a `finally` block regardless of
+whether the measurement succeeded.
+
+Bring-up: `scripts/rfswitch_manual.py`'s `s`/`o` keys drive the
+termination directly through the potmon proxy — independent of
+whatever rfswitch state is currently selected — and print the
+`sp1_term_name` metadata read-back next to the usual `sw_state_name`
+line. The potmon dependency is soft (no `require_pico` at startup), so
+rfswitch bring-up keeps working with the potmon pico down; only the
+`s`/`o` keys themselves report the failure, at use time.
+
+Bench-validate before trusting the failsafe in the field:
+- Confirm the termination switch's settle time is negligible against
+  the VNA sweep start — potmon has no settle state machine (unlike
+  rfswitch's `UNKNOWN` transition window), so `sp1_term` reports the
+  driven pin level immediately after a toggle.
+- With GPIO 27 driven HIGH (OPEN), confirm the GPIO 26 az-pot ADC
+  reading shows no DC shift before trusting azimuth during OPEN
+  dwells — potmon has a documented ADC-mux crosstalk history.
+
+Deploy order for a new install or upgrade:
+
+1. Flash the potmon pico with SP1-termination-capable firmware first.
+2. Upgrade `picohost` on the panda (>= 4.5) so `_pot_redis_handler`
+   publishes `sp1_term`/`sp1_term_name` and the proxy's
+   `set_sp1_termination` command exists.
+3. Deploy the updated `obs_config.yaml` (`RFSP1_SHORT`/`RFSP1_OPEN`
+   schedule keys) and restart `panda_observe`.
+
+Two failure modes motivate that ordering. Deploying the new
+`obs_config.yaml` before the `eigsep_observing` code upgrade lands:
+the old code's `OBS_MODES` has no `RFSP1_SHORT`/`RFSP1_OPEN` entries,
+so the `switch_loop` key check rejects the whole schedule (not just
+the two new keys) and switching refuses to run. The other ordering
+mistake — deploying the new `eigsep_observing` code without picohost
+>= 4.4 already on the panda — is prevented outright by the
+`pyproject.toml` pip pin (`picohost>=4.5`); `pip`/`uv` refuses the
+install rather than leaving a runtime gap for `switch_loop` to fall
+into.
+
+### If the termination switch is stuck or dead
+
+A stuck or dead switch raises **no error anywhere**: the GPIO drives
+fine, so commands succeed and `sp1_term`/`sp1_term_name` keep
+reporting the *pin*, not the far end of the cable. The tell is in the
+data — a real open and short differ by ~180° in reflection phase, so
+a stuck switch makes the live-status sp1 pane's SHORT and OPEN traces
+(and the corr `RFSP1_SHORT` vs `RFSP1_OPEN` spectra) come out
+identical. Checking that the two sp1 traces actually differ is the
+deploy-day acceptance test for the switch.
+
+Escape hatches, cheapest first:
+
+- **Skip the OPEN dwell**: set `RFSP1_OPEN: 0` in `switch_schedule`
+  (zero-wait modes are skipped with a log line). `RFSP1_SHORT` keeps
+  running — cable + short cap is still a valid reflection standard,
+  i.e. exactly the pre-feature behavior. Caveat: VNA ant sweeps keep
+  toggling and publishing both traces (`sp1_open` just duplicates
+  `sp1_short` — harmless but mislabeled until the switch is fixed);
+  only `use_vna: false` stops them.
+- **Hardware failsafe**: unpowered / pin LOW = SHORT regardless of
+  software state, and a rebooted potmon pico boots the pin LOW. A
+  dead control line degrades to a permanently-SHORT cable, not an
+  unknown termination.
+- **Full rollback**: previous potmon firmware + previous
+  `eigsep_observing` release + old `RFSP1` schedule restores the
+  pre-feature system exactly; the failsafe cap keeps the cable
+  terminated throughout. Nothing in this feature is a one-way door.
 
 ## Orientation calibration recipe
 

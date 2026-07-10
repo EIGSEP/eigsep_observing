@@ -91,7 +91,7 @@ def _print_menu(last_summary):
         print(f"Last bundle: {last_summary}")
     print(
         "  [a] antenna bundle  (OSL + VNAANT + VNANOFF + VNANON + "
-        "VNAAMB + VNASP1)"
+        "VNAAMB + VNASP1 SHORT/OPEN)"
     )
     print("  [r] receiver bundle (OSL + VNARF)")
     print('  [d STATE] one-off probe of one switch path (e.g. "d VNAANT");')
@@ -108,6 +108,7 @@ def _run_bundle(subsystem, cfg, transport, mode, save_dir):
             transport=transport,
             vna_writer=subsystem.vna_writer,
             metadata_snapshot=subsystem.metadata_snapshot,
+            sp1_term_fn=subsystem.sp1_term_fn,
             on_contract_violation=logger.warning,
         )
     except (RuntimeError, TimeoutError, ValueError) as exc:

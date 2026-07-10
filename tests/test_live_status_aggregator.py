@@ -52,7 +52,8 @@ OBS_CFG = {
         "RFNOFF": 60,
         "RFNON": 60,
         "RFAMB": 60,
-        "RFSP1": 60,
+        "RFSP1_SHORT": 60,
+        "RFSP1_OPEN": 60,
     },
 }
 
@@ -148,14 +149,19 @@ def _make_corr_row(pairs=("0", "1", "02"), auto_value=100, cross_value=5):
 
 
 def _make_ant_bundle(nfreq=16):
-    """Conforming ant-mode VNA bundle (all 5 DUTs + OSL)."""
+    """Conforming ant-mode VNA bundle (all 6 DUTs + OSL).
+
+    ``sp1_short``/``sp1_open`` carry distinct values so a test that
+    only drops one of the two can tell which slot survived.
+    """
     z = np.ones(nfreq, dtype=np.complex128)
     data = {
         "ant": z,
         "load": 0.5 * z,
         "noise": 0.25 * z,
         "amb": 0.1 * z,
-        "sp1": 0.9 * z,
+        "sp1_short": 0.9 * z,
+        "sp1_open": 0.8 * z,
         "cal:VNAO": z,
         "cal:VNAS": -z,
         "cal:VNAL": 0.0 * z,
@@ -1161,13 +1167,13 @@ def test_snap_fpga_probe_unknown_when_no_host(agg, monkeypatch):
 
 
 # ---------------------------------------------------------------------
-# VNA tick — sp1 cache
+# VNA tick — sp1_short / sp1_open caches
 # ---------------------------------------------------------------------
 
 
-def test_vna_tick_caches_ant_and_sp1_from_one_bundle(agg, seeded):
-    """One ant-mode entry fills both the ant and sp1 VnaCache slots,
-    sharing OSL arrays and freqs."""
+def test_ant_bundle_fills_both_sp1_caches(agg, seeded):
+    """One ant-mode entry fills the ant, sp1_short, and sp1_open
+    VnaCache slots, sharing OSL arrays and freqs."""
     _, panda = seeded
     data, header = _make_ant_bundle()
     VnaWriter(panda).add(data, header=header)
@@ -1177,20 +1183,29 @@ def test_vna_tick_caches_ant_and_sp1_from_one_bundle(agg, seeded):
 
     state = agg.snapshot()
     assert state.last_vna_ant is not None
-    assert state.last_vna_sp1 is not None
-    np.testing.assert_array_equal(state.last_vna_sp1.raw_s11, data["sp1"])
+    assert state.last_vna_sp1_short is not None
+    assert state.last_vna_sp1_open is not None
     np.testing.assert_array_equal(
-        state.last_vna_sp1.cal_o, state.last_vna_ant.cal_o
+        state.last_vna_sp1_short.raw_s11, data["sp1_short"]
+    )
+    np.testing.assert_array_equal(
+        state.last_vna_sp1_open.raw_s11, data["sp1_open"]
+    )
+    np.testing.assert_array_equal(
+        state.last_vna_sp1_short.cal_o, state.last_vna_ant.cal_o
+    )
+    np.testing.assert_array_equal(
+        state.last_vna_sp1_open.cal_o, state.last_vna_ant.cal_o
     )
     assert state.last_vna_rec is None
 
 
-def test_vna_tick_missing_sp1_drops_only_sp1(agg, seeded, caplog):
-    """A pre-upgrade ant bundle without sp1 still caches the ant trace;
-    the sp1 slot stays empty and the violation logs at ERROR."""
+def test_vna_tick_missing_sp1_short_drops_only_that_slot(agg, seeded, caplog):
+    """A bundle missing sp1_short still caches ant + sp1_open; the
+    sp1_short slot stays empty and the violation logs at ERROR."""
     _, panda = seeded
     data, header = _make_ant_bundle()
-    del data["sp1"]
+    del data["sp1_short"]
     VnaWriter(panda).add(data, header=header)
     _rewind_streams(panda, ["stream:vna"])
 
@@ -1199,8 +1214,9 @@ def test_vna_tick_missing_sp1_drops_only_sp1(agg, seeded, caplog):
 
     state = agg.snapshot()
     assert state.last_vna_ant is not None
-    assert state.last_vna_sp1 is None
-    assert any("sp1" in r.message for r in caplog.records)
+    assert state.last_vna_sp1_open is not None
+    assert state.last_vna_sp1_short is None
+    assert any("sp1_short" in r.message for r in caplog.records)
 
 
 def test_snapshot_exposes_snap_fpga_fields(agg):

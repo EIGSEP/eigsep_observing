@@ -16,6 +16,7 @@ from eigsep_redis import (
 )
 from eigsep_redis.keys import STATUS_STREAM
 from eigsep_redis.testing import DummyTransport
+from picohost.base import PicoRFSwitch
 from picohost.proxy import PicoProxy
 
 import eigsep_observing
@@ -846,7 +847,9 @@ def test_measure_s11_returns_published_payload(transport, dummy_cfg):
             result = client.measure_s11("ant")
         assert isinstance(result, tuple) and len(result) == 3
         s11, header, metadata = result
-        assert set(("ant", "noise", "load", "amb", "sp1")).issubset(s11.keys())
+        assert set(
+            ("ant", "noise", "load", "amb", "sp1_short", "sp1_open")
+        ).issubset(s11.keys())
         assert {"cal:VNAO", "cal:VNAS", "cal:VNAL"}.issubset(s11.keys())
         assert header["mode"] == "ant"
         assert "freqs" in header
@@ -3175,3 +3178,161 @@ def test_run_calibration_sequence_uses_session(transport, dummy_cfg):
         assert client.vna is None  # session closed after the block
     finally:
         client.stop()
+
+
+def _wait_potmon_term(client, name, timeout=5.0):
+    """Poll the metadata snapshot until potmon publishes term ``name``."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if client._read_sp1_term_from_redis() == name:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_obs_modes_cover_paths_and_sp1_pair():
+    from eigsep_observing.client import OBS_MODES
+
+    # Every non-RFSP1 rfswitch path is a mode implying failsafe SHORT.
+    for path in PicoRFSwitch.PATHS:
+        if path == "RFSP1":
+            assert path not in OBS_MODES
+        else:
+            assert OBS_MODES[path] == (path, "SHORT")
+    assert OBS_MODES["RFSP1_SHORT"] == ("RFSP1", "SHORT")
+    assert OBS_MODES["RFSP1_OPEN"] == ("RFSP1", "OPEN")
+
+
+def test_boot_asserts_short_termination(client, dummy_cfg):
+    # Vacuous as a bare "assert SHORT right after construction":
+    # PotMonEmulator.__init__ already defaults sp1_term to SHORT
+    # (mirroring the real hardware failsafe), so that assertion would
+    # pass even with PandaClient's boot-time
+    # `_safe_set_sp1_term(SP1_TERM_SHORT)` block deleted. Drive the
+    # termination to OPEN first, then construct a second client against
+    # the SAME already-running manager/device — a plain PandaClient,
+    # not another DummyPandaClient, since DummyPandaClient spins up a
+    # brand-new manager + fresh emulator that boots to SHORT on its
+    # own and would just reintroduce the same vacuousness one level
+    # up. This pins the boot-time re-assert itself, not the emulator's
+    # boot state.
+    assert client._apply_obs_mode("RFSP1_OPEN")
+    assert _wait_potmon_term(client, "OPEN")
+
+    second = PandaClient(client.transport, cfg=dummy_cfg)
+    try:
+        assert _wait_potmon_term(second, "SHORT")
+    finally:
+        second.stop()
+
+
+def test_apply_obs_mode_drives_both_knobs(client):
+    assert client._apply_obs_mode("RFSP1_OPEN")
+    assert _wait_potmon_term(client, "OPEN")
+    # Any other mode re-asserts the failsafe SHORT.
+    assert client._apply_obs_mode("RFANT")
+    assert _wait_potmon_term(client, "SHORT")
+
+
+def test_switch_session_restores_termination(client):
+    client._apply_obs_mode("RFANT")
+    assert _wait_potmon_term(client, "SHORT")
+    with client.switch_session() as sw:
+        assert sw("RFSP1_OPEN")
+        assert _wait_potmon_term(client, "OPEN")
+    # Exit restores the entry termination (SHORT).
+    assert _wait_potmon_term(client, "SHORT")
+
+
+def test_switch_session_rejects_plain_rfsp1(client):
+    with client.switch_session() as sw:
+        assert not sw("RFSP1")  # must name the termination explicitly
+
+
+def test_switch_session_partial_failure_still_restores(client):
+    """If sw()'s termination half fails after the rfswitch path half
+    already moved hardware, the exit restore must still fire — a
+    partially failed switch is not a no-op, so ``switched`` arms on
+    any valid-mode invocation regardless of the composite result."""
+    assert client._safe_switch("RFANT")
+    _wait_for_published_mode(client, "RFANT")
+    assert _wait_potmon_term(client, "SHORT")
+
+    term_calls = []
+    original_term = client._safe_set_sp1_term
+
+    # Fail only the sw() half (OPEN); the restore half (SHORT) passes
+    # through to the real dummy potmon. Scoped patch on the one method
+    # (dummies-over-mocks) — the rfswitch path command runs for real.
+    def term_fails_open(term):
+        term_calls.append(term)
+        if term == "OPEN":
+            return False
+        return original_term(term)
+
+    with patch.object(
+        client, "_safe_set_sp1_term", side_effect=term_fails_open
+    ):
+        with client.switch_session() as sw:
+            assert sw("RFSP1_OPEN") is False  # composite result
+            # ...but the path half really moved hardware.
+            _wait_for_published_mode(client, "RFSP1")
+    # Exit: sw() attempted OPEN (failed), then the session restored
+    # the entry termination — the restore was not skipped.
+    assert term_calls == ["OPEN", "SHORT"], term_calls
+    # And the rfswitch path was restored to the entry mode.
+    _wait_for_published_mode(client, "RFANT")
+    assert _wait_potmon_term(client, "SHORT")
+
+
+# ``_set_sp1_term`` / ``_safe_set_sp1_term`` mirror the ``_switch`` /
+# ``_safe_switch`` contract pair for the potmon-driven SP1 termination;
+# the tests below mirror the _safe_switch contract tests above.
+
+
+def test_set_sp1_term_raises_on_invalid_name(client):
+    """Unknown termination names raise ValueError naming the valid
+    set, mirroring ``_switch``'s raising contract."""
+    with pytest.raises(ValueError, match="Invalid SP1 termination") as exc:
+        client._set_sp1_term("BOGUS")
+    assert "OPEN" in str(exc.value)
+    assert "SHORT" in str(exc.value)
+
+
+def test_safe_set_sp1_term_returns_false_on_unregistered(client, caplog):
+    """If ``pot_proxy.send_command`` returns ``None`` (potmon not
+    registered with PicoManager), ``_set_sp1_term`` raises RuntimeError
+    and the safe wrapper translates it to False with a warning."""
+    caplog.set_level("WARNING")
+    with patch.object(client.pot_proxy, "send_command", return_value=None):
+        assert client._safe_set_sp1_term("OPEN") is False
+    assert any(
+        "SP1 termination to OPEN failed" in r.getMessage()
+        and "RuntimeError" in r.getMessage()
+        and "not registered" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_safe_set_sp1_term_returns_false_on_timeout(client, caplog):
+    """A proxy-level TimeoutError must be caught and translated to
+    False — observing loops depend on the never-raises contract."""
+    caplog.set_level("WARNING")
+    with patch.object(
+        client.pot_proxy, "send_command", side_effect=TimeoutError("t")
+    ):
+        assert client._safe_set_sp1_term("OPEN") is False
+    assert any(
+        "SP1 termination to OPEN failed" in r.getMessage()
+        and "TimeoutError" in r.getMessage()
+        and r.levelname == "WARNING"
+        for r in caplog.records
+    ), [r.getMessage() for r in caplog.records]
+
+
+def test_safe_set_sp1_term_returns_true_on_success(client):
+    """Happy path against the real dummy potmon: the command
+    round-trips and the pin state lands on the potmon stream."""
+    assert client._safe_set_sp1_term("OPEN") is True
+    assert _wait_potmon_term(client, "OPEN")

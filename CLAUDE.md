@@ -31,7 +31,7 @@ modifying any script in that directory.
 
 - **Transport** (`eigsep_redis.transport`, sibling repo [`eigsep_redis`](https://github.com/EIGSEP/eigsep_redis)) - Shared Redis transport object: connection, last-read-id bookkeeping, raw K/V, lifecycle. Owns nothing bus-specific. Writer and reader classes are constructed with a `Transport` and share state through it. Tests use `DummyTransport` (fakeredis-backed). The entire Redis transport + per-bus writer/reader layer lives in the `eigsep_redis` sibling repo; `eigsep_observing` consumes it as a dependency.
 - **EigObserver** (`observer.py`) - Main orchestrator on the ground computer. Takes two transports (`transport_snap` for SNAP correlator, `transport_panda` for LattePanda) and builds *only* the consumer-side per-bus surfaces it needs: `corr_config`, `corr_reader` (SNAP side); `config`, `metadata_stream`, `status_reader`, `heartbeat_reader`, `vna_reader` (panda side). Holds no writer surface.
-- **PandaClient** (`client.py`) - Runs on the suspended LattePanda. Takes a transport and builds *only* producer-side surfaces: `config`, `metadata_snapshot` (read-only — rfswitch state check), `status`, `heartbeat`, `vna_writer`. Manages Pico devices (IMU, thermometers, peltier, lidar, RF switch) via `picohost` library. Holds no corr surface.
+- **PandaClient** (`client.py`) - Runs on the suspended LattePanda. Takes a transport and builds *only* producer-side surfaces: `config`, `metadata_snapshot` (read-only — rfswitch state check), `status`, `heartbeat`, `vna_writer`. Manages Pico devices (IMU, thermometers, peltier, lidar, RF switch) via `picohost` library. Holds no corr surface. `switch_schedule` keys are `OBS_MODES` observing modes (an rfswitch path × the SP1 failsafe termination), not raw `picohost.base.PicoRFSwitch.PATHS` names — e.g. `RFSP1_SHORT`/`RFSP1_OPEN` instead of a bare `RFSP1`.
 - **EigsepFpga** (`fpga.py`) - SNAP FPGA/correlator driver. Takes a transport (built from `cfg["redis"]` when not supplied) and builds the corr-bus publication path: `corr` (writer), `corr_config` (store — config + header). Owns the register blocks (`blocks.py`) and the `.fpg` bitstream (`data/`). Was historically a subclass of `eigsep_corr.fpga.EigsepFpga`; the two were merged in-tree when `eigsep_corr` was archived.
 - **MotorClient** (`motor_client.py`) / **MotorZeroer** (`motor_zeroer.py`) - Client-side motor orchestrators used by `scripts/motor_scan.py` and `scripts/motor_manual.py`. Both wrap a `picohost.proxy.PicoProxy("motor", ...)` and a `MetadataSnapshotReader`, drive the scan loop and interactive zeroing from outside the `PicoManager` process, and poll Redis metadata for move completion (so a long move never stalls the manager's shared `cmd_loop`).
 
@@ -231,7 +231,7 @@ directly from `SENSOR_SCHEMAS`:
 | schema type | reduction                                       | rationale |
 |-------------|-------------------------------------------------|-----------|
 | `float`     | `np.mean` over non-error survivors              | the actual averaging path; matches the integration's physical meaning |
-| `int`       | `min` over non-error survivors; `max` for fields in `_MAX_REDUCED_FIELDS` | invariant constants (`app_id`, `watchdog_timeout_ms`, the motor's per-boot `boot_id`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path. Worst-case counters that reset on every good sample (tempctrl's `sensor_rejects` rate-guard reject counter) take `max` instead, so an any-reject-in-window integration stays identifiable — `min` would wash the marker back to 0 |
+| `int`       | `min` over non-error survivors; `max` for fields in `_MAX_REDUCED_FIELDS` | invariant constants (`app_id`, `watchdog_timeout_ms`, the motor's per-boot `boot_id`) — `min` is a no-op on agreement, and a disagreement is caught by the throttled invariant ERROR log path. Worst-case counters that reset on every good sample (tempctrl's `sensor_rejects` rate-guard reject counter) take `max` instead, so an any-reject-in-window integration stays identifiable — `min` would wash the marker back to 0. A third category is a raw int that rides along a paired name/str field which is the real consumer surface — potmon's `sp1_term` (raw GPIO level) takes the plain `min` default and leaves disagreement-surfacing to `sp1_term_name`'s own `"UNKNOWN"` reduction |
 | `bool`      | `any` over non-error survivors                  | bool fields are fault flags (`watchdog_tripped`); `any` preserves a fault that occurred mid-integration |
 | `str`       | first value if unanimous, else `"UNKNOWN"`      | matches the rfswitch convention |
 
@@ -328,7 +328,11 @@ two by bypassing `PicoPotentiometer.__init__` and calling
 `_potmon_post_handler_reading` there. The picohost scalar-only contract
 (documented on `picohost.base.redis_handler`) means every field is
 scalar, including the cal slope/intercept which were flattened from the
-old `[m, b]` list shape.
+old `[m, b]` list shape. `potmon` also publishes `sp1_term`/
+`sp1_term_name` (the SP1 failsafe termination, driven via the potmon
+pico's GPIO 27); the str field's first-if-unanimous-else-`"UNKNOWN"`
+reduction flags a mid-integration termination flip the same way it
+flags an rfswitch state change.
 
 ## File I/O: write/read symmetry
 

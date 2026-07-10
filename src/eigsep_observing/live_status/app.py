@@ -605,6 +605,10 @@ def _rfswitch_payload(state: StateSnapshot) -> dict:
     and a live panda heartbeat. Any missing input returns ``None``,
     which the dashboard renders as N/A rather than a misleading
     projection of an idle schedule.
+
+    ``sp1_term`` is the SP1 failsafe termination name ("SHORT" /
+    "OPEN") read from the potmon metadata stream (the pico that owns
+    the pin) — ``None`` when potmon hasn't published yet.
     """
     latest = state.metadata_latest.get("rfswitch") or {}
     name = latest.get("sw_state_name")
@@ -628,12 +632,18 @@ def _rfswitch_payload(state: StateSnapshot) -> dict:
         next_expected_change_s = expected_dwell - time_in_state_s
         on_schedule = time_in_state_s <= expected_dwell * 1.1
 
+    # SP1 failsafe termination, from the potmon stream (the pico that
+    # owns the pin). None when potmon hasn't published.
+    pot = state.metadata_latest.get("potmon") or {}
+    sp1_term = pot.get("sp1_term_name") if isinstance(pot, dict) else None
+
     return {
         "state": name,
         "time_in_state_s": time_in_state_s,
         "schedule": schedule,
         "next_expected_change_s": next_expected_change_s,
         "on_schedule": on_schedule,
+        "sp1_term": sp1_term,
     }
 
 
@@ -655,11 +665,14 @@ _VNA_STALE_AGE_S = 5400.0
 
 
 def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
-    """Calibrated VNA pane payload for ``mode in {"ant", "rec", "sp1"}``.
+    """Calibrated VNA pane payload for
+    ``mode in {"ant", "rec", "sp1_short", "sp1_open"}``.
 
-    ``sp1`` (Spare-1 open-cable trace) carries an extra ``"phase_deg"``
-    field (unwrapped phase in degrees) alongside the standard
-    magnitude data — see the mode-specific block below.
+    ``sp1_short``/``sp1_open`` (Spare-1 cable traces under each
+    failsafe termination) carry an extra ``"phase_deg"`` field
+    (unwrapped phase in degrees) alongside the standard magnitude
+    data — see the mode-specific block below. There is no legacy
+    ``"sp1"`` alias: it falls through to the unknown-mode branch.
 
     Calibration is computed lazily here so the drain thread never pays
     the calkit cost when the pane isn't visible. A failure of the cal
@@ -670,7 +683,8 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
     caches: dict[str, Optional[VnaCache]] = {
         "ant": state.last_vna_ant,
         "rec": state.last_vna_rec,
-        "sp1": state.last_vna_sp1,
+        "sp1_short": state.last_vna_sp1_short,
+        "sp1_open": state.last_vna_sp1_open,
     }
     if mode not in caches:
         return {
@@ -726,10 +740,12 @@ def _vna_payload(state: StateSnapshot, mode: str, now: float) -> dict:
         "stale": age_s > _VNA_STALE_AGE_S,
         "metadata_snapshot_unix": cache.metadata_snapshot_unix,
     }
-    if mode == "sp1":
-        # An open cable's phase vs. frequency is ~linear (slope = the
-        # cable's round-trip delay); unwrapping makes slope drift or
-        # ripple visible instead of sawtoothing at +-180 deg.
+    if mode in ("sp1_short", "sp1_open"):
+        # A shorted or open cable's phase vs. frequency is ~linear
+        # either way (slope = the cable's round-trip delay); unwrap
+        # for the same reason regardless of which termination is
+        # active — it makes slope drift or ripple visible instead of
+        # sawtoothing at +-180 deg.
         #
         # Unwrap only the finite channels: np.unwrap cumsums phase
         # diffs, so a single NaN would poison every later channel.
