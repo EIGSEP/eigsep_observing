@@ -811,12 +811,13 @@ def _validate_corr_header(header):
 #
 # IMU schemas reflect the BNO085 UART RVC mode introduced in picohost
 # 1.0.0: only yaw/pitch/roll orientation and acceleration are reported.
-# The two physical IMU picos now emit different field sets:
-# imu_el (panda elevation, app_id 3) adds gravity-derived signed elevation;
-# imu_az (antenna azimuth, app_id 6) adds |theta| elevation plus the azimuth
-# blend (accel-based + yaw-based, registered to the pot).
-# All derived fields are float->float (mean reduction); all are None when
-# uncalibrated.
+# The two physical IMU picos share the same derived field name but
+# different sign semantics: imu_el (panda elevation, app_id 3) adds
+# gravity-derived signed elevation; imu_az (antenna azimuth turntable,
+# app_id 6) adds |theta| elevation only — the accel/yaw azimuth blend
+# was retired in picohost 4.3 (azimuth is owned by potmon; accel-az is
+# degenerate at level). All derived fields are float->float (mean
+# reduction); all are None when uncalibrated.
 _IMU_BASE = {
     "sensor_name": str,
     "status": str,
@@ -832,17 +833,8 @@ _IMU_BASE = {
 # imu_el (panda elevation, app_id 3): gravity-derived signed elevation.
 _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
-# imu_az (antenna azimuth, app_id 6): |theta| elevation plus the azimuth
-# blend (accel-based + yaw-based, registered to the pot). All float ->
-# float->mean reduction; all None when uncalibrated.
-_IMU_AZ_SCHEMA = {
-    **_IMU_BASE,
-    "el_deg": float,
-    "az_deg": float,
-    "az_from_accel_deg": float,
-    "az_from_yaw_deg": float,
-    "az_blend_weight": float,
-}
+# imu_az (antenna azimuth turntable, app_id 6): |theta| elevation only.
+_IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
 # tempctrl publishes two flat streams (one per Peltier channel), each
 # matching this schema. The producer is
@@ -1041,19 +1033,23 @@ SENSOR_SCHEMAS = {
     # `adc_stats` is produced by the SNAP-side correlator (not a pico),
     # published on the SNAP transport via a second ``MetadataWriter``
     # that lives in ``EigsepFpga``. One entry is emitted per
-    # ``diagnostics_period_s`` tick (throttled off the per-integration
-    # read path; see ``_publish_diagnostics_loop``) from
-    # ``Input.get_stats(sum_cores=False)`` — mean, power, and RMS for
-    # each of the 12 ADC cores (6 SNAP inputs × 2 interleaved cores).
-    # At cadences slower than the integration rate some integration rows
-    # carry no adc_stats sample (gap-filled None); the freshness check
-    # tolerates this well within its 30 s window. Field names are
+    # ``adc_snapshot_period_s`` tick: ``_publish_adc_stats`` reduces
+    # the raw snapshot frames grabbed for the adc_snapshot stream to
+    # mean, power, and RMS for each of the 12 ADC cores (6 SNAP
+    # inputs × 2 interleaved cores). The stats are software-derived
+    # because the flashed bitstreams carry no ``input_rms_*``
+    # hardware accumulators (2026-07-09 eigsep-backend diagnosis).
+    # At this cadence nearly every integration row carries no
+    # adc_stats sample (gap-filled None) — expected; the publish
+    # period must stay below the stream-freshness ``max_age_s``
+    # (30 s) or every zero-entry drain near the end of a period
+    # would log a spurious stale warning. Field names are
     # ``input{N}_core{C}_{stat}``
     # where ``N`` is the snap-input index 0..5 (same label the corr
     # file uses for auto-correlations) and ``C`` is the interleaved
-    # ADC core 0/1: ``get_stats`` returns 12 values where indices
-    # ``2N`` and ``2N+1`` are the pair that ``sum_cores=True`` would
-    # average into snap input ``N``. Keeping cores split preserves the
+    # ADC core 0/1 — the even/odd sample split of the snapshot,
+    # matching the 2N/2N+1 core convention of the retired register
+    # block. Keeping cores split preserves the
     # interleaved-imbalance diagnostic while making each field trivially
     # joinable to the corr data it describes. Envelope is minimal: no
     # ``app_id`` (not a picohost app) and no invariant fields beyond

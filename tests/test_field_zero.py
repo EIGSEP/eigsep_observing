@@ -180,7 +180,7 @@ def test_curses_main_exits_with_result_on_converged_home(client, monkeypatch):
     monkeypatch.setattr(field_zero.curses, "noecho", lambda: None)
 
     class _Homer:
-        def home(self, stop_event=None):
+        def home(self, stop_event=None, axes=("az", "el")):
             return HomeResult(
                 converged=True,
                 iterations=1,
@@ -206,7 +206,7 @@ def test_curses_main_stays_alive_on_unconverged_home(client, monkeypatch):
     monkeypatch.setattr(field_zero.curses, "noecho", lambda: None)
 
     class _Homer:
-        def home(self, stop_event=None):
+        def home(self, stop_event=None, axes=("az", "el")):
             return HomeResult(
                 converged=False,
                 iterations=6,

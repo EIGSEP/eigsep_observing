@@ -424,8 +424,12 @@ OBS_CFG_LOCAL = {
     "use_tempctrl": True,
     "switch_schedule": {"RFANT": 3600, "RFNON": 60},
     "calibration": {
-        "noise_diode_enr_db": 11.0,
-        "t_load_stream": "tempctrl_load",
+        "noise_diode_enr_db": 35.0,
+        "noise_source_atten_db": 30.0,
+        "t_ns_stream": "rfswitch_therm",
+        "t_ns_field": "temp_therm2",
+        "t_amb_stream": "tempctrl_load",
+        "t_amb_field": "T_now",
     },
     "tempctrl_settings": {
         "LNA": {"installed": True, "target_C": 25.0, "hysteresis_C": 0.5},
@@ -492,20 +496,28 @@ def test_effective_obs_cfg_missing_upload_keys_fall_back_to_local():
     assert out["tempctrl_settings"] == OBS_CFG_LOCAL["tempctrl_settings"]
 
 
-def test_effective_obs_cfg_plucks_only_t_load_stream_from_calibration():
+def test_effective_obs_cfg_plucks_only_routing_knobs_from_calibration():
     upload = _panda_upload(
         calibration={
             "noise_diode_enr_db": 99.0,  # panda copy drifted
-            "t_load_stream": "tempctrl_lna",  # hot-swap step 3
+            "noise_source_atten_db": 20.0,  # panda copy drifted
+            "t_ns_stream": "rfswitch_therm",
+            "t_ns_field": "temp_therm0",  # pad moved to another channel
+            "t_amb_stream": "tempctrl_lna",  # hot-swap step 3
+            "t_amb_field": "T_now",
         }
     )
     out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
     cal = out["calibration"]
-    assert cal["t_load_stream"] == "tempctrl_lna"
-    # The ENR is a dashboard-local display-cal knob, not panda reality.
-    assert cal["noise_diode_enr_db"] == 11.0
+    # The reference-temperature routing follows the upload...
+    assert cal["t_amb_stream"] == "tempctrl_lna"
+    assert cal["t_ns_field"] == "temp_therm0"
+    # ...but the physical constants are dashboard-local display-cal
+    # knobs, not panda reality.
+    assert cal["noise_diode_enr_db"] == 35.0
+    assert cal["noise_source_atten_db"] == 30.0
     # The local dict's nested section was copied, not mutated in place.
-    assert OBS_CFG_LOCAL["calibration"]["t_load_stream"] == "tempctrl_load"
+    assert OBS_CFG_LOCAL["calibration"]["t_amb_stream"] == "tempctrl_load"
 
 
 def test_effective_obs_cfg_switch_schedule_not_merged():

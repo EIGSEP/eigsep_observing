@@ -5,6 +5,11 @@ into az/el degrees for each sensor that reports them, plus a median consensus
 and the max-min spread. The spread is the live drift/stall signal; the
 consensus is display-only (the authoritative weighted estimate is a
 post-processing concern, not a live decision).
+
+Az sources: motor + potmon. imu_az azimuth was retired with the
+picohost-4.3 descope (accel-derived azimuth is physically degenerate at
+level; potmon is the az reference). imu_az still contributes to the el
+consensus/spread alongside motor and imu_el.
 """
 
 import numpy as np
@@ -41,7 +46,6 @@ def compute_orientation(metadata, steps_to_deg):
     az = {
         "motor": steps_to_deg(az_pos) if az_pos is not None else None,
         "potmon": _val(metadata, "potmon", "pot_az_angle"),
-        "imu_az": _val(metadata, "imu_az", "az_deg"),
     }
     el = {
         "motor": steps_to_deg(el_pos) if el_pos is not None else None,

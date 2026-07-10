@@ -6,16 +6,27 @@ to the motor pico, so the manager service stays up throughout. Log
 start/end boundaries to the shared status stream so the ground
 observer sees when a scan is active.
 
-The scan grid is configured per axis from the command line via
+Three modes:
+
+* Default (neither hold flag): the full 2-D serpentine grid via
+  :meth:`MotorClient.scan` — homes to step (0, 0) before the first
+  pass and after completion; ``--el_first`` picks the fast axis.
+* ``--el E``: single-axis azimuth sweep. One move takes elevation to
+  ``E``; azimuth then sweeps ``--az_start`` to ``--az_stop``, in the
+  same direction on every pass (each pass first repositions to the
+  start — expect the angle to run backwards during that leg). No
+  homing: when done the rig parks in place, elevation still at ``E``.
+* ``--az A``: the mirrored single-axis elevation sweep at fixed
+  azimuth ``A``.
+
+The sweep bounds are configured per axis via
 ``--az_start/--az_stop/--az_step`` and the ``--el_*`` equivalents
 (degrees). Bounds are inclusive of the stop endpoint, so e.g.
-``--az_start 0 --az_stop 180 --az_step 5`` sweeps 0..180 in 5 deg steps.
-
-``--axis`` selects which axis is swept: ``both`` (default) runs the
-full 2-D grid, while ``az`` or ``el`` sweep a single axis and hold the
-other fixed at ``--el`` / ``--az`` respectively (default 0). In a
-single-axis scan the held axis's ``--*_start/stop/step`` flags are
-ignored.
+``--az_start 0 --az_stop 180 --az_step 5`` sweeps 0..180 in 5 deg
+steps. With ``--pause_s`` the sweep steps through every grid point and
+dwells at each; without it each pass is a single continuous
+start-to-stop move. In a single-axis mode the held axis's
+``--*_start/stop/step`` flags are ignored.
 """
 
 from argparse import ArgumentParser
@@ -47,8 +58,9 @@ def _axis_range(start, stop, step):
     grid (so ``0 -> 180`` reaches 180). A ``stop`` that doesn't land on
     the grid stops at the last point ``<= stop`` rather than
     overshooting the mechanical boundary. Direction is always ascending;
-    the serpentine traversal in ``MotorClient.scan`` handles sweep
-    direction, so an inverted ``stop < start`` is a user error.
+    the caller sets sweep direction (serpentine in ``MotorClient.scan``
+    for the 2-D grid, fixed start -> stop in the single-axis sweep), so
+    an inverted ``stop < start`` is a user error.
     """
     if step <= 0:
         raise ValueError(f"step must be positive, got {step}")
@@ -58,47 +70,102 @@ def _axis_range(start, stop, step):
     return np.arange(start, stop + step / 2.0, step)
 
 
-def _build_grid(args):
-    """Resolve ``(az_range, el_range, el_first)`` from CLI args.
+def _resolve_plan(args):
+    """Validate CLI flags and build the scan plan before any hardware
+    is touched.
 
-    For ``--axis both`` the full 2-D grid is built from both sets of
-    bounds and ``--el_first`` is honored. For a single-axis scan the
-    swept axis is built from its ``--<axis>_start/stop/step`` bounds
-    while the other axis collapses to a single hold point (``--el`` for
-    an az scan, ``--az`` for an el scan). ``el_first`` is then forced so
-    the swept axis is the inner (fast) loop, which preserves the
-    ``pause_s`` sweep semantics; the held axis's bound/step flags are
-    ignored. Bad bounds still raise from ``_axis_range`` before any
-    hardware is touched.
+    Returns ``(mode, az_range, el_range)`` where ``mode`` is ``"az"``
+    (azimuth sweep at fixed ``--el``), ``"el"`` (elevation sweep at
+    fixed ``--az``), or ``"both"`` (full 2-D grid, neither hold flag
+    given). In a single-axis mode the held axis's range is ``None`` —
+    its ``--*_start/stop/step`` bounds are ignored. Passing both
+    ``--az`` and ``--el`` is ambiguous and raises; bad bounds raise
+    from ``_axis_range``.
     """
-    if args.axis == "az":
+    if args.az is not None and args.el is not None:
+        raise ValueError(
+            "--az and --el are mutually exclusive: pass --el to sweep "
+            "azimuth at that elevation, --az to sweep elevation at "
+            "that azimuth, or neither for the full 2-D grid."
+        )
+    if args.el is not None:
         az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
-        el_range = np.array([args.el], dtype=float)
-        return az_range, el_range, False
-    if args.axis == "el":
+        return "az", az_range, None
+    if args.az is not None:
         el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
-        az_range = np.array([args.az], dtype=float)
-        return az_range, el_range, True
+        return "el", None, el_range
     az_range = _axis_range(args.az_start, args.az_stop, args.az_step)
     el_range = _axis_range(args.el_start, args.el_stop, args.el_step)
-    return az_range, el_range, args.el_first
+    return "both", az_range, el_range
 
 
-def _describe_grid(args, az_range, el_range):
-    """One-line human summary of the resolved scan grid for the log."""
-    az = (
+def _describe_plan(mode, args, az_range, el_range):
+    """One-line human summary of the resolved scan for the log."""
+    if mode == "az":
+        return (
+            f"az sweep {args.az_start:g}..{args.az_stop:g} "
+            f"({len(az_range)} pts) at el {args.el:g}"
+        )
+    if mode == "el":
+        return (
+            f"el sweep {args.el_start:g}..{args.el_stop:g} "
+            f"({len(el_range)} pts) at az {args.az:g}"
+        )
+    return (
         f"az {args.az_start:g}..{args.az_stop:g} step {args.az_step:g} "
-        f"({len(az_range)} pts)"
-    )
-    el = (
+        f"({len(az_range)} pts), "
         f"el {args.el_start:g}..{args.el_stop:g} step {args.el_step:g} "
         f"({len(el_range)} pts)"
     )
-    if args.axis == "az":
-        return f"{az}, el held at {args.el:g}"
-    if args.axis == "el":
-        return f"{el}, az held at {args.az:g}"
-    return f"{az}, {el}"
+
+
+def _single_axis_sweep(motor, args, sweep_axis, sweep_range):
+    """Hold one axis, sweep the other; park at the hold when done.
+
+    One move takes the held axis to its ``--el`` / ``--az`` hold angle;
+    the sweep axis then runs start -> stop, in the same direction on
+    every pass (each pass begins by repositioning to the sweep start).
+    Without ``--pause_s`` each pass is a single continuous move; with
+    it the sweep dwells at every grid point. Unlike
+    :meth:`MotorClient.scan` there is no homing before or after: on
+    completion the rig parks in place, held axis still at its hold
+    angle. Every move routes through :meth:`MotorClient.move_to`, so
+    the travel-limit guard and sensor fence apply.
+    """
+    if sweep_axis == "az":
+        hold_axis, hold_deg = "el", float(args.el)
+    else:
+        hold_axis, hold_deg = "az", float(args.az)
+
+    logger.info("Moving %s to hold angle %g deg", hold_axis, hold_deg)
+    motor.move_to(**{f"{hold_axis}_deg": hold_deg})
+
+    start, stop = float(sweep_range[0]), float(sweep_range[-1])
+    npass = 0
+    while args.count is None or npass < args.count:
+        if args.pause_s is None:
+            logger.info("%s: repositioning to %g deg", sweep_axis, start)
+            motor.move_to(**{f"{sweep_axis}_deg": start})
+            logger.info("%s: sweeping %g -> %g deg", sweep_axis, start, stop)
+            motor.move_to(**{f"{sweep_axis}_deg": stop})
+        else:
+            logger.info(
+                "%s: stepping %g -> %g deg, %g s dwell per point",
+                sweep_axis,
+                start,
+                stop,
+                args.pause_s,
+            )
+            for val in sweep_range:
+                motor.move_to(**{f"{sweep_axis}_deg": float(val)})
+                time.sleep(args.pause_s)
+        npass += 1
+        if args.sleep_s is not None and (
+            args.count is None or npass < args.count
+        ):
+            logger.info("Sleeping %g s between passes", args.sleep_s)
+            time.sleep(args.sleep_s)
+    logger.info("Sweep done; parked with %s at %g deg", hold_axis, hold_deg)
 
 
 def _prompt_go_home(motor):
@@ -130,9 +197,9 @@ def _prompt_go_home(motor):
 
 
 def main(transport, args):
-    # Build (and validate) the grid before touching hardware so bad
-    # bounds fail fast without opening a run_tag session.
-    az_range, el_range, el_first = _build_grid(args)
+    # Resolve (and validate) the plan before touching hardware so bad
+    # flags fail fast without opening a run_tag session.
+    mode, az_range, el_range = _resolve_plan(args)
     require_pico(PicoProxy("motor", transport, source="motor_scan"))
     with run_tag.session(transport, "motor_scan"):
         status = StatusWriter(transport)
@@ -141,19 +208,26 @@ def main(transport, args):
         started = time.monotonic()
         status.send("motor_scan started")
         logger.info("motor_scan started")
-        logger.info("Scan grid: %s", _describe_grid(args, az_range, el_range))
+        logger.info(
+            "Scan plan: %s", _describe_plan(mode, args, az_range, el_range)
+        )
 
         try:
             motor.set_delay()
             motor.halt()
-            motor.scan(
-                az_range_deg=az_range,
-                el_range_deg=el_range,
-                el_first=el_first,
-                repeat_count=args.count,
-                pause_s=args.pause_s,
-                sleep_between=args.sleep_s,
-            )
+            if mode == "az":
+                _single_axis_sweep(motor, args, "az", az_range)
+            elif mode == "el":
+                _single_axis_sweep(motor, args, "el", el_range)
+            else:
+                motor.scan(
+                    az_range_deg=az_range,
+                    el_range_deg=el_range,
+                    el_first=args.el_first,
+                    repeat_count=args.count,
+                    pause_s=args.pause_s,
+                    sleep_between=args.sleep_s,
+                )
         except KeyboardInterrupt:
             logger.info("Scan interrupted by user")
             _prompt_go_home(motor)
@@ -176,19 +250,10 @@ def _parse_args():
     )
     add_redis_args(parser)
     parser.add_argument(
-        "--axis",
-        choices=("az", "el", "both"),
-        default="both",
-        help=(
-            "Which axis to sweep: 'az' (elevation held at --el), 'el' "
-            "(azimuth held at --az), or 'both' (default, full 2-D grid)."
-        ),
-    )
-    parser.add_argument(
         "--el_first",
         action="store_true",
         help="Scan az as outer loop (el is the fast axis); default is az "
-        "fast. Ignored unless --axis both.",
+        "fast. Only used for the default 2-D grid.",
     )
     parser.add_argument(
         "--az_start",
@@ -211,8 +276,9 @@ def _parse_args():
     parser.add_argument(
         "--az",
         type=float,
-        default=0.0,
-        help="Azimuth hold position in degrees when --axis el (default: 0).",
+        default=None,
+        help="Hold azimuth at this angle (degrees) and sweep elevation "
+        "only. Mutually exclusive with --el.",
     )
     parser.add_argument(
         "--el_start",
@@ -235,14 +301,16 @@ def _parse_args():
     parser.add_argument(
         "--el",
         type=float,
-        default=0.0,
-        help="Elevation hold position in degrees when --axis az (default: 0).",
+        default=None,
+        help="Hold elevation at this angle (degrees) and sweep azimuth "
+        "only. Mutually exclusive with --az.",
     )
     parser.add_argument(
         "--count",
         type=int,
         default=None,
-        help="Number of full-grid passes (default: run until Ctrl-C).",
+        help="Number of passes over the grid or sweep (default: run "
+        "until Ctrl-C).",
     )
     parser.add_argument(
         "--pause_s",

@@ -88,6 +88,28 @@ def _input_to_ant(wiring: Optional[dict]) -> dict[str, str]:
     return out
 
 
+def _input_to_snap_label(wiring: Optional[dict]) -> dict[str, str]:
+    """Invert ``wiring["ants"]`` to ``{snap_input_str: connector}``,
+    where connector is the SNAP SMA silkscreen label carried in
+    ``snap.label`` (e.g. ``"N0"``, ``"E6"``).
+
+    Permissive like :func:`_input_to_ant`: entries missing
+    ``snap.input`` or ``snap.label`` are skipped, absent wiring
+    returns an empty map.
+    """
+    if not wiring:
+        return {}
+    out: dict[str, str] = {}
+    for spec in (wiring.get("ants") or {}).values():
+        snap = (spec or {}).get("snap") or {}
+        inp = snap.get("input")
+        label = snap.get("label")
+        if inp is None or label is None:
+            continue
+        out[str(inp)] = str(label)
+    return out
+
+
 def _header_input_to_ant(header: Optional[dict]) -> dict[str, str]:
     """Effective ``{input_str: antenna}`` map for a corr header.
 
@@ -435,6 +457,10 @@ def _corr_payload(
         # raw (uncalibrated) view only.
         payload["linear_min"] = _nan_to_none(state.corr_linear_min)
         payload["linear_max"] = _nan_to_none(state.corr_linear_max)
+        # acc_len-ratio the bounds were rescaled by (guide-for-the-eye
+        # mode, see aggregator._maybe_load_linear_range); null when the
+        # bounds are exact. The front end labels the curves with it.
+        payload["linear_range_scale"] = state.corr_linear_scale
     if cal_meta is not None:
         payload["calibration_meta"] = cal_meta
     return payload
@@ -525,16 +551,20 @@ def _metadata_payload(state: StateSnapshot, thresholds: Thresholds) -> dict:
 
 def _adc_payload(state: StateSnapshot) -> dict:
     adc_stats = state.adc_stats_latest or {}
-    # Prefer the corr header's effective input->antenna map (mux-aware,
-    # written on every state-changing FPGA call); fall back to the ADC
-    # sidecar wiring so standalone snapshots still carry labels when corr
-    # publishing is paused.
+    # ADC snapshots tap the ADC cores *upstream* of the adc_mux_sel
+    # copy the corr datapath sees (field-verified 2026-07-09: with mux
+    # on, a mux-target input reads its own floating-level RMS, not its
+    # source's). So label cells from the PHYSICAL wiring manifest —
+    # antenna name plus SNAP connector (``snap.label``) — never from
+    # the mux-aware input_to_ant map the corr panes use, which would
+    # claim antenna signal on a connector that carries none. Corr
+    # header wiring is preferred; the ADC sidecar wiring keeps labels
+    # alive when corr publishing is paused.
     header = state.corr_header or {}
-    if header.get("input_to_ant"):
-        input_to_ant = _header_input_to_ant(header)
-    else:
-        sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
-        input_to_ant = _input_to_ant(header.get("wiring") or sidecar_wiring)
+    sidecar_wiring = (state.adc_snapshot_sidecar or {}).get("wiring")
+    wiring = header.get("wiring") or sidecar_wiring
+    input_to_ant = _input_to_ant(wiring)
+    input_to_connector = _input_to_snap_label(wiring)
     per_input = []
     for n in range(6):
         for c in range(2):
@@ -550,6 +580,7 @@ def _adc_payload(state: StateSnapshot) -> dict:
                     "power": power,
                     "clip_frac": state.adc_clip_fraction.get(str(n)),
                     "label": input_to_ant.get(str(n)),
+                    "connector": input_to_connector.get(str(n)),
                 }
             )
     return {
@@ -829,9 +860,9 @@ def _config_payload(
 
     ``obs_cfg`` here is the aggregator's *effective* config: the local
     YAML with the panda-reality slice (``tempctrl_settings``, ``use_*``
-    gates, ``corr_ntimes``, ``calibration.t_load_stream``) overridden
-    by the panda's Redis ``ConfigStore`` upload once one has landed
-    (issue #194). ``config_source`` records which side supplied that
+    gates, ``corr_ntimes``, the ``calibration`` t_ns_*/t_amb_* routing
+    knobs) overridden by the panda's Redis ``ConfigStore`` upload once
+    one has landed (issue #194). ``config_source`` records which side supplied that
     slice — ``"panda_upload"`` when an upload has been seen on this
     Redis, ``"local_file"`` when none ever has — and
     ``config_upload_unix`` dates it (the upload persists after panda
@@ -856,6 +887,11 @@ def _config_payload(
         "use_tempctrl": obs_cfg.get("use_tempctrl", False),
         "use_switches": obs_cfg.get("use_switches", False),
         "use_vna": obs_cfg.get("use_vna", False),
+        # Effective calibration block so the config panel can show the
+        # reference-temperature routing a hot-swap re-pointed (the
+        # t_ns_*/t_amb_* knobs follow the upload; the ENR/pad physical
+        # constants are dashboard-local).
+        "calibration": obs_cfg.get("calibration", {}) or {},
         "thresholds": thresholds.as_dict(),
     }
 
@@ -899,8 +935,9 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
     def api_corr():
         state = aggregator.snapshot()
         calibrated = request.args.get("calibrated") == "1"
-        # Effective config so the display calibration's t_load_stream
-        # follows a hot-swap announced via the panda's config upload.
+        # Effective config so the display calibration's t_ns_*/t_amb_*
+        # reference-temperature routing follows a hot-swap announced
+        # via the panda's config upload.
         return jsonify(
             _envelope(
                 _corr_payload(

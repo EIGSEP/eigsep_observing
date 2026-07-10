@@ -27,7 +27,6 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -214,25 +213,23 @@ def _adc_stats_post_publish_reading():
     """Return an adc_stats reading after EigsepFpga._publish_adc_stats.
 
     adc_stats isn't a picohost emulator — it's produced by
-    ``EigsepFpga._publish_adc_stats``, which reads the on-FPGA
-    ``rms_levels`` register via ``Input.get_stats`` and composes the
-    per-core payload. The contract this test enforces is the
-    *post-publish* Redis shape, so the fixture drives the real method
-    end-to-end and reads the payload back off the transport hash.
-    Mirrors the _potmon / _rfswitch post-handler pattern — same
-    "compose producer + real publish path to get the Redis shape"
-    idea, with an FPGA-side producer in place of a pico.
+    ``EigsepFpga._publish_adc_stats``, which reduces the ADC snapshot
+    frames grabbed by ``_grab_adc_frames`` (the flashed bitstreams
+    carry no ``input_rms_*`` registers, so the old register path is
+    gone) and composes the per-core payload. The contract this test
+    enforces is the *post-publish* Redis shape, so the fixture drives
+    the real method end-to-end with schema-realistic int8 frames and
+    reads the payload back off the transport hash. Mirrors the
+    _potmon / _rfswitch post-handler pattern — same "compose producer
+    + real publish path to get the Redis shape" idea, with an
+    FPGA-side producer in place of a pico.
     """
     fpga = DummyEigsepFpga(program=False)
-    # Synthetic but schema-realistic: 12 cores × 3 stats, shape matches
-    # the real Input.get_stats(sum_cores=False) return.
-    means = np.linspace(-0.1, 0.1, 12)
-    powers = np.linspace(5.0, 15.0, 12)
-    rmss = np.sqrt(powers)
-    with patch.object(
-        fpga.inp, "get_stats", return_value=(means, powers, rmss)
-    ):
-        fpga._publish_adc_stats()
+    # Synthetic but shape-realistic: (antenna pairs, 2 pols, samples)
+    # int8, exactly what one snapshot grab returns.
+    vals = (np.arange(3 * 2 * 2048) * 7 + 11) % 251 - 125
+    frames = vals.astype(np.int8).reshape(3, 2, 2048)
+    fpga._publish_adc_stats(frames)
     raw = fpga.transport.r.hget("metadata", "adc_stats")
     return json.loads(raw.decode("utf-8"))
 
@@ -241,8 +238,8 @@ def _imu_post_handler_reading(name, app_id):
     """Return an IMU reading after PicoIMU._imu_redis_handler.
 
     Composes ImuEmulator.get_status() with the real handler, which adds
-    the calibrate-imu derived fields (el_deg; az_deg + blend for
-    imu_az). The handler is run UNCALIBRATED, so derived fields are
+    the calibrate-imu derived fields (el_deg for both; imu_az's is
+    |theta|). The handler is run UNCALIBRATED, so derived fields are
     None — the genuine state of a freshly-deployed, not-yet-calibrated
     IMU, which is what the schema's None-when-uncalibrated contract
     describes. Mirrors _potmon_post_handler_reading (bypass __init__,

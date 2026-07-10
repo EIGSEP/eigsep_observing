@@ -1296,6 +1296,42 @@ def test_linear_range_mismatch_clears_bounds_and_logs_once(
     assert "adc_gain" in errors[0].message
 
 
+def test_linear_range_acc_len_only_mismatch_rescales_bounds(
+    transports, tmp_path, caplog
+):
+    """The deployment carve-out: a product fit at 4x the live
+    corr_acc_len (and an otherwise identical operating point) is drawn
+    rescaled by 0.25 as a guide for the eye — WARNING, not ERROR, and
+    the scale is exposed for the front-end label."""
+    measured = dict(
+        GOLDEN_HEADER, corr_acc_len=GOLDEN_HEADER["corr_acc_len"] * 4
+    )
+    agg = _seed_linear_range(transports, tmp_path, measured)
+    try:
+        with caplog.at_level(logging.WARNING):
+            agg._snap_tick()
+        state = agg.snapshot()
+    finally:
+        agg.stop(timeout=1.0)
+    np.testing.assert_array_equal(
+        state.corr_linear_min,
+        np.full(GOLDEN_HEADER["nchan"], 1e5 * 0.25),
+    )
+    np.testing.assert_array_equal(
+        state.corr_linear_max,
+        np.full(GOLDEN_HEADER["nchan"], 5e8 * 0.25),
+    )
+    assert state.corr_linear_scale == pytest.approx(0.25)
+    warnings = [r for r in caplog.records if "guide for the eye" in r.message]
+    assert len(warnings) == 1
+    assert warnings[0].levelno == logging.WARNING
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.ERROR and "mismatch" in r.message
+    ]
+
+
 def test_linear_range_none_without_config(agg):
     """The seeded fixture config has no linear_range_file — bounds
     stay None and no linear-range ERROR fires."""

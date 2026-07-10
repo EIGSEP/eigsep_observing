@@ -1,10 +1,10 @@
-# EIGSEP hardware wiring manifest (SNAP C000069, 5-input layout).
+# EIGSEP hardware wiring manifest (SNAP C000122, 4-input layout).
 #
 # This file is declarative: it describes the intended RF wiring between
-# antennas, front-end modules (FEMs), optional PAMs, and SNAP digital
-# inputs. Physically wire the hardware to match the values here. Any
-# mismatch means the file header on corr HDF5 files is wrong, which is
-# the thing you actually care about at analysis time.
+# antennas, receiver-chain modules, and SNAP digital inputs. Physically
+# wire the hardware to match the values here. Any mismatch means the
+# file header on corr HDF5 files is wrong, which is the thing you
+# actually care about at analysis time.
 #
 # ---------------------------------------------------------------------
 # Editing in the field
@@ -20,6 +20,16 @@
 #        are unaffected.
 #
 # ---------------------------------------------------------------------
+# Receiver-chain modules
+# ---------------------------------------------------------------------
+# Eight interchangeable receiver modules labeled "Rx 1".."Rx 8". Each
+# signal chain pairs one Rx with either a transmitter module (tx:, the
+# box antennas) or a FEM (fem:, the Vivaldi). Module ids are null until
+# assigned at install — fill them in on the rig, then run
+# scripts/republish_header.py so subsequent files record the real ids.
+# Rx units not listed below are spares.
+#
+# ---------------------------------------------------------------------
 # PAM block is optional
 # ---------------------------------------------------------------------
 # PAMs have been removed from the current deployment. The `pam:` block
@@ -32,21 +42,31 @@
 # onto each antenna that has one (num is the SNAP PAM position 0/1/2;
 # pol is the PAM channel E or N; atten is dB in [0, 15]).
 
-snap_id: C000069
-# snap_id: C000122  # spare SNAP
+snap_id: C000122
+# snap_id: C000069  # spare SNAP
 ants:
-  box:
-    fem: {id: "eigsep1"}
+  box-air:  # suspended box
+    tx: {id: 2}
+    rx: {id: 2}  # Rx 2
     snap: {input: 0, label: N0}
-  viv1-N:
-    fem: {id: 32, pol: N}
+  box-gnd:  # ground box
+    tx: {id: 1}
+    rx: {id: 3}  # Rx 3
     snap: {input: 2, label: N4}
-  viv1-E:
-    fem: {id: 32, pol: E}
-    snap: {input: 3, label: E6}
-  viv2-N:
-    fem: {id: 348, pol: N}
+  viv-N:
+    # One dual-pol FEM serves both viv-N and viv-E; id unknown — fill
+    # both entries with the same id, then run republish_header.py.
+    fem: {id: null, pol: N}
+    rx: {id: 5}  # Rx 5
     snap: {input: 4, label: N8}
-  viv2-E:
-    fem: {id: 348, pol: E}
+  viv-E:
+    fem: {id: null, pol: E}  # same FEM module as viv-N
+    rx: {id: 7}  # Rx 7
     snap: {input: 5, label: E10}
+  # input 1 (label E2): unwired.
+  # input 3 (label E6): reserved for a possible additional chain. If
+  # added, copy an entry like:
+  #   <name>:
+  #     fem: {id: null}
+  #     rx: {id: null}
+  #     snap: {input: 3, label: E6}

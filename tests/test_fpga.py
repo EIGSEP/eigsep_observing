@@ -5,11 +5,13 @@ from contextlib import contextmanager
 from copy import deepcopy
 from queue import Queue
 from threading import Event
+from types import SimpleNamespace
 
 import pytest
 from unittest.mock import Mock, patch
 
 from eigsep_observing import corr as corr_mod
+from eigsep_observing import fpga as fpga_mod
 from eigsep_observing.fpga import _FpgaLockProxy, default_config
 from eigsep_observing.keys import CORR_STREAM
 from eigsep_observing.testing import DummyEigsepFpga, utils
@@ -1241,6 +1243,108 @@ class TestFpgaLockProxy:
         lookups on the underlying object."""
         # DummyFpga sets ``snap_ip`` as a plain attribute.
         assert fpga_instance.fpga.snap_ip == fpga_instance.fpga._fpga.snap_ip
+
+    def test_slow_transaction_logs_warning(self, caplog):
+        """A locked call that exceeds ``slow_call_s`` logs a WARNING
+        naming the method. This is the in-band stall detector for
+        issue #204: a tftpy lost-packet retransmit blocks the caller
+        for the full TAPCP timeout, and without this log the stall is
+        invisible (casperfpga only logs after a *full* 5-retry
+        TftpTimeout, never for a single recovered resend)."""
+
+        class SlowFpga:
+            def read_int(self, reg):
+                time.sleep(0.05)
+                return 7
+
+        proxy = _FpgaLockProxy(SlowFpga(), threading.Lock(), slow_call_s=0.01)
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing"):
+            assert proxy.read_int("corr_acc_cnt") == 7
+        slow_records = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "read_int" in r.message
+        ]
+        assert len(slow_records) == 1
+        # Both durations ride in the message: a long *hold* means this
+        # call stalled on the wire; a long *wait* means another thread
+        # held the lock. The distinction is the whole point of the
+        # instrumentation, so both must be visible to the operator.
+        assert "held" in slow_records[0].message
+        assert "waited" in slow_records[0].message
+
+    def test_fast_transaction_logs_nothing(self, caplog):
+        """Normal-speed calls (the ~100 Hz corr poll) stay silent —
+        the detector must not spam the journal at the poll cadence."""
+
+        class FastFpga:
+            def read_int(self, reg):
+                return 7
+
+        proxy = _FpgaLockProxy(FastFpga(), threading.Lock())
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing"):
+            assert proxy.read_int("corr_acc_cnt") == 7
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+class TestMakeFpgaTapcpTimeout:
+    """``EigsepFpga._make_fpga`` must plumb ``cfg["tapcp_timeout_s"]``
+    into the casperfpga transport (issue #204). The transport's
+    default tftpy timeout of 3 s makes any single lost UDP packet
+    stall the caller across 2–3 integration windows at
+    ``corr_acc_len=2**28`` — the periodic "Dropped 2 integration(s)"
+    signature. ``CasperFpga`` forwards ``**kwargs`` to the transport
+    constructor, which reads ``kwargs.get('timeout', 3)``; the
+    forwarding contract is pinned in ``test_casperfpga_api.py``."""
+
+    def _record_make_fpga(self, fpga_instance, monkeypatch):
+        """Run the *production* ``_make_fpga`` against a recording
+        CasperFpga stub. The stub replaces the module-level
+        ``casperfpga`` symbol (absent entirely when the optional
+        hardware dep isn't installed, hence ``raising=False``) — the
+        same boundary-recorder pattern as ``test_casperfpga_api.py``,
+        because ``DummyFpga`` substitutes the whole factory and can't
+        see these kwargs."""
+        calls = []
+
+        class RecorderCasperFpga:
+            def __init__(self, *args, **kwargs):
+                calls.append((args, kwargs))
+
+        monkeypatch.setattr(
+            fpga_mod,
+            "casperfpga",
+            SimpleNamespace(CasperFpga=RecorderCasperFpga),
+            raising=False,
+        )
+        sentinel_transport = object()
+        monkeypatch.setattr(fpga_mod, "TapcpTransport", sentinel_transport)
+        fpga_mod.EigsepFpga._make_fpga(fpga_instance)
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args == (fpga_instance.cfg["snap_ip"],)
+        assert kwargs["transport"] is sentinel_transport
+        return kwargs
+
+    def test_timeout_plumbed_from_config(self, fpga_instance, monkeypatch):
+        fpga_instance.cfg["tapcp_timeout_s"] = 0.5
+        kwargs = self._record_make_fpga(fpga_instance, monkeypatch)
+        assert kwargs["timeout"] == 0.5
+
+    def test_timeout_defaults_when_key_absent(
+        self, fpga_instance, monkeypatch
+    ):
+        """Configs predating the knob get the fix, not the old 3 s."""
+        fpga_instance.cfg.pop("tapcp_timeout_s", None)
+        kwargs = self._record_make_fpga(fpga_instance, monkeypatch)
+        assert kwargs["timeout"] == 0.25
+
+    def test_default_config_ships_the_knob(self):
+        """The shipped corr_config.yaml sets the knob explicitly so
+        the field value is visible in the file, not just in code.
+        0.1 s (below the code default 0.25 s) is required by the
+        2**26 acc_len tick's ~165 ms boundary margin."""
+        assert default_config["tapcp_timeout_s"] == 0.1
 
 
 _MUX_DEPLOY_WIRING = {

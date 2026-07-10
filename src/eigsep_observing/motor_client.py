@@ -35,6 +35,18 @@ class MotorLimitError(ValueError):
     axis outside its configured safe-travel window."""
 
 
+def validate_axes(axes):
+    """Return ``axes`` as a tuple, or raise ``ValueError`` unless it is a
+    non-empty subset of ``("az", "el")``. Shared by the per-axis ``home``
+    entry points (:meth:`MotorClient.home`, ``MotorHomer.home``)."""
+    axes = tuple(axes)
+    if not axes or any(a not in ("az", "el") for a in axes):
+        raise ValueError(
+            f"axes must be a non-empty subset of ('az', 'el'); got {axes!r}"
+        )
+    return axes
+
+
 class MotorClient:
     """Drive the motor pico through ``PicoManager`` via Redis.
 
@@ -196,8 +208,12 @@ class MotorClient:
 
     def reset_step_position(self, az_step=0, el_step=0):
         """Define the current physical pose as the given step counts
-        (default origin). No motion — intentionally bypasses the travel
-        guard; used by MotorHomer to re-zero the count at converged home."""
+        (default origin). ``None`` for either axis leaves that axis'
+        counter untouched (``picohost.PicoMotor.reset_step_position``
+        omits a ``None`` axis from the firmware command) — that is how a
+        single-axis home re-zeros only its own counter. No motion —
+        intentionally bypasses the travel guard; used by MotorHomer to
+        re-zero the count at converged home."""
         self._proxy.send_command(
             "reset_step_position", az_step=az_step, el_step=el_step
         )
@@ -259,7 +275,9 @@ class MotorClient:
                     return
             time.sleep(self.poll_interval_s)
 
-    def _wait_for_stop(self, timeout=None, stop_event=None, axis=None):
+    def _wait_for_stop(
+        self, timeout=None, stop_event=None, axis=None, guard=None
+    ):
         """Block until the motor's position equals its target on both axes.
 
         Mirrors the progress-reset stall detection in
@@ -277,6 +295,14 @@ class MotorClient:
         iteration. A breach calls :meth:`halt` and re-raises
         :class:`MotorLimitError` immediately, aborting the move
         mid-flight.
+
+        If ``guard`` is supplied it is polled once per iteration,
+        right after the sensor fence and with the same contract: a
+        :class:`MotorLimitError` raised by it calls :meth:`halt` and
+        re-raises, aborting the move mid-flight. Like the fence, the
+        guard is not polled during the start window
+        (:meth:`_wait_for_start`), so pre-poll exposure is bounded by
+        ``start_timeout_s``.
         """
         timeout = self.stall_timeout_s if timeout is None else timeout
         t = time.monotonic()
@@ -288,6 +314,12 @@ class MotorClient:
             if axis is not None:
                 try:
                     self._check_sensor_fence(axis)
+                except MotorLimitError:
+                    self.halt()
+                    raise
+            if guard is not None:
+                try:
+                    guard()
                 except MotorLimitError:
                     self.halt()
                     raise
@@ -334,7 +366,14 @@ class MotorClient:
         )
 
     def _send_and_wait(
-        self, action, *, label, timeout=None, stop_event=None, **kwargs
+        self,
+        action,
+        *,
+        label,
+        timeout=None,
+        stop_event=None,
+        guard=None,
+        **kwargs,
     ):
         """Send a single move command and block until the motor stops.
 
@@ -351,6 +390,7 @@ class MotorClient:
         stale at-rest snapshot read immediately after the send would let
         the next axis command fire mid-move (the home double-move bug).
         ``stop_event`` is forwarded to both for cooperative cancellation.
+        ``guard`` is forwarded to :meth:`_wait_for_stop`.
         """
         axis = (
             "az"
@@ -369,7 +409,7 @@ class MotorClient:
                 self.halt()
                 return
             self._wait_for_stop(
-                timeout=timeout, stop_event=stop_event, axis=axis
+                timeout=timeout, stop_event=stop_event, axis=axis, guard=guard
             )
 
     def _axis_target(self, axis):
@@ -442,7 +482,7 @@ class MotorClient:
             pot_v = None
         # IMU cross-check warning suppressed on the high-frequency fence
         # path (~10 Hz inside _wait_for_stop); the homer's settle-cadence
-        # read (MotorHomer._read_sensors) and the live-status dashboard
+        # read (MotorHomer._read_el) and the live-status dashboard
         # surface IMU disagreement at a sane rate.
         el = read_el_estimate(self._reader, logger=None).el_deg
         return pot_v, el
@@ -514,34 +554,51 @@ class MotorClient:
                 target_deg=target_deg,
             )
 
-    def home(self, stop_event=None):
-        """Drive both axes to step position 0, one at a time.
+    def home(self, stop_event=None, axes=("az", "el"), guard=None):
+        """Drive the requested axes to step position 0, one at a time.
 
-        Only one motor moves at once: az homes first, then el. Running
-        both simultaneously is a mechanical-safety hazard on the rig
-        and matches the historical ``picohost`` script behavior.
+        Only one motor moves at once: az homes first, then el (when
+        both are requested). Running both simultaneously is a
+        mechanical-safety hazard on the rig and matches the historical
+        ``picohost`` script behavior.
 
-        ``stop_event`` (optional) enables cooperative cancellation: a
-        set event halts the in-flight axis and skips the next one, so a
-        background home (``motor_manual.py``) can be aborted mid-move.
+        Parameters
+        ----------
+        stop_event : threading.Event or None
+            Cooperative cancellation: a set event halts the in-flight
+            axis and skips any remaining one, so a background home
+            (``motor_manual.py``) can be aborted mid-move.
+        axes : tuple of str
+            Axes to home, a non-empty subset of ``("az", "el")``
+            (default both). The drive order is always az before el
+            regardless of the order given here.
+        guard : callable or None
+            Optional zero-arg callable polled during the move; applies
+            to every axis move in the call, so callers wanting a
+            single-axis guard pass a single-axis ``axes``. See
+            :meth:`_wait_for_stop`.
+
+        Raises
+        ------
+        ValueError
+            If ``axes`` is empty or names an unknown axis.
         """
+        axes = validate_axes(axes)
         self._await_initial_status()
-        self._send_and_wait(
-            "az_target_steps",
-            label="home az",
-            target_steps=0,
-            stop_event=stop_event,
-        )
-        if stop_event is not None and stop_event.is_set():
-            return
-        self._send_and_wait(
-            "el_target_steps",
-            label="home el",
-            target_steps=0,
-            stop_event=stop_event,
-        )
+        for axis in ("az", "el"):
+            if axis not in axes:
+                continue
+            if stop_event is not None and stop_event.is_set():
+                return
+            self._send_and_wait(
+                f"{axis}_target_steps",
+                label=f"home {axis}",
+                target_steps=0,
+                stop_event=stop_event,
+                guard=guard,
+            )
 
-    def jog_az(self, delta_deg, *, stop_event=None):
+    def jog_az(self, delta_deg, *, stop_event=None, guard=None):
         """Jog az by ``delta_deg`` degrees, blocking until the move stops.
 
         Relative to the current az target. Routes through
@@ -550,22 +607,24 @@ class MotorClient:
         returns cannot overlap it. Backs the interactive jogger in
         :class:`~eigsep_observing.motor_zeroer.MotorZeroer` — blocking is
         what enforces one-motor-at-a-time there.
+        ``guard`` — see :meth:`_wait_for_stop`.
         """
-        self._jog("az_move_deg", delta_deg, stop_event=stop_event)
+        self._jog("az_move_deg", delta_deg, stop_event=stop_event, guard=guard)
 
-    def jog_el(self, delta_deg, *, stop_event=None):
+    def jog_el(self, delta_deg, *, stop_event=None, guard=None):
         """Jog el by ``delta_deg`` degrees, blocking until the move stops.
 
         See :meth:`jog_az`.
         """
-        self._jog("el_move_deg", delta_deg, stop_event=stop_event)
+        self._jog("el_move_deg", delta_deg, stop_event=stop_event, guard=guard)
 
-    def _jog(self, action, delta_deg, *, stop_event=None):
+    def _jog(self, action, delta_deg, *, stop_event=None, guard=None):
         self._send_and_wait(
             action,
             label=action,
             delta_deg=float(delta_deg),
             stop_event=stop_event,
+            guard=guard,
         )
 
     def scan(

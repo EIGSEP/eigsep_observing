@@ -22,6 +22,12 @@ bounds on mismatch — bounds measured at a different operating point
 (gain, FFT shift, accumulation length, ...) are junk data. Failures
 raise :class:`LinearRangeError` here; consumers log at ERROR and move
 on, so a bad product can never block corr data.
+
+One sanctioned display-only exception: when ``corr_acc_len`` is the
+sole mismatch, :func:`acc_len_rescale` gives the ratio to redraw the
+bounds as an approximate guide for the eye on the live-status plot
+(counts scale with accumulation length). File headers never carry
+rescaled bounds.
 """
 
 import functools
@@ -258,6 +264,15 @@ def validate_operating_point(product_header, live_header):
         as a mismatch — silence is not agreement.
 
     """
+    return [
+        f"{name}: product={prod!r} live={live!r}"
+        for name, prod, live in _mismatched_fields(product_header, live_header)
+    ]
+
+
+def _mismatched_fields(product_header, live_header):
+    """Return ``(name, product_value, live_value)`` per mismatched
+    ``OPERATING_POINT_FIELDS`` field (empty means a full match)."""
     mismatches = []
     for name in OPERATING_POINT_FIELDS:
         prod = product_header.get(name)
@@ -268,5 +283,45 @@ def validate_operating_point(product_header, live_header):
         if isinstance(live, tuple):
             live = list(live)
         if prod != live:
-            mismatches.append(f"{name}: product={prod!r} live={live!r}")
+            mismatches.append((name, prod, live))
     return mismatches
+
+
+def acc_len_rescale(product_header, live_header):
+    """
+    Ratio to rescale bounds when only ``corr_acc_len`` mismatches.
+
+    Raw corr counts scale linearly with the number of accumulated
+    samples, so when the accumulation length is the *only*
+    operating-point difference the product's bounds can be rescaled by
+    ``live/product`` as an approximate **guide for the eye**. The
+    fitter's floor subtraction does not necessarily scale linearly, so
+    the rescaled bounds are display-only: the live-status plot may draw
+    them (flagged as scaled); ``io.append_corr_header`` must keep
+    omitting them — approximate bounds do not belong in file headers.
+
+    Parameters
+    ----------
+    product_header, live_header : dict
+        As for :func:`validate_operating_point`.
+
+    Returns
+    -------
+    float or None
+        ``live_acc_len / product_acc_len`` if ``corr_acc_len`` is the
+        only mismatched field and both values are positive numbers;
+        None otherwise (including on a full match, where no rescale is
+        needed).
+
+    """
+    mismatches = _mismatched_fields(product_header, live_header)
+    if [name for name, _, _ in mismatches] != ["corr_acc_len"]:
+        return None
+    _, prod, live = mismatches[0]
+    if not isinstance(prod, (int, float)) or not isinstance(
+        live, (int, float)
+    ):
+        return None
+    if prod <= 0 or live <= 0:
+        return None
+    return live / prod

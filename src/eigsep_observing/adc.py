@@ -21,12 +21,13 @@ class AdcSnapshotWriter(SingleStreamWriter):
     snapshots are binary and bypass the metadata-averaging path; they
     live in Redis only and are not folded into the HDF5 corr file.
 
-    ``maxlen`` is a dead-reader failsafe: at the 1 Hz default publish
-    cadence, 60 entries is one minute of headroom, which covers any
-    realistic live-status reconnect window. Snapshots are diagnostic
-    and not recoverable from a different source, so we don't need
-    hours of buffering — if the reader fell behind that far, the data
-    it would pull is already stale for debugging purposes.
+    ``maxlen`` is a dead-reader failsafe: at the default 20 s publish
+    cadence (``adc_snapshot_period_s``), 60 entries is 20 minutes of
+    headroom, which covers any realistic live-status reconnect window.
+    Snapshots are diagnostic and not recoverable from a different
+    source, so we don't need hours of buffering — if the reader fell
+    behind that far, the data it would pull is already stale for
+    debugging purposes.
     """
 
     stream = ADC_SNAPSHOT_STREAM

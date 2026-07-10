@@ -354,8 +354,8 @@ the LNA connector):**
      block's `target_C` / `hysteresis_C` / `clamp` / `cooling_enabled` /
      `Kp` / `Ki` — the physical module is the same, only the channel
      (pins + stream name) changed.
-   - `calibration.t_load_stream: tempctrl_lna` — the Y-factor
-     calibration's load-temperature reference now rides the
+   - `calibration.t_amb_stream: tempctrl_lna` — the Y-factor
+     calibration's ambient-load temperature reference now rides the
      LNA-connector stream.
 4. One-time Redis cleanup so the retired `tempctrl_load` stream doesn't
    emit throttled staleness warnings on the ground side: delete its
@@ -364,8 +364,9 @@ the LNA connector):**
    set entry.
 5. Restart `panda_observe`. The live-status dashboard follows on its
    own: signal gating, tempctrl bands, and the display calibration's
-   `t_load_stream` prefer the panda's Redis config upload over the
-   dashboard host's local file, so the restarted `panda_observe`'s
+   `t_ns_*`/`t_amb_*` reference routing prefer the panda's Redis
+   config upload over the dashboard host's local file, so the
+   restarted `panda_observe`'s
    upload re-gates the dashboard within a tick — no dashboard-side
    config edit or restart. During the swap window itself the dashboard
    still renders the *last* upload's tiles (empty for the retired
@@ -472,3 +473,55 @@ Escape hatches, cheapest first:
   `eigsep_observing` release + old `RFSP1` schedule restores the
   pre-feature system exactly; the failsafe cap keeps the cable
   terminated throughout. Nothing in this feature is a one-way door.
+
+## Orientation calibration recipe
+
+Azimuth is pot-referenced (`potmon`); elevation is IMU-referenced
+(`imu_el`, plus `imu_az`'s el-only `|θ|` as a cross-check). The
+picohost-4.3 az descope retired accel-derived `imu_az` azimuth — at
+level, azimuth rotation is rotation about gravity and unobservable to
+an accelerometer (2026-07-08 field data: ~20x noise amplification for
+a few degrees of tilt). See CLAUDE.md's "IMU mode" section for the
+schema-level detail.
+
+Three commands, run in order (all picohost CLI entry points, run
+against the running `pico-manager`; step 3 is this repo's
+`motor_manual`):
+
+1. **`calibrate-pot --mode auto`** — in-box, motor-driven pot sweep.
+   Defines az 0 = pot 0° (writes the slope/intercept to `PotCalStore`).
+2. **`calibrate-imu`** — auto-driven single elevation sweep. Defines
+   el 0 = the pose where the IMUs read most "down", derived from the
+   sweep itself (no operator-eyeballed level needed). **The az
+   turntable must be parked at az home during this sweep** — the
+   `imu_az` `el_deg` section of the fit is gated on the pot reading
+   within ~10° of the calibrated zero; `imu_el` is azimuth-invariant
+   and calibrates regardless of az position.
+3. **`motor_manual` → `h` + confirm** — drives the closed-loop
+   `MotorHomer` onto the cal-defined home (pot 0° az / IMU-level el)
+   and re-zeros the step counters there.
+
+**Order matters**: run step 1 before step 2. `calibrate-imu`'s
+`imu_az` section needs a calibrated, home-parked pot to gate against.
+Running it before `calibrate-pot`, or with the turntable off home,
+does **not** silently drop the `imu_az` section: the gate prints a
+warning to stderr and prompts `Continue imu_el-only? [y / Enter to
+abort]:`. The default (Enter) **aborts the entire calibration**,
+including `imu_el`; only an explicit `y` continues with `imu_el`
+alone, dropping the `imu_az` cross-check section from the saved fit.
+
+**A stale motor zero is a warning, not a failure.** If step 2's
+derived level sits more than ~10° from the motor's current zero
+position, it logs a warning ("motor zero may be stale; home after
+saving"), but the warning does not bypass or auto-trigger saving —
+saving a calibration always goes through the same `Save this
+calibration? [y/N]:` confirm, warning or not; the fit is independent
+of the motor's step-counter zero. Run step 3 afterward to re-zero the
+counters against the newly-saved cal-defined home; it is not a
+prerequisite for steps 1–2 to succeed.
+
+**Expect cross-check FLAG rows near el 0 and ±180°.** `imu_az`'s
+`|θ|` estimator has an intrinsic near-pole floor (~10–20° with a
+single-sweep cal, dominated by the along-axis accel-bias component a
+single el sweep cannot observe) — `imu_el` is the el authority, and
+`imu_az` is a cross-check/failover only.

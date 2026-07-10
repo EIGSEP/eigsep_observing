@@ -295,14 +295,19 @@ absence, never a sentinel or error stream; see OPERATIONS.md
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:
 just `yaw`/`pitch`/`roll` (degrees) and `accel_x/y/z` (m/s²). No quaternion,
 linear-accel, gyro, mag, or BNO085 calibration-status fields. The two picos
-now carry *different* derived field sets, so the single shared `_IMU_SCHEMA`
-was split (picohost 3.10, calibrate-imu) into a common `_IMU_BASE` body plus
-two per-pico schemas in `io.py`: `_IMU_EL_SCHEMA` adds a gravity-derived
-signed `el_deg`; `_IMU_AZ_SCHEMA` adds `el_deg` (|θ|) plus the azimuth blend
-(`az_deg`, `az_from_accel_deg`, `az_from_yaw_deg`, `az_blend_weight`). All
-derived fields are `float` in the schema and `None` when the IMU is
-uncalibrated — the producer's stable shape — so the float→mean reduction and
-`_validate_metadata`'s None short-circuit handle them cleanly.
+originally carried *different* derived field sets, so the single shared
+`_IMU_SCHEMA` was split (picohost 3.10, calibrate-imu) into a common
+`_IMU_BASE` body plus two per-pico schemas in `io.py`: `_IMU_EL_SCHEMA` adds
+a gravity-derived signed `el_deg`; `_IMU_AZ_SCHEMA` adds `el_deg` (|θ|) only
+— the azimuth blend (`az_deg`, `az_from_accel_deg`, `az_from_yaw_deg`,
+`az_blend_weight`) was retired in picohost 4.3 (2026-07 descope: potmon owns
+azimuth — accel-az is physically degenerate at level; see
+`notebooks/motor_pot_imu/0708_test/`). The two schemas are now identical
+expressions but stay separate names in `SENSOR_SCHEMAS` — the sign semantics
+differ (`imu_el.el_deg` is signed, `imu_az.el_deg` is |θ|) and the names are
+load-bearing. All derived fields are `float` in the schema and `None` when
+the IMU is uncalibrated — the producer's stable shape — so the float→mean
+reduction and `_validate_metadata`'s None short-circuit handle them cleanly.
 
 Like `potmon`, the IMU schema is enforced against the **post-handler** shape,
 not the raw emulator output: `ImuEmulator.get_status()` emits only the BNO085
@@ -368,8 +373,12 @@ corr plot; NaN → JSON null → Plotly line gap). Both validate
 `OPERATING_POINT_FIELDS` (adc_gain, fft_shift, corr_scalar, ...)
 against the live corr header and **omit the bounds with an ERROR
 log on any failure** — bounds from a different operating point are
-junk, and a bad product must never block corr writes. Re-fit the
-product after any operating-point change.
+junk, and a bad product must never block corr writes. One sanctioned
+display-only exception: when `corr_acc_len` is the *sole* mismatch,
+the live-status aggregator draws the bounds rescaled by the acc_len
+ratio (`acc_len_rescale`) as an approximate guide for the eye —
+WARNING logged, legend labeled with the scale; file headers still
+omit. Re-fit the product after any operating-point change.
 
 ## Testing philosophy: dummies over mocks
 

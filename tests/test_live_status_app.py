@@ -703,6 +703,44 @@ def test_adc_route_lists_per_input_with_clip_frac(client):
     assert entries[(0, 0)]["rms"] == pytest.approx(15.0)
 
 
+def test_adc_payload_labels_are_physical_not_mux_aware():
+    """ADC snapshots tap the ADC cores upstream of the ``adc_mux_sel``
+    copy the corr datapath sees (field-verified 2026-07-09: with mux
+    on, a mux-target input reads its own floating-level RMS, not its
+    source's). Cells must therefore carry the *physical* wiring's
+    antenna name and SNAP connector label (``snap.label``), ignoring
+    the mux-aware ``input_to_ant`` map that the corr panes use — a
+    mux-aware label would claim antenna signal on a connector that
+    physically carries none.
+    """
+    from eigsep_observing.live_status.aggregator import StateSnapshot
+    from eigsep_observing.live_status.app import _adc_payload
+
+    header = {
+        "wiring": {
+            "ants": {
+                "box": {"snap": {"input": 0, "label": "N0"}},
+                "viv1-N": {"snap": {"input": 2, "label": "N4"}},
+            }
+        },
+        # Mux-aware map claims input 1 carries box's copy — correct
+        # for corr storage keys, wrong for the pre-mux ADC tap.
+        "input_to_ant": {"0": "box", "1": "box", "2": "viv1-N"},
+    }
+    state = StateSnapshot(corr_header=header)
+    cells = {
+        (c["input"], c["core"]): c for c in _adc_payload(state)["per_input"]
+    }
+    assert cells[(0, 0)]["label"] == "box"
+    assert cells[(0, 0)]["connector"] == "N0"
+    assert cells[(2, 1)]["label"] == "viv1-N"
+    assert cells[(2, 1)]["connector"] == "N4"
+    # Unwired input: nothing is physically on that connector, so no
+    # label — even though the mux map names it.
+    assert cells[(1, 0)]["label"] is None
+    assert cells[(1, 0)]["connector"] is None
+
+
 def test_rfswitch_route(client):
     body = client.get("/api/rfswitch").get_json()
     data = body["data"]
@@ -1027,6 +1065,9 @@ def test_config_route_schedule_empty_when_no_config_in_redis():
         # But disk-backed fields still come through (Thresholds-driving
         # rendering decisions, not runtime claims).
         assert data["use_tempctrl"] is True
+        # The effective calibration block rides along for the config
+        # panel — local values here since no upload has landed.
+        assert data["calibration"] == OBS_CFG["calibration"]
     finally:
         agg.stop(timeout=1.0)
 
@@ -1104,7 +1145,7 @@ def test_panda_upload_regates_signals_and_thresholds():
             },
             "calibration": {
                 **OBS_CFG["calibration"],
-                "t_load_stream": "tempctrl_lna",
+                "t_amb_stream": "tempctrl_lna",
             },
         }
         ConfigStore(panda).upload(upload)
@@ -1118,10 +1159,10 @@ def test_panda_upload_regates_signals_and_thresholds():
             29.0,
             31.0,
         ]
-        # calibration.t_load_stream was plucked from the upload; the
+        # calibration.t_amb_stream was plucked from the upload; the
         # ENR knob stays dashboard-local.
         cal = agg.obs_cfg_effective["calibration"]
-        assert cal["t_load_stream"] == "tempctrl_lna"
+        assert cal["t_amb_stream"] == "tempctrl_lna"
         assert (
             cal["noise_diode_enr_db"]
             == OBS_CFG["calibration"]["noise_diode_enr_db"]
@@ -1144,6 +1185,13 @@ def test_panda_upload_regates_signals_and_thresholds():
         assert cfg_data["tempctrl_settings"]["LNA"]["installed"] is False
         assert cfg_data["tempctrl_settings"]["LOAD"]["target_C"] == 30.0
         assert "tempctrl_lna.T_now" not in cfg_data["thresholds"]
+        # The config panel reads the effective cal reference routing
+        # from here: plucked from the upload, ENR still dashboard-local.
+        assert cfg_data["calibration"]["t_amb_stream"] == "tempctrl_lna"
+        assert (
+            cfg_data["calibration"]["noise_diode_enr_db"]
+            == OBS_CFG["calibration"]["noise_diode_enr_db"]
+        )
     finally:
         agg.stop(timeout=1.0)
 
@@ -1210,16 +1258,17 @@ def test_panda_upload_malformed_keeps_previous_gating(agg_primed, caplog):
     assert agg.thresholds is not th_good
 
 
-def test_corr_route_calibrated_t_load_stream_follows_upload(agg_primed):
-    """Hot-swap contingency end-to-end: the panda upload names
-    ``tempctrl_lna`` as the cal-load stream; the calibrated corr route
-    must read T_LOAD from that stream without a dashboard restart."""
+def test_corr_route_calibrated_t_amb_stream_follows_upload(agg_primed):
+    """Hot-swap contingency end-to-end: the panda upload re-points the
+    ambient-reference stream at ``tempctrl_lna`` (the moved LOAD module
+    publishes there); the calibrated corr route must read T_amb from
+    that stream without a dashboard restart."""
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
     upload = {
         **OBS_CFG,
         "calibration": {
             **OBS_CFG["calibration"],
-            "t_load_stream": "tempctrl_lna",
+            "t_amb_stream": "tempctrl_lna",
         },
     }
     ConfigStore(agg_primed.transport_panda).upload(upload)
@@ -1229,10 +1278,10 @@ def test_corr_route_calibrated_t_load_stream_follows_upload(agg_primed):
     app.config.update(TESTING=True)
     body = app.test_client().get("/api/corr?calibrated=1").get_json()
     meta = body["data"]["calibration_meta"]
-    assert meta["t_load_stream"] == "tempctrl_lna"
+    assert meta["t_amb_stream"] == "tempctrl_lna"
     # tempctrl_lna's T_now is 25.1 C in the fixture (vs LOAD's 25.0) —
     # proof the solve read the swapped stream, not the default.
-    assert meta["t_load_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
+    assert meta["t_amb_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
 
 
 def test_file_route(client):
@@ -1259,6 +1308,21 @@ def test_config_route_exposes_thresholds_with_provenance(client):
     assert thresh["adc.rms"]["source"] == "yaml_override"
     # tempctrl_lna.T_now is derived from obs_config.
     assert thresh["tempctrl_lna.T_now"]["source"] == "derived"
+
+
+def test_index_page_includes_config_panel(client):
+    """The config panel's mount points must exist in the template —
+    tickConfig() in dashboard.js no-ops silently on a missing element,
+    so a template regression would otherwise drop the panel without
+    any test noticing."""
+    html = client.get("/").get_data(as_text=True)
+    for element_id in (
+        "config-source-tile",
+        "config-values-block",
+        "config-schedule-block",
+        "config-thresholds",
+    ):
+        assert f'id="{element_id}"' in html, element_id
 
 
 def test_envelope_shape(client):
@@ -2300,7 +2364,6 @@ def test_metadata_payload_orientation_agree_and_diverge():
             "imu_az": {
                 "sensor_name": "imu_az",
                 "status": "update",
-                "az_deg": 100.0,
                 "el_deg": 0.0,
             },
             "imu_az_ts": now,
@@ -2308,10 +2371,12 @@ def test_metadata_payload_orientation_agree_and_diverge():
         state.metadata_snapshot_read_unix = now
         return state
 
-    # Agreeing sensors: spread = 100.5 - 100.0 = 0.5 -> "ok" (< 3).
+    # Agreeing sensors: az sources are motor (~100.004) + potmon (100.5)
+    # only (imu_az azimuth retired) -> spread ~0.5 -> "ok" (< 3).
     out = _metadata_payload(make_state(100.5), _payload_thresholds())
     ori = out["orientation"]
     assert "az" in ori["value"] and "el" in ori["value"]
+    assert "imu_az" not in ori["value"]["az"]
     assert ori["classify"]["orientation.az_spread_deg"] == "ok"
 
     # Diverging: potmon ~12 deg off -> spread > 10 -> "danger".

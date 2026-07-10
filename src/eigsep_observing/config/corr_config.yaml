@@ -1,4 +1,18 @@
 snap_ip: "10.10.10.12"
+# Per-transfer TAPCP/tftpy socket timeout [s]. tftpy recovers a lost
+# UDP packet only by waiting out this timeout before retransmitting,
+# so it sets the stall cost of a single lost packet on the SNAP link.
+# casperfpga's default of 3 s spans 2-3 integration windows at
+# corr_acc_len 2**28 and was the root cause of the periodic
+# "Dropped 2 integration(s)" warnings (issue #204). At corr_acc_len
+# 2**26 the boundary margin is only ~165 ms (268 ms window minus the
+# ~103 ms readout), so even 0.25 s turns every lost packet into one
+# torn-read drop (~3.7% loss measured 2026-07-09); 0.1 s keeps a
+# single-loss stall inside the window (0 drops in the same-day A/B)
+# while still ~40x the per-block readout cadence, so only a genuinely
+# lost packet ever waits this long. casperfpga's 8 transaction-level
+# retries are unaffected. Absent -> defaults to 0.25.
+tapcp_timeout_s: 0.1
 fpg_file: "eigsep_fengine_1g_v2_4_2026-06-23_2052.fpg"  # path to fpg file
 fpg_version: [2, 4]  # major, minor
 sample_rate: 500.0  # in MHz
@@ -7,8 +21,12 @@ use_ref: false  # use synth on snap to generate adc clock from 10 MHz ref
 use_noise: false  # use digital noise instead of ADC data
 adc_gain: 4
 fft_shift: 0x015F
-corr_acc_len: 0x10000000  # 2**28 fabric clocks (250 MHz): 1 tick / 1.074 s
-#corr_acc_len: 0x04000000  # 2**26 fabric clocks: 1 tick / 0.268 s
+#corr_acc_len: 0x10000000  # 2**28 fabric clocks (250 MHz): 1 tick / 1.074 s
+#corr_acc_len: 0x08000000  # 2**27 fabric clocks (250 MHz): 1 tick / 0.537 s
+# 2**26 requires tapcp_timeout_s <= ~0.15: the ~165 ms boundary margin
+# must absorb a full retransmit stall or every lost packet drops one
+# integration (see tapcp_timeout_s note above).
+corr_acc_len: 0x04000000  # 2**26 fabric clocks (250 MHz): 1 tick / 0.268 s
 corr_scalar: 512  # 2**9 - 8 bits after binary point so 2**9 = 1
 corr_word: 4  # 4 bytes per word
 # acc_bins / avg_even_odd are DECLARED defaults only. The producer
@@ -35,30 +53,29 @@ redis:
 # [true, true, false] (register value 3). Ignored on firmware < 2.4.
 adc_mux_sel: [false, false, false]
 pairs: ["0", "1", "2", "3", "4", "5", "02", "04", "13", "15", "24", "35"]
-# Cadence for raw ADC snapshot publishing to Redis (seconds between
-# frames). Set to null or 0 to disable. This period only controls the
-# raw-samples stream, which is diagnostic-only. Stats (mean/power/RMS
-# per ADC core) publish on ``diagnostics_period_s`` below and land in
-# the corr file via the metadata-averaging path.
+# Cadence [s] of the ADC snapshot tick. Each tick grabs one set of
+# snapshot frames off the FPGA and feeds BOTH ADC diagnostics: the
+# raw-samples stream (Redis-only) and adc_stats (per-core ADC
+# mean/power/RMS derived from the same frames — the flashed
+# bitstreams have no input_rms_* hardware accumulators), which lands
+# in corr files via the metadata-averaging path. Set to null or 0 to
+# disable both.
 #
-# Default off: the snapshot publisher shares one casperfpga TAPCP
-# transport with the corr loop, so enabling it puts the corr poll
-# in contention with the snapshot reads. The transport is
-# serialized via ``_FpgaLockProxy``, but the loaded path has not
-# been validated on the deployment hardware — run
-# ``scripts/adc_snapshot_bench.py`` against the target SNAP and
-# confirm corr-poll latency stays inside the acceptance bar before
-# flipping a nonzero value here.
-adc_snapshot_period_s: 0
-# Cadence [s] for SNAP-side diagnostics — adc_stats (per-core ADC
-# mean/power/RMS, metadata stream → corr file) and corr_health
-# (cumulative dropped-integration count + latest readout wall-time,
-# dashboard-only Redis K/V; the file records drops as acc_cnt gaps).
-# These publish on a throttled background thread instead of once per
-# integration, keeping the corr read path (which must beat the FPGA's
-# BRAM overwrite) free of an extra register read and Redis write — the
-# headroom that matters as corr_acc_len is lowered. Set to 0 to disable
-# both; absent → defaults to 1.0.
+# Bounds on the value: keep it well below the metadata
+# stream-freshness window (max_age_s, 30 s) or zero-entry drains
+# late in the period log spurious stale warnings; and not so low
+# that the snapshot BRAM reads contend with the corr poll on the
+# shared TAPCP transport (serialized via ``_FpgaLockProxy``, and
+# benched OK at 1 s by ``scripts/adc_snapshot_bench.py`` on lab
+# hardware — re-run the bench on the deployment SNAP if lowering
+# this on a link with heavy TAPCP loss, cf. issue #204). 20 s is
+# 20x gentler than the benched load with 10 s of freshness margin.
+adc_snapshot_period_s: 20
+# Cadence [s] for corr_health (cumulative dropped-integration count +
+# latest readout wall-time, dashboard-only Redis K/V; the file records
+# drops as acc_cnt gaps). Publishes on a throttled background thread
+# that only snapshots in-memory counters — no FPGA access — so 1 s is
+# free. Set to 0 to disable; absent → defaults to 1.0.
 diagnostics_period_s: 1.0
 # Per-channel linear-range calibration product (npz in the packaged
 # data/ dir, produced by scripts/linearity_test/fit_linearity.py).

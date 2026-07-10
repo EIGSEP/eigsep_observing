@@ -419,23 +419,28 @@ function updateCorr(corr) {
     // the min bound only marks the bottom of the *verified* range;
     // cold cal states (load, noise-off) legitimately sit at or below
     // it, so it stays a faint informational dotted line.
+    // linear_range_scale set = the bounds were rescaled from a
+    // different corr_acc_len as a guide for the eye; surface that on
+    // the plot via a legend entry so the approximation is visible.
+    const lrScale = corr.linear_range_scale;
+    const lrSuffix = lrScale ? ` (×${lrScale} approx)` : "";
     magTraces.push({
       x: freqs,
       y: corr.linear_max,
       type: "scatter",
       mode: "lines",
-      name: "linear range max",
+      name: "linear range max" + lrSuffix,
       line: { dash: "dash", width: 1.5, color: LINEAR_MAX_WARN_COLOR },
       opacity: 0.9,
       hoverinfo: "skip",
-      showlegend: false,
+      showlegend: !!lrScale,
     });
     magTraces.push({
       x: freqs,
       y: corr.linear_min,
       type: "scatter",
       mode: "lines",
-      name: "linear range min",
+      name: "linear range min" + lrSuffix,
       line: { dash: "dot", width: 1, color: activeTheme.font },
       opacity: 0.35,
       hoverinfo: "skip",
@@ -1050,9 +1055,16 @@ function renderAdcInCorr(adc) {
       entry.clip_frac !== null && entry.clip_frac !== undefined
         ? fmt(entry.clip_frac * 100, 2) + "%"
         : "—";
-    const inputName = pickLabel(`in${entry.input}`, entry.label);
+    // Wiring view: SNAP connector silkscreen + antenna name
+    // ("N4/c0 · viv1-N"); digital view: bare input index ("in4/c0").
+    // Both come from the physical (pre-mux) wiring manifest.
+    const digital = `in${entry.input}/c${entry.core}`;
+    const conn = entry.connector || `in${entry.input}`;
+    const wired = entry.label
+      ? `${conn}/c${entry.core} · ${entry.label}`
+      : `${conn}/c${entry.core}`;
     cell.append(
-      makeSpan("label", `${inputName}/c${entry.core}`),
+      makeSpan("label", pickLabel(digital, wired === digital ? null : wired)),
       makeSpan("value", `rms ${rmsStr}`),
       makeSpan("value", `clip ${clipStr}`),
     );
@@ -1152,6 +1164,182 @@ function renderStatusLog(entries) {
     const ts = new Date((entry.ts_unix || 0) * 1000).toISOString().slice(11, 19);
     li.textContent = `[${ts}] ${entry.msg}`;
     ul.appendChild(li);
+  }
+}
+
+// ---- config panel ---------------------------------------------------
+
+// The config panel polls on its own slow cadence: /api/config is
+// heavier than the streaming endpoints (it carries the full threshold
+// table) and its content changes once per panda session — when a
+// panda script uploads its obs_config — not per integration, so it
+// stays out of the 2 Hz tick loop.
+const CONFIG_POLL_MS = 30000;
+
+// "[lo, hi]" band → "lo … hi", or an em-dash for a null band (signals
+// with no configured band classify as grey "unknown" tiles).
+function fmtBand(band) {
+  if (!band) return "—";
+  return `${fmt(band[0], 2)} … ${fmt(band[1], 2)}`;
+}
+
+// Provenance tile: the issue-#194 headline. Green when the gating
+// slice follows a panda upload (with that upload's age so a stale
+// last-run intent is visible); neutral when the dashboard is on its
+// local-file fallback — normal during bring-up, but worth a glance
+// when panda is supposed to be running.
+function renderConfigSourceTile(cfg) {
+  const tile = document.getElementById("config-source-tile");
+  if (!tile) return;
+  if (cfg.config_source === "panda_upload") {
+    let ageStr = "";
+    if (cfg.config_upload_unix !== null &&
+        cfg.config_upload_unix !== undefined) {
+      const age = Math.max(0, Date.now() / 1000 - cfg.config_upload_unix);
+      ageStr = ` (${fmtDuration(age)} ago)`;
+    }
+    tile.className = "tile ok";
+    tile.textContent = `Config: panda upload${ageStr}`;
+  } else {
+    tile.className = "tile";
+    tile.textContent = "Config: local file (no upload seen)";
+  }
+}
+
+function renderConfigValues(cfg) {
+  const container = document.getElementById("config-values-block");
+  if (!container) return;
+  container.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "Observing config";
+  container.appendChild(heading);
+  appendValueRow(container, "use_switches", boolText(cfg.use_switches));
+  appendValueRow(container, "use_vna", boolText(cfg.use_vna));
+  appendValueRow(container, "use_tempctrl", boolText(cfg.use_tempctrl));
+  appendValueRow(container, "corr_ntimes", fmt(cfg.corr_ntimes, 0));
+  appendValueRow(container, "corr_save_dir", cfg.corr_save_dir || "—");
+  const cal = cfg.calibration || {};
+  // Mirror _solve_calibration's defaults so the panel shows the
+  // stream.field references the display cal will actually read when
+  // the routing knobs are unset. These are the panda-reality knobs a
+  // hot-swap re-points (t_amb_*) — see OPERATIONS.md.
+  appendValueRow(
+    container,
+    "cal T_ns ref",
+    `${cal.t_ns_stream || "rfswitch_therm"}.${cal.t_ns_field || "temp_therm2"}`,
+  );
+  appendValueRow(
+    container,
+    "cal T_amb ref",
+    `${cal.t_amb_stream || "tempctrl_load"}.${cal.t_amb_field || "T_now"}`,
+  );
+  const enr = cal.noise_diode_enr_db;
+  appendValueRow(
+    container,
+    "noise diode ENR",
+    enr !== null && enr !== undefined ? `${fmt(enr, 1)} dB` : "—",
+  );
+  const atten = cal.noise_source_atten_db;
+  appendValueRow(
+    container,
+    "noise source pad",
+    atten !== null && atten !== undefined ? `${fmt(atten, 1)} dB` : "—",
+  );
+  const settings = cfg.tempctrl_settings || {};
+  for (const ch of ["LNA", "LOAD"]) {
+    const c = settings[ch] || {};
+    if (c.installed === false) {
+      // Deliberate hardware descope, not a fault — plain text. The
+      // channel's tiles/bands are gone from the rest of the dashboard;
+      // this row is where the operator confirms that's configured.
+      appendValueRow(container, `tempctrl ${ch}`, "descoped (installed: false)");
+      continue;
+    }
+    appendValueRow(
+      container,
+      `tempctrl ${ch}`,
+      `${fmt(c.target_C, 1)}±${fmt(c.hysteresis_C, 1)} °C · clamp ${fmt(c.clamp, 2)}`,
+    );
+  }
+}
+
+function renderConfigSchedule(cfg) {
+  const container = document.getElementById("config-schedule-block");
+  if (!container) return;
+  container.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "Switch schedule (uploaded)";
+  container.appendChild(heading);
+  const schedule = cfg.switch_schedule || {};
+  const names = Object.keys(schedule);
+  if (!names.length) {
+    // No local fallback by design: a parked switch with no panda ever
+    // running must not imply a schedule (see _config_payload).
+    const empty = document.createElement("div");
+    empty.textContent = "no schedule uploaded";
+    container.appendChild(empty);
+    return;
+  }
+  for (const name of names) {
+    appendValueRow(container, name, fmtDuration(schedule[name]));
+  }
+}
+
+function renderConfigThresholds(cfg) {
+  const container = document.getElementById("config-thresholds");
+  if (!container) return;
+  container.replaceChildren();
+  const heading = document.createElement("h3");
+  heading.textContent = "Threshold bands (gated signals)";
+  container.appendChild(heading);
+  const thresholds = cfg.thresholds || {};
+  const names = Object.keys(thresholds).sort();
+  if (!names.length) return;
+  const table = document.createElement("table");
+  table.className = "config-table";
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  for (const label of ["signal", "healthy", "danger", "unit", "source"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    headRow.appendChild(th);
+  }
+  thead.appendChild(headRow);
+  table.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  for (const name of names) {
+    const t = thresholds[name] || {};
+    const tr = document.createElement("tr");
+    const tdName = document.createElement("td");
+    tdName.className = "signal";
+    tdName.textContent = name;
+    if (t.description) tdName.title = t.description;
+    const tdHealthy = document.createElement("td");
+    tdHealthy.textContent = fmtBand(t.healthy);
+    const tdDanger = document.createElement("td");
+    tdDanger.textContent = fmtBand(t.danger);
+    const tdUnit = document.createElement("td");
+    tdUnit.textContent = t.unit || "";
+    const tdSource = document.createElement("td");
+    tdSource.className = "source";
+    tdSource.textContent = t.source || "";
+    tr.append(tdName, tdHealthy, tdDanger, tdUnit, tdSource);
+    tbody.appendChild(tr);
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+async function tickConfig() {
+  try {
+    const body = await fetchJson("/api/config");
+    const cfg = body.data;
+    renderConfigSourceTile(cfg);
+    renderConfigValues(cfg);
+    renderConfigSchedule(cfg);
+    renderConfigThresholds(cfg);
+  } catch (e) {
+    console.error("config poll failed:", e);
   }
 }
 
@@ -1298,3 +1486,5 @@ initVnaModeToggle();
 initThemeToggle();
 tick();
 setInterval(tick, POLL_MS);
+tickConfig();
+setInterval(tickConfig, CONFIG_POLL_MS);

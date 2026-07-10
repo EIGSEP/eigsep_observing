@@ -1,11 +1,12 @@
-"""Closed-loop return-to-home. Standalone active driver (claims run_tag);
-talks to hardware only via MotorClient/PicoProxy; requires pico-manager.
+"""Return-to-home (az: single pot-referenced correction; el: closed-loop).
+Standalone active driver (claims run_tag); talks to hardware only via
+MotorClient/PicoProxy; requires pico-manager.
 
 Drives the antenna to the cal-defined home — az where the calibrated pot
-reads 0° (v_home = -b/m from PotCalStore), el at IMU-level — using
-pot-voltage (az) + IMU (el) feedback, settling between moves. Re-zeros the
-step counter on convergence. Run after a motor_scan / motor_manual session
-to re-establish a known position.
+reads 0° (v_home = -b/m from PotCalStore), el at IMU-level — az takes one
+guarded corrective jog off a noise-averaged pot read; el converges
+closed-loop on the IMU. Re-zeros each axis' step counter on success. Run
+after a motor_scan / motor_manual session to re-establish a known position.
 """
 
 import logging
@@ -40,7 +41,8 @@ def run(transport, *, dry_run=False, override_limits=False):
         raise SystemExit(str(exc))
     require_pico(homer.motor_client._proxy)
     if dry_run:
-        pot_v, el_est = homer._read_sensors()
+        pot_v = homer._read_pot_once()
+        el_est = homer._read_el()
         logger.info(
             "Dry run: pot=%s V (home %.3f), el=%s (%s)",
             pot_v,
@@ -55,7 +57,12 @@ def run(transport, *, dry_run=False, override_limits=False):
 
 
 def main():
-    p = ArgumentParser(description="Closed-loop return-to-home")
+    p = ArgumentParser(
+        description=(
+            "Return-to-home (az: single pot-referenced correction; "
+            "el: closed-loop)"
+        )
+    )
     p.add_argument("--dummy", action="store_true")
     p.add_argument(
         "--dry-run",

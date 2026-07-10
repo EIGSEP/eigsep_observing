@@ -195,3 +195,31 @@ def test_casperfpga_constructor_uses_transport_kwarg():
         casperfpga.CasperFpga("dummyhost", transport=RecorderTransport)
 
     assert instances, "CasperFpga.__init__ did not honor transport=... kwarg"
+
+
+def test_casperfpga_forwards_timeout_kwarg_to_transport():
+    # ``EigsepFpga._make_fpga`` passes ``timeout=cfg["tapcp_timeout_s"]``
+    # relying on ``CasperFpga.__init__`` forwarding its ``**kwargs`` to
+    # the transport constructor (``transport(**kwargs)``), where
+    # ``TapcpTransport`` reads ``kwargs.get('timeout', 3)`` — the 3 s
+    # default being the per-lost-packet stall behind issue #204. Same
+    # recording-stub pattern as the transport-kwarg test above; if the
+    # fork ever stops forwarding constructor kwargs, ``timeout`` goes
+    # missing here and the field silently reverts to 3 s stalls.
+    instances = []
+
+    class RecorderTransport:
+        def __init__(self, **kwargs):
+            instances.append(kwargs)
+            raise RuntimeError("stop after transport ctor")
+
+    with pytest.raises(RuntimeError, match="stop after transport ctor"):
+        casperfpga.CasperFpga(
+            "dummyhost", transport=RecorderTransport, timeout=0.25
+        )
+
+    assert instances, "CasperFpga.__init__ did not honor transport=... kwarg"
+    assert instances[0].get("timeout") == 0.25, (
+        "CasperFpga.__init__ did not forward timeout=... to the "
+        "transport constructor"
+    )

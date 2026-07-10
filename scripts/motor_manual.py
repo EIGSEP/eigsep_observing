@@ -10,16 +10,21 @@ physical position as ``(0, 0)``.
 Zeroing here defines a *scan origin* (an arbitrary lab/scan pattern
 reference), which is distinct from *home*: home is defined by the pot
 calibration (az where the calibrated pot reads 0°, el at IMU-level)
-and is not operator-adjustable — 'h' drives there via the closed-loop
-homer and re-trues the step counters on convergence. Use field_zero
-for the guided home-and-zero flow.
+and is not operator-adjustable — 'h' drives there via the homer (az:
+one pot-referenced corrective jog under the divergence guard; el:
+closed-loop convergence) and re-trues the step counters on success. Use
+field_zero for the guided home-and-zero flow.
 
 Controls:
     u / d  - jog elevation up / down
     l / r  - jog azimuth left / right
     + / -  - increase / decrease jog step size
-    h      - go home: pot 0 deg az, IMU-level el (any key cancels;
-             requires a pot calibration)
+    h      - go home on both axes: pot 0 deg az, IMU-level el (any key
+             cancels; requires a pot calibration)
+    a      - go home in azimuth only (pot 0 deg; el never moves and
+             keeps its step counter)
+    e      - go home in elevation only (IMU-level; az never moves and
+             keeps its step counter; needs no pot calibration)
     Enter  - arm zero confirmation (scan origin at current pose)
     y      - confirm and zero (after Enter); any other key cancels
     q      - quit without zeroing
@@ -56,15 +61,21 @@ def _render(screen, zeroer, deg):
         screen.addstr(3, 0, "AZ pos: DISCONNECTED (waiting for reconnect)")
         screen.addstr(4, 0, "EL pos: ---")
     screen.addstr(6, 0, "u/d = jog EL | l/r = jog AZ")
-    screen.addstr(7, 0, "+/- = change step size | h = go home (pot 0 / level)")
+    screen.addstr(7, 0, "+/- = change step size")
     screen.addstr(
-        8, 0, "Enter = zero scan origin (asks to confirm) | q = quit"
+        8,
+        0,
+        "h = home both | a = home AZ | e = home EL (pot 0 / level)",
+    )
+    screen.addstr(
+        9, 0, "Enter = zero scan origin (asks to confirm) | q = quit"
     )
     if zeroer.is_homing:
+        axes = "+".join(a.upper() for a in zeroer.homing_axes)
         screen.addstr(
             10,
             0,
-            ">>> HOMING to cal home... press any key to cancel <<<",
+            f">>> HOMING {axes} to cal home... press any key to cancel <<<",
         )
     elif zeroer.pending_zero:
         screen.addstr(
@@ -79,8 +90,13 @@ def _render(screen, zeroer, deg):
 
 
 def _build_zeroer(transport, args):
-    """Build a ``MotorZeroer``, honouring ``args.override_limits``."""
-    return MotorZeroer(transport, enforce_limits=not args.override_limits)
+    """Build a ``MotorZeroer``, honouring ``args.override_limits`` and
+    ``args.az_step0_fallback``."""
+    return MotorZeroer(
+        transport,
+        enforce_limits=not args.override_limits,
+        az_step0_fallback=args.az_step0_fallback,
+    )
 
 
 def _curses_main(screen, transport, args):
@@ -135,6 +151,15 @@ def _parse_args():
         help=(
             "Disable travel limits for this session"
             " (recovery from out-of-window)."
+        ),
+    )
+    parser.add_argument(
+        "--az-step0-fallback",
+        action="store_true",
+        help=(
+            "If the potmon is not publishing, still park az at step 0"
+            " open-loop when homing (default: skip az — home is"
+            " pot-referenced and the pot fence is inert without it)."
         ),
     )
     return parser.parse_args()
