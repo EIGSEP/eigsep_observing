@@ -161,3 +161,15 @@ tempctrl_settings:
     hysteresis_C: 0.5
     clamp: 0.6
     cooling_enabled: false
+
+# RFI standby defaults, applied once at panda_observe startup
+# (best-effort; a device that's down is logged and skipped — a standby
+# default never blocks observing). true = quiet the sensor for RFI:
+# imu_el/imu_az hold the BNO085 in reset; lidar disables the GRF-250
+# laser. In-RAM only — a pico reboot comes back sensing. Toggle live
+# during a session with scripts/standby_manual.py (coexists with
+# panda_observe; commands serialize at the pico level).
+standby:
+  imu_el: false
+  imu_az: false
+  lidar: false

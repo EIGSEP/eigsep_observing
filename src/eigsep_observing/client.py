@@ -13,6 +13,7 @@ from eigsep_redis import (
 from picohost.base import PicoPotentiometer, PicoRFSwitch
 from picohost.proxy import PicoProxy
 
+from . import standby
 from . import vna_service
 from .motion_switch import MotionSwitchCoordinator
 from .motor_client import MotorClient, MotorLimitError
@@ -691,6 +692,33 @@ class PandaClient:
                     "Invalid motor_homer_kwargs for MotorHomer: "
                     f"{err}. Motor homer disabled."
                 )
+
+    def apply_standby_defaults(self):
+        """Apply obs_config ``standby:`` defaults once, best-effort.
+
+        Reads ``cfg["standby"]`` ({device: bool}) and sends standby/resume
+        to each known device via PicoManager. One-shot (no loop, no
+        periodic re-apply). Best-effort: a device that is down or errors
+        is logged at WARNING and skipped — a standby default must never
+        block observing (corr is sacred). Devices not in
+        :data:`standby.STANDBY_DEVICES` are ignored with a WARNING (config
+        typo guard).
+        """
+        defaults = self.cfg.get("standby") or {}
+        for device, on in defaults.items():
+            if device not in standby.STANDBY_DEVICES:
+                self.logger.warning(
+                    f"obs_config standby: unknown device {device!r}; "
+                    f"expected one of {standby.STANDBY_DEVICES}. Skipping."
+                )
+                continue
+            proxy = PicoProxy(device, self.transport, source="panda_client")
+            result = standby.set_standby(proxy, bool(on))
+            msg = f"standby default {device}={bool(on)}: {result}"
+            if result == "ok":
+                self.logger.info(msg)
+            else:
+                self.logger.warning(msg)
 
     def init_tempctrl(self):
         """

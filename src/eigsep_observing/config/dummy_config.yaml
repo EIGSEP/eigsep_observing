@@ -77,3 +77,10 @@ tempctrl_settings:
     clamp: 0.6
     # Kp: 0.2
     # Ki: 0.0
+
+# RFI standby defaults, applied once at panda_observe startup. See
+# obs_config.yaml. All false in dummy mode (nothing quieted).
+standby:
+  imu_el: false
+  imu_az: false
+  lidar: false

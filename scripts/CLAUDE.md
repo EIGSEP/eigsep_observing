@@ -120,10 +120,23 @@ scripts split into two classes by whether they change that state:
   physical state, have no provenance to record, and must coexist with
   whatever active driver is running. Claiming would block that
   coexistence and misattribute a concurrent driver's files.
+- **Coexisting commands** — the one sanctioned exception to "sends
+  commands ⇒ active driver". `standby_manual` toggles RFI standby/resume
+  on the imu/lidar picos: it *issues pico commands* but changes no
+  physical **observing** state (no switch/motor/VNA), so it is not
+  hand-driving the science path. Its whole purpose is to run *alongside*
+  the autonomous driver (quiet a sensor mid-`panda_observe`), so it must
+  **not** claim the refuse-on-conflict tag — doing so would defeat the
+  coexistence. Cross-process command arbitration happens at the pico
+  level, so firing standby while `panda_observe` reads the same picos is
+  safe. A new command tool belongs here only if it is genuinely
+  orthogonal to switch/motor/VNA state; anything touching those is an
+  active driver and claims the tag.
 
 `tests/test_obs_config_uploaders.py` enforces the split both ways:
 active drivers (plus the autonomous uploaders) must enter
-`run_tag.session`; exempt (passive / coexisting) scripts must not.
+`run_tag.session`; exempt (passive readouts / coexisting commands) scripts
+must not.
 
 ## Cross-process coordination is YAGNI
 

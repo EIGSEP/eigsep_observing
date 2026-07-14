@@ -256,6 +256,47 @@ def _imu_post_handler_reading(name, app_id):
     return captured
 
 
+def _imu_standby_post_handler_reading(name, app_id):
+    """Return an IMU *standby* tick after PicoIMU._imu_redis_handler.
+
+    Puts the emulator in RFI standby (firmware holds the BNO085 in reset),
+    so ``get_status()`` emits the reduced standby shape (status="error",
+    standby=True, no orientation/accel). The real handler must normalize
+    that to the full contract shape (data fields None) — this is the
+    producer-side guard that the standby tick still conforms to
+    ``SENSOR_SCHEMAS``. Mirrors ``_imu_post_handler_reading``.
+    """
+    emu = ImuEmulator(app_id=app_id)
+    emu.server({"cmd": "standby"})
+    raw = emu.get_status()
+    raw.setdefault("sensor_name", name)
+    imu = PicoIMU.__new__(PicoIMU)
+    imu._imu_cal = {}
+    captured = {}
+    imu._base_redis_handler = lambda d: captured.update(d)
+    imu._imu_redis_handler(raw)
+    return captured
+
+
+def _lidar_standby_post_handler_reading():
+    """Return the lidar *standby* entry after PicoLidar._lidar_redis_handler.
+
+    Emulator in standby emits status="error", standby=True, laser_firing,
+    and omits distance_m; the handler normalizes distance_m to None. Only
+    the lidar entry (captured[0]) is returned — system_current keeps its
+    own always-"update" shape covered by ``_lidar_post_handler_readings``.
+    """
+    lidar = PicoLidar.__new__(PicoLidar)
+    lidar._current_cal = (8.4223, -12.5248)
+    lidar._warned_no_current = False
+    captured = []
+    lidar._base_redis_handler = lambda d: captured.append(dict(d))
+    emu = LidarEmulator()
+    emu.server({"cmd": "standby"})
+    lidar._lidar_redis_handler(emu.get_status())
+    return captured[0]
+
+
 # Registry mapping each sensor in SENSOR_SCHEMAS to a zero-arg callable
 # that returns a single fresh reading from the corresponding producer.
 # Most entries are picohost emulators; ``adc_stats`` is an FPGA-side
@@ -366,6 +407,25 @@ def test_every_schema_has_conforming_emulator(sensor_name):
     )
     violations = io._validate_metadata(reading, io.SENSOR_SCHEMAS[sensor_name])
     assert violations == [], f"{sensor_name} producer drift: {violations}"
+
+
+@pytest.mark.parametrize("name,app_id", [("imu_el", 3), ("imu_az", 6)])
+def test_imu_standby_reading_conforms_to_schema(name, app_id):
+    """The RFI-standby tick is a second producer shape that must also
+    conform to the IMU schema (status="error", standby=True, data None) —
+    otherwise the corr path logs a contract violation every integration
+    while a sensor is intentionally quiet."""
+    reading = _imu_standby_post_handler_reading(name, app_id)
+    assert reading["standby"] is True
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS[name]) == []
+
+
+def test_lidar_standby_reading_conforms_to_schema():
+    """Lidar standby tick conforms to the lidar schema (distance_m None,
+    standby=True, laser_firing read-back)."""
+    reading = _lidar_standby_post_handler_reading()
+    assert reading["standby"] is True
+    assert io._validate_metadata(reading, io.SENSOR_SCHEMAS["lidar"]) == []
 
 
 @pytest.mark.parametrize("mode", sorted(io.VNA_S11_MODE_DATA_KEYS))

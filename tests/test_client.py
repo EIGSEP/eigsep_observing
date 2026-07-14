@@ -3362,3 +3362,99 @@ def test_init_motor_client_bad_az_pot_verify_type_disables(client, caplog):
         client.init_motor_client()
     assert client.motor_client._verifier is None
     assert any("az_pot_verify" in r.message for r in caplog.records)
+
+
+# -- apply_standby_defaults -------------------------------------------
+
+
+def test_panda_client_exposes_apply_standby_defaults(dummy_cfg):
+    """panda_observe calls this at startup; guard that it exists and is
+    callable on a fresh client."""
+    t = DummyTransport()
+    client = DummyPandaClient(t, cfg=dict(dummy_cfg))
+    try:
+        assert callable(getattr(client, "apply_standby_defaults", None))
+    finally:
+        client.stop()
+
+
+def test_apply_standby_defaults_sends_per_device(dummy_cfg, monkeypatch):
+    """Reads cfg['standby'] and issues standby/resume per device."""
+    from eigsep_observing import standby as standby_mod
+
+    t = DummyTransport()
+    cfg = dict(dummy_cfg)
+    cfg["standby"] = {"imu_el": True, "imu_az": False, "lidar": True}
+    client = DummyPandaClient(t, cfg=cfg)
+    try:
+        calls = []
+        monkeypatch.setattr(
+            standby_mod,
+            "set_standby",
+            lambda proxy, on: calls.append((proxy.name, on)) or "ok",
+        )
+        client.apply_standby_defaults()
+        assert ("imu_el", True) in calls
+        assert ("imu_az", False) in calls
+        assert ("lidar", True) in calls
+    finally:
+        client.stop()
+
+
+def test_apply_standby_defaults_noop_without_config(dummy_cfg):
+    """No cfg['standby'] block → nothing sent, no error."""
+    t = DummyTransport()
+    cfg = dict(dummy_cfg)
+    cfg.pop("standby", None)
+    client = DummyPandaClient(t, cfg=cfg)
+    try:
+        client.apply_standby_defaults()  # must not raise
+    finally:
+        client.stop()
+
+
+def test_apply_standby_defaults_logs_and_continues_on_unavailable(
+    dummy_cfg, monkeypatch, caplog
+):
+    """A down device is logged at WARNING and skipped, never raised."""
+    from eigsep_observing import standby as standby_mod
+
+    t = DummyTransport()
+    cfg = dict(dummy_cfg)
+    cfg["standby"] = {"lidar": True}
+    client = DummyPandaClient(t, cfg=cfg)
+    try:
+        monkeypatch.setattr(
+            standby_mod, "set_standby", lambda proxy, on: "unavailable"
+        )
+        with caplog.at_level("WARNING"):
+            client.apply_standby_defaults()
+        assert any("lidar" in r.message for r in caplog.records)
+    finally:
+        client.stop()
+
+
+def test_apply_standby_defaults_warns_on_unknown_device(
+    dummy_cfg, monkeypatch, caplog
+):
+    """A config typo (device not in STANDBY_DEVICES) warns and is skipped
+    without ever calling set_standby."""
+    from eigsep_observing import standby as standby_mod
+
+    t = DummyTransport()
+    cfg = dict(dummy_cfg)
+    cfg["standby"] = {"imu_xy": True}
+    client = DummyPandaClient(t, cfg=cfg)
+    try:
+        calls = []
+        monkeypatch.setattr(
+            standby_mod,
+            "set_standby",
+            lambda proxy, on: calls.append(proxy.name) or "ok",
+        )
+        with caplog.at_level("WARNING"):
+            client.apply_standby_defaults()
+        assert calls == []
+        assert any("imu_xy" in r.message for r in caplog.records)
+    finally:
+        client.stop()

@@ -115,6 +115,11 @@ def main() -> int:
                 client = PandaClient(transport)
             logger.info(f"Client configuration: {client.cfg}")
 
+            # Apply RFI-standby defaults once at startup (best-effort;
+            # a down device is logged and skipped — never blocks
+            # observing). See obs_config `standby:` and PandaClient.
+            client.apply_standby_defaults()
+
             # switches
             if client.cfg["use_switches"]:
                 switch_thd = Thread(target=client.switch_loop)

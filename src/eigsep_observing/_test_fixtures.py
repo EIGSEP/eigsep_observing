@@ -99,6 +99,8 @@ IMU_READING = {
     "accel_y": 0.0,
     "accel_z": 9.81,
     "el_deg": 0.0,
+    # Normal (sensing) tick — standby marker False (picohost >= 4.6).
+    "standby": False,
 }
 
 
@@ -120,6 +122,8 @@ def _imu_avg_entry(yaw):
         "accel_y": 0.0,
         "accel_z": 9.81,
         "el_deg": 0.0,
+        # `standby` bool→any reduction over all-False survivors → False.
+        "standby": False,
     }
 
 
@@ -143,6 +147,8 @@ IMU_AZ_READING = {
     "accel_y": 0.0,
     "accel_z": 9.81,
     "el_deg": 0.0,
+    # Normal (sensing) tick — standby marker False (picohost >= 4.6).
+    "standby": False,
 }
 
 
@@ -163,6 +169,8 @@ def _imu_az_avg_entry(yaw):
         "accel_y": 0.0,
         "accel_z": 9.81,
         "el_deg": 0.0,
+        # `standby` bool→any reduction over all-False survivors → False.
+        "standby": False,
     }
 
 
@@ -223,6 +231,11 @@ def _lidar_avg_entry(distance_m):
         "status": "update",
         "app_id": 4,
         "distance_m": distance_m,
+        # Normal ticks: standby=False, laser_firing None (opcode-50 read
+        # only in standby). laser_firing's `min` reduction over the
+        # all-None normal survivors → None. (picohost >= 4.6)
+        "standby": False,
+        "laser_firing": None,
     }
 
 
@@ -378,6 +391,9 @@ VNA_METADATA = {
         "status": "update",
         "app_id": 4,
         "distance_m": 1.52,
+        # Normal snapshot shape (picohost >= 4.6): laser on, not in standby.
+        "standby": False,
+        "laser_firing": None,
     },
     "lidar_ts": _SNAPSHOT_TS,
     "potmon": {

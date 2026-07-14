@@ -828,6 +828,17 @@ _IMU_BASE = {
     "accel_x": float,
     "accel_y": float,
     "accel_z": float,
+    # RFI standby marker (picohost >= 4.6). True while a `standby`
+    # command holds the BNO085 in reset; the orientation/accel fields
+    # above are then None and status is "error" (commanded-off, not a
+    # fault). bool -> `any` reduction; because the reduction filters
+    # status="error" samples, `standby` washes to None in a fully-standby
+    # integration (the row is already status="error") and reads False in
+    # normal operation — its live surface is the metadata snapshot read by
+    # standby_manual / live_status, which distinguishes commanded standby
+    # from a dead pico (a standby pico keeps publishing, so it stays
+    # fresh). None is allowed (the producer keeps the field a real bool).
+    "standby": bool,
 }
 
 # imu_el (panda elevation, app_id 3): gravity-derived signed elevation.
@@ -984,6 +995,19 @@ SENSOR_SCHEMAS = {
         "status": str,
         "app_id": int,
         "distance_m": float,
+        # RFI standby marker + GRF-250 opcode-50 laser read-back
+        # (picohost >= 4.6). In standby: standby=True, laser_firing=0
+        # (laser confirmed off), distance_m None, status "error"; a
+        # standby=True with laser_firing=1 means the opcode write did not
+        # take. Normal: standby=False, laser_firing None (not read).
+        # `standby` reduces via `any` (see the _IMU_BASE note);
+        # `laser_firing` is a rides-along raw int taking the plain `min`
+        # default and is typically None in averaged rows (normal ticks
+        # emit None, standby ticks are error-filtered) — its consumer
+        # surface is the live snapshot (is the 905 nm laser actually off),
+        # not the corr row. Both are None-tolerant.
+        "standby": bool,
+        "laser_firing": int,
     },
     # `system_current`: whole-system current draw, fanned out from the
     # lidar Pico's ACS724 by picohost's PicoLidar._lidar_redis_handler.
@@ -1395,7 +1419,12 @@ def _avg_rfswitch_metadata(value):
 # e.g. potmon's `sp1_term` (raw GPIO level), whose `sp1_term_name` is
 # what downstream reads; such an int can stay out of both sets, taking
 # the plain `min` default with the disagreement left for the str
-# field's own "UNKNOWN" reduction to surface. A future schema int that
+# field's own "UNKNOWN" reduction to surface. lidar's `laser_firing`
+# is a related case — a rides-along raw int taking the plain `min`
+# default whose real consumer surface is the live snapshot (laser
+# on/off confirmation) rather than the averaged corr row, where it is
+# typically None (normal ticks emit None, standby ticks error-filter).
+# A future schema int that
 # fits none of the three gets `min` with the disagreement silently
 # captured rather than logged — decide which category it belongs in
 # when adding it.

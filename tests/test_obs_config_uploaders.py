@@ -76,7 +76,17 @@ ACTIVE_DRIVER_SCRIPTS = {
 #     physical state and has no provenance to record. A one-shot config
 #     tool that must coexist with whatever is running, so it must not
 #     claim the refuse-on-conflict tag.
+#   - standby_manual.py: COEXISTING COMMAND — the one sanctioned
+#     exception to "sends commands => active driver => claims run_tag".
+#     RFI standby/resume (imu_el/imu_az/lidar) changes no physical
+#     *observing* state (no switch/motor/VNA); it quiets a sensor and
+#     must run *alongside* the autonomous driver (interject-during-
+#     observe is the whole point). Claiming the refuse-on-conflict tag
+#     would defeat that, so it stays exempt despite issuing pico
+#     commands. Commands serialize at the pico level, so coexistence is
+#     safe. See scripts/CLAUDE.md "coexisting commands".
 RUN_TAG_EXEMPT = {
+    "standby_manual.py",
     "live_status.py",
     "live_plotter.py",
     "record_metadata.py",

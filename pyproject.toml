@@ -28,7 +28,10 @@ dependencies = [
   # >=4.5: potmon SP1 failsafe termination (pico-firmware #155) —
   # set_sp1_termination command + sp1_term/sp1_term_name in the potmon
   # stream; the potmon schema and OBS_MODES plumbing require both.
-  "picohost>=4.5",
+  # >=4.6: imu/lidar standby tick normalized to the full contract shape
+  # (data fields None + standby/laser_firing markers); the imu/lidar
+  # schemas and the standby toggle require the normalized producer.
+  "picohost>=4.6",
   "eigsep-vna>=1.4",
   "eigsep_redis>=2.3",
 ]

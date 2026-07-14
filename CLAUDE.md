@@ -141,6 +141,16 @@ So "full functionality" (autonomous switching + periodic scans +
 heartbeat) only holds when `panda_observe` is running; manual debugging
 is a deliberate, flagged degraded mode, not a silent data gap.
 
+**RFI standby is a coexisting toggle, not a manual session.**
+`scripts/standby_manual.py` quiets/wakes the imu/lidar picos
+(standby/resume) and can run *during* `panda_observe` without stopping
+it — it changes no physical observing state (no switch/motor/VNA) and
+does **not** claim `run_tag` (see `scripts/CLAUDE.md` "coexisting
+commands"). Commands serialize at the pico level, so toggling standby
+mid-observe is safe. `obs_config`'s `standby:` block sets the startup
+default, applied once (best-effort) by
+`PandaClient.apply_standby_defaults`.
+
 ## Metadata flow: streaming for corr, snapshot for VNA
 
 Two reader classes expose metadata with deliberately different semantics. They
@@ -316,6 +326,21 @@ at Redis-publish time. The producer-contract test composes the two via
 `_imu_post_handler_reading` (run uncalibrated, so derived fields are `None`) —
 see it in `src/eigsep_observing/contract_tests/test_producer_contracts.py`,
 mirroring `_potmon_post_handler_reading`.
+
+**RFI standby fields (picohost 4.6+).** `imu_el`/`imu_az` and `lidar`
+carry a `standby` bool; `lidar` also carries `laser_firing` (int,
+GRF-250 opcode-50 read-back). In standby the pico reports
+`status="error"` with the sensor data fields `None` (commanded-off, not
+a fault); the `_imu_redis_handler` / `_lidar_redis_handler` normalize
+the reduced firmware standby tick to the full schema shape (data `None`,
+markers present) so the corr path sees no missing/extra keys. `standby`
+takes the bool→`any` reduction and `laser_firing` the raw-int `min`
+default, but both wash to `None` in a fully-standby integration (the
+error-filter drops every sample) — the row is already `status="error"`.
+Their live surface is the metadata **snapshot** read by `standby_manual`
+/ `live_status` (distinguishing commanded standby from a dead pico: a
+standby pico keeps publishing, so it stays fresh). Toggle via
+`standby_manual` / the `obs_config` `standby:` startup default.
 
 **`potmon` producer-contract quirk.** The `potmon` schema is enforced
 against the **post-`_pot_redis_handler`** shape, not the raw

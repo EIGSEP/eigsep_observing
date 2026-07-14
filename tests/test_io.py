@@ -1312,6 +1312,9 @@ def test_metadata_end_to_end_round_trip():
                     "status": "update",
                     "app_id": 4,
                     "distance_m": 1.5 + 0.001 * i,
+                    # Normal post-handler shape (picohost >= 4.6).
+                    "standby": False,
+                    "laser_firing": None,
                 },
             ],
             "stream:potmon": [
@@ -1825,6 +1828,8 @@ def test_validate_metadata():
         "status": "update",
         "app_id": 4,
         "distance_m": 1.5,
+        "standby": False,
+        "laser_firing": None,
     }
     assert io._validate_metadata(valid, schema) == []
 
@@ -3722,6 +3727,8 @@ def test_imu_schemas_field_sets():
         "accel_x",
         "accel_y",
         "accel_z",
+        # RFI standby marker added to _IMU_BASE (picohost >= 4.6).
+        "standby",
     }
     assert set(io._IMU_EL_SCHEMA) == base | {"el_deg"}
     assert io._IMU_EL_SCHEMA["el_deg"] is float
