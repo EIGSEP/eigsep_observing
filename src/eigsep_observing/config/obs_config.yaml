@@ -46,7 +46,12 @@ vna_settings:
 use_motor: false
 motor_interval: 3600  # seconds between scans
 motor_failure_retry_s: 60  # shorter wait after a failed scan to home
-motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
+motor_scan:  # kwargs forwarded to MotorClient.scan
+  # az is the slow/outer axis, so every az move is a discrete grid step.
+  # This is the committed field mode and is REQUIRED for az_pot_verify
+  # (closed-loop az slip correction runs on discrete az moves only).
+  # el_first: false is the unused fast-az continuous-sweep mode.
+  el_first: true
 # Motor safe-travel limits are now rig-wide in the MotorLimitStore Redis K/V,
 # set via scripts/set_motor_limits.py (read by every MotorClient). They are
 # intentionally NOT here. motor_client_kwargs may still carry non-limit
@@ -60,6 +65,19 @@ motor_homer_kwargs:     # forwarded to MotorHomer (only used when home_after_sca
   damping: 0.5
   max_iters: 6
   reset_count: true
+
+# Closed-loop azimuth slip correction. When true, MotorClient verifies each
+# discrete az move against the calibrated pot (pot_az_angle) and bounds-
+# corrects a detected slip; a slip it can't correct logs ERROR + status and
+# the scan continues. Requires motor_scan.el_first: true (az must be the
+# discrete/outer axis). Default false = current open-loop behavior.
+az_pot_verify: false
+az_pot_verify_kwargs:
+  tol_az_deg: 3.0      # deadband; above pot noise + ~7 deg 1/rev nonlinearity
+  max_iters: 3         # correction cap = stuck-actuator alarm
+  settle_s: 1.5        # clears the ~0.7 s pot lag before re-measuring
+  integrate_s: 1.0     # seconds of pot samples averaged per read
+  diverge_deg: 20.0    # divergence-guard allowance
 
 # motion-switch coordination
 # When true, motor moves and RF switching mutually exclude each other

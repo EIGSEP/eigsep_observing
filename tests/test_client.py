@@ -3336,3 +3336,29 @@ def test_safe_set_sp1_term_returns_true_on_success(client):
     round-trips and the pin state lands on the potmon stream."""
     assert client._safe_set_sp1_term("OPEN") is True
     assert _wait_potmon_term(client, "OPEN")
+
+
+# --- az pot-verify config plumbing ------------------------------------------
+
+
+def test_init_motor_client_forwards_az_pot_verify(client):
+    client.cfg["az_pot_verify"] = True
+    client.cfg["az_pot_verify_kwargs"] = {"tol_az_deg": 4.0}
+    client.init_motor_client()
+    assert client.motor_client._verifier is not None
+    assert client.motor_client._verifier.tol_az_deg == 4.0
+    assert client.motor_client._status_writer is client.status
+
+
+def test_init_motor_client_defaults_verify_off(client):
+    client.cfg.pop("az_pot_verify", None)
+    client.init_motor_client()
+    assert client.motor_client._verifier is None
+
+
+def test_init_motor_client_bad_az_pot_verify_type_disables(client, caplog):
+    client.cfg["az_pot_verify"] = "yes"
+    with caplog.at_level("WARNING"):
+        client.init_motor_client()
+    assert client.motor_client._verifier is None
+    assert any("az_pot_verify" in r.message for r in caplog.records)

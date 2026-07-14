@@ -638,9 +638,30 @@ class PandaClient:
                 f"got {type(raw_kwargs).__name__}. Motor client disabled."
             )
             return
+        az_pot_verify = self.cfg.get("az_pot_verify", False)
+        if not isinstance(az_pot_verify, bool):
+            self.logger.warning(
+                "Invalid az_pot_verify (%r); expected bool. "
+                "Disabling az pot-verify.",
+                az_pot_verify,
+            )
+            az_pot_verify = False
+        raw_verify_kwargs = self.cfg.get("az_pot_verify_kwargs") or {}
+        if not isinstance(raw_verify_kwargs, dict):
+            self.logger.warning(
+                "Invalid az_pot_verify_kwargs (%r); expected dict. "
+                "Using AzPotVerifier defaults.",
+                self.cfg.get("az_pot_verify_kwargs"),
+            )
+            raw_verify_kwargs = {}
         try:
             self.motor_client = MotorClient(
-                self.transport, coord=self.coord, **kwargs
+                self.transport,
+                coord=self.coord,
+                az_pot_verify=az_pot_verify,
+                az_pot_verify_kwargs=raw_verify_kwargs,
+                status_writer=self.status,
+                **kwargs,
             )
         except TypeError as err:
             self.logger.warning(
