@@ -332,7 +332,9 @@ def test_motor_manual_helpers_exist():
 def test_motor_manual_build_zeroer_override_limits():
     """_build_zeroer with override_limits=True builds enforce_limits=False."""
     mm = _load("motor_manual")
-    ns = Namespace(override_limits=True, az_step0_fallback=False)
+    ns = Namespace(
+        override_limits=True, az_step0_fallback=False, az_pot_verify=False
+    )
     zeroer = mm._build_zeroer(DummyTransport(), ns)
     assert zeroer._motor_client.enforce_limits is False
 
@@ -340,7 +342,9 @@ def test_motor_manual_build_zeroer_override_limits():
 def test_motor_manual_build_zeroer_default_enforces_limits():
     """_build_zeroer with override_limits=False preserves enforce_limits=True."""
     mm = _load("motor_manual")
-    ns = Namespace(override_limits=False, az_step0_fallback=False)
+    ns = Namespace(
+        override_limits=False, az_step0_fallback=False, az_pot_verify=False
+    )
     zeroer = mm._build_zeroer(DummyTransport(), ns)
     assert zeroer._motor_client.enforce_limits is True
 
@@ -365,9 +369,30 @@ def test_motor_manual_parse_args_accepts_az_step0_fallback(monkeypatch):
 def test_motor_manual_build_zeroer_forwards_az_step0_fallback():
     """_build_zeroer threads the flag through to the homer."""
     mm = _load("motor_manual")
-    ns = Namespace(override_limits=False, az_step0_fallback=True)
+    ns = Namespace(
+        override_limits=False, az_step0_fallback=True, az_pot_verify=False
+    )
     zeroer = mm._build_zeroer(DummyTransport(), ns)
     assert zeroer._homer.az_step0_fallback is True
+
+
+def test_motor_manual_build_zeroer_forwards_az_pot_verify():
+    """_build_zeroer threads --az-pot-verify into the motor client."""
+    mm = _load("motor_manual")
+    ns = Namespace(
+        override_limits=False, az_step0_fallback=False, az_pot_verify=True
+    )
+    zeroer = mm._build_zeroer(DummyTransport(), ns)
+    assert zeroer._motor_client._verifier is not None
+
+
+def test_motor_manual_parse_args_accepts_az_pot_verify(monkeypatch):
+    """_parse_args recognises --az-pot-verify flag (default off)."""
+    mm = _load("motor_manual")
+    monkeypatch.setattr(sys, "argv", ["motor_manual", "--az-pot-verify"])
+    assert mm._parse_args().az_pot_verify is True
+    monkeypatch.setattr(sys, "argv", ["motor_manual"])
+    assert mm._parse_args().az_pot_verify is False
 
 
 # ---------------------------------------------------------------------
@@ -718,3 +743,15 @@ def test_vna_position_sweep_tags_vna_entries_and_clears_on_exit(
         "run_tag": None,
         "run_started_at_unix": None,
     }
+
+
+def test_goto_notice_formats_each_outcome():
+    from eigsep_observing.motor_az_verify import VerifyResult
+
+    mm = _load("motor_manual")
+    assert "verify off" in mm._goto_notice(10.0, None)
+    assert "OK" in mm._goto_notice(10.0, VerifyResult(True, 1, 0.4, False))
+    assert "SLIP" in mm._goto_notice(10.0, VerifyResult(False, 3, 18.0, False))
+    assert "open-loop" in mm._goto_notice(
+        10.0, VerifyResult(False, 0, float("nan"), True)
+    )

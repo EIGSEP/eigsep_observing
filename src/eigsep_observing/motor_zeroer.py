@@ -63,6 +63,8 @@ class MotorZeroer:
         source="motor_zeroer",
         enforce_limits=True,
         az_step0_fallback=False,
+        az_pot_verify=False,
+        az_pot_verify_kwargs=None,
         motor_client=None,
         homer=None,
         confirm_starts_home=False,
@@ -95,6 +97,8 @@ class MotorZeroer:
                 transport,
                 source="motor_manual_home",
                 enforce_limits=enforce_limits,
+                az_pot_verify=az_pot_verify,
+                az_pot_verify_kwargs=az_pot_verify_kwargs,
             )
         self._motor_client = motor_client
         if homer is None:
@@ -182,6 +186,19 @@ class MotorZeroer:
 
     def jog_el(self, delta_deg):
         self._jog(self._motor_client.jog_el, delta_deg)
+
+    def goto_az(self, target_deg):
+        """Absolute az move with closed-loop pot-verify (when the client
+        has it enabled). Retries once on a post-reconnect missing-status
+        ``RuntimeError``, like :meth:`_jog`. Returns the az
+        ``VerifyResult`` (or ``None`` when verify is disabled)."""
+        try:
+            return self._motor_client.move_to(az_deg=float(target_deg))
+        except RuntimeError as exc:
+            if "No status" not in str(exc):
+                raise
+            time.sleep(_REQUIRE_STATUS_RETRY_S)
+            return self._motor_client.move_to(az_deg=float(target_deg))
 
     def zero(self):
         """Halt, then set both step counters to 0. After this call the

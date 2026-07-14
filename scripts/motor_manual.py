@@ -19,6 +19,8 @@ Controls:
     u / d  - jog elevation up / down
     l / r  - jog azimuth left / right
     + / -  - increase / decrease jog step size
+    g      - goto absolute azimuth (prompts for degrees); with
+             --az-pot-verify, corrects az slip against the pot
     h      - go home on both axes: pot 0 deg az, IMU-level el (any key
              cancels; requires a pot calibration)
     a      - go home in azimuth only (pot 0 deg; el never moves and
@@ -42,11 +44,59 @@ from eigsep_observing._scripts_util import (
     build_transport,
     require_pico,
 )
+from eigsep_observing.motor_client import MotorLimitError
 from eigsep_observing.utils import configure_eig_logger
 
 
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
+
+
+def _goto_notice(target, result):
+    """One-line summary of a goto-az verify outcome for the curses UI."""
+    if result is None:
+        return f"goto az {target:.1f}: sent (verify off)"
+    if result.degraded:
+        return f"goto az {target:.1f}: pot unavailable (open-loop)"
+    if result.converged:
+        return (
+            f"goto az {target:.1f}: OK, {result.iters} jog(s), "
+            f"resid {result.residual_deg:.1f} deg"
+        )
+    return (
+        f"goto az {target:.1f}: SLIP resid {result.residual_deg:.1f} deg "
+        f"after {result.iters} jog(s)"
+    )
+
+
+def _do_goto(screen, zeroer):
+    """Prompt for a target az and run a verified goto; set notice."""
+    curses.echo()
+    screen.timeout(-1)
+    screen.addstr(11, 0, "goto az (deg): ")
+    screen.clrtoeol()
+    screen.refresh()
+    try:
+        raw = screen.getstr(11, 15, 8).decode().strip()
+    except Exception:
+        raw = ""
+    finally:
+        curses.noecho()
+        screen.timeout(100)
+    if not raw:
+        zeroer.notice = "goto cancelled"
+        return
+    try:
+        target = float(raw)
+    except ValueError:
+        zeroer.notice = f"goto: bad az {raw!r}"
+        return
+    try:
+        result = zeroer.goto_az(target)
+    except (MotorLimitError, RuntimeError, TimeoutError) as exc:
+        zeroer.notice = f"goto failed: {exc}"
+        return
+    zeroer.notice = _goto_notice(target, result)
 
 
 def _render(screen, zeroer, deg):
@@ -61,7 +111,7 @@ def _render(screen, zeroer, deg):
         screen.addstr(3, 0, "AZ pos: DISCONNECTED (waiting for reconnect)")
         screen.addstr(4, 0, "EL pos: ---")
     screen.addstr(6, 0, "u/d = jog EL | l/r = jog AZ")
-    screen.addstr(7, 0, "+/- = change step size")
+    screen.addstr(7, 0, "+/- = change step size | g = goto az (deg)")
     screen.addstr(
         8,
         0,
@@ -96,6 +146,7 @@ def _build_zeroer(transport, args):
         transport,
         enforce_limits=not args.override_limits,
         az_step0_fallback=args.az_step0_fallback,
+        az_pot_verify=args.az_pot_verify,
     )
 
 
@@ -113,6 +164,9 @@ def _curses_main(screen, transport, args):
         while True:
             _render(screen, zeroer, deg)
             ch = screen.getch()
+            if ch == ord("g") and not zeroer.is_homing and zeroer.is_available:
+                _do_goto(screen, zeroer)
+                continue
             deg, should_exit, was_zeroed = zeroer.handle_key(ch, deg)
             if should_exit:
                 zeroed = was_zeroed
@@ -160,6 +214,14 @@ def _parse_args():
             "If the potmon is not publishing, still park az at step 0"
             " open-loop when homing (default: skip az — home is"
             " pot-referenced and the pot fence is inert without it)."
+        ),
+    )
+    parser.add_argument(
+        "--az-pot-verify",
+        action="store_true",
+        help=(
+            "Enable closed-loop az pot-verify for the 'g' goto command "
+            "(detect + correct az slip against the pot)."
         ),
     )
     return parser.parse_args()

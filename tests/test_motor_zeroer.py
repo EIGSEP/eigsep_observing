@@ -761,3 +761,23 @@ def test_home_notice_stays_none_on_converged_result(client):
     zeroer.handle_key(ord("h"), 1.0)
     assert _wait_until(lambda: not zeroer.is_homing, timeout=2.0)
     assert zeroer.notice is None
+
+
+def test_goto_az_calls_move_to_and_returns_result():
+    from eigsep_observing.motor_az_verify import VerifyResult
+
+    sentinel = VerifyResult(True, 1, 0.4, False)
+
+    class _FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def move_to(self, *, az_deg=None):
+            self.calls.append(az_deg)
+            return sentinel
+
+    fake = _FakeClient()
+    z = MotorZeroer(DummyTransport(), motor_client=fake)
+    result = z.goto_az(42.0)
+    assert fake.calls == [42.0]
+    assert result is sentinel
