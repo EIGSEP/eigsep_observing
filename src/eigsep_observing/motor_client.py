@@ -124,6 +124,9 @@ class MotorClient:
         pot_az_v_limits=_UNSET,
         imu_el_limits_deg=_UNSET,
         enforce_limits=True,
+        az_pot_verify=False,
+        az_pot_verify_kwargs=None,
+        status_writer=None,
         source="motor_client",
         coord=None,
     ):
@@ -160,6 +163,18 @@ class MotorClient:
                 threading.RLock(), serialize=False, logger=self.logger
             )
         self._coord = coord
+        self._status_writer = status_writer
+        if az_pot_verify:
+            # Deferred import: motor_az_verify imports MotorLimitError
+            # from this module, so a top-level import here would be a
+            # cycle. motor_client is the base layer.
+            from .motor_az_verify import AzPotVerifier
+
+            self._verifier = AzPotVerifier(
+                self, self._reader, **(az_pot_verify_kwargs or {})
+            )
+        else:
+            self._verifier = None
 
     @staticmethod
     def _resolve_limit(explicit, stored, default):
@@ -412,6 +427,43 @@ class MotorClient:
                 timeout=timeout, stop_event=stop_event, axis=axis, guard=guard
             )
 
+    def _push_status(self, msg):
+        """Best-effort status-stream push; never raises into a move."""
+        if self._status_writer is None:
+            return
+        try:
+            self._status_writer.send(msg)
+        except Exception as exc:  # status is non-critical
+            self.logger.debug("status push failed: %s", exc)
+
+    def _verify_az_if_enabled(self, target_deg):
+        """Run the pot-verify after an az move when enabled.
+
+        No-op returning ``None`` when the verifier is disabled. A
+        degraded result (pot gone/at-risk) logs WARNING. A non-converged
+        result (slip the loop could not correct) logs ERROR and pushes a
+        status message; the caller continues regardless — a slip must
+        never abort the scan.
+        """
+        if self._verifier is None:
+            return None
+        result = self._verifier.verify(target_deg)
+        if result.degraded:
+            self.logger.warning(
+                "az pot-verify degraded at target %.1f deg: pot "
+                "unavailable/at-risk; move left open-loop (unverified).",
+                target_deg,
+            )
+        elif not result.converged:
+            msg = (
+                f"az slip: pot short of {target_deg:.1f} deg by "
+                f"{result.residual_deg:.1f} deg after {result.iters} "
+                f"corrections."
+            )
+            self.logger.error(msg)
+            self._push_status(msg)
+        return result
+
     def _axis_target(self, axis):
         """Current ``{axis}_target_pos`` from the snapshot, or ``None``.
 
@@ -536,6 +588,12 @@ class MotorClient:
             (so passing only ``az_deg`` does just the az move).
         timeout : float or None
             Per-move stall timeout override.
+
+        Returns
+        -------
+        VerifyResult or None
+            The az pot-verify result when pot-verify is enabled and an az
+            move ran; otherwise ``None``.
         """
         moves = []
         for axis in axis_order:
@@ -546,6 +604,7 @@ class MotorClient:
         if not moves:
             return
         self._await_initial_status()
+        az_result = None
         for action, target_deg, label in moves:
             self._send_and_wait(
                 action,
@@ -553,6 +612,9 @@ class MotorClient:
                 timeout=timeout,
                 target_deg=target_deg,
             )
+            if action == "az_target_deg":
+                az_result = self._verify_az_if_enabled(target_deg)
+        return az_result
 
     def home(self, stop_event=None, axes=("az", "el"), guard=None):
         """Drive the requested axes to step position 0, one at a time.
@@ -714,6 +776,11 @@ class MotorClient:
                         label=axis1_label,
                         target_deg=float(val1),
                     )
+                    if mv_axis1_action == "az_target_deg":
+                        # Only fires in el_first=True (az is axis 1, moved
+                        # in discrete grid steps). In el_first=False az is
+                        # the continuous inner sweep and is left untouched.
+                        self._verify_az_if_enabled(float(val1))
                     if _cancelled():
                         break
                     if pause_s is None:

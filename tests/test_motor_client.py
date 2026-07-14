@@ -19,6 +19,7 @@ from eigsep_observing import (
     MotorClient,
     MotorLimitError,
 )
+from eigsep_observing.motor_az_verify import VerifyResult
 from eigsep_observing.motor_cal import cal_motor
 from eigsep_observing.motor_limits import publish_motor_limits
 from eigsep_redis.testing import DummyTransport
@@ -947,3 +948,117 @@ def test_home_and_jogs_forward_guard(client):
         ("az_move_deg", True),
         ("el_move_deg", True),
     ]
+
+
+# --- az pot-verify wiring ---------------------------------------------------
+
+
+def test_verifier_none_when_flag_off():
+    mc = MotorClient(DummyTransport())
+    assert mc._verifier is None
+    assert mc._verify_az_if_enabled(10.0) is None
+
+
+def test_verifier_built_and_configured_when_flag_on():
+    mc = MotorClient(
+        DummyTransport(),
+        az_pot_verify=True,
+        az_pot_verify_kwargs={"tol_az_deg": 4.0, "max_iters": 2},
+    )
+    assert mc._verifier is not None
+    assert mc._verifier.tol_az_deg == 4.0
+    assert mc._verifier.max_iters == 2
+
+
+def test_move_to_az_calls_verify_and_returns_result(client):
+    motor = _motor(client.transport)
+    calls = []
+    sentinel = VerifyResult(True, 1, 0.5, False)
+
+    class _StubVerifier:
+        def verify(self, target_deg):
+            calls.append(target_deg)
+            return sentinel
+
+    motor._verifier = _StubVerifier()
+    with patch.object(motor, "_send_and_wait", return_value=None):
+        result = motor.move_to(az_deg=5.0)
+    assert calls == [5.0]
+    assert result is sentinel
+
+
+def test_move_to_el_only_does_not_verify(client):
+    motor = _motor(client.transport)
+    calls = []
+
+    class _StubVerifier:
+        def verify(self, target_deg):
+            calls.append(target_deg)
+            return None
+
+    motor._verifier = _StubVerifier()
+    with patch.object(motor, "_send_and_wait", return_value=None):
+        motor.move_to(el_deg=5.0)
+    assert calls == []
+
+
+def test_scan_verifies_each_az_step_el_first(client):
+    motor = _motor(client.transport)
+    targets = []
+    with (
+        patch.object(motor, "_send_and_wait", return_value=None),
+        patch.object(motor, "home", return_value=None),
+        patch.object(
+            motor,
+            "_verify_az_if_enabled",
+            side_effect=lambda t: targets.append(t),
+        ),
+    ):
+        motor.scan(
+            az_range_deg=np.array([-1.0, 0.0, 1.0]),
+            el_range_deg=np.array([-1.0, 1.0]),
+            el_first=True,  # az is the outer/discrete axis
+            repeat_count=1,
+        )
+    assert targets == [-1.0, 0.0, 1.0]
+
+
+def test_verify_give_up_logs_error_and_pushes_status(caplog):
+    sent = []
+
+    class _StatusWriter:
+        def send(self, msg):
+            sent.append(msg)
+
+    mc = MotorClient(DummyTransport(), status_writer=_StatusWriter())
+
+    class _StubVerifier:
+        def verify(self, target_deg):
+            return VerifyResult(False, 3, 18.0, False)
+
+    mc._verifier = _StubVerifier()
+    with caplog.at_level("ERROR"):
+        result = mc._verify_az_if_enabled(90.0)
+    assert not result.converged
+    assert any("az slip" in r.message for r in caplog.records)
+    assert sent and "az slip" in sent[0]
+
+
+def test_verify_degraded_logs_warning_no_status(caplog):
+    sent = []
+
+    class _StatusWriter:
+        def send(self, msg):
+            sent.append(msg)
+
+    mc = MotorClient(DummyTransport(), status_writer=_StatusWriter())
+
+    class _StubVerifier:
+        def verify(self, target_deg):
+            return VerifyResult(False, 0, float("nan"), True)
+
+    mc._verifier = _StubVerifier()
+    with caplog.at_level("WARNING"):
+        mc._verify_az_if_enabled(90.0)
+    assert any("degraded" in r.message.lower() for r in caplog.records)
+    assert sent == []  # degraded is not a slip alarm
