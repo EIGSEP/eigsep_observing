@@ -61,6 +61,7 @@ def _scan_args(**overrides):
         el_stop=1.0,
         el_step=1.0,
         el=None,
+        az_pot_verify=False,
     )
     base.update(overrides)
     return Namespace(**base)
@@ -755,3 +756,18 @@ def test_goto_notice_formats_each_outcome():
     assert "open-loop" in mm._goto_notice(
         10.0, VerifyResult(False, 0, float("nan"), True)
     )
+
+
+def test_motor_scan_forwards_az_pot_verify(client, monkeypatch):
+    """--az-pot-verify threads az_pot_verify=True into MotorClient."""
+    mm = _load("motor_scan")
+    captured = {}
+    real_cls = mm.MotorClient
+
+    def _factory(transport, **kw):
+        captured.update(kw)
+        return real_cls(transport, **kw)
+
+    monkeypatch.setattr(mm, "MotorClient", _factory)
+    mm.main(client.transport, _scan_args(az_pot_verify=True, count=1))
+    assert captured.get("az_pot_verify") is True

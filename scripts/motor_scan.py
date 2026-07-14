@@ -203,7 +203,11 @@ def main(transport, args):
     require_pico(PicoProxy("motor", transport, source="motor_scan"))
     with run_tag.session(transport, "motor_scan"):
         status = StatusWriter(transport)
-        motor = MotorClient(transport)
+        motor = MotorClient(
+            transport,
+            az_pot_verify=args.az_pot_verify,
+            status_writer=status,
+        )
 
         started = time.monotonic()
         status.send("motor_scan started")
@@ -323,6 +327,12 @@ def _parse_args():
         type=float,
         default=None,
         help="Seconds to sleep between passes (with --count).",
+    )
+    parser.add_argument(
+        "--az-pot-verify",
+        action="store_true",
+        help="Closed-loop az pot-verify on each discrete az move "
+        "(detect + correct slip). Use with el_first (az the outer axis).",
     )
     return parser.parse_args()
 
