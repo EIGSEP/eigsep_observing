@@ -836,96 +836,32 @@ _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 # imu_az (antenna azimuth turntable, app_id 6): |theta| elevation only.
 _IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
-# tempctrl publishes two flat streams, tempctrl_lna and tempctrl_load.
-# The producer is `picohost.base.PicoPeltier._peltier_redis_handler`,
-# which fans the firmware's combined tick into two `writer.add(...)`
-# calls, stripping the `LNA_`/`LOAD_` prefix and duplicating the
-# device-wide `watchdog_tripped` / `watchdog_timeout_ms` fields into
-# both streams. With per-stream `status`, both streams flow through the
-# generic `_avg_sensor_values` reduction like every other sensor.
-#
-# The two channels are NOT the same schema (pico-firmware, LOAD switched
-# from a Peltier to a single low-side FET heater; LNA is unchanged):
-# tempctrl_lna is still a Peltier under PI control (_PELTIER_SCHEMA,
-# analog thermistor + Kp/Ki/integral/clamp/cooling_enabled), while
-# tempctrl_load is a single FET heater under on/off hysteresis
-# (_LOAD_HEATER_SCHEMA) — it has no reverse (cooling) drive direction
-# and no PWM duty to modulate, so it has no PI/clamp/cooling_enabled
-# fields at all. The once-planned "convert LNA to the same analog-
-# thermistor + PI design too" track (pico-firmware #109/#150,
-# feat/tempctrl-status-redesign) is superseded — the project is moving
-# off Peltier devices entirely — so don't try to unify the two schemas;
-# expect tempctrl_lna's shape to change again if/when LNA is replaced.
+# tempctrl publishes a single flat stream, tempctrl_load — a low-side
+# FET heater behind an analog NTC thermistor (30k, Beta=3943, plain 10k
+# pull-up to 3V3), under on/off hysteresis control. There used to be a
+# second channel, "LNA" (a Peltier thermoelectric element under PI
+# control), but the project has moved off Peltier devices entirely — the
+# LNA channel and all PI-control code were removed from the firmware,
+# picohost, and this schema. The producer is
+# `picohost.base.PicoTempCtrl._tempctrl_redis_handler`, which republishes
+# the firmware's `LOAD_*`-prefixed status tick as a flat `writer.add(...)`
+# call, stripping the prefix and carrying the device-wide
+# `watchdog_tripped` / `watchdog_timeout_ms` fields along with it. With a
+# top-level `status`, the stream flows through the generic
+# `_avg_sensor_values` reduction like every other sensor.
 #
 # A channel descoped via the firmware `installed` flag
-# (tempctrl_settings.{LNA,LOAD}.installed: false) publishes NO stream
-# at all — clean absence (no corr-file column, no staleness warnings),
-# never a sentinel or a permanent error stream. Both schemas stay
-# registered here regardless: the module may return, and the fan-out
-# never puts an `installed` field into the published per-channel shape.
-_PELTIER_SCHEMA = {
-    "sensor_name": str,
-    "status": str,
-    "app_id": int,
-    "watchdog_tripped": bool,
-    "watchdog_timeout_ms": int,
-    "T_now": float,
-    # Analog-thermistor diagnostics added by pico-firmware #109: the Pico
-    # reports the raw ADC voltage at the divider node and the derived
-    # thermistor resistance alongside the converted temperature. Scalar
-    # floats, so they reduce via the standard float->mean path.
-    "voltage": float,
-    "resistance": float,
-    "timestamp": float,
-    "T_target": float,
-    "drive_level": float,
-    "enabled": bool,
-    "active": bool,
-    # Sticky control latches (pico-firmware feat/tempctrl-status-redesign):
-    # sensor_tripped = rate-guard latch (garbage burst), stall_tripped =
-    # drive moved nothing for a full window, runaway_tripped = temperature
-    # moved against the drive (mis-wire/lost-heatsink signature). All gate
-    # drive and are cleared by a *_enable=true host ack; none affect the
-    # per-stream `status`, which is data-validity only — a latched channel
-    # with a recovered sensor keeps contributing real values here. `any`
-    # reduction = worst-case fault flag, as designed.
-    "sensor_tripped": bool,
-    "stall_tripped": bool,
-    "runaway_tripped": bool,
-    # Rate-guard reject counter (pico-firmware #150): the rate guard is
-    # control-only, so rejected-but-plausible conversions are still
-    # reported (status="update", real values) with this per-channel
-    # counter as the cross-check marker. It increments once per
-    # consecutive rejected sample and resets to 0 on an accepted one,
-    # so any nonzero value inside an integration means at least one
-    # averaged-in sample was rate-guard-rejected. Reduces via max —
-    # see _MAX_REDUCED_FIELDS; the default int min would wash a
-    # mid-integration burst back to 0 and delete the marker.
-    "sensor_rejects": int,
-    # Asymmetric-clamp safety setting (False forbids drive<0). Reduces
-    # via `any` like every other bool config field; a mid-integration
-    # toggle is an operator action and rare enough that surfacing
-    # disagreement via the existing invariant-throttle is acceptable.
-    "cooling_enabled": bool,
-    "hysteresis": float,
-    "clamp": float,
-    "Kp": float,
-    "Ki": float,
-    "integral": float,
-}
+# (tempctrl_settings.LOAD.installed: false) publishes NO stream at all —
+# clean absence (no corr-file column, no staleness warnings), never a
+# sentinel or a permanent error stream.
 
-# tempctrl_load: LOAD is a single low-side FET heater behind an analog
-# NTC thermistor (30k, Beta=3943, plain 10k pull-up — a different part
-# on a different divider than LNA's onboard PCB thermistor), under
-# on/off hysteresis control rather than LNA's continuous PI drive on a
-# Peltier. Same producer (`PicoPeltier._peltier_redis_handler`) and same
-# rate-guard / sticky stall+runaway latch / installed-flag scaffolding
-# as _PELTIER_SCHEMA (see LoadHeater in pico-firmware's tempctrl.h), but
-# no cooling_enabled/clamp/Kp/Ki/integral — those are PI/bidirectional-
-# drive concepts a single FET doesn't have, so firmware never sends them
-# for this channel. runaway_tripped additionally latches on LOAD hitting
-# its absolute LOAD_MAX_SAFE_TEMP_C safety ceiling (100 C), independent
-# of whatever target/hysteresis the host configured.
+# tempctrl_load: rate-guard / sticky stall+runaway latch / installed-flag
+# scaffolding (see LoadHeater in pico-firmware's tempctrl.h), but no
+# cooling_enabled/clamp/Kp/Ki/integral — those are PI/bidirectional-drive
+# concepts a single FET doesn't have, so firmware never sends them.
+# runaway_tripped additionally latches on LOAD hitting its absolute
+# LOAD_MAX_SAFE_TEMP_C safety ceiling (100 C), independent of whatever
+# target/hysteresis the host configured.
 _LOAD_HEATER_SCHEMA = {
     "sensor_name": str,
     "status": str,
@@ -972,7 +908,6 @@ _LOAD_HEATER_SCHEMA = {
 SENSOR_SCHEMAS = {
     "imu_el": _IMU_EL_SCHEMA,
     "imu_az": _IMU_AZ_SCHEMA,
-    "tempctrl_lna": _PELTIER_SCHEMA,
     "tempctrl_load": _LOAD_HEATER_SCHEMA,
     "potmon": {
         "sensor_name": str,
@@ -1377,7 +1312,7 @@ def avg_metadata(value):
     if app_name == "rfswitch":
         return _avg_rfswitch_metadata(value)
 
-    # generic sensor (e.g. IMU, lidar, tempctrl_lna, tempctrl_load)
+    # generic sensor (e.g. IMU, lidar, tempctrl_load)
     return _avg_sensor_values(value, schema, app_name=app_name)
 
 
@@ -1424,9 +1359,9 @@ def _avg_rfswitch_metadata(value):
 # disagreement could emit ~14k events/hour for a chronic case.
 #
 # Non-invariant fields that legitimately change inside an integration
-# (the tempctrl `watchdog_tripped` fault flag, the
-# `LNA_enabled`/`LOAD_enabled`/`LNA_active`/`LOAD_active` mode flags,
-# the `LNA_status`/`LOAD_status` strings) are NOT logged — the per-type
+# (the tempctrl `watchdog_tripped` fault flag, the `LOAD_enabled`/
+# `LOAD_active` mode flags, the `LOAD_status` string) are NOT logged —
+# the per-type
 # reduction in _avg_sensor_values already encodes the disagreement in
 # the saved value (`any` for bools, `"UNKNOWN"` for strings) so
 # downstream can detect the issue from the file alone. Note that

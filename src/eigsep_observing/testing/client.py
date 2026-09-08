@@ -48,7 +48,7 @@ DUMMY_PICO_CLASSES = {
     "imu_el": _DummyPicoImuEl,
     "imu_az": _DummyPicoImuAz,
     "potmon": picohost.testing.DummyPicoPotentiometer,
-    "tempctrl": picohost.testing.DummyPicoPeltier,
+    "tempctrl": picohost.testing.DummyPicoTempCtrl,
     "lidar": picohost.testing.DummyPicoLidar,
     "rfswitch": picohost.testing.DummyPicoRFSwitch,
     "motor": picohost.testing.DummyPicoMotor,

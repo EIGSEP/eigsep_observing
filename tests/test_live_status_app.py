@@ -43,8 +43,7 @@ OBS_CFG = {
     "corr_ntimes": 240,
     "corr_save_dir": None,
     "tempctrl_settings": {
-        "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
-        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
+        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5},
     },
     "switch_schedule": {
         "RFANT": 3600,
@@ -184,26 +183,6 @@ def agg_primed():
     )
     now = time.time()
     panda_md.add(
-        "tempctrl_lna",
-        {
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "app_id": 4,
-            "watchdog_tripped": False,
-            "watchdog_timeout_ms": 30000,
-            "T_now": 25.1,
-            "timestamp": now,
-            "T_target": 25.0,
-            "drive_level": 0.25,
-            "enabled": True,
-            "active": True,
-            "sensor_tripped": False,
-            "runaway_tripped": False,
-            "hysteresis": 0.5,
-            "clamp": 0.6,
-        },
-    )
-    panda_md.add(
         "tempctrl_load",
         {
             "sensor_name": "tempctrl_load",
@@ -220,7 +199,6 @@ def agg_primed():
             "sensor_tripped": False,
             "runaway_tripped": False,
             "hysteresis": 0.5,
-            "clamp": 0.6,
         },
     )
     # RF-switch PCB thermistors (full production shape per the
@@ -259,7 +237,6 @@ def agg_primed():
             "stream:lidar",
             "stream:rfswitch",
             "stream:rfswitch_therm",
-            "stream:tempctrl_lna",
             "stream:tempctrl_load",
             "stream:status",
         ],
@@ -603,11 +580,10 @@ def test_metadata_route_includes_classify(client):
     body = client.get("/api/metadata").get_json()
     data = body["data"]
     assert "lidar" in data
-    assert "tempctrl_lna" in data
     assert "tempctrl_load" in data
-    lna = data["tempctrl_lna"]
-    # tempctrl_lna.T_now = 25.1 is inside healthy (24.0, 26.0).
-    assert lna["classify"]["tempctrl_lna.T_now"] == "ok"
+    load = data["tempctrl_load"]
+    # tempctrl_load.T_now = 25.0 is inside healthy (24.0, 26.0).
+    assert load["classify"]["tempctrl_load.T_now"] == "ok"
 
 
 # ---------------------------------------------------------------------
@@ -1095,27 +1071,24 @@ def _tempctrl_row(stream: str, t_now: float) -> dict:
         "sensor_tripped": False,
         "runaway_tripped": False,
         "hysteresis": 0.5,
-        "clamp": 0.6,
     }
 
 
 def test_panda_upload_regates_signals_and_thresholds():
-    """A panda upload that descopes LNA and moves the LOAD setpoint
-    re-gates the dashboard without a restart (issue #194): signal
-    gating, tempctrl bands, the cal-load stream, and /api/config all
-    follow the upload, while dashboard-local knobs stay from the
-    on-disk obs_cfg.
+    """A panda upload that moves the LOAD setpoint re-gates the
+    dashboard without a restart (issue #194): tempctrl bands and
+    /api/config follow the upload, while dashboard-local knobs stay
+    from the on-disk obs_cfg.
     """
     snap = DummyTransport()
     panda = DummyTransport()
     CorrConfigStore(snap).upload(CORR_CONFIG)
 
     panda_md = MetadataWriter(panda)
-    panda_md.add("tempctrl_lna", _tempctrl_row("tempctrl_lna", 25.1))
     panda_md.add("tempctrl_load", _tempctrl_row("tempctrl_load", 25.0))
     _rewind(
         panda,
-        ["stream:tempctrl_lna", "stream:tempctrl_load", "stream:status"],
+        ["stream:tempctrl_load", "stream:status"],
     )
 
     agg = LiveStatusAggregator(
@@ -1127,71 +1100,102 @@ def test_panda_upload_regates_signals_and_thresholds():
         # Baseline: no upload yet — the local file gates.
         agg._panda_tick()
         assert agg.obs_cfg_effective == OBS_CFG
-        assert "tempctrl_lna.T_now" in agg.thresholds.registry
+        assert "tempctrl_load.T_now" in agg.thresholds.registry
 
-        # panda_observe restarts with a diverged config: LNA descoped,
-        # LOAD setpoint moved, cal-load stream re-pointed (hot-swap).
+        # panda_observe restarts with a diverged config: LOAD setpoint
+        # moved.
         upload = {
             **OBS_CFG,
             "tempctrl_settings": {
-                "LNA": {
-                    "installed": False,
-                    "enable": False,
-                    "target_C": 25.0,
-                    "hysteresis_C": 0.5,
-                    "clamp": 0.6,
-                },
-                "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
-            },
-            "calibration": {
-                **OBS_CFG["calibration"],
-                "t_amb_stream": "tempctrl_lna",
+                "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5},
             },
         }
         ConfigStore(panda).upload(upload)
         th_before = agg.thresholds
         agg._panda_tick()
 
-        # Gating followed the upload: LNA tiles gone, LOAD band moved.
+        # Gating followed the upload: LOAD band moved.
         assert agg.thresholds is not th_before
-        assert "tempctrl_lna.T_now" not in agg.thresholds.registry
         assert agg.thresholds.bands["tempctrl_load.T_now"]["healthy"] == [
             29.0,
             31.0,
         ]
-        # calibration.t_amb_stream was plucked from the upload; the
-        # ENR knob stays dashboard-local.
-        cal = agg.obs_cfg_effective["calibration"]
-        assert cal["t_amb_stream"] == "tempctrl_lna"
-        assert (
-            cal["noise_diode_enr_db"]
-            == OBS_CFG["calibration"]["noise_diode_enr_db"]
-        )
+
+        app = create_app(agg)
+        app.config.update(TESTING=True)
+        client_ = app.test_client()
+
+        # /api/metadata: the live channel still classifies.
+        md = client_.get("/api/metadata").get_json()["data"]
+        assert "tempctrl_load.T_now" in md["tempctrl_load"]["classify"]
+
+        # /api/config: effective values + provenance.
+        cfg_data = client_.get("/api/config").get_json()["data"]
+        assert cfg_data["config_source"] == "panda_upload"
+        assert cfg_data["tempctrl_settings"]["LOAD"]["target_C"] == 30.0
+        assert cfg_data["thresholds"]["tempctrl_load.T_now"]["healthy"] == [
+            29.0,
+            31.0,
+        ]
+    finally:
+        agg.stop(timeout=1.0)
+
+
+def test_panda_upload_regates_signals_when_load_descoped():
+    """A panda upload that descopes LOAD (the only tempctrl channel)
+    drops the tempctrl tile/band entirely — there is no second channel
+    to fall back to."""
+    snap = DummyTransport()
+    panda = DummyTransport()
+    CorrConfigStore(snap).upload(CORR_CONFIG)
+
+    panda_md = MetadataWriter(panda)
+    panda_md.add("tempctrl_load", _tempctrl_row("tempctrl_load", 25.0))
+    _rewind(
+        panda,
+        ["stream:tempctrl_load", "stream:status"],
+    )
+
+    agg = LiveStatusAggregator(
+        transport_snap=snap,
+        transport_panda=panda,
+        obs_cfg=OBS_CFG,
+    )
+    try:
+        agg._panda_tick()
+        assert "tempctrl_load.T_now" in agg.thresholds.registry
+
+        upload = {
+            **OBS_CFG,
+            "tempctrl_settings": {
+                "LOAD": {
+                    "installed": False,
+                    "enable": False,
+                    "target_C": 25.0,
+                    "hysteresis_C": 0.5,
+                },
+            },
+        }
+        ConfigStore(panda).upload(upload)
+        th_before = agg.thresholds
+        agg._panda_tick()
+
+        assert agg.thresholds is not th_before
+        assert "tempctrl_load.T_now" not in agg.thresholds.registry
 
         app = create_app(agg)
         app.config.update(TESTING=True)
         client_ = app.test_client()
 
         # /api/metadata: the descoped channel's snapshot entry lingers
-        # in the Redis hash until the OPERATIONS.md cleanup step, but
-        # it classifies against nothing; the live channel still does.
+        # in the Redis hash until the descope cleanup, but it
+        # classifies against nothing.
         md = client_.get("/api/metadata").get_json()["data"]
-        assert md["tempctrl_lna"]["classify"] == {}
-        assert "tempctrl_load.T_now" in md["tempctrl_load"]["classify"]
+        assert md["tempctrl_load"]["classify"] == {}
 
-        # /api/config: effective values + provenance.
         cfg_data = client_.get("/api/config").get_json()["data"]
-        assert cfg_data["config_source"] == "panda_upload"
-        assert cfg_data["tempctrl_settings"]["LNA"]["installed"] is False
-        assert cfg_data["tempctrl_settings"]["LOAD"]["target_C"] == 30.0
-        assert "tempctrl_lna.T_now" not in cfg_data["thresholds"]
-        # The config panel reads the effective cal reference routing
-        # from here: plucked from the upload, ENR still dashboard-local.
-        assert cfg_data["calibration"]["t_amb_stream"] == "tempctrl_lna"
-        assert (
-            cfg_data["calibration"]["noise_diode_enr_db"]
-            == OBS_CFG["calibration"]["noise_diode_enr_db"]
-        )
+        assert cfg_data["tempctrl_settings"]["LOAD"]["installed"] is False
+        assert "tempctrl_load.T_now" not in cfg_data["thresholds"]
     finally:
         agg.stop(timeout=1.0)
 
@@ -1231,8 +1235,7 @@ def test_panda_upload_malformed_keeps_previous_gating(agg_primed, caplog):
     bad = {
         **OBS_CFG,
         "tempctrl_settings": {
-            "LNA": {"target_C": "not-a-number", "hysteresis_C": 0.5},
-            "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5},
+            "LOAD": {"target_C": "not-a-number", "hysteresis_C": 0.5},
         },
     }
     ConfigStore(agg.transport_panda).upload(bad)
@@ -1258,17 +1261,35 @@ def test_panda_upload_malformed_keeps_previous_gating(agg_primed, caplog):
     assert agg.thresholds is not th_good
 
 
-def test_corr_route_calibrated_t_amb_stream_follows_upload(agg_primed):
-    """Hot-swap contingency end-to-end: the panda upload re-points the
-    ambient-reference stream at ``tempctrl_lna`` (the moved LOAD module
-    publishes there); the calibrated corr route must read T_amb from
-    that stream without a dashboard restart."""
+def test_corr_route_calibrated_t_amb_field_follows_upload(agg_primed):
+    """``t_amb_stream``/``t_amb_field`` remain config-driven: the panda
+    upload can re-point the ambient-reference field at any published
+    metadata field, and the calibrated corr route must read T_amb from
+    wherever the upload points, without a dashboard restart. Uses
+    ``rfswitch_therm.temp_therm1`` as the redirect target here — not a
+    real deployment scenario (there is no second tempctrl channel to
+    swap to), just proof the config knob propagates end-to-end, at a
+    value distinct from the default ``tempctrl_load.T_now``."""
     _seed_onoff_cache(agg_primed, p_off_value=100, p_on_value=250)
+    MetadataWriter(agg_primed.transport_panda).add(
+        "rfswitch_therm",
+        {
+            "sensor_name": "rfswitch_therm",
+            "status": "update",
+            "volt_therm0": 2.5,
+            "volt_therm1": 2.6,
+            "volt_therm2": 2.5,
+            "temp_therm0": 25.0,
+            "temp_therm1": 27.3,
+            "temp_therm2": 25.0,
+        },
+    )
     upload = {
         **OBS_CFG,
         "calibration": {
             **OBS_CFG["calibration"],
-            "t_amb_stream": "tempctrl_lna",
+            "t_amb_stream": "rfswitch_therm",
+            "t_amb_field": "temp_therm1",
         },
     }
     ConfigStore(agg_primed.transport_panda).upload(upload)
@@ -1278,10 +1299,11 @@ def test_corr_route_calibrated_t_amb_stream_follows_upload(agg_primed):
     app.config.update(TESTING=True)
     body = app.test_client().get("/api/corr?calibrated=1").get_json()
     meta = body["data"]["calibration_meta"]
-    assert meta["t_amb_stream"] == "tempctrl_lna"
-    # tempctrl_lna's T_now is 25.1 C in the fixture (vs LOAD's 25.0) —
-    # proof the solve read the swapped stream, not the default.
-    assert meta["t_amb_k"] == pytest.approx(25.1 + 273.15, rel=1e-9)
+    assert meta["t_amb_stream"] == "rfswitch_therm"
+    assert meta["t_amb_field"] == "temp_therm1"
+    # temp_therm1 is 27.3 C (vs LOAD's default 25.0) — proof the solve
+    # read the redirected field, not the default.
+    assert meta["t_amb_k"] == pytest.approx(27.3 + 273.15, rel=1e-9)
 
 
 def test_file_route(client):
@@ -1306,8 +1328,8 @@ def test_config_route_exposes_thresholds_with_provenance(client):
     thresh = data["thresholds"]
     # adc.rms is YAML-override per bundled live_status_thresholds.yaml.
     assert thresh["adc.rms"]["source"] == "yaml_override"
-    # tempctrl_lna.T_now is derived from obs_config.
-    assert thresh["tempctrl_lna.T_now"]["source"] == "derived"
+    # tempctrl_load.T_now is derived from obs_config.
+    assert thresh["tempctrl_load.T_now"]["source"] == "derived"
 
 
 def test_index_page_includes_config_panel(client):
@@ -1724,20 +1746,26 @@ def test_solve_calibration_solves_from_rfamb_not_rfnoff(agg_primed):
 def test_solve_calibration_honors_t_ns_and_t_amb_knobs(agg_primed):
     """Both reference-temperature sources re-point via config — stream
     and field — with no silent fallback to the defaults. Both are sent
-    to tempctrl_lna (T_now = 25.1 C in the fixture) while the default
+    to a synthetic ``bench_probe`` stream (T_now = 25.1 C — not a real
+    producer, just proof the knobs propagate) while the default
     streams are removed from the snapshot, so a solve that fell back
     to rfswitch_therm / tempctrl_load would bail instead of solving."""
     _seed_onoff_cache(agg_primed)
     with agg_primed._lock:
         agg_primed.state.metadata_snapshot.pop("rfswitch_therm", None)
         agg_primed.state.metadata_snapshot.pop("tempctrl_load", None)
+        agg_primed.state.metadata_snapshot["bench_probe"] = {
+            "sensor_name": "bench_probe",
+            "status": "update",
+            "T_now": 25.1,
+        }
     obs_cfg = {
         "calibration": {
             "noise_diode_enr_db": 6.5,
             "noise_source_atten_db": 0.0,
-            "t_ns_stream": "tempctrl_lna",
+            "t_ns_stream": "bench_probe",
             "t_ns_field": "T_now",
-            "t_amb_stream": "tempctrl_lna",
+            "t_amb_stream": "bench_probe",
             "t_amb_field": "T_now",
         },
     }
@@ -1748,8 +1776,8 @@ def test_solve_calibration_honors_t_ns_and_t_amb_knobs(agg_primed):
     expected_k = 25.1 + 273.15
     assert meta["t_ns_k"] == pytest.approx(expected_k, rel=1e-9)
     assert meta["t_amb_k"] == pytest.approx(expected_k, rel=1e-9)
-    assert meta["t_ns_stream"] == "tempctrl_lna"
-    assert meta["t_amb_stream"] == "tempctrl_lna"
+    assert meta["t_ns_stream"] == "bench_probe"
+    assert meta["t_amb_stream"] == "bench_probe"
 
 
 def test_solve_calibration_none_thermistor_disables_cal_cleanly(

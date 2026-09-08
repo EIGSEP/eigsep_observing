@@ -26,7 +26,7 @@ without significant test rewrites.
 """
 
 import numpy as np
-from picohost.base import PicoPeltier
+from picohost.base import PicoTempCtrl
 from picohost.testing import TempCtrlEmulator
 
 # One corr file accumulates NTIMES integrations, each of duration
@@ -226,54 +226,64 @@ def _lidar_avg_entry(distance_m):
     }
 
 
-def tempctrl_post_handler_reading(stream_name, *, sensor_error=None):
-    """One per-channel tempctrl reading after ``_peltier_redis_handler``.
+def tempctrl_post_handler_reading(
+    stream_name="tempctrl_load", *, sensor_error=None
+):
+    """The tempctrl_load reading after ``_tempctrl_redis_handler``.
 
-    The firmware/emulator emits one combined ``sensor_name="tempctrl"``
-    dict per status tick; ``PicoPeltier._peltier_redis_handler`` fans
-    that into two ``writer.add(...)`` calls — one per channel — and is
-    the boundary that produces the actual Redis-stream shapes. Composing
-    the emulator with the handler here means every test fixture downstream
-    is anchored to the real producer output rather than drifting on
-    hand-typed steady-state values.
+    The firmware/emulator emits one ``sensor_name="tempctrl"`` dict per
+    status tick; ``PicoTempCtrl._tempctrl_redis_handler`` republishes it
+    as the flat ``tempctrl_load`` stream — the boundary that produces the
+    actual Redis-stream shape. Composing the emulator with the handler
+    here means every test fixture downstream is anchored to the real
+    producer output rather than drifting on hand-typed steady-state
+    values.
 
     Parameters
     ----------
-    sensor_error : str, optional
-        Channel name (``"LNA"`` or ``"LOAD"``) to put into the
-        railed-divider error state before the op tick, yielding that
-        stream's real error-row shape (``status: "error"``, null
-        T_now/resistance, voltage at the rail) — the row an unplugged
-        thermistor produces, e.g. during the reboot burst before
-        pico-manager replays the installed flags.
+    stream_name : str, optional
+        Kept for call-site compatibility; the only valid value is
+        ``"tempctrl_load"`` (the LNA channel and its Peltier/PI control
+        were removed — there is only one tempctrl stream now).
+    sensor_error : bool, optional
+        Put the channel into the railed-divider error state before the
+        op tick, yielding the real error-row shape (``status: "error"``,
+        null T_now/resistance, voltage at the rail) — the row an
+        unplugged thermistor produces, e.g. during the reboot burst
+        before pico-manager replays the installed flag.
     """
-    pel = PicoPeltier.__new__(PicoPeltier)
+    if stream_name != "tempctrl_load":
+        raise ValueError(
+            f"tempctrl_post_handler_reading: unknown stream {stream_name!r} "
+            "— the LNA channel was removed; only 'tempctrl_load' exists"
+        )
+    tc = PicoTempCtrl.__new__(PicoTempCtrl)
     captured = []
-    pel._base_redis_handler = lambda d: captured.append(dict(d))
+    tc._base_redis_handler = lambda d: captured.append(dict(d))
     # One op() before status, mirroring the firmware main loop: before the
-    # first sample tick the channels report invalid data (status "error",
+    # first sample tick the channel reports invalid data (status "error",
     # null T_now/resistance), which is not the steady state this fixture
     # is meant to pin.
     emu = TempCtrlEmulator()
-    if sensor_error is not None:
-        emu.inject_sensor_error(sensor_error)
+    if sensor_error:
+        emu.inject_sensor_error()
     emu.op()
-    pel._peltier_redis_handler(emu.get_status())
+    tc._tempctrl_redis_handler(emu.get_status())
     for entry in captured:
         if entry.get("sensor_name") == stream_name:
             return entry
     raise AssertionError(
-        f"_peltier_redis_handler did not emit a {stream_name!r} entry; "
+        f"_tempctrl_redis_handler did not emit a {stream_name!r} entry; "
         f"got sensor_names={[e.get('sensor_name') for e in captured]}"
     )
 
 
 def _tempctrl_channel_entry(sensor_name, t_now, timestamp):
-    """One per-sample tempctrl channel (``tempctrl_lna`` or ``tempctrl_load``).
+    """One per-sample tempctrl_load channel entry.
 
     Steady-state fields are derived from
     ``tempctrl_post_handler_reading`` so the fixture stays anchored to
-    real ``TempCtrlEmulator`` + ``PicoPeltier._peltier_redis_handler``
+    real ``TempCtrlEmulator`` + ``PicoTempCtrl._tempctrl_redis_handler``
     output. Only ``T_now`` and ``timestamp`` are per-sample test inputs;
     everything else (``T_target``, drive flags, watchdog) is the
     emulator's steady-state value.
@@ -341,10 +351,6 @@ CORR_METADATA = {
     "imu_az": [_imu_az_avg_entry(0.002 * i) for i in range(NTIMES)],
     "lidar": [_lidar_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
-    "tempctrl_lna": [
-        _tempctrl_channel_entry("tempctrl_lna", 30.0 + 0.01 * i, 1.0 + i)
-        for i in range(NTIMES)
-    ],
     "tempctrl_load": [
         _tempctrl_channel_entry("tempctrl_load", 25.0 + 0.01 * i, 1.0 + i)
         for i in range(NTIMES)

@@ -788,38 +788,34 @@ function renderHostTile(tileId, label, host) {
 
 // ---- metadata + adc + tempctrl + rfswitch --------------------------
 
-// Render the two tempctrl streams (LNA, LOAD) into side-by-side
-// sub-blocks. Each block shows status/age, the live temperature vs
-// setpoint, the current drive level, the enable/active control flags,
-// and the watchdog fault flag.
+// Render the tempctrl LOAD stream (the only surviving tempctrl
+// channel; the LNA/Peltier channel was removed). Shows status/age,
+// the live temperature vs setpoint, the current drive level, the
+// enable/active control flags, and the watchdog fault flag.
 function renderTempctrlTiles(meta) {
-  const channels = [
-    { label: "LNA", stream: "tempctrl_lna", containerId: "tempctrl-lna-block" },
-    { label: "LOAD", stream: "tempctrl_load", containerId: "tempctrl-load-block" },
-  ];
-  for (const { label, stream, containerId } of channels) {
-    const container = document.getElementById(containerId);
-    if (!container) continue;
-    container.replaceChildren();
-    const entry = meta[stream];
-    if (!entry) {
-      container.textContent = `no ${label.toLowerCase()} data`;
-      continue;
-    }
-    const value = entry.value || {};
-    const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
-    const dClass = (entry.classify || {})[`${stream}.drive_level`] || "unknown";
-    container.appendChild(makePaneStatusHeader(label, entry));
-    appendTileRow(container, "now", tileClass(tClass), `${fmt(value.T_now, 2)} C`);
-    appendValueRow(container, "set", `${fmt(value.T_target, 2)} C`);
-    appendTileRow(container, "drive", tileClass(dClass), fmt(value.drive_level, 2));
-    appendValueRow(container, "enabled", boolText(value.enabled));
-    appendValueRow(container, "active", boolText(value.active));
-    const wdTripped = value.watchdog_tripped === true;
-    const wdCls = wdTripped ? "danger" : (value.watchdog_tripped === false ? "ok" : "unknown");
-    const wdText = wdTripped ? "TRIPPED" : (value.watchdog_tripped === false ? "ok" : "—");
-    appendTileRow(container, "watchdog", tileClass(wdCls), wdText);
+  const label = "LOAD";
+  const stream = "tempctrl_load";
+  const container = document.getElementById("tempctrl-load-block");
+  if (!container) return;
+  container.replaceChildren();
+  const entry = meta[stream];
+  if (!entry) {
+    container.textContent = `no ${label.toLowerCase()} data`;
+    return;
   }
+  const value = entry.value || {};
+  const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
+  const dClass = (entry.classify || {})[`${stream}.drive_level`] || "unknown";
+  container.appendChild(makePaneStatusHeader(label, entry));
+  appendTileRow(container, "now", tileClass(tClass), `${fmt(value.T_now, 2)} C`);
+  appendValueRow(container, "set", `${fmt(value.T_target, 2)} C`);
+  appendTileRow(container, "drive", tileClass(dClass), fmt(value.drive_level, 2));
+  appendValueRow(container, "enabled", boolText(value.enabled));
+  appendValueRow(container, "active", boolText(value.active));
+  const wdTripped = value.watchdog_tripped === true;
+  const wdCls = wdTripped ? "danger" : (value.watchdog_tripped === false ? "ok" : "unknown");
+  const wdText = wdTripped ? "TRIPPED" : (value.watchdog_tripped === false ? "ok" : "—");
+  appendTileRow(container, "watchdog", tileClass(wdCls), wdText);
 }
 
 function boolText(v) {
@@ -1246,19 +1242,17 @@ function renderConfigValues(cfg) {
     atten !== null && atten !== undefined ? `${fmt(atten, 1)} dB` : "—",
   );
   const settings = cfg.tempctrl_settings || {};
-  for (const ch of ["LNA", "LOAD"]) {
-    const c = settings[ch] || {};
-    if (c.installed === false) {
-      // Deliberate hardware descope, not a fault — plain text. The
-      // channel's tiles/bands are gone from the rest of the dashboard;
-      // this row is where the operator confirms that's configured.
-      appendValueRow(container, `tempctrl ${ch}`, "descoped (installed: false)");
-      continue;
-    }
+  const loadCfg = settings.LOAD || {};
+  if (loadCfg.installed === false) {
+    // Deliberate hardware descope, not a fault — plain text. The
+    // channel's tiles/bands are gone from the rest of the dashboard;
+    // this row is where the operator confirms that's configured.
+    appendValueRow(container, "tempctrl LOAD", "descoped (installed: false)");
+  } else {
     appendValueRow(
       container,
-      `tempctrl ${ch}`,
-      `${fmt(c.target_C, 1)}±${fmt(c.hysteresis_C, 1)} °C · clamp ${fmt(c.clamp, 2)}`,
+      "tempctrl LOAD",
+      `${fmt(loadCfg.target_C, 1)}±${fmt(loadCfg.hysteresis_C, 1)} °C`,
     );
   }
 }

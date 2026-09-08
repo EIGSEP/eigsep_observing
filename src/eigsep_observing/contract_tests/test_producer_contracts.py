@@ -35,7 +35,7 @@ from picohost import PicoPotentiometer
 from picohost.base import (
     PicoIMU,
     PicoLidar,
-    PicoPeltier,
+    PicoTempCtrl,
     PicoRFSwitch,
     redis_handler,
 )
@@ -144,8 +144,8 @@ def _motor_post_handler_reading():
     return captured
 
 
-def _peltier_post_handler_reading(stream_name):
-    """Return one per-channel tempctrl reading after _peltier_redis_handler.
+def _tempctrl_post_handler_reading(stream_name):
+    """Return the tempctrl_load reading after _tempctrl_redis_handler.
 
     Delegates to ``tempctrl_post_handler_reading`` in ``_test_fixtures``
     so the contract test and the shared golden fixtures (and the inline
@@ -270,8 +270,7 @@ SENSOR_EMULATORS = {
     "imu_az": lambda: _imu_post_handler_reading("imu_az", 6),
     "rfswitch": lambda: _rfswitch_post_handler_readings()[0],
     "rfswitch_therm": lambda: _rfswitch_post_handler_readings()[1],
-    "tempctrl_lna": lambda: _peltier_post_handler_reading("tempctrl_lna"),
-    "tempctrl_load": lambda: _peltier_post_handler_reading("tempctrl_load"),
+    "tempctrl_load": lambda: _tempctrl_post_handler_reading("tempctrl_load"),
     "lidar": lambda: _lidar_post_handler_readings()[0],
     "potmon": _potmon_post_handler_reading,
     "motor": _motor_post_handler_reading,
@@ -281,20 +280,32 @@ SENSOR_EMULATORS = {
 
 
 def test_uninstalled_tempctrl_channel_publishes_nothing():
-    """Descope contract: a channel whose firmware ``installed`` flag is
-    false is fanned out as *nothing* — clean stream absence downstream
-    (no corr-file column, no snapshot staleness warnings) rather than a
-    permanent error stream off the dead thermistor divider. The
-    surviving channel still conforms to its schema, and the installed
-    flag itself never enters the published per-channel shape, so
-    ``_PELTIER_SCHEMA`` is untouched by the descope feature."""
-    pel = PicoPeltier.__new__(PicoPeltier)
+    """Descope contract: when the firmware ``installed`` flag is false,
+    LOAD is fanned out as *nothing* — clean stream absence downstream (no
+    corr-file column, no snapshot staleness warnings) rather than a
+    permanent error stream off the dead thermistor divider. There is only
+    one tempctrl channel (LNA and its Peltier/PI control were removed),
+    so descoping it means the whole stream disappears."""
+    tc = PicoTempCtrl.__new__(PicoTempCtrl)
     captured = []
-    pel._base_redis_handler = lambda d: captured.append(dict(d))
+    tc._base_redis_handler = lambda d: captured.append(dict(d))
     emu = TempCtrlEmulator()
-    emu.server({"LNA_installed": 0})
+    emu.server({"LOAD_installed": 0})
     emu.op()
-    pel._peltier_redis_handler(emu.get_status())
+    tc._tempctrl_redis_handler(emu.get_status())
+    assert captured == []
+
+
+def test_installed_tempctrl_channel_conforms_to_schema():
+    """The installed (default) case: LOAD publishes exactly one entry
+    conforming to its schema, and the installed flag itself never enters
+    the published shape."""
+    tc = PicoTempCtrl.__new__(PicoTempCtrl)
+    captured = []
+    tc._base_redis_handler = lambda d: captured.append(dict(d))
+    emu = TempCtrlEmulator()
+    emu.op()
+    tc._tempctrl_redis_handler(emu.get_status())
     assert [e["sensor_name"] for e in captured] == ["tempctrl_load"]
     entry = captured[0]
     assert "installed" not in entry

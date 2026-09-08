@@ -230,9 +230,9 @@ def _solve_calibration(
     # RF-switch PCB thermistor nearest the pad (channel assignment is
     # config, see obs_config.yaml; the reading may be None when the
     # channel is dead/shorted or ADC-saturated). t_amb_*: the RFAMB
-    # ambient load, riding the LOAD Peltier stream; the tempctrl
-    # hot-swap contingency re-points it at tempctrl_lna (see
-    # OPERATIONS.md "Tempctrl channel descope and hot-swap").
+    # ambient load, riding the tempctrl LOAD stream (the only tempctrl
+    # channel). ``t_amb_stream``/``t_amb_field`` remain config-driven
+    # so a deployment can point them elsewhere if needed.
     t_ns_stream = cal_cfg.get("t_ns_stream") or "rfswitch_therm"
     t_ns_field = cal_cfg.get("t_ns_field") or "temp_therm2"
     t_amb_stream = cal_cfg.get("t_amb_stream") or "tempctrl_load"
@@ -888,9 +888,9 @@ def _config_payload(
         "use_switches": obs_cfg.get("use_switches", False),
         "use_vna": obs_cfg.get("use_vna", False),
         # Effective calibration block so the config panel can show the
-        # reference-temperature routing a hot-swap re-pointed (the
-        # t_ns_*/t_amb_* knobs follow the upload; the ENR/pad physical
-        # constants are dashboard-local).
+        # reference-temperature routing as currently configured (the
+        # t_ns_*/t_amb_* knobs follow the panda's config upload; the
+        # ENR/pad physical constants are dashboard-local).
         "calibration": obs_cfg.get("calibration", {}) or {},
         "thresholds": thresholds.as_dict(),
     }
@@ -936,8 +936,8 @@ def create_app(aggregator: LiveStatusAggregator) -> Flask:
         state = aggregator.snapshot()
         calibrated = request.args.get("calibrated") == "1"
         # Effective config so the display calibration's t_ns_*/t_amb_*
-        # reference-temperature routing follows a hot-swap announced
-        # via the panda's config upload.
+        # reference-temperature routing follows changes announced via
+        # the panda's config upload.
         return jsonify(
             _envelope(
                 _corr_payload(
