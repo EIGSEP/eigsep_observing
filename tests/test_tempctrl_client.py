@@ -24,13 +24,15 @@ SETTINGS = {
         "Kp": 0.25,
         "Ki": 0.01,
     },
+    # LOAD is a single low-side FET heater under on/off hysteresis, not
+    # a Peltier under PI control — it has no clamp/Kp/Ki at all, so those
+    # keys are omitted here (TempCtrlClient still accepts them generically
+    # if a caller passes them; firmware just silently ignores LOAD_clamp/
+    # LOAD_Kp/LOAD_Ki, see PicoPeltier.set_clamp's docstring).
     "LOAD": {
         "enable": True,
         "target_C": 22.0,
         "hysteresis_C": 0.4,
-        "clamp": 0.7,
-        "Kp": 0.18,
-        "Ki": 0.02,
     },
 }
 
@@ -61,7 +63,11 @@ def test_apply_settings_pushes_all_fields(client):
     """apply_settings walks watchdog → clamp → setpoint → enable, and
     every field ends up on the emulator. Commands are dispatched
     asynchronously through PicoManager's cmd_loop so poll for the
-    final expected state."""
+    final expected state.
+
+    LOAD (a single FET heater, on/off hysteresis) has no clamp/Kp/Ki —
+    only T_target/hysteresis/enabled are checked for it.
+    """
     tc = TempCtrlClient(client.transport, settings=SETTINGS)
     tc.apply_settings()
     em = _emulator(client)
@@ -70,15 +76,12 @@ def test_apply_settings_pushes_all_fields(client):
         lambda: (
             em.watchdog_timeout_ms == 25000
             and em.lna.clamp == pytest.approx(0.5)
-            and em.load.clamp == pytest.approx(0.7)
             and em.lna.T_target == pytest.approx(27.5)
             and em.load.T_target == pytest.approx(22.0)
             and em.lna.hysteresis == pytest.approx(0.3)
             and em.load.hysteresis == pytest.approx(0.4)
             and em.lna.Kp == pytest.approx(0.25)
             and em.lna.Ki == pytest.approx(0.01)
-            and em.load.Kp == pytest.approx(0.18)
-            and em.load.Ki == pytest.approx(0.02)
             and em.lna.enabled is True
             and em.load.enabled is True
         )
@@ -87,9 +90,8 @@ def test_apply_settings_pushes_all_fields(client):
         f"LNA(clamp={em.lna.clamp}, T_target={em.lna.T_target}, "
         f"hyst={em.lna.hysteresis}, Kp={em.lna.Kp}, Ki={em.lna.Ki}, "
         f"enabled={em.lna.enabled}), "
-        f"LOAD(clamp={em.load.clamp}, T_target={em.load.T_target}, "
-        f"hyst={em.load.hysteresis}, Kp={em.load.Kp}, Ki={em.load.Ki}, "
-        f"enabled={em.load.enabled})"
+        f"LOAD(T_target={em.load.T_target}, "
+        f"hyst={em.load.hysteresis}, enabled={em.load.enabled})"
     )
 
 
@@ -136,12 +138,13 @@ def test_set_temperature_only_pushes_specified_channel(client):
 
 
 def test_set_clamp_partial(client):
+    """LOAD (a single FET heater) has no clamp attribute at all — set_clamp
+    only has an LNA-side effect to verify."""
     em = _emulator(client)
-    load_before = em.load.clamp
     tc = TempCtrlClient(client.transport, settings={})
     tc.set_clamp(LNA=0.35)
     assert _wait_until(lambda: em.lna.clamp == pytest.approx(0.35))
-    assert em.load.clamp == pytest.approx(load_before)
+    assert not hasattr(em.load, "clamp")
 
 
 def test_set_enable_requires_at_least_one_channel(client):
@@ -173,28 +176,25 @@ def test_set_enable_uses_settings_for_unspecified_channel(client):
 
 
 def test_set_gains_pushes_to_emulator(client):
-    """Full-kwargs set_gains lands on both channels."""
+    """Full-kwargs set_gains lands on LNA; LOAD (a single FET heater
+    under on/off hysteresis, not a PI loop) has no Kp/Ki at all, so
+    LOAD_Kp/LOAD_Ki are silently ignored firmware-side."""
     em = _emulator(client)
     tc = TempCtrlClient(client.transport, settings={})
     tc.set_gains(LNA_Kp=0.3, LNA_Ki=0.02, LOAD_Kp=0.15, LOAD_Ki=0.005)
     assert _wait_until(
         lambda: (
-            em.lna.Kp == pytest.approx(0.3)
-            and em.lna.Ki == pytest.approx(0.02)
-            and em.load.Kp == pytest.approx(0.15)
-            and em.load.Ki == pytest.approx(0.005)
+            em.lna.Kp == pytest.approx(0.3) and em.lna.Ki == pytest.approx(0.02)
         )
-    ), (
-        f"gains did not land: LNA(Kp={em.lna.Kp}, Ki={em.lna.Ki}), "
-        f"LOAD(Kp={em.load.Kp}, Ki={em.load.Ki})"
-    )
+    ), f"gains did not land: LNA(Kp={em.lna.Kp}, Ki={em.lna.Ki})"
+    assert not hasattr(em.load, "Kp")
+    assert not hasattr(em.load, "Ki")
 
 
 def test_set_gains_partial_leaves_other_channel(client):
-    """Partial-kwargs set_gains touches only the named channel."""
+    """Partial-kwargs set_gains touches only the named channel. LOAD has
+    no Kp/Ki attribute at all (single FET heater, not a PI loop)."""
     em = _emulator(client)
-    load_Kp_before = em.load.Kp
-    load_Ki_before = em.load.Ki
     tc = TempCtrlClient(client.transport, settings={})
     tc.set_gains(LNA_Kp=0.4, LNA_Ki=0.03)
     assert _wait_until(
@@ -203,8 +203,8 @@ def test_set_gains_partial_leaves_other_channel(client):
             and em.lna.Ki == pytest.approx(0.03)
         )
     )
-    assert em.load.Kp == pytest.approx(load_Kp_before)
-    assert em.load.Ki == pytest.approx(load_Ki_before)
+    assert not hasattr(em.load, "Kp")
+    assert not hasattr(em.load, "Ki")
 
 
 def test_set_gains_no_kwargs_is_no_op(client):
@@ -493,35 +493,33 @@ def test_get_status_skips_uninstalled_channel_stream(off_ch, on_ch):
 
 def test_set_cooling_enabled_pushes_to_emulator(client):
     """``set_cooling_enabled`` flips the firmware-side cooling_enabled
-    flag on the addressed channel(s)."""
+    flag on LNA. LOAD is a single low-side FET heater with no reverse
+    (cooling) direction to guard, so it has no cooling_enabled attribute
+    at all — LOAD_cooling_enabled is silently ignored firmware-side."""
     tc = TempCtrlClient(client.transport)
     em = _emulator(client)
     assert em.lna.cooling_enabled is True
-    assert em.load.cooling_enabled is True
+    assert not hasattr(em.load, "cooling_enabled")
 
     tc.set_cooling_enabled(LNA=False, LOAD=True)
 
     assert _wait_until(
-        lambda: (
-            em.lna.cooling_enabled is False and em.load.cooling_enabled is True
-        )
-    ), (
-        f"cooling_enabled did not propagate: "
-        f"LNA={em.lna.cooling_enabled}, LOAD={em.load.cooling_enabled}"
-    )
+        lambda: em.lna.cooling_enabled is False
+    ), f"cooling_enabled did not propagate: LNA={em.lna.cooling_enabled}"
+    assert not hasattr(em.load, "cooling_enabled")
 
 
 def test_set_cooling_enabled_partial_leaves_other_channel(client):
-    """Partial-kwargs ``set_cooling_enabled`` touches only the named
-    channel (matches ``set_clamp`` / ``set_gains`` shape)."""
+    """Partial-kwargs ``set_cooling_enabled`` touches only LNA (matches
+    ``set_clamp`` / ``set_gains`` shape). LOAD has no cooling_enabled
+    attribute at all (single FET heater, no cooling direction)."""
     tc = TempCtrlClient(client.transport)
     em = _emulator(client)
 
     tc.set_cooling_enabled(LNA=False)
 
     assert _wait_until(lambda: em.lna.cooling_enabled is False)
-    # LOAD was never sent; firmware default (True) untouched.
-    assert em.load.cooling_enabled is True
+    assert not hasattr(em.load, "cooling_enabled")
 
 
 def test_set_cooling_enabled_no_kwargs_is_no_op(client):
@@ -536,7 +534,9 @@ def test_set_cooling_enabled_no_kwargs_is_no_op(client):
 
 def test_apply_settings_applies_cooling_enabled(client):
     """``cooling_enabled`` field in the yaml settings reaches the
-    emulator via ``apply_settings``."""
+    emulator via ``apply_settings`` for LNA. LOAD (single FET heater) has
+    no cooling_enabled attribute — the yaml value is accepted (generic
+    per-channel schema) but silently ignored firmware-side."""
     settings = {
         "LNA": {"enable": True, "cooling_enabled": False, "target_C": 25.0},
         "LOAD": {"enable": True, "cooling_enabled": True, "target_C": 25.0},
@@ -545,13 +545,9 @@ def test_apply_settings_applies_cooling_enabled(client):
     tc.apply_settings()
     em = _emulator(client)
     assert _wait_until(
-        lambda: (
-            em.lna.cooling_enabled is False and em.load.cooling_enabled is True
-        )
-    ), (
-        f"apply_settings did not propagate cooling_enabled: "
-        f"LNA={em.lna.cooling_enabled}, LOAD={em.load.cooling_enabled}"
-    )
+        lambda: em.lna.cooling_enabled is False
+    ), f"apply_settings did not propagate cooling_enabled: LNA={em.lna.cooling_enabled}"
+    assert not hasattr(em.load, "cooling_enabled")
 
 
 def test_apply_settings_order_cooling_before_gains():

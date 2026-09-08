@@ -836,14 +836,26 @@ _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 # imu_az (antenna azimuth turntable, app_id 6): |theta| elevation only.
 _IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
-# tempctrl publishes two flat streams (one per Peltier channel), each
-# matching this schema. The producer is
-# `picohost.base.PicoPeltier._peltier_redis_handler`, which fans the
-# firmware's combined tick into two `writer.add(...)` calls, stripping
-# the `LNA_`/`LOAD_` prefix and duplicating the device-wide
-# `watchdog_tripped` / `watchdog_timeout_ms` fields into both streams.
-# With per-stream `status`, both streams flow through the generic
-# `_avg_sensor_values` reduction like every other sensor.
+# tempctrl publishes two flat streams, tempctrl_lna and tempctrl_load.
+# The producer is `picohost.base.PicoPeltier._peltier_redis_handler`,
+# which fans the firmware's combined tick into two `writer.add(...)`
+# calls, stripping the `LNA_`/`LOAD_` prefix and duplicating the
+# device-wide `watchdog_tripped` / `watchdog_timeout_ms` fields into
+# both streams. With per-stream `status`, both streams flow through the
+# generic `_avg_sensor_values` reduction like every other sensor.
+#
+# The two channels are NOT the same schema (pico-firmware, LOAD switched
+# from a Peltier to a single low-side FET heater; LNA is unchanged):
+# tempctrl_lna is still a Peltier under PI control (_PELTIER_SCHEMA,
+# analog thermistor + Kp/Ki/integral/clamp/cooling_enabled), while
+# tempctrl_load is a single FET heater under on/off hysteresis
+# (_LOAD_HEATER_SCHEMA) — it has no reverse (cooling) drive direction
+# and no PWM duty to modulate, so it has no PI/clamp/cooling_enabled
+# fields at all. The once-planned "convert LNA to the same analog-
+# thermistor + PI design too" track (pico-firmware #109/#150,
+# feat/tempctrl-status-redesign) is superseded — the project is moving
+# off Peltier devices entirely — so don't try to unify the two schemas;
+# expect tempctrl_lna's shape to change again if/when LNA is replaced.
 #
 # A channel descoped via the firmware `installed` flag
 # (tempctrl_settings.{LNA,LOAD}.installed: false) publishes NO stream
@@ -902,6 +914,40 @@ _PELTIER_SCHEMA = {
     "integral": float,
 }
 
+# tempctrl_load: LOAD is a single low-side FET heater behind an analog
+# NTC thermistor (30k, Beta=3943, plain 10k pull-up — a different part
+# on a different divider than LNA's onboard PCB thermistor), under
+# on/off hysteresis control rather than LNA's continuous PI drive on a
+# Peltier. Same producer (`PicoPeltier._peltier_redis_handler`) and same
+# rate-guard / sticky stall+runaway latch / installed-flag scaffolding
+# as _PELTIER_SCHEMA (see LoadHeater in pico-firmware's tempctrl.h), but
+# no cooling_enabled/clamp/Kp/Ki/integral — those are PI/bidirectional-
+# drive concepts a single FET doesn't have, so firmware never sends them
+# for this channel. runaway_tripped additionally latches on LOAD hitting
+# its absolute LOAD_MAX_SAFE_TEMP_C safety ceiling (100 C), independent
+# of whatever target/hysteresis the host configured.
+_LOAD_HEATER_SCHEMA = {
+    "sensor_name": str,
+    "status": str,
+    "app_id": int,
+    "watchdog_tripped": bool,
+    "watchdog_timeout_ms": int,
+    "T_now": float,
+    "voltage": float,
+    "resistance": float,
+    "timestamp": float,
+    "T_target": float,
+    # 0.0/1.0: the FET is either fully on or fully off, no PWM duty.
+    "drive_level": float,
+    "enabled": bool,
+    "active": bool,
+    "sensor_tripped": bool,
+    "sensor_rejects": int,
+    "stall_tripped": bool,
+    "runaway_tripped": bool,
+    "hysteresis": float,
+}
+
 # `potmon` (potentiometer monitor): the producer is `PotMonEmulator` +
 # `PicoPotentiometer._pot_redis_handler`, which augments the raw
 # voltages with calibration slope/intercept and the derived angle.
@@ -927,7 +973,7 @@ SENSOR_SCHEMAS = {
     "imu_el": _IMU_EL_SCHEMA,
     "imu_az": _IMU_AZ_SCHEMA,
     "tempctrl_lna": _PELTIER_SCHEMA,
-    "tempctrl_load": _PELTIER_SCHEMA,
+    "tempctrl_load": _LOAD_HEATER_SCHEMA,
     "potmon": {
         "sensor_name": str,
         "status": str,

@@ -1,0 +1,111 @@
+# Corr-only observing config: RF switching and VNA disabled, LOAD
+# thermistor/FET heater held at a fixed setpoint via tempctrl. Derived
+# from obs_config.yaml — see that file for the full field reference.
+# Use with: eigsep-panda --cfg_file <path to this file>
+# (eigsep-observe on the ground computer needs no flag — it always
+# records corr and is unaffected by use_switches/use_vna/use_tempctrl.)
+
+# IP addresses
+rpi_ip: "10.10.10.10"
+panda_ip: "10.10.10.11"
+
+# corr filewriter
+corr_save_dir: "/media/eigsep/T7/data"
+corr_ntimes: 240
+
+# switches — disabled. The RF switch freezes wherever it currently
+# sits (no reset to RFANT); set it manually beforehand if a specific
+# path is needed.
+use_switches: false
+switch_schedule:  # seconds per measurement (unused while use_switches is false)
+  RFANT: 3600  # sky
+  RFNOFF: 60  # noise source off (offline cross-check)
+  RFNON: 60  # noise source on (Y-factor hot reference)
+  RFAMB: 60  # ambient load (Y-factor cold reference)
+  RFSP1_SHORT: 60  # Spare 1 port, SHORT termination, see switch_connections
+  RFSP1_OPEN: 60  # Spare 1 port, OPEN termination, see switch_connections
+
+# What is physically connected to the spare rfswitch ports right now.
+# Purely descriptive — no code reads it. It rides into every corr and
+# VNA file header via the obs_config embed, so each file records the
+# wiring that was active when it was written. Update on every rewire.
+switch_connections:
+  SP1: "long coax cable -> failsafe termination switch (SHORT when unpowered/default, OPEN when driven from potmon GPIO 27)"  # operator: record cable length on install
+  SP2: null  # unconnected
+
+# vna — disabled. eigsep-observe's VNA file-writing thread still
+# starts but idles with nothing to write, so effectively no VNA files.
+use_vna: false
+vna_interval: 3600  # seconds between VNA measurements (unused)
+vna_ip: "127.0.0.1"
+vna_port: 5025
+vna_timeout: 1000  # in seconds
+vna_settings:
+  fstart: 1000000.0  # in Hz
+  fstop: 250000000.0  # in Hz
+  npoints: 1000
+  ifbw: 100.0  # in Hz
+  power_dBm:
+    ant: 0.0
+    rec: -40.0
+
+# motor
+use_motor: false
+motor_interval: 3600  # seconds between scans
+motor_failure_retry_s: 60  # shorter wait after a failed scan to home
+motor_scan: {}  # kwargs forwarded to MotorClient.scan; {}
+motor_client_kwargs: {}
+home_after_scan: false  # closed-loop return-to-home after each scan
+motor_homer_kwargs:     # forwarded to MotorHomer (only used when home_after_scan: true)
+  tol_az_deg: 3.0
+  tol_el_deg: 2.0
+  settle_s: 10.0
+  damping: 0.5
+  max_iters: 6
+  reset_count: true
+
+# motion-switch coordination (irrelevant while use_switches/use_motor
+# are both false, left at default)
+serialize_motion_and_switching: false
+
+# vna position sweep (unused while use_vna is false)
+vna_position_sweep:
+  az_grid_deg: [0, 90, 180, 270]
+  el_grid_deg: [0, 90, 180, 270]
+  settle_s: 2.0  # post-move dwell before VNA fires
+
+# live-status first-order Y-factor calibration (display-only; harmless
+# to leave in place even with switching disabled — it just won't have
+# fresh RFNON/RFAMB integrations to work from)
+calibration:
+  noise_diode_enr_db: 35.0  # diode ENR at its output plane (dB re 290 K)
+  noise_source_atten_db: 30.0  # pad between diode and switch (dB)
+  t_ns_stream: rfswitch_therm
+  t_ns_field: temp_therm2
+  t_amb_stream: tempctrl_load
+  t_amb_field: T_now
+
+# tempctrl — enabled, LOAD channel only, held at a fixed setpoint via
+# the FET/hysteresis heater. LNA left at its normal defaults
+# (untouched by this config's purpose); flip LNA.enable/installed to
+# false here too if that channel's hardware isn't present.
+use_tempctrl: true
+tempctrl_interval: 60  # seconds between setpoint re-apply + health check
+tempctrl_settings:
+  watchdog_timeout_ms: 30000
+  LNA:
+    installed: true
+    enable: true
+    target_C: 25.0
+    hysteresis_C: 0.5
+    clamp: 0.6  # max drive duty [0, 1]
+    cooling_enabled: false
+  LOAD:
+    installed: true
+    enable: true
+    target_C: 50.0
+    hysteresis_C: 0.5
+    # clamp/cooling_enabled/Kp/Ki are no-ops for LOAD (single FET
+    # heater, on/off hysteresis, no PI/PWM) — left out here since they
+    # do nothing; harmless to add back if you want one config file
+    # shared with the LNA/Peltier shape.
