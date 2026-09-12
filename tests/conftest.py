@@ -89,17 +89,10 @@ def dummy_cfg(module_tmpdir):
         "tempctrl_interval": 1,
         "tempctrl_settings": {
             "watchdog_timeout_ms": 30000,
-            "LNA": {
-                "enable": True,
-                "target_C": 25.0,
-                "hysteresis_C": 0.5,
-                "clamp": 0.6,
-            },
             "LOAD": {
                 "enable": True,
                 "target_C": 25.0,
                 "hysteresis_C": 0.5,
-                "clamp": 0.6,
             },
         },
     }

@@ -2,9 +2,8 @@
 #
 # Signals whose bands follow from obs_config / corr_header are
 # computed in eigsep_observing.live_status.signals.default_thresholds
-# and do NOT need to appear here. Examples: tempctrl_lna.T_now,
-# tempctrl_lna.drive_level, corr.acc_cadence_s,
-# file.seconds_since_write.
+# and do NOT need to appear here. Examples: tempctrl_load.T_now,
+# corr.acc_cadence_s, file.seconds_since_write.
 #
 # This file holds:
 #   - signals with no config-derived source (ADC RMS, clipping),
@@ -38,8 +37,8 @@ corr.auto_mag_median:
   danger:  null
 
 # Whole-system current (ACS724-10AB inline on the shared 5 V feed).
-# Nominal bands: panda + both Peltiers draws ~3 A; the sensor saturates
-# ~12.5 A. Tune against a measured baseline — these are starting values.
+# The sensor saturates ~12.5 A. Tune against a measured baseline —
+# these are starting values, not a derived spec.
 system_current.current_a:
   healthy: [0.0, 5.0]
   danger:  [0.0, 8.0]
@@ -72,6 +71,6 @@ orientation.el_spread_deg:
 
 # Escape hatch: any entry here overrides the derived default for that
 # signal. Example:
-# tempctrl_lna.T_now:
+# tempctrl_load.T_now:
 #   healthy: [22.0, 28.0]
 #   danger:  [18.0, 32.0]

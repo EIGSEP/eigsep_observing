@@ -2276,65 +2276,7 @@ def test_use_tempctrl_true_builds_client(transport, dummy_cfg):
         assert client.tempctrl.transport is client.transport
         # Settings from dummy_config land on the client object.
         assert client.tempctrl.settings.get("watchdog_timeout_ms") == 30000
-        assert client.tempctrl.settings["LNA"]["target_C"] == 25.0
-    finally:
-        client.stop()
-
-
-def test_init_tempctrl_warns_when_cooling_disabled(
-    transport, dummy_cfg, caplog
-):
-    """``cooling_enabled: False`` is a deliberate non-default safety
-    setting — surface it loudly at init so operators know the
-    asymmetric-clamp guard is active. Fires per affected channel."""
-    cfg = dict(dummy_cfg)
-    cfg["use_tempctrl"] = True
-    cfg["tempctrl_settings"] = {
-        "LNA": {
-            "enable": True,
-            "cooling_enabled": False,
-            "target_C": 25.0,
-        },
-        "LOAD": {
-            "enable": True,
-            "cooling_enabled": True,
-            "target_C": 25.0,
-        },
-    }
-    caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, cfg=cfg)
-    try:
-        warnings = [
-            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
-        ]
-        # LNA fires (cooling disabled); LOAD does not.
-        assert any("LNA cooling disabled" in m for m in warnings), (
-            f"expected LNA cooling warning in: {warnings}"
-        )
-        assert not any("LOAD cooling disabled" in m for m in warnings), (
-            f"unexpected LOAD warning in: {warnings}"
-        )
-    finally:
-        client.stop()
-
-
-def test_init_tempctrl_no_warning_when_cooling_default(
-    transport, dummy_cfg, caplog
-):
-    """Default config (no ``cooling_enabled`` key) leaves firmware
-    default True — no cooling-disabled warning should fire."""
-    cfg = dict(dummy_cfg)
-    cfg["use_tempctrl"] = True
-    # dummy_cfg already has tempctrl_settings without cooling_enabled.
-    caplog.set_level("WARNING")
-    client = DummyPandaClient(transport, cfg=cfg)
-    try:
-        warnings = [
-            r.getMessage() for r in caplog.records if r.levelname == "WARNING"
-        ]
-        assert not any("cooling disabled" in m for m in warnings), (
-            f"unexpected cooling warning with default config: {warnings}"
-        )
+        assert client.tempctrl.settings["LOAD"]["target_C"] == 25.0
     finally:
         client.stop()
 
@@ -2344,12 +2286,11 @@ def test_init_tempctrl_warns_when_channel_uninstalled(
 ):
     """``installed: False`` is a deliberate hardware descope — surface
     it once at init so operators know the channel is dark on purpose,
-    not from a fault. Fires per affected channel."""
+    not from a fault."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_settings"] = {
-        "LNA": {"installed": False, "enable": False},
-        "LOAD": {"installed": True, "enable": True, "target_C": 25.0},
+        "LOAD": {"installed": False, "enable": False},
     }
     caplog.set_level("WARNING")
     client = DummyPandaClient(transport, cfg=cfg)
@@ -2357,11 +2298,8 @@ def test_init_tempctrl_warns_when_channel_uninstalled(
         warnings = [
             r.getMessage() for r in caplog.records if r.levelname == "WARNING"
         ]
-        assert any("LNA not installed" in m for m in warnings), (
-            f"expected LNA not-installed warning in: {warnings}"
-        )
-        assert not any("LOAD not installed" in m for m in warnings), (
-            f"unexpected LOAD warning in: {warnings}"
+        assert any("LOAD not installed" in m for m in warnings), (
+            f"expected LOAD not-installed warning in: {warnings}"
         )
     finally:
         client.stop()
@@ -2370,11 +2308,11 @@ def test_init_tempctrl_warns_when_channel_uninstalled(
 def test_init_tempctrl_no_warning_when_installed_default(
     transport, dummy_cfg, caplog
 ):
-    """Default config (no ``installed`` key) means both modules present
-    — no not-installed warning should fire."""
+    """Default config (no ``installed`` key) means the module is
+    present — no not-installed warning should fire."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
-    # dummy_cfg's tempctrl_settings carries no installed keys.
+    # dummy_cfg's tempctrl_settings carries no installed key.
     caplog.set_level("WARNING")
     client = DummyPandaClient(transport, cfg=cfg)
     try:
@@ -2391,41 +2329,28 @@ def test_init_tempctrl_no_warning_when_installed_default(
 def test_tempctrl_health_check_skips_uninstalled_channel(
     transport, dummy_cfg, caplog
 ):
-    """End-to-end descope guard: with ``LNA.installed: false``, the
-    merged status from the real ``TempCtrlClient.get_status`` carries
-    no LNA keys — even with a leftover ``tempctrl_lna`` hash entry in
-    its real error-row shape (the reboot burst) — so the health check
-    emits no LNA warnings. If the stream were read, the error row
-    would trip "LNA thermistor in error state"; its absence proves the
-    skip, not a lucky healthy row."""
+    """End-to-end descope guard: with ``LOAD.installed: false``, the
+    real ``TempCtrlClient.get_status`` returns ``None`` — even with a
+    leftover ``tempctrl_load`` hash entry in its real error-row shape
+    (the reboot burst) — so :meth:`tempctrl_loop`'s ``if status is not
+    None`` gate never calls the health check at all. If the stream
+    were read, the error row would trip "LOAD thermistor in error
+    state"; ``get_status`` returning ``None`` proves the skip, not a
+    lucky healthy row."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_settings"] = {
-        "LNA": {"installed": False, "enable": False},
-        "LOAD": {"installed": True, "enable": True, "target_C": 25.0},
+        "LOAD": {"installed": False, "enable": False},
     }
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         writer = MetadataWriter(client.transport)
         writer.add(
-            "tempctrl_lna",
-            tempctrl_post_handler_reading("tempctrl_lna", sensor_error="LNA"),
+            "tempctrl_load",
+            tempctrl_post_handler_reading("tempctrl_load", sensor_error=True),
         )
-        writer.add(
-            "tempctrl_load", tempctrl_post_handler_reading("tempctrl_load")
-        )
-        caplog.set_level("WARNING")
         status = client.tempctrl.get_status()
-        assert status is not None
-        assert not any(k.startswith("LNA_") for k in status)
-        # Drop the init-time "LNA not installed" descope warning (by
-        # design, tested separately) so the assertion scopes to the
-        # health check alone.
-        caplog.clear()
-        client._tempctrl_health_check(status)
-        assert not any("LNA" in r.getMessage() for r in caplog.records), (
-            f"unexpected LNA warning: {[r.getMessage() for r in caplog.records]}"
-        )
+        assert status is None
     finally:
         client.stop()
 
@@ -2463,7 +2388,7 @@ def test_tempctrl_settings_bad_numeric_disables_client(
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     cfg["tempctrl_settings"] = {
-        "LNA": {"target_C": "twenty-five"},
+        "LOAD": {"target_C": "twenty-five"},
     }
     caplog.set_level("WARNING")
     client = DummyPandaClient(transport, cfg=cfg)
@@ -2555,7 +2480,7 @@ def test_tempctrl_loop_applies_settings_once_then_stops(transport, dummy_cfg):
 
 def test_tempctrl_loop_does_not_reapply_after_success(transport, dummy_cfg):
     """After apply_settings succeeds once, subsequent iterations run
-    the health check only — no re-apply. picohost's PicoPeltier caches
+    the health check only — no re-apply. picohost's PicoTempCtrl caches
     the last-applied config and replays it on reconnect, which makes
     panda-side periodic re-apply redundant. Regression guard so we
     don't drift back to the old "apply every iteration" shape."""
@@ -2584,7 +2509,6 @@ def test_tempctrl_loop_does_not_reapply_after_success(transport, dummy_cfg):
                 "get_status",
                 return_value={
                     "watchdog_tripped": False,
-                    "LNA_status": "update",
                     "LOAD_status": "update",
                 },
             ),
@@ -2638,7 +2562,6 @@ def test_tempctrl_loop_retries_apply_until_success(
                 "get_status",
                 return_value={
                     "watchdog_tripped": False,
-                    "LNA_status": "update",
                     "LOAD_status": "update",
                 },
             ),
@@ -2679,8 +2602,8 @@ def test_tempctrl_loop_retries_apply_until_success(
 
 def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
     """When the metadata snapshot reports ``watchdog_tripped``, the
-    health check emits an operator-visible WARNING so the peltiers
-    going dark is visible ground-side."""
+    health check emits an operator-visible WARNING so LOAD going dark
+    is visible ground-side."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     client = DummyPandaClient(transport, cfg=cfg)
@@ -2690,7 +2613,6 @@ def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": True,
-                "LNA_status": "update",
                 "LOAD_status": "update",
             }
         )
@@ -2703,8 +2625,10 @@ def test_tempctrl_loop_warns_on_watchdog_tripped(transport, dummy_cfg, caplog):
 
 
 def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
-    """Per-channel ``status == "error"`` (thermistor read failed) must
-    ride the status stream so the operator sees the dead sensor."""
+    """``LOAD_status == "error"`` (thermistor read failed) must ride
+    the status stream so the operator sees the dead sensor. This warn
+    branch returns early — no sticky-trip checks run on an errored
+    row."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     client = DummyPandaClient(transport, cfg=cfg)
@@ -2714,15 +2638,10 @@ def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": False,
-                "LNA_status": "error",
-                "LOAD_status": "update",
+                "LOAD_status": "error",
             }
         )
         assert any(
-            "LNA thermistor in error state" in r.getMessage()
-            for r in caplog.records
-        )
-        assert not any(
             "LOAD thermistor in error state" in r.getMessage()
             for r in caplog.records
         )
@@ -2730,40 +2649,66 @@ def test_tempctrl_loop_warns_on_channel_error(transport, dummy_cfg, caplog):
         client.stop()
 
 
-def test_tempctrl_loop_warns_on_saturated_drive(transport, dummy_cfg, caplog):
-    """Drive saturated at the clamp while still >1°C from target =
-    peltier can't keep up. Log loudly for the operator."""
+@pytest.mark.parametrize(
+    "flag, reason_needle",
+    [
+        ("LOAD_sensor_tripped", "rate-guard latch"),
+        ("LOAD_stall_tripped", "stall"),
+        ("LOAD_runaway_tripped", "runaway"),
+    ],
+)
+def test_tempctrl_loop_warns_on_sticky_trip_flag(
+    transport, dummy_cfg, caplog, flag, reason_needle
+):
+    """Each sticky trip latch (``LOAD_sensor_tripped`` /
+    ``LOAD_stall_tripped`` / ``LOAD_runaway_tripped``) gates drive
+    until the host acks with ``LOAD_enable=true`` — the health check
+    must warn per flag, replacing the old clamp-saturation heuristic
+    (LOAD has no clamp)."""
     cfg = dict(dummy_cfg)
     cfg["use_tempctrl"] = True
     client = DummyPandaClient(transport, cfg=cfg)
     try:
         caplog.set_level("WARNING")
-        # Sparse fixture — see branch-test rationale above. The drive/
-        # clamp/T_now/T_target quartet per channel is the full input to
-        # the saturation check; the rest of the 24-field schema is
-        # irrelevant to this branch.
+        # Sparse fixture — see branch-test rationale above.
         client._tempctrl_health_check(
             {
                 "watchdog_tripped": False,
-                "LNA_status": "update",
                 "LOAD_status": "update",
-                "LNA_drive_level": 0.6,
-                "LNA_clamp": 0.6,
-                "LNA_T_now": 35.0,
-                "LNA_T_target": 25.0,
-                "LOAD_drive_level": 0.05,
-                "LOAD_clamp": 0.6,
-                "LOAD_T_now": 25.1,
-                "LOAD_T_target": 25.0,
+                flag: True,
             }
         )
         assert any(
-            "LNA drive saturated at clamp" in r.getMessage()
+            flag in r.getMessage() and reason_needle in r.getMessage()
             for r in caplog.records
+        ), (
+            f"expected a {flag} warning containing {reason_needle!r} in: "
+            f"{[r.getMessage() for r in caplog.records]}"
         )
-        assert not any(
-            "LOAD drive saturated" in r.getMessage() for r in caplog.records
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_no_warning_on_healthy_status(
+    transport, dummy_cfg, caplog
+):
+    """A clean status (no watchdog trip, ``status='update'``, no sticky
+    trip flags) emits nothing."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LOAD_status": "update",
+                "LOAD_sensor_tripped": False,
+                "LOAD_stall_tripped": False,
+                "LOAD_runaway_tripped": False,
+            }
         )
+        assert caplog.records == []
     finally:
         client.stop()
 

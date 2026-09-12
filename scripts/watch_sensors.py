@@ -41,7 +41,6 @@ _PANDA_STREAMS = [s for s in SENSOR_SCHEMAS if s != "adc_stats"]
 _PLOT_FIELDS = {
     "imu_el": ("yaw", "pitch", "roll"),
     "imu_az": ("yaw", "pitch", "roll"),
-    "tempctrl_lna": ("T_now", "T_target", "drive_level"),
     "tempctrl_load": ("T_now", "T_target", "drive_level"),
     "potmon": ("pot_az_angle",),
     "motor": ("az_pos", "el_pos"),

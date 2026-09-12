@@ -234,13 +234,14 @@ header h1 { margin: 0; font-size: 18px; font-weight: 500; }
   font-weight: 600;
 }
 
-/* Multi-stream cards (Tempctrl LNA/LOAD) stack sub-blocks vertically. */
+/* Multi-stream cards stack sub-blocks vertically. */
 .stream-block + .stream-block {
   margin-top: 10px;
 }
 
 /* Two-column sub-grid for wide cards that fan a single subsystem into
-   two halves (IMU el/az, Tempctrl LNA/LOAD, Motor az/el). */
+   two halves (IMU el/az, Motor az/el). Tempctrl is single-channel
+   (LOAD only) and no longer uses this grid. */
 .two-col-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

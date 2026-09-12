@@ -1,12 +1,13 @@
 """
-Client-side tempctrl (Peltier) orchestrator.
+Client-side tempctrl (LOAD heater) orchestrator.
 
 Wraps a :class:`picohost.proxy.PicoProxy` (``tempctrl``) and a
 :class:`eigsep_redis.MetadataSnapshotReader` so :class:`PandaClient`
-can push setpoints/clamps/enable flags to the LNA and LOAD Peltier
-channels and read back the most recent status without reaching inside
-the :class:`picohost.manager.PicoManager` process. Mirrors the role of
-:class:`eigsep_observing.motor_client.MotorClient` for the motor pico.
+can push setpoints/enable flags to the LOAD channel (a low-side FET
+heater under on/off hysteresis control) and read back the most recent
+status without reaching inside the :class:`picohost.manager.PicoManager`
+process. Mirrors the role of :class:`eigsep_observing.motor_client.MotorClient`
+for the motor pico.
 """
 
 import logging
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class TempCtrlClient:
-    """Push LNA/LOAD Peltier settings through ``PicoManager`` via Redis.
+    """Push LOAD heater settings through ``PicoManager`` via Redis.
 
     Parameters
     ----------
@@ -29,38 +30,25 @@ class TempCtrlClient:
 
             {
                 "watchdog_timeout_ms": int,
-                "LNA": {
+                "LOAD": {
                     "installed": bool,  # optional; firmware default True
                     "enable": bool,
-                    "cooling_enabled": bool,  # optional; firmware default True
                     "target_C": float,
                     "hysteresis_C": float,
-                    "clamp": float,
-                    "Kp": float,   # optional; firmware default 0.2
-                    "Ki": float,   # optional; firmware default 0.0
                 },
-                "LOAD": {... same keys as LNA ...},
             }
 
         ``None`` or ``{}`` means "do not push anything on
         ``apply_settings`` beyond what's explicitly passed as an
         override." The yaml schema is kept readable (``target_C``,
         ``hysteresis_C``) and translated to firmware field names
-        (``LNA_temp_target``, ``LNA_hysteresis``, ...) inside
-        :meth:`apply_settings`. ``Kp`` and ``Ki`` are firmware-side
-        field names already and are forwarded unchanged via
-        :meth:`set_gains`. Omitting either gain leaves the firmware
-        default in place (``Kp=0.2``, ``Ki=0.0``).
-        ``cooling_enabled`` is the asymmetric-clamp safety setting
-        (False clamps drive to ``[0, +clamp]`` instead of
-        ``[-clamp, +clamp]``); omit to leave the firmware default
-        (True) in place. Deployments that cannot dissipate Peltier
-        heat should set this False on the affected channel.
-        ``installed: false`` descopes a channel whose hardware module
-        is physically absent: firmware never samples or drives it, its
-        Redis stream stops publishing entirely, and :meth:`get_status`
-        stops reading it. Must be paired with ``enable: false`` (an
-        absent module cannot be armed — rejected at construction).
+        (``LOAD_temp_target``, ``LOAD_hysteresis``) inside
+        :meth:`apply_settings`.
+        ``installed: false`` descopes the channel: firmware never
+        samples its thermistor or drives it, its Redis stream stops
+        publishing entirely, and :meth:`get_status` stops reading it.
+        Must be paired with ``enable: false`` (an absent module cannot
+        be armed — rejected at construction).
     source : str
         Identifier stamped on proxy command stream entries.
     """
@@ -80,14 +68,14 @@ class TempCtrlClient:
         config.
 
         ``None`` → ``{}`` (nothing to push). Missing top-level
-        sections (``watchdog_timeout_ms``, ``LNA``, ``LOAD``) are
-        skipped, matching :meth:`apply_settings`' "keep whatever
-        firmware had" behavior.
+        sections (``watchdog_timeout_ms``, ``LOAD``) are skipped,
+        matching :meth:`apply_settings`' "keep whatever firmware had"
+        behavior.
 
         Raises
         ------
         ValueError
-            Settings is not a dict, a per-channel section is not a
+            Settings is not a dict, the ``LOAD`` section is not a
             dict, ``enable`` is not a real bool, or a numeric field is
             not int/float-coercible. Raised at construction so the
             caller (:meth:`PandaClient.init_tempctrl`) can disable
@@ -111,32 +99,30 @@ class TempCtrlClient:
                 raise ValueError(
                     f"watchdog_timeout_ms: {val!r} not int-coercible ({exc})"
                 ) from exc
-        for ch in ("LNA", "LOAD"):
-            if ch not in raw:
-                continue
-            section = raw[ch]
+        if "LOAD" in raw:
+            section = raw["LOAD"]
             if not isinstance(section, dict):
                 raise ValueError(
-                    f"tempctrl[{ch}] must be a dict, got "
+                    "tempctrl[LOAD] must be a dict, got "
                     f"{type(section).__name__}"
                 )
             coerced = {}
-            for fname in ("target_C", "hysteresis_C", "clamp", "Kp", "Ki"):
+            for fname in ("target_C", "hysteresis_C"):
                 if fname in section:
                     val = section[fname]
                     try:
                         coerced[fname] = float(val)
                     except (TypeError, ValueError) as exc:
                         raise ValueError(
-                            f"tempctrl[{ch}].{fname}: {val!r} not "
+                            f"tempctrl[LOAD].{fname}: {val!r} not "
                             f"float-coercible ({exc})"
                         ) from exc
-            for bname in ("installed", "enable", "cooling_enabled"):
+            for bname in ("installed", "enable"):
                 if bname in section:
                     val = section[bname]
                     if not isinstance(val, bool):
                         raise ValueError(
-                            f"tempctrl[{ch}].{bname}: {val!r} must be a "
+                            f"tempctrl[LOAD].{bname}: {val!r} must be a "
                             f"bool, got {type(val).__name__}"
                         )
                     coerced[bname] = val
@@ -145,11 +131,11 @@ class TempCtrlClient:
                 and coerced.get("enable") is True
             ):
                 raise ValueError(
-                    f"tempctrl[{ch}]: installed: false with enable: true "
+                    "tempctrl[LOAD]: installed: false with enable: true "
                     "— an absent module cannot be armed; set enable: "
                     "false or mark the channel installed"
                 )
-            out[ch] = coerced
+            out["LOAD"] = coerced
         return out
 
     @property
@@ -159,50 +145,36 @@ class TempCtrlClient:
     def get_status(self):
         """Latest tempctrl metadata snapshot, or ``None`` if absent.
 
-        The picohost producer publishes two streams — ``tempctrl_lna``
-        and ``tempctrl_load``, each with flat per-channel fields plus a
-        duplicated copy of the device-wide watchdog state. This method
-        merges them back into the flat ``LNA_*`` / ``LOAD_*`` shape
-        used internally by ``_tempctrl_health_check`` so callers don't
-        have to know about the split.
+        The picohost producer publishes the ``tempctrl_load`` stream
+        with flat per-channel fields plus a duplicated copy of the
+        device-wide watchdog state. This method republishes it under
+        the flat ``LOAD_*`` shape used internally by
+        ``_tempctrl_health_check`` so callers don't have to know about
+        the underlying stream name.
 
         A channel whose settings say ``installed: false`` is never
         read: its stream stopped publishing at the producer, but a
         leftover hash entry (lab bring-up, pre-descope deployment, the
         reboot burst before pico-manager replays the flags) would
         otherwise feed stale data into the merged status and trigger
-        the snapshot reader's staleness warning on every poll. With
-        one channel skipped, the device-wide ``watchdog_*`` fields
-        ride the remaining channel's entry — same firmware tick, no
-        information loss.
+        the snapshot reader's staleness warning on every poll.
         """
-        lna = None
-        if self.settings.get("LNA", {}).get("installed") is not False:
-            try:
-                lna = self._reader.get("tempctrl_lna")
-            except KeyError:
-                lna = None
-        load = None
-        if self.settings.get("LOAD", {}).get("installed") is not False:
-            try:
-                load = self._reader.get("tempctrl_load")
-            except KeyError:
-                load = None
-        if not lna and not load:
+        if self.settings.get("LOAD", {}).get("installed") is False:
+            return None
+        try:
+            load = self._reader.get("tempctrl_load")
+        except KeyError:
+            load = None
+        if not load:
             return None
         merged = {}
-        for prefix, src in (("LNA_", lna), ("LOAD_", load)):
-            if not src:
+        for k, v in load.items():
+            if k in ("sensor_name", "app_id"):
                 continue
-            for k, v in src.items():
-                if k in ("sensor_name", "app_id"):
-                    continue
-                if k in ("watchdog_tripped", "watchdog_timeout_ms"):
-                    # Device-wide; same firmware tick produced both
-                    # entries, so first-write-wins.
-                    merged.setdefault(k, v)
-                else:
-                    merged[f"{prefix}{k}"] = v
+            if k in ("watchdog_tripped", "watchdog_timeout_ms"):
+                merged[k] = v
+            else:
+                merged[f"LOAD_{k}"] = v
         return merged or None
 
     def set_watchdog_timeout(self, timeout_ms):
@@ -210,105 +182,26 @@ class TempCtrlClient:
             "set_watchdog_timeout", timeout_ms=int(timeout_ms)
         )
 
-    def set_installed(self, *, LNA=None, LOAD=None):
-        """Mark a channel's hardware module present/absent.
+    def set_installed(self, *, LOAD=None):
+        """Mark the LOAD module's hardware present/absent.
 
-        Mirrors :meth:`picohost.base.PicoPeltier.set_installed`.
+        Mirrors :meth:`picohost.base.PicoTempCtrl.set_installed`.
         ``False`` descopes the channel: firmware never samples its
         thermistor (no ADC mux switch to a dead divider) or drives it,
         and the redis fan-out suppresses its stream entirely — clean
         absence downstream. Distinct from :meth:`set_enable` (drive
-        intent for present hardware); not a trip ack. Only the kwargs
-        that are not ``None`` are forwarded, so partial application
-        does not flip the untouched channel. Firmware caches the
-        setting for replay on reconnect.
+        intent for present hardware); not a trip ack. Firmware caches
+        the setting for replay on reconnect.
         """
-        kwargs = {}
-        if LNA is not None:
-            kwargs["LNA"] = bool(LNA)
         if LOAD is not None:
-            kwargs["LOAD"] = bool(LOAD)
-        if kwargs:
-            self._proxy.send_command("set_installed", **kwargs)
+            self._proxy.send_command("set_installed", LOAD=bool(LOAD))
 
-    def set_clamp(self, *, LNA=None, LOAD=None):
-        kwargs = {}
-        if LNA is not None:
-            kwargs["LNA"] = float(LNA)
-        if LOAD is not None:
-            kwargs["LOAD"] = float(LOAD)
-        if kwargs:
-            self._proxy.send_command("set_clamp", **kwargs)
-
-    def set_cooling_enabled(self, *, LNA=None, LOAD=None):
-        """Allow/forbid negative (cooling) drive per channel.
-
-        Mirrors :meth:`picohost.base.PicoPeltier.set_cooling_enabled`.
-        ``False`` clamps drive to ``[0, +clamp]`` instead of
-        ``[-clamp, +clamp]`` firmware-side — the cooling-mode
-        thermal-runaway guard. Only the kwargs that are not ``None``
-        are forwarded, so partial application does not flip the
-        untouched channel. Firmware caches the setting for replay on
-        reconnect.
+    def set_temperature(self, *, T_LOAD=None, LOAD_hyst=None):
+        """Push the setpoint. Hysteresis piggybacks on the
+        set_temperature command to match the
+        :class:`picohost.base.PicoTempCtrl` signature.
         """
         kwargs = {}
-        if LNA is not None:
-            kwargs["LNA"] = bool(LNA)
-        if LOAD is not None:
-            kwargs["LOAD"] = bool(LOAD)
-        if kwargs:
-            self._proxy.send_command("set_cooling_enabled", **kwargs)
-
-    def set_gains(
-        self, *, LNA_Kp=None, LNA_Ki=None, LOAD_Kp=None, LOAD_Ki=None
-    ):
-        """Set PI gains per channel.
-
-        Mirrors :meth:`picohost.base.PicoPeltier.set_gains`. Only the
-        kwargs that are not ``None`` are forwarded, so partial
-        application (e.g. tuning ``LNA_Ki`` while leaving everything
-        else alone) does not disturb other gains. Firmware caches the
-        last gains for replay on reconnect, so this method does not
-        need its own re-push loop.
-        """
-        kwargs = {}
-        if LNA_Kp is not None:
-            kwargs["LNA_Kp"] = float(LNA_Kp)
-        if LNA_Ki is not None:
-            kwargs["LNA_Ki"] = float(LNA_Ki)
-        if LOAD_Kp is not None:
-            kwargs["LOAD_Kp"] = float(LOAD_Kp)
-        if LOAD_Ki is not None:
-            kwargs["LOAD_Ki"] = float(LOAD_Ki)
-        if kwargs:
-            self._proxy.send_command("set_gains", **kwargs)
-
-    def reset_integral(self, *, LNA=False, LOAD=False):
-        """Clear the PI integrator on the selected channel(s).
-
-        One-shot. No-op if both channels are ``False`` so a
-        partial-application caller doesn't reset the wrong channel.
-        Operator-driven (e.g. after a large setpoint step that
-        accumulated integral that's no longer relevant); the steady
-        state controller does its own anti-windup.
-        """
-        if not LNA and not LOAD:
-            return
-        self._proxy.send_command(
-            "reset_integral", LNA=bool(LNA), LOAD=bool(LOAD)
-        )
-
-    def set_temperature(
-        self, *, T_LNA=None, LNA_hyst=None, T_LOAD=None, LOAD_hyst=None
-    ):
-        """Push setpoints. Hysteresis piggybacks on the set_temperature
-        command to match the :class:`picohost.base.PicoPeltier` signature.
-        """
-        kwargs = {}
-        if T_LNA is not None:
-            kwargs["T_LNA"] = float(T_LNA)
-            if LNA_hyst is not None:
-                kwargs["LNA_hyst"] = float(LNA_hyst)
         if T_LOAD is not None:
             kwargs["T_LOAD"] = float(T_LOAD)
             if LOAD_hyst is not None:
@@ -316,69 +209,43 @@ class TempCtrlClient:
         if kwargs:
             self._proxy.send_command("set_temperature", **kwargs)
 
-    def set_enable(self, *, LNA=None, LOAD=None):
-        """Arm/disarm per-channel peltier drive.
+    def set_enable(self, *, LOAD=None):
+        """Arm/disarm the LOAD heater drive.
 
-        Only sends the command if at least one channel is specified, so
-        partial-application callers don't flip the untouched channel.
-        ``PicoPeltier.set_enable`` defaults missing kwargs to ``True``
-        firmware-side, so we pass both explicitly to avoid surprise
-        arming.
+        Only sends the command if ``LOAD`` is specified. ``PicoTempCtrl
+        .set_enable`` defaults its kwarg to ``True`` firmware-side, so
+        we pass it explicitly to avoid surprise arming.
         """
-        if LNA is None and LOAD is None:
+        if LOAD is None:
             return
-        current = self.settings
-        lna_enable = (
-            bool(LNA)
-            if LNA is not None
-            else bool(current.get("LNA", {}).get("enable", False))
-        )
-        load_enable = (
-            bool(LOAD)
-            if LOAD is not None
-            else bool(current.get("LOAD", {}).get("enable", False))
-        )
-        self._proxy.send_command(
-            "set_enable", LNA=lna_enable, LOAD=load_enable
-        )
+        self._proxy.send_command("set_enable", LOAD=bool(LOAD))
 
     def apply_settings(self):
         """Push the full config to the pico in safe order.
 
-        Order matches ``PicoPeltier``'s reconnect replay
-        (watchdog → installed → clamp → cooling_enabled → gains →
-        temperature → enable):
+        Order matches ``PicoTempCtrl``'s reconnect replay (watchdog →
+        installed → temperature → enable):
 
         1. ``set_watchdog_timeout`` first so any subsequent
            delay-between-commands cannot trip a zero-timeout default.
         2. ``set_installed`` — gate a descoped channel (no sampling,
            no drive, no stream) before any drive-producing config
-           arrives; firmware reboots to installed=true defaults.
-        3. ``set_clamp`` — establish the duty-cycle ceiling before
-           anything is armed.
-        4. ``set_cooling_enabled`` — apply the asymmetric-clamp safety
-           setting before the PI controller can produce drive on the
-           new config.
-        5. ``set_gains`` — tune the PI controller before the setpoint
-           is published, so the very first PI tick on the new target
-           uses the configured Kp/Ki rather than firmware defaults.
-        6. ``set_temperature`` — publish the target (and hysteresis)
+           arrives; firmware reboots to installed=true by default.
+        3. ``set_temperature`` — publish the target (and hysteresis)
            while still disarmed (or at prior arm state).
-        7. ``set_enable`` — arm last, so by the time the channel turns
-           on the clamp, gains, and setpoint are already in place.
+        4. ``set_enable`` — arm last, so by the time the channel turns
+           on the setpoint is already in place.
 
         Idempotent: calling repeatedly with unchanged settings is a
         no-op on the hardware side (firmware replaces current values
         with identical ones). Missing sections are skipped — e.g.
         omitting ``watchdog_timeout_ms`` leaves whatever the firmware
-        currently has. Missing ``Kp``/``Ki`` likewise leaves the
-        firmware defaults in place. Missing ``cooling_enabled`` and
-        ``installed`` leave the firmware defaults (True) in place.
-        An uninstalled channel's setpoints/gains still push — harmless
-        while descoped (no sampling, no drive) and pre-staged for the
-        moment the module is re-installed; arming it is what's
-        forbidden (``_coerce_settings`` rejects ``installed: false``
-        with ``enable: true``).
+        currently has. Missing ``installed`` leaves the firmware
+        default (True) in place. An uninstalled channel's setpoint
+        still pushes — harmless while descoped (no sampling, no drive)
+        and pre-staged for the moment the module is re-installed;
+        arming it is what's forbidden (``_coerce_settings`` rejects
+        ``installed: false`` with ``enable: true``).
 
         Raises
         ------
@@ -392,33 +259,10 @@ class TempCtrlClient:
         watchdog = s.get("watchdog_timeout_ms")
         if watchdog is not None:
             self.set_watchdog_timeout(watchdog)
-        lna = s.get("LNA", {})
         load = s.get("LOAD", {})
-        self.set_installed(
-            LNA=lna.get("installed"),
-            LOAD=load.get("installed"),
-        )
-        self.set_clamp(
-            LNA=lna.get("clamp"),
-            LOAD=load.get("clamp"),
-        )
-        self.set_cooling_enabled(
-            LNA=lna.get("cooling_enabled"),
-            LOAD=load.get("cooling_enabled"),
-        )
-        self.set_gains(
-            LNA_Kp=lna.get("Kp"),
-            LNA_Ki=lna.get("Ki"),
-            LOAD_Kp=load.get("Kp"),
-            LOAD_Ki=load.get("Ki"),
-        )
+        self.set_installed(LOAD=load.get("installed"))
         self.set_temperature(
-            T_LNA=lna.get("target_C"),
-            LNA_hyst=lna.get("hysteresis_C"),
             T_LOAD=load.get("target_C"),
             LOAD_hyst=load.get("hysteresis_C"),
         )
-        self.set_enable(
-            LNA=lna.get("enable"),
-            LOAD=load.get("enable"),
-        )
+        self.set_enable(LOAD=load.get("enable"))

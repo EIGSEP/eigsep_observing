@@ -29,8 +29,7 @@ OBS_CFG_TEMPCTRL_ON = {
     "use_tempctrl": True,
     "corr_ntimes": 240,
     "tempctrl_settings": {
-        "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
-        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
+        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5},
     },
 }
 
@@ -53,20 +52,20 @@ CORR_HEADER = {"integration_time": 0.27, "sync_time": 1.0}
 
 
 def test_default_thresholds_tempctrl_bands_from_config():
-    """target_C ± 2*hysteresis_C should be the healthy band; clamp is
-    the upper bound of the drive-level healthy band."""
+    """target_C ± 2*hysteresis_C should be the healthy band."""
     out = default_thresholds(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
 
-    assert out["tempctrl_lna.T_now"]["healthy"] == [24.0, 26.0]
     assert out["tempctrl_load.T_now"]["healthy"] == [24.0, 26.0]
     # danger is deferred to Thresholds where the YAML tuning knob is
     # resolved. default_thresholds leaves it None and carries
     # _target_C so the merger can fill it in.
-    assert out["tempctrl_lna.T_now"]["danger"] is None
-    assert out["tempctrl_lna.T_now"]["_target_C"] == 25.0
+    assert out["tempctrl_load.T_now"]["danger"] is None
+    assert out["tempctrl_load.T_now"]["_target_C"] == 25.0
 
-    assert out["tempctrl_lna.drive_level"]["healthy"] == [0.0, 0.6]
-    assert out["tempctrl_load.drive_level"]["healthy"] == [0.0, 0.6]
+    # drive_level is a plain on/off flag (LOAD is hysteresis-controlled,
+    # not PI-controlled, so it has no clamp) — there is no
+    # config-derived band for it.
+    assert "tempctrl_load.drive_level" not in out
 
 
 def test_default_thresholds_corr_cadence_from_integration_time():
@@ -89,13 +88,7 @@ def test_default_thresholds_file_heartbeat_from_ntimes():
 
 def test_default_thresholds_dropped_when_tempctrl_disabled():
     out = default_thresholds(OBS_CFG_TEMPCTRL_OFF, CORR_HEADER)
-    for key in (
-        "tempctrl_lna.T_now",
-        "tempctrl_load.T_now",
-        "tempctrl_lna.drive_level",
-        "tempctrl_load.drive_level",
-    ):
-        assert key not in out
+    assert "tempctrl_load.T_now" not in out
 
 
 def test_default_thresholds_omits_cadence_without_header():
@@ -111,7 +104,7 @@ def test_default_thresholds_omits_cadence_without_header():
 
 def test_enabled_signals_drops_disabled_subsystems():
     enabled = enabled_signals(OBS_CFG_TEMPCTRL_OFF)
-    assert "tempctrl_lna.T_now" not in enabled
+    assert "tempctrl_load.T_now" not in enabled
     # Signals with enabled_by=None stay regardless.
     assert "adc.rms" in enabled
     assert "corr.acc_cadence_s" in enabled
@@ -119,26 +112,23 @@ def test_enabled_signals_drops_disabled_subsystems():
 
 def test_enabled_signals_includes_tempctrl_when_on():
     enabled = enabled_signals(OBS_CFG_TEMPCTRL_ON)
-    assert "tempctrl_lna.T_now" in enabled
-    assert "tempctrl_lna.drive_level" in enabled
+    assert "tempctrl_load.T_now" in enabled
+    assert "tempctrl_load.drive_level" in enabled
 
 
-# LNA descoped (installed: false) but with setpoints still staged for a
-# potential re-install/hot-swap — the realistic field shape. The channel
-# publishes no stream, so its tiles/bands must disappear while LOAD's
-# stay.
-OBS_CFG_LNA_UNINSTALLED = {
+# LOAD descoped (installed: false) but with setpoints still staged for a
+# potential re-install — the realistic field shape. LOAD is the only
+# tempctrl channel, so descoping it drops every tempctrl signal.
+OBS_CFG_LOAD_UNINSTALLED = {
     "use_tempctrl": True,
     "corr_ntimes": 240,
     "tempctrl_settings": {
-        "LNA": {
+        "LOAD": {
             "installed": False,
             "enable": False,
             "target_C": 25.0,
             "hysteresis_C": 0.5,
-            "clamp": 0.6,
         },
-        "LOAD": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
     },
 }
 
@@ -146,28 +136,17 @@ OBS_CFG_LNA_UNINSTALLED = {
 def test_enabled_signals_drops_uninstalled_channel():
     """A descoped channel publishes no stream — its tiles would sit
     permanently empty on the dashboard (the field's only alerting
-    surface), so they're dropped per channel while LOAD's stay."""
-    enabled = enabled_signals(OBS_CFG_LNA_UNINSTALLED)
-    for key in (
-        "tempctrl_lna.T_now",
-        "tempctrl_lna.drive_level",
-        "tempctrl_lna.Kp",
-        "tempctrl_lna.Ki",
-        "tempctrl_lna.integral",
-    ):
-        assert key not in enabled, key
-    assert "tempctrl_load.T_now" in enabled
-    assert "tempctrl_load.drive_level" in enabled
+    surface), so they're dropped."""
+    enabled = enabled_signals(OBS_CFG_LOAD_UNINSTALLED)
+    assert "tempctrl_load.T_now" not in enabled
+    assert "tempctrl_load.drive_level" not in enabled
 
 
 def test_default_thresholds_skips_uninstalled_channel():
     """Staged setpoints on a descoped channel must not produce bands —
     there is no stream for them to classify."""
-    out = default_thresholds(OBS_CFG_LNA_UNINSTALLED, corr_header=CORR_HEADER)
-    assert "tempctrl_lna.T_now" not in out
-    assert "tempctrl_lna.drive_level" not in out
-    assert "tempctrl_load.T_now" in out
-    assert "tempctrl_load.drive_level" in out
+    out = default_thresholds(OBS_CFG_LOAD_UNINSTALLED, corr_header=CORR_HEADER)
+    assert "tempctrl_load.T_now" not in out
 
 
 # ---------------------------------------------------------------------
@@ -188,17 +167,17 @@ def test_thresholds_merges_derived_and_yaml():
     assert adc["healthy"] == [10.0, 20.0]
     assert adc["source"] == "yaml_override"
 
-    lna = th.bands["tempctrl_lna.T_now"]
-    assert lna["healthy"] == [24.0, 26.0]
+    load = th.bands["tempctrl_load.T_now"]
+    assert load["healthy"] == [24.0, 26.0]
     # danger filled in from target_C +/- tempctrl.danger_k_C
-    assert lna["danger"] == [15.0, 35.0]
-    assert lna["source"] == "derived"
+    assert load["danger"] == [15.0, 35.0]
+    assert load["source"] == "derived"
 
 
 def test_thresholds_yaml_wins_over_derived():
     """An explicit YAML entry for a derived signal should override."""
     yaml_overrides = {
-        "tempctrl_lna.T_now": {
+        "tempctrl_load.T_now": {
             "healthy": [22.0, 28.0],
             "danger": [18.0, 32.0],
         },
@@ -206,10 +185,10 @@ def test_thresholds_yaml_wins_over_derived():
     th = Thresholds(
         OBS_CFG_TEMPCTRL_ON, CORR_HEADER, yaml_overrides=yaml_overrides
     )
-    lna = th.bands["tempctrl_lna.T_now"]
-    assert lna["healthy"] == [22.0, 28.0]
-    assert lna["danger"] == [18.0, 32.0]
-    assert lna["source"] == "yaml_override"
+    load = th.bands["tempctrl_load.T_now"]
+    assert load["healthy"] == [22.0, 28.0]
+    assert load["danger"] == [18.0, 32.0]
+    assert load["source"] == "yaml_override"
 
 
 def test_thresholds_unregistered_signal_classifies_unknown():
@@ -220,7 +199,7 @@ def test_thresholds_unregistered_signal_classifies_unknown():
 def test_thresholds_disabled_signal_classifies_unknown():
     """Signals filtered out by enabled_by should be unreachable."""
     th = Thresholds(OBS_CFG_TEMPCTRL_OFF, CORR_HEADER)
-    assert th.classify("tempctrl_lna.T_now", 25.0) == "unknown"
+    assert th.classify("tempctrl_load.T_now", 25.0) == "unknown"
 
 
 def test_thresholds_null_healthy_classifies_unknown():
@@ -251,7 +230,7 @@ def test_thresholds_classify_value_paths():
 
 def test_thresholds_classify_stale_wins_over_value():
     yaml_overrides = {
-        "tempctrl_lna.T_now": {
+        "tempctrl_load.T_now": {
             "healthy": [24.0, 26.0],
             "danger": [15.0, 35.0],
         },
@@ -260,7 +239,7 @@ def test_thresholds_classify_stale_wins_over_value():
         OBS_CFG_TEMPCTRL_ON, CORR_HEADER, yaml_overrides=yaml_overrides
     )
     # In healthy range on value alone, but too old.
-    assert th.classify("tempctrl_lna.T_now", 25.0, age_s=120.0) == "stale"
+    assert th.classify("tempctrl_load.T_now", 25.0, age_s=120.0) == "stale"
     # max_age_s=None disables the check.
     assert th.classify("adc.rms", 15.0, age_s=9999.0) in {
         "ok",
@@ -272,11 +251,17 @@ def test_thresholds_classify_stale_wins_over_value():
 
 
 def test_thresholds_classify_warn_without_danger_band():
-    """Derived tempctrl_lna.drive_level has healthy=[0, clamp] but no
-    danger band. Outside-healthy should warn, not raise."""
-    th = Thresholds(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
-    assert th.classify("tempctrl_lna.drive_level", 0.5) == "ok"
-    assert th.classify("tempctrl_lna.drive_level", 0.9) == "warn"
+    """A signal with only a healthy band set (danger left None) should
+    warn when the value falls outside healthy, not raise."""
+    th = Thresholds(
+        OBS_CFG_TEMPCTRL_ON,
+        CORR_HEADER,
+        yaml_overrides={
+            "lidar.distance_m": {"healthy": [1.0, 2.0], "danger": None},
+        },
+    )
+    assert th.classify("lidar.distance_m", 1.5) == "ok"
+    assert th.classify("lidar.distance_m", 5.0) == "warn"
 
 
 # ---------------------------------------------------------------------
@@ -305,7 +290,7 @@ def test_thresholds_with_header_preserves_yaml_override():
     th2 = th.with_header({"integration_time": 0.5, "sync_time": 1.0})
     assert th2.bands["adc.rms"]["healthy"] == [10.0, 20.0]
     # Preserved non-default tempctrl_k (target 25 ± 7)
-    assert th2.bands["tempctrl_lna.T_now"]["danger"] == [18.0, 32.0]
+    assert th2.bands["tempctrl_load.T_now"]["danger"] == [18.0, 32.0]
 
 
 # ---------------------------------------------------------------------
@@ -324,7 +309,7 @@ def test_thresholds_as_dict_includes_provenance_and_metadata():
 
     assert d["adc.rms"]["source"] == "yaml_override"
     assert d["adc.rms"]["unit"] == "counts"
-    assert d["tempctrl_lna.T_now"]["source"] == "derived"
+    assert d["tempctrl_load.T_now"]["source"] == "derived"
     # Signals with no band from either tier:
     assert d["corr.auto_mag_median"]["source"] == "default_null"
     assert d["corr.auto_mag_median"]["healthy"] is None
@@ -341,7 +326,7 @@ def test_thresholds_from_yaml_loads_bundled_defaults():
     assert th.bands["adc.rms"]["healthy"] == [10.0, 20.0]
     assert th.bands["adc.rms"]["source"] == "yaml_override"
     # Derived defaults still apply.
-    assert th.bands["tempctrl_lna.T_now"]["source"] == "derived"
+    assert th.bands["tempctrl_load.T_now"]["source"] == "derived"
 
 
 def test_thresholds_from_yaml_with_explicit_path(tmp_path):
@@ -432,7 +417,6 @@ OBS_CFG_LOCAL = {
         "t_amb_field": "T_now",
     },
     "tempctrl_settings": {
-        "LNA": {"installed": True, "target_C": 25.0, "hysteresis_C": 0.5},
         "LOAD": {"installed": True, "target_C": 25.0, "hysteresis_C": 0.5},
     },
 }
@@ -464,7 +448,6 @@ def test_effective_obs_cfg_upload_wins_on_panda_reality_keys():
         use_motor=True,
         corr_ntimes=480,
         tempctrl_settings={
-            "LNA": {"installed": False},
             "LOAD": {"installed": True, "target_C": 30.0},
         },
     )
@@ -503,14 +486,14 @@ def test_effective_obs_cfg_plucks_only_routing_knobs_from_calibration():
             "noise_source_atten_db": 20.0,  # panda copy drifted
             "t_ns_stream": "rfswitch_therm",
             "t_ns_field": "temp_therm0",  # pad moved to another channel
-            "t_amb_stream": "tempctrl_lna",  # hot-swap step 3
+            "t_amb_stream": "tempctrl_load",
             "t_amb_field": "T_now",
         }
     )
     out = effective_obs_cfg(OBS_CFG_LOCAL, upload)
     cal = out["calibration"]
     # The reference-temperature routing follows the upload...
-    assert cal["t_amb_stream"] == "tempctrl_lna"
+    assert cal["t_amb_stream"] == "tempctrl_load"
     assert cal["t_ns_field"] == "temp_therm0"
     # ...but the physical constants are dashboard-local display-cal
     # knobs, not panda reality.
@@ -536,29 +519,46 @@ def test_effective_obs_cfg_switch_schedule_not_merged():
 
 def test_thresholds_with_obs_cfg_recomputes_bands_and_gating():
     th = Thresholds(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
-    assert "tempctrl_lna.T_now" in th.registry
+    assert "tempctrl_load.T_now" in th.registry
 
     new_cfg = {
         "use_tempctrl": True,
         "corr_ntimes": 240,
         "tempctrl_settings": {
-            "LNA": {
+            "LOAD": {
+                "installed": True,
+                "enable": True,
+                "target_C": 30.0,
+                "hysteresis_C": 0.5,
+            },
+        },
+    }
+    th2 = th.with_obs_cfg(new_cfg)
+    # The channel's band moved to the new setpoint.
+    assert th2.bands["tempctrl_load.T_now"]["healthy"] == [29.0, 31.0]
+    # The corr header carried over — cadence band unchanged.
+    assert th2.bands["corr.acc_cadence_s"] == th.bands["corr.acc_cadence_s"]
+
+
+def test_thresholds_with_obs_cfg_drops_gating_when_descoped():
+    th = Thresholds(OBS_CFG_TEMPCTRL_ON, CORR_HEADER)
+    assert "tempctrl_load.T_now" in th.registry
+
+    new_cfg = {
+        "use_tempctrl": True,
+        "corr_ntimes": 240,
+        "tempctrl_settings": {
+            "LOAD": {
                 "installed": False,
                 "enable": False,
                 "target_C": 25.0,
                 "hysteresis_C": 0.5,
-                "clamp": 0.6,
             },
-            "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
         },
     }
     th2 = th.with_obs_cfg(new_cfg)
-    # Gating followed the new config: the descoped channel is gone...
-    assert "tempctrl_lna.T_now" not in th2.registry
-    # ...and the live channel's band moved to the new setpoint.
-    assert th2.bands["tempctrl_load.T_now"]["healthy"] == [29.0, 31.0]
-    # The corr header carried over — cadence band unchanged.
-    assert th2.bands["corr.acc_cadence_s"] == th.bands["corr.acc_cadence_s"]
+    # Gating followed the new config: the descoped channel is gone.
+    assert "tempctrl_load.T_now" not in th2.registry
 
 
 def test_thresholds_with_obs_cfg_preserves_yaml_override_and_danger_k():
@@ -573,8 +573,7 @@ def test_thresholds_with_obs_cfg_preserves_yaml_override_and_danger_k():
         "use_tempctrl": True,
         "corr_ntimes": 240,
         "tempctrl_settings": {
-            "LNA": {"target_C": 25.0, "hysteresis_C": 0.5, "clamp": 0.6},
-            "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5, "clamp": 0.6},
+            "LOAD": {"target_C": 30.0, "hysteresis_C": 0.5},
         },
     }
     th2 = th.with_obs_cfg(new_cfg)

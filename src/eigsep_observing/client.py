@@ -706,25 +706,18 @@ class PandaClient:
         self.logger.info(
             f"Tempctrl initialized (settings={self.tempctrl.settings})"
         )
-        # Deliberate non-default deployment choices, surfaced once at
-        # init rather than every tempctrl_loop iteration — they are
-        # config decisions, not runtime faults.
-        for ch in ("LNA", "LOAD"):
-            section = self.tempctrl.settings.get(ch, {})
-            if section.get("installed") is False:
-                # Hardware descope: the module is physically absent —
-                # never sampled, never driven, no Redis stream, no
-                # dashboard tiles. See OPERATIONS.md "Tempctrl channel
-                # descope and hot-swap".
-                self.logger.warning(
-                    f"Tempctrl {ch} not installed — channel descoped: "
-                    "no sampling, no drive, no metadata stream."
-                )
-            if section.get("cooling_enabled") is False:
-                self.logger.warning(
-                    f"Tempctrl {ch} cooling disabled — drive clamped to "
-                    "[0, +clamp] (asymmetric-clamp safety guard)."
-                )
+        # Deliberate non-default deployment choice, surfaced once at
+        # init rather than every tempctrl_loop iteration — it's a
+        # config decision, not a runtime fault.
+        section = self.tempctrl.settings.get("LOAD", {})
+        if section.get("installed") is False:
+            # Hardware descope: the module is physically absent — never
+            # sampled, never driven, no Redis stream, no dashboard
+            # tiles.
+            self.logger.warning(
+                "Tempctrl LOAD not installed — channel descoped: "
+                "no sampling, no drive, no metadata stream."
+            )
 
     def switch_loop(self):
         """
@@ -1220,20 +1213,19 @@ class PandaClient:
         """Seed firmware config once, then poll health forever.
 
         The first iteration calls ``apply_settings`` to push the
-        yaml-configured watchdog / clamps / setpoints / enable flags to
-        the tempctrl pico. Once that succeeds the loop switches to
+        yaml-configured watchdog / setpoint / enable flags to the
+        tempctrl pico. Once that succeeds the loop switches to
         health-check-only mode: every ``tempctrl_interval`` seconds it
         inspects the metadata snapshot for operator-actionable faults:
 
-        * firmware watchdog tripped (channels disabled by firmware),
-        * a channel's ``status == "error"`` (thermistor read failed),
-        * drive saturated at the clamp while the channel is still far
-          from its target (peltier can't keep up — fan failure,
-          thermal-interface degradation, setpoint outside achievable
-          range).
+        * firmware watchdog tripped (LOAD disabled by firmware),
+        * ``status == "error"`` (thermistor read failed),
+        * a sticky trip latch set (``sensor_tripped`` / ``stall_tripped``
+          / ``runaway_tripped``) — firmware has gated drive until the
+          host acks with ``LOAD_enable=true``.
 
         Reboot recovery is owned by picohost:
-        :class:`picohost.base.PicoPeltier` caches the last config each
+        :class:`picohost.base.PicoTempCtrl` caches the last config each
         setter pushed and replays it from ``on_reconnect``. On EIGSEP
         hardware every firmware reset path (hard watchdog, brownout,
         picotool re-flash via BOOTSEL) drops USB CDC, so the replay
@@ -1283,52 +1275,53 @@ class PandaClient:
         """Emit operator-visible warnings for tempctrl fault states.
 
         Called once per :meth:`tempctrl_loop` iteration on the latest
-        metadata snapshot. Three warn conditions:
+        metadata snapshot. Warn conditions:
 
-        1. ``watchdog_tripped`` — firmware disabled both channels
-           because panda-side commands stopped arriving.
-        2. Per-channel ``status == "error"`` — thermistor read failed
-           on that side. Control is disabled by firmware for the
-           affected channel until the sensor recovers.
-        3. Per-channel drive saturated at the clamp while
-           ``|T_now - T_target| > 1°C`` — the peltier is trying its
-           hardest and still losing ground, i.e. a fan or
-           thermal-interface fault, or a setpoint outside the rig's
-           thermal capability. Uses a ±0.02 slack on the clamp check
-           because ``drive_level`` is a floating-point duty cycle and
-           we don't want to false-fire on the last bit of rounding.
+        1. ``watchdog_tripped`` — firmware disabled LOAD because
+           panda-side commands stopped arriving.
+        2. ``LOAD_status == "error"`` — thermistor read failed. Control
+           is disabled by firmware until the sensor recovers.
+        3. A sticky trip latch is set (``LOAD_sensor_tripped`` — a
+           burst of implausible ADC jumps; ``LOAD_stall_tripped`` — the
+           FET was on for a full window with no meaningful temperature
+           rise, heater ineffective or sensor stuck; ``LOAD_runaway_
+           tripped`` — temperature fell while heating, mis-wired FET/
+           sensor, or the absolute safety ceiling was hit). All three
+           gate drive until the host acks with ``LOAD_enable=true``.
 
         A descoped channel (``installed: false``) never warns: every
         check here is ``.get()``-guarded and
-        :meth:`TempCtrlClient.get_status` omits an uninstalled
-        channel's keys from the merged snapshot by construction, so no
-        code change is needed per channel.
+        :meth:`TempCtrlClient.get_status` returns ``None`` when LOAD is
+        uninstalled, so :meth:`tempctrl_loop` never calls this method
+        at all in that case.
         """
         if status.get("watchdog_tripped"):
             self._warn_with_status(
-                "Tempctrl firmware watchdog tripped; channels disabled."
+                "Tempctrl firmware watchdog tripped; LOAD disabled."
             )
-        for ch in ("LNA", "LOAD"):
-            if status.get(f"{ch}_status") == "error":
+        if status.get("LOAD_status") == "error":
+            self._warn_with_status(
+                "Tempctrl LOAD thermistor in error state; firmware has "
+                "disabled the channel."
+            )
+            return
+        for flag, reason in (
+            (
+                "LOAD_sensor_tripped",
+                "rate-guard latch (implausible ADC jump burst)",
+            ),
+            (
+                "LOAD_stall_tripped",
+                "stall (FET on, no measurable temperature rise)",
+            ),
+            (
+                "LOAD_runaway_tripped",
+                "runaway (temperature moved against the drive, or hit the "
+                "absolute safety ceiling)",
+            ),
+        ):
+            if status.get(flag):
                 self._warn_with_status(
-                    f"Tempctrl {ch} thermistor in error state; "
-                    "firmware has disabled that channel."
-                )
-                continue
-            drive = status.get(f"{ch}_drive_level")
-            clamp = status.get(f"{ch}_clamp")
-            t_now = status.get(f"{ch}_T_now")
-            t_target = status.get(f"{ch}_T_target")
-            if (
-                drive is not None
-                and clamp is not None
-                and t_now is not None
-                and t_target is not None
-                and abs(drive) >= abs(clamp) - 0.02
-                and abs(t_now - t_target) > 1.0
-            ):
-                self._warn_with_status(
-                    f"Tempctrl {ch} drive saturated at clamp "
-                    f"({drive:.2f}/{clamp:.2f}) with T_now={t_now:.2f}°C "
-                    f"vs target={t_target:.2f}°C; peltier cannot keep up."
+                    f"Tempctrl LOAD {flag} set: {reason}; drive gated "
+                    "until acked with LOAD_enable=true."
                 )

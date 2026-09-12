@@ -14,11 +14,12 @@ Reads three places in Redis on the pico-manager host:
 Prints one line per published metadata stream. That is usually one
 row per logical device in ``picohost.manager.APP_NAMES`` (including
 ones that aren't flashed, shown as ``--``); the one exception is
-``tempctrl``, whose single Pico drives two Peltier channels and so
-fans out into ``tempctrl_lna`` and ``tempctrl_load`` (see
-``picohost.base.PicoPeltier._peltier_redis_handler``). Both channel
-rows share the same port and heartbeat. Use this before starting
-``eigsep-panda`` to confirm every expected pico is reporting.
+``tempctrl``, whose device name (``tempctrl``) doesn't match its
+published stream name (``tempctrl_load`` — the sole surviving tempctrl
+channel; the LNA/Peltier channel was removed) (see
+``picohost.base.PicoTempCtrl._tempctrl_redis_handler``). Use this
+before starting ``eigsep-panda`` to confirm every expected pico is
+reporting.
 
 When the manager is NOT running (e.g. picos are plugged into a bench
 Pi without ``pico-manager.service``), heartbeats and metadata will
@@ -37,12 +38,10 @@ from picohost.buses import PicoConfigStore
 from picohost.keys import pico_heartbeat_name
 from picohost.manager import APP_NAMES
 
-# Per-channel Peltier fields are unprefixed in the split streams
-# (``T_now`` / ``drive_level``, not ``LNA_T_now`` / ``LNA_drive_level``)
-# because ``_peltier_redis_handler`` strips the ``LNA_`` / ``LOAD_``
-# prefix when fanning the firmware tick into ``tempctrl_lna`` /
-# ``tempctrl_load``. The stream label in the leftmost column already
-# tells us which channel each row is.
+# Tempctrl LOAD fields are unprefixed in the published stream
+# (``T_now`` / ``drive_level``, not ``LOAD_T_now`` / ``LOAD_drive_level``)
+# because ``_tempctrl_redis_handler`` strips the ``LOAD_`` prefix when
+# publishing the firmware tick into ``tempctrl_load``.
 _SUMMARY_FIELD_PRIORITY = (
     "az_pos",
     "el_pos",
@@ -80,10 +79,11 @@ SUMMARY_FIELDS = _summary_fields()
 
 # Map device name (from ``APP_NAMES``) to the ordered list of metadata
 # stream names it publishes. Most devices publish exactly one stream
-# named after the device; ``tempctrl`` is the exception. Keys absent
-# from this map default to ``(device,)`` via ``_streams_for``.
+# named after the device; ``tempctrl`` is the exception (device name
+# ``tempctrl``, stream name ``tempctrl_load``). Keys absent from this
+# map default to ``(device,)`` via ``_streams_for``.
 DEVICE_STREAMS = {
-    "tempctrl": ("tempctrl_lna", "tempctrl_load"),
+    "tempctrl": ("tempctrl_load",),
 }
 
 

@@ -809,20 +809,13 @@ def test_avg_metadata():
     sw_data[1] = dict(sw_data[0], status="error")
     assert io.avg_metadata(sw_data) == "UNKNOWN"
 
-    # tempctrl_lna and tempctrl_load are independent streams that each
-    # flow through the generic _avg_sensor_values path; no special-case
-    # dispatch. Per-channel "status" collapses to "error" on any errored
-    # sample, just like every other sensor. Per-sample dicts are anchored
-    # to the real TempCtrlEmulator + PicoPeltier._peltier_redis_handler
-    # output via tempctrl_post_handler_reading; only T_now/timestamp/status
-    # vary per sample.
-    def _lna(t_now, timestamp, status="update"):
-        e = tempctrl_post_handler_reading("tempctrl_lna")
-        e["T_now"] = t_now
-        e["timestamp"] = timestamp
-        e["status"] = status
-        return e
-
+    # tempctrl_load flows through the generic _avg_sensor_values path;
+    # no special-case dispatch. "status" collapses to "error" on any
+    # errored sample, just like every other sensor. Per-sample dicts are
+    # anchored to the real TempCtrlEmulator +
+    # PicoTempCtrl._tempctrl_redis_handler output via
+    # tempctrl_post_handler_reading; only T_now/timestamp/status vary
+    # per sample.
     def _load(t_now, timestamp, status="update"):
         e = tempctrl_post_handler_reading("tempctrl_load")
         e["T_now"] = t_now
@@ -830,9 +823,9 @@ def test_avg_metadata():
         e["status"] = status
         return e
 
-    lna_data = [_lna(30.0, 1.0), _lna(32.0, 3.0)]
-    result = io.avg_metadata(lna_data)
-    assert result["sensor_name"] == "tempctrl_lna"
+    load_steady = [_load(30.0, 1.0), _load(32.0, 3.0)]
+    result = io.avg_metadata(load_steady)
+    assert result["sensor_name"] == "tempctrl_load"
     assert result["T_now"] == pytest.approx(31.0)  # average of 30 and 32
     assert result["status"] == "update"
 
@@ -857,40 +850,32 @@ def test_avg_metadata():
     assert isinstance(result["app_id"], int)
 
 
-def test_avg_metadata_tempctrl_watchdog_fields_survive_split():
-    """Each split tempctrl stream carries the device-wide watchdog
-    fields (``watchdog_tripped``, ``watchdog_timeout_ms``) duplicated
-    in by the picohost producer. Lock in that the generic
-    ``_avg_sensor_values`` path preserves them with types intact —
-    before the LNA/LOAD split, an earlier ``_avg_temp_metadata``
-    silently dropped these because the helper only enumerated channel
-    keys.
+def test_avg_metadata_tempctrl_watchdog_fields_survive():
+    """The tempctrl stream carries the device-wide watchdog fields
+    (``watchdog_tripped``, ``watchdog_timeout_ms``) duplicated in by the
+    picohost producer. Lock in that the generic ``_avg_sensor_values``
+    path preserves them with types intact — an earlier
+    ``_avg_temp_metadata`` silently dropped these because the helper
+    only enumerated channel keys.
     """
-    expected_watchdog_ms = tempctrl_post_handler_reading("tempctrl_lna")[
+    expected_watchdog_ms = tempctrl_post_handler_reading("tempctrl_load")[
         "watchdog_timeout_ms"
     ]
 
-    def _make(stream, t_now):
-        e = tempctrl_post_handler_reading(stream)
+    def _make(t_now):
+        e = tempctrl_post_handler_reading("tempctrl_load")
         e["T_now"] = t_now
         e["timestamp"] = 1.0
         return e
 
-    lna = io.avg_metadata(
-        [_make("tempctrl_lna", 30.0), _make("tempctrl_lna", 32.0)]
-    )
-    assert lna["sensor_name"] == "tempctrl_lna"
-    assert lna["app_id"] == 1
-    assert isinstance(lna["app_id"], int)
-    assert lna["watchdog_tripped"] is False
-    assert lna["watchdog_timeout_ms"] == expected_watchdog_ms
-    assert isinstance(lna["watchdog_timeout_ms"], int)
-    assert lna["T_now"] == pytest.approx(31.0)
-
-    load = io.avg_metadata([_make("tempctrl_load", 32.0)])
+    load = io.avg_metadata([_make(30.0), _make(32.0)])
     assert load["sensor_name"] == "tempctrl_load"
+    assert load["app_id"] == 1
+    assert isinstance(load["app_id"], int)
+    assert load["watchdog_tripped"] is False
     assert load["watchdog_timeout_ms"] == expected_watchdog_ms
-    assert load["T_now"] == pytest.approx(32.0)
+    assert isinstance(load["watchdog_timeout_ms"], int)
+    assert load["T_now"] == pytest.approx(31.0)
 
 
 # ----------------------------------------------------------------------
@@ -942,7 +927,7 @@ def test_avg_metadata_bool_any_on_disagreement():
     """bool fields take any() — fault-flag worst-case. A tempctrl
     integration whose watchdog tripped at any point in the integration
     must record watchdog_tripped=True."""
-    base = tempctrl_post_handler_reading("tempctrl_lna")
+    base = tempctrl_post_handler_reading("tempctrl_load")
     base["T_now"] = 30.0
     base["timestamp"] = 1.0
     data = [
@@ -960,7 +945,7 @@ def test_avg_metadata_sensor_rejects_max_on_disagreement():
     on every accepted sample, so the default int reduction (min, a
     no-op for the invariant constants) would wash a mid-integration
     reject burst back to 0 and delete the marker from the corr record."""
-    base = tempctrl_post_handler_reading("tempctrl_lna")
+    base = tempctrl_post_handler_reading("tempctrl_load")
     base["T_now"] = 30.0
     base["timestamp"] = 1.0
     data = [
@@ -1225,9 +1210,8 @@ def test_stream_metadata_averaging():
 
 
 def test_temp_metadata_streams_land_in_file():
-    """tempctrl_lna and tempctrl_load are independent streams; each
-    lands as a flat per-channel entry in the file. (Producer-side
-    fan-out lives in picohost's PicoPeltier._peltier_redis_handler.)
+    """tempctrl_load lands as a flat entry in the file. (Producer-side
+    republish lives in picohost's PicoTempCtrl._tempctrl_redis_handler.)
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         save_dir = Path(tmpdir)
@@ -1245,27 +1229,20 @@ def test_temp_metadata_streams_land_in_file():
             e["timestamp"] = timestamp
             return e
 
-        expected_watchdog_ms = tempctrl_post_handler_reading("tempctrl_lna")[
+        expected_watchdog_ms = tempctrl_post_handler_reading("tempctrl_load")[
             "watchdog_timeout_ms"
         ]
 
         md = {
-            "stream:tempctrl_lna": [_entry("tempctrl_lna", 30.0, 1.0)],
             "stream:tempctrl_load": [_entry("tempctrl_load", 25.0, 2.0)],
         }
         f.add_data(1, 0.0, d, metadata=md)
 
         assert "tempctrl" not in f.metadata
-        assert "tempctrl_lna" in f.metadata
         assert "tempctrl_load" in f.metadata
-        assert f.metadata["tempctrl_lna"][0]["T_now"] == 30.0
         assert f.metadata["tempctrl_load"][0]["T_now"] == 25.0
         # Device-wide watchdog fields survive into the file (the old
         # _avg_temp_metadata split dropped them).
-        assert (
-            f.metadata["tempctrl_lna"][0]["watchdog_timeout_ms"]
-            == expected_watchdog_ms
-        )
         assert (
             f.metadata["tempctrl_load"][0]["watchdog_timeout_ms"]
             == expected_watchdog_ms
@@ -1328,13 +1305,6 @@ def test_metadata_end_to_end_round_trip():
                     # matches _potmon_avg_entry in CORR_METADATA.
                     "sp1_term": 0,
                     "sp1_term_name": "SHORT",
-                },
-            ],
-            "stream:tempctrl_lna": [
-                {
-                    **tempctrl_post_handler_reading("tempctrl_lna"),
-                    "T_now": 30.0 + 0.01 * i,
-                    "timestamp": 1.0 + i,
                 },
             ],
             "stream:tempctrl_load": [
