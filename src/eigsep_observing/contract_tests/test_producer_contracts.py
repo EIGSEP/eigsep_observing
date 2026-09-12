@@ -35,7 +35,7 @@ from picohost import PicoPotentiometer
 from picohost.base import (
     PicoIMU,
     PicoLidar,
-    PicoTempCtrl,
+    PicoPeltier as PicoTempCtrl,  # renamed in picohost 4.5
     PicoRFSwitch,
     redis_handler,
 )

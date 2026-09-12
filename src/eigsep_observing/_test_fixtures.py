@@ -26,7 +26,7 @@ without significant test rewrites.
 """
 
 import numpy as np
-from picohost.base import PicoTempCtrl
+from picohost.base import PicoPeltier as PicoTempCtrl  # renamed in picohost 4.5
 from picohost.testing import TempCtrlEmulator
 
 # One corr file accumulates NTIMES integrations, each of duration
