@@ -92,7 +92,13 @@ calibration:
 use_tempctrl: true
 tempctrl_interval: 60  # seconds between setpoint re-apply + health check
 tempctrl_settings:
-  watchdog_timeout_ms: 30000
+  # 0 = disabled. Temporarily off during bring-up: eigsep-panda's
+  # tempctrl_loop only pushes settings once at startup and never
+  # resends, so a nonzero timeout here trips ~watchdog_timeout_ms
+  # after every start and then stays sticky-off until a manual
+  # LOAD_enable=true. Re-enable (nonzero, > tempctrl_interval, with a
+  # periodic resend) once that's fixed properly.
+  watchdog_timeout_ms: 0
   LOAD:
     installed: true
     enable: true
