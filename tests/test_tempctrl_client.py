@@ -1,10 +1,13 @@
 """Tests for ``TempCtrlClient`` driven against the dummy PicoManager.
 
 The ``client`` fixture starts an in-process ``PicoManager`` with a
-``DummyPicoTempCtrl`` backed by ``TempCtrlEmulator``. Tests inspect the
-emulator's ``load`` channel state (the sole tempctrl channel — the
-LNA/Peltier channel and its PI control were removed) to confirm that
-commands sent via :class:`TempCtrlClient` land with the right fields.
+``DummyPicoTempCtrl`` backed by ``TempCtrlEmulator``. Most tests inspect
+the emulator's ``load`` channel state — LOAD is the only channel with
+settings to push (the LNA1/LNA2 thermistor channels are read-only, no
+setpoints/enable/installed) — to confirm that commands sent via
+:class:`TempCtrlClient` land with the right fields. A few tests below
+cover LNA1/LNA2 specifically: they have no settings surface, but their
+status still flows through :meth:`TempCtrlClient.get_status`.
 """
 
 import time
@@ -273,6 +276,48 @@ def test_apply_settings_order_watchdog_installed_temperature_enable():
         "set_temperature",
         "set_enable",
     ]
+
+
+def test_get_status_merges_lna_channels(client):
+    """LNA1/LNA2 have no settings/installed concept and always publish
+    — get_status merges their fields in under LNA1_*/LNA2_* prefixes
+    alongside LOAD_*, mirroring the tempctrl_load shape."""
+    tc = TempCtrlClient(client.transport, settings=SETTINGS)
+    tc.apply_settings()
+    assert _wait_until(
+        lambda: (s := tc.get_status()) is not None
+        and "LOAD_T_target" in s
+        and "LNA1_T_now" in s
+        and "LNA2_T_now" in s
+    )
+    status = tc.get_status()
+    assert "LNA1_status" in status
+    assert "LNA2_status" in status
+    assert "watchdog_timeout_ms" in status
+
+
+def test_get_status_includes_lna_when_load_uninstalled():
+    """LOAD being descoped must not suppress LNA1/LNA2 — they have no
+    ``installed`` concept and always publish."""
+    from eigsep_redis import MetadataWriter
+    from eigsep_redis.testing import DummyTransport
+
+    from eigsep_observing._test_fixtures import tempctrl_post_handler_reading
+
+    transport = DummyTransport()
+    writer = MetadataWriter(transport)
+    writer.add("tempctrl_lna1", tempctrl_post_handler_reading("tempctrl_lna1"))
+    writer.add("tempctrl_lna2", tempctrl_post_handler_reading("tempctrl_lna2"))
+
+    tc = TempCtrlClient(
+        transport,
+        settings={"LOAD": {"installed": False, "enable": False}},
+    )
+    status = tc.get_status()
+    assert status is not None
+    assert "LOAD_T_now" not in status
+    assert "LNA1_T_now" in status
+    assert "LNA2_T_now" in status
 
 
 def test_get_status_skips_uninstalled_channel_stream():

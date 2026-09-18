@@ -226,36 +226,44 @@ def _lidar_avg_entry(distance_m):
     }
 
 
+_TEMPCTRL_STREAMS = ("tempctrl_load", "tempctrl_lna1", "tempctrl_lna2")
+
+
 def tempctrl_post_handler_reading(
     stream_name="tempctrl_load", *, sensor_error=None
 ):
-    """The tempctrl_load reading after ``_tempctrl_redis_handler``.
+    """One tempctrl-family stream reading after ``_tempctrl_redis_handler``.
 
     The firmware/emulator emits one ``sensor_name="tempctrl"`` dict per
-    status tick; ``PicoTempCtrl._tempctrl_redis_handler`` republishes it
-    as the flat ``tempctrl_load`` stream — the boundary that produces the
-    actual Redis-stream shape. Composing the emulator with the handler
-    here means every test fixture downstream is anchored to the real
+    status tick, with ``LOAD_*`` / ``LNA1_*`` / ``LNA2_*`` prefixed
+    fields; ``PicoTempCtrl._tempctrl_redis_handler`` republishes it as
+    three flat streams — the boundary that produces the actual
+    Redis-stream shape. Composing the emulator with the handler here
+    means every test fixture downstream is anchored to the real
     producer output rather than drifting on hand-typed steady-state
     values.
 
     Parameters
     ----------
     stream_name : str, optional
-        Kept for call-site compatibility; the only valid value is
-        ``"tempctrl_load"`` (the LNA channel and its Peltier/PI control
-        were removed — there is only one tempctrl stream now).
+        One of ``"tempctrl_load"``, ``"tempctrl_lna1"``,
+        ``"tempctrl_lna2"``.
     sensor_error : bool, optional
         Put the channel into the railed-divider error state before the
         op tick, yielding the real error-row shape (``status: "error"``,
         null T_now/resistance, voltage at the rail) — the row an
         unplugged thermistor produces, e.g. during the reboot burst
-        before pico-manager replays the installed flag.
+        before pico-manager replays the installed flag (LOAD) or a
+        dead LNA divider (LNA1/LNA2). Maps to
+        ``TempCtrlEmulator.inject_sensor_error(channel=...)``; the
+        channel name is derived from ``stream_name``
+        (``tempctrl_load`` -> ``LOAD``, ``tempctrl_lna1`` -> ``LNA1``,
+        etc.).
     """
-    if stream_name != "tempctrl_load":
+    if stream_name not in _TEMPCTRL_STREAMS:
         raise ValueError(
             f"tempctrl_post_handler_reading: unknown stream {stream_name!r} "
-            "— the LNA channel was removed; only 'tempctrl_load' exists"
+            f"— expected one of {_TEMPCTRL_STREAMS!r}"
         )
     tc = PicoTempCtrl.__new__(PicoTempCtrl)
     captured = []
@@ -266,7 +274,8 @@ def tempctrl_post_handler_reading(
     # is meant to pin.
     emu = TempCtrlEmulator()
     if sensor_error:
-        emu.inject_sensor_error()
+        channel = stream_name.removeprefix("tempctrl_").upper()
+        emu.inject_sensor_error(channel=channel)
     emu.op()
     tc._tempctrl_redis_handler(emu.get_status())
     for entry in captured:
@@ -279,14 +288,14 @@ def tempctrl_post_handler_reading(
 
 
 def _tempctrl_channel_entry(sensor_name, t_now, timestamp):
-    """One per-sample tempctrl_load channel entry.
+    """One per-sample tempctrl-family channel entry (LOAD, LNA1, or LNA2).
 
     Steady-state fields are derived from
     ``tempctrl_post_handler_reading`` so the fixture stays anchored to
     real ``TempCtrlEmulator`` + ``PicoTempCtrl._tempctrl_redis_handler``
     output. Only ``T_now`` and ``timestamp`` are per-sample test inputs;
-    everything else (``T_target``, drive flags, watchdog) is the
-    emulator's steady-state value.
+    everything else (``T_target``, drive flags, watchdog — LOAD only)
+    is the emulator's steady-state value.
     """
     entry = tempctrl_post_handler_reading(sensor_name)
     entry["T_now"] = t_now
@@ -353,6 +362,14 @@ CORR_METADATA = {
     "potmon": [_potmon_avg_entry(1.5 + 0.001 * i) for i in range(NTIMES)],
     "tempctrl_load": [
         _tempctrl_channel_entry("tempctrl_load", 25.0 + 0.01 * i, 1.0 + i)
+        for i in range(NTIMES)
+    ],
+    "tempctrl_lna1": [
+        _tempctrl_channel_entry("tempctrl_lna1", 24.0 + 0.01 * i, 1.0 + i)
+        for i in range(NTIMES)
+    ],
+    "tempctrl_lna2": [
+        _tempctrl_channel_entry("tempctrl_lna2", 23.5 + 0.01 * i, 1.0 + i)
         for i in range(NTIMES)
     ],
     "rfswitch": (

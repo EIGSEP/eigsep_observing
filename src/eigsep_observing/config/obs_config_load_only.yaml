@@ -10,7 +10,7 @@ rpi_ip: "10.10.10.10"
 panda_ip: "10.10.10.11"
 
 # corr filewriter
-corr_save_dir: "/media/eigsep/T7/data"
+corr_save_dir: "/home/eigsep/data"
 corr_ntimes: 240
 
 # switches — disabled. The RF switch freezes wherever it currently

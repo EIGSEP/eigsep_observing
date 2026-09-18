@@ -98,6 +98,23 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         "LOAD drive level",
         enabled_by="use_tempctrl",
     ),
+    # LNA1/LNA2: read-only NTC thermistor readouts on two LNAs, no
+    # heater/drive concept, so only a T_now signal (no drive_level).
+    # No `installed` descope flag either (see TempCtrlClient docs) — the
+    # signal is enabled whenever tempctrl is, and the stream simply
+    # doesn't publish if the physical channel isn't wired up yet.
+    "tempctrl_lna1.T_now": Signal(
+        "tempctrl_lna1.T_now",
+        "LNA1 temperature",
+        unit="C",
+        enabled_by="use_tempctrl",
+    ),
+    "tempctrl_lna2.T_now": Signal(
+        "tempctrl_lna2.T_now",
+        "LNA2 temperature",
+        unit="C",
+        enabled_by="use_tempctrl",
+    ),
     # Whole-system current draw (ACS724 on the lidar Pico, fanned out to
     # the system_current stream). Always enabled — a system-wide vital,
     # not gated by a subsystem flag. current_voltage is a raw ADC

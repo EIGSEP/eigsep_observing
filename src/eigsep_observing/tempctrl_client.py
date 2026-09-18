@@ -145,36 +145,56 @@ class TempCtrlClient:
     def get_status(self):
         """Latest tempctrl metadata snapshot, or ``None`` if absent.
 
-        The picohost producer publishes the ``tempctrl_load`` stream
+        The picohost producer publishes three streams —
+        ``tempctrl_load``, ``tempctrl_lna1``, ``tempctrl_lna2`` — each
         with flat per-channel fields plus a duplicated copy of the
-        device-wide watchdog state. This method republishes it under
-        the flat ``LOAD_*`` shape used internally by
-        ``_tempctrl_health_check`` so callers don't have to know about
-        the underlying stream name.
+        device-wide watchdog state. This method republishes them under
+        the flat ``LOAD_*`` / ``LNA1_*`` / ``LNA2_*`` shape used
+        internally by ``_tempctrl_health_check`` so callers don't have
+        to know about the underlying stream names. The device-wide
+        ``watchdog_tripped`` / ``watchdog_timeout_ms`` fields are taken
+        from whichever channel is read first and are not re-prefixed.
 
         A channel whose settings say ``installed: false`` is never
         read: its stream stopped publishing at the producer, but a
         leftover hash entry (lab bring-up, pre-descope deployment, the
         reboot burst before pico-manager replays the flags) would
         otherwise feed stale data into the merged status and trigger
-        the snapshot reader's staleness warning on every poll.
+        the snapshot reader's staleness warning on every poll. LNA1/
+        LNA2 have no ``installed`` concept (see
+        :class:`picohost.base.PicoTempCtrl`) and are always read.
         """
-        if self.settings.get("LOAD", {}).get("installed") is False:
-            return None
-        try:
-            load = self._reader.get("tempctrl_load")
-        except KeyError:
-            load = None
-        if not load:
-            return None
         merged = {}
-        for k, v in load.items():
-            if k in ("sensor_name", "app_id"):
+        if self.settings.get("LOAD", {}).get("installed") is not False:
+            try:
+                load = self._reader.get("tempctrl_load")
+            except KeyError:
+                load = None
+            if load:
+                for k, v in load.items():
+                    if k in ("sensor_name", "app_id"):
+                        continue
+                    if k in ("watchdog_tripped", "watchdog_timeout_ms"):
+                        merged[k] = v
+                    else:
+                        merged[f"LOAD_{k}"] = v
+        for prefix, stream_name in (
+            ("LNA1", "tempctrl_lna1"),
+            ("LNA2", "tempctrl_lna2"),
+        ):
+            try:
+                lna = self._reader.get(stream_name)
+            except KeyError:
+                lna = None
+            if not lna:
                 continue
-            if k in ("watchdog_tripped", "watchdog_timeout_ms"):
-                merged[k] = v
-            else:
-                merged[f"LOAD_{k}"] = v
+            for k, v in lna.items():
+                if k in ("sensor_name", "app_id"):
+                    continue
+                if k in ("watchdog_tripped", "watchdog_timeout_ms"):
+                    merged.setdefault(k, v)
+                else:
+                    merged[f"{prefix}_{k}"] = v
         return merged or None
 
     def set_watchdog_timeout(self, timeout_ms):

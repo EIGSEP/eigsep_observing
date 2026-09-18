@@ -836,24 +836,30 @@ _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 # imu_az (antenna azimuth turntable, app_id 6): |theta| elevation only.
 _IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
-# tempctrl publishes a single flat stream, tempctrl_load — a low-side
-# FET heater behind an analog NTC thermistor (30k, Beta=3943, plain 10k
-# pull-up to 3V3), under on/off hysteresis control. There used to be a
-# second channel, "LNA" (a Peltier thermoelectric element under PI
-# control), but the project has moved off Peltier devices entirely — the
-# LNA channel and all PI-control code were removed from the firmware,
-# picohost, and this schema. The producer is
+# tempctrl publishes three flat streams: tempctrl_load — a low-side FET
+# heater behind an analog NTC thermistor (30k, Beta=3943, plain 10k
+# pull-up to 3V3), under on/off hysteresis control — plus tempctrl_lna1
+# / tempctrl_lna2, two read-only NTC readouts (same part/conversion,
+# no heater) on two LNAs. There used to be a different second channel,
+# "LNA" (a Peltier thermoelectric element under PI control), but the
+# project moved off Peltier devices entirely and that channel and all
+# PI-control code were removed from the firmware, picohost, and this
+# schema before the present LNA1/LNA2 thermistor channels were added —
+# the reused "LNA" name refers to unrelated hardware (a plain
+# thermistor readout, not a Peltier element). The producer for all
+# three streams is
 # `picohost.base.PicoTempCtrl._tempctrl_redis_handler`, which republishes
-# the firmware's `LOAD_*`-prefixed status tick as a flat `writer.add(...)`
-# call, stripping the prefix and carrying the device-wide
-# `watchdog_tripped` / `watchdog_timeout_ms` fields along with it. With a
-# top-level `status`, the stream flows through the generic
-# `_avg_sensor_values` reduction like every other sensor.
+# the firmware's `LOAD_*` / `LNA1_*` / `LNA2_*`-prefixed status tick as
+# three flat `writer.add(...)` calls, stripping each prefix and carrying
+# the device-wide `watchdog_tripped` / `watchdog_timeout_ms` fields along
+# with each. With a top-level `status`, each stream flows through the
+# generic `_avg_sensor_values` reduction like every other sensor.
 #
 # A channel descoped via the firmware `installed` flag
 # (tempctrl_settings.LOAD.installed: false) publishes NO stream at all —
 # clean absence (no corr-file column, no staleness warnings), never a
-# sentinel or a permanent error stream.
+# sentinel or a permanent error stream. LNA1/LNA2 have no `installed`
+# flag and always publish.
 
 # tempctrl_load: rate-guard / sticky stall+runaway latch / installed-flag
 # scaffolding (see LoadHeater in pico-firmware's tempctrl.h), but no
@@ -884,6 +890,29 @@ _LOAD_HEATER_SCHEMA = {
     "hysteresis": float,
 }
 
+# tempctrl_lna1 / tempctrl_lna2: two plain read-only NTC thermistor
+# readouts on two LNAs (same physical part + Beta-equation conversion as
+# LOAD; see LnaThermistor in pico-firmware's tempctrl.h). No heater, no
+# target/hysteresis, no enable, no rate-guard/stall/runaway latches, and
+# (unlike LOAD) no `installed` descope flag — the channels always
+# publish. The producer is the same `PicoTempCtrl._tempctrl_redis_handler`
+# that publishes tempctrl_load, fanned out from the same firmware status
+# tick's `LNA1_*` / `LNA2_*` prefixed fields; `status` is "error" (with
+# T_now/resistance reported as None) only while that channel's own most
+# recent sample cycle failed a plausibility check, same status semantics
+# as LOAD.
+_LNA_THERM_SCHEMA = {
+    "sensor_name": str,
+    "status": str,
+    "app_id": int,
+    "watchdog_tripped": bool,
+    "watchdog_timeout_ms": int,
+    "T_now": float,
+    "voltage": float,
+    "resistance": float,
+    "timestamp": float,
+}
+
 # `potmon` (potentiometer monitor): the producer is `PotMonEmulator` +
 # `PicoPotentiometer._pot_redis_handler`, which augments the raw
 # voltages with calibration slope/intercept and the derived angle.
@@ -909,6 +938,8 @@ SENSOR_SCHEMAS = {
     "imu_el": _IMU_EL_SCHEMA,
     "imu_az": _IMU_AZ_SCHEMA,
     "tempctrl_load": _LOAD_HEATER_SCHEMA,
+    "tempctrl_lna1": _LNA_THERM_SCHEMA,
+    "tempctrl_lna2": _LNA_THERM_SCHEMA,
     "potmon": {
         "sensor_name": str,
         "status": str,

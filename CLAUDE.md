@@ -284,12 +284,29 @@ normal operation.
 
 `tempctrl_load` is an ordinary stream handled by the generic
 `_avg_sensor_values` path. (The standalone `temp_mon` Pico app was
-retired in picohost 1.0.0; the LNA/Peltier tempctrl channel and its PI
-control were later removed entirely, leaving LOAD as the sole tempctrl
-channel.) A descope via `tempctrl_settings.LOAD.installed: false`
-(firmware `installed` flag, picohost 4.2) publishes no stream at
-all — consumers see clean absence, never a sentinel or error stream;
-see OPERATIONS.md "Tempctrl channel descope".
+retired in picohost 1.0.0; the original LNA/Peltier tempctrl channel
+and its PI control were later removed entirely, leaving LOAD as the
+sole tempctrl channel for a time.) A descope via
+`tempctrl_settings.LOAD.installed: false` (firmware `installed` flag,
+picohost 4.2) publishes no stream at all — consumers see clean
+absence, never a sentinel or error stream; see OPERATIONS.md "Tempctrl
+channel descope".
+
+**`tempctrl_lna1` / `tempctrl_lna2`** (added after the Peltier-era LNA
+channel was removed — same name, unrelated hardware) are two more
+read-only NTC thermistor readouts on two LNAs, on the same tempctrl
+pico as LOAD. Same physical part and Beta-equation conversion as LOAD
+(`LnaThermistor` in pico-firmware's `tempctrl.h`), but no heater, no
+target/hysteresis/enable, no rate-guard/stall/runaway trip latches,
+and — unlike LOAD — no `installed` descope flag: they always publish
+whenever `use_tempctrl` is true. Both ride the same
+`_avg_sensor_values` reduction path and the same producer
+(`picohost.base.PicoTempCtrl._tempctrl_redis_handler`, which fans one
+firmware status tick out to all three streams). `TempCtrlClient
+.get_status()` merges all three into one flat dict (`LOAD_*` /
+`LNA1_*` / `LNA2_*` prefixes); `_tempctrl_health_check` in `client.py`
+warns on `LNA1_status`/`LNA2_status == "error"` the same way it warns
+on `LOAD_status`. See `_LNA_THERM_SCHEMA` in `io.py`.
 
 **IMU mode (picohost 1.0.0+).** The two IMU picos (`imu_el` panda elevation,
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:

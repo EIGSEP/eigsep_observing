@@ -271,6 +271,8 @@ SENSOR_EMULATORS = {
     "rfswitch": lambda: _rfswitch_post_handler_readings()[0],
     "rfswitch_therm": lambda: _rfswitch_post_handler_readings()[1],
     "tempctrl_load": lambda: _tempctrl_post_handler_reading("tempctrl_load"),
+    "tempctrl_lna1": lambda: _tempctrl_post_handler_reading("tempctrl_lna1"),
+    "tempctrl_lna2": lambda: _tempctrl_post_handler_reading("tempctrl_lna2"),
     "lidar": lambda: _lidar_post_handler_readings()[0],
     "potmon": _potmon_post_handler_reading,
     "motor": _motor_post_handler_reading,
@@ -283,9 +285,11 @@ def test_uninstalled_tempctrl_channel_publishes_nothing():
     """Descope contract: when the firmware ``installed`` flag is false,
     LOAD is fanned out as *nothing* — clean stream absence downstream (no
     corr-file column, no snapshot staleness warnings) rather than a
-    permanent error stream off the dead thermistor divider. There is only
-    one tempctrl channel (LNA and its Peltier/PI control were removed),
-    so descoping it means the whole stream disappears."""
+    permanent error stream off the dead thermistor divider. LNA1/LNA2
+    have no ``installed`` concept and always publish, so descoping LOAD
+    leaves them unaffected — this is the same
+    installed-gates-only-LOAD contract exercised in picohost's
+    ``test_uninstalled_load_suppressed_lna_still_publishes``."""
     tc = PicoTempCtrl.__new__(PicoTempCtrl)
     captured = []
     tc._base_redis_handler = lambda d: captured.append(dict(d))
@@ -293,25 +297,31 @@ def test_uninstalled_tempctrl_channel_publishes_nothing():
     emu.server({"LOAD_installed": 0})
     emu.op()
     tc._tempctrl_redis_handler(emu.get_status())
-    assert captured == []
+    assert [e["sensor_name"] for e in captured] == [
+        "tempctrl_lna1",
+        "tempctrl_lna2",
+    ]
 
 
 def test_installed_tempctrl_channel_conforms_to_schema():
-    """The installed (default) case: LOAD publishes exactly one entry
-    conforming to its schema, and the installed flag itself never enters
-    the published shape."""
+    """The installed (default) case: all three channels publish,
+    each conforming to its own schema, and the installed flag itself
+    never enters the published shape."""
     tc = PicoTempCtrl.__new__(PicoTempCtrl)
     captured = []
     tc._base_redis_handler = lambda d: captured.append(dict(d))
     emu = TempCtrlEmulator()
     emu.op()
     tc._tempctrl_redis_handler(emu.get_status())
-    assert [e["sensor_name"] for e in captured] == ["tempctrl_load"]
-    entry = captured[0]
-    assert "installed" not in entry
-    assert (
-        io._validate_metadata(entry, io.SENSOR_SCHEMAS["tempctrl_load"]) == []
-    )
+    assert [e["sensor_name"] for e in captured] == [
+        "tempctrl_load",
+        "tempctrl_lna1",
+        "tempctrl_lna2",
+    ]
+    for entry in captured:
+        assert "installed" not in entry
+        schema = io.SENSOR_SCHEMAS[entry["sensor_name"]]
+        assert io._validate_metadata(entry, schema) == []
 
 
 def test_test_header_conforms_to_corr_schema():

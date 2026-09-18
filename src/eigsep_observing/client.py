@@ -1288,12 +1288,17 @@ class PandaClient:
            tripped`` — temperature fell while heating, mis-wired FET/
            sensor, or the absolute safety ceiling was hit). All three
            gate drive until the host acks with ``LOAD_enable=true``.
+        4. ``LNA1_status`` / ``LNA2_status`` == ``"error"`` — one of the
+           LNA thermistor readouts failed a plausibility check. These
+           channels are read-only telemetry (no heater, no trip
+           latches, nothing to re-arm), so this is a plain "sensor is
+           unhappy" warning rather than a "drive is gated" one.
 
-        A descoped channel (``installed: false``) never warns: every
-        check here is ``.get()``-guarded and
-        :meth:`TempCtrlClient.get_status` returns ``None`` when LOAD is
-        uninstalled, so :meth:`tempctrl_loop` never calls this method
-        at all in that case.
+        A descoped LOAD channel (``installed: false``) never warns for
+        LOAD: every LOAD check here is ``.get()``-guarded and
+        :meth:`TempCtrlClient.get_status` omits ``LOAD_*`` keys when
+        LOAD is uninstalled. LNA1/LNA2 have no ``installed`` concept
+        and are always checked when present in ``status``.
         """
         if status.get("watchdog_tripped"):
             self._warn_with_status(
@@ -1304,24 +1309,30 @@ class PandaClient:
                 "Tempctrl LOAD thermistor in error state; firmware has "
                 "disabled the channel."
             )
-            return
-        for flag, reason in (
-            (
-                "LOAD_sensor_tripped",
-                "rate-guard latch (implausible ADC jump burst)",
-            ),
-            (
-                "LOAD_stall_tripped",
-                "stall (FET on, no measurable temperature rise)",
-            ),
-            (
-                "LOAD_runaway_tripped",
-                "runaway (temperature moved against the drive, or hit the "
-                "absolute safety ceiling)",
-            ),
-        ):
-            if status.get(flag):
+        else:
+            for flag, reason in (
+                (
+                    "LOAD_sensor_tripped",
+                    "rate-guard latch (implausible ADC jump burst)",
+                ),
+                (
+                    "LOAD_stall_tripped",
+                    "stall (FET on, no measurable temperature rise)",
+                ),
+                (
+                    "LOAD_runaway_tripped",
+                    "runaway (temperature moved against the drive, or "
+                    "hit the absolute safety ceiling)",
+                ),
+            ):
+                if status.get(flag):
+                    self._warn_with_status(
+                        f"Tempctrl LOAD {flag} set: {reason}; drive "
+                        "gated until acked with LOAD_enable=true."
+                    )
+        for prefix in ("LNA1", "LNA2"):
+            if status.get(f"{prefix}_status") == "error":
                 self._warn_with_status(
-                    f"Tempctrl LOAD {flag} set: {reason}; drive gated "
-                    "until acked with LOAD_enable=true."
+                    f"Tempctrl {prefix} thermistor in error state "
+                    "(plausibility check failed)."
                 )

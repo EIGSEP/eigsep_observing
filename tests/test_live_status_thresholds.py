@@ -117,8 +117,10 @@ def test_enabled_signals_includes_tempctrl_when_on():
 
 
 # LOAD descoped (installed: false) but with setpoints still staged for a
-# potential re-install — the realistic field shape. LOAD is the only
-# tempctrl channel, so descoping it drops every tempctrl signal.
+# potential re-install — the realistic field shape. LNA1/LNA2 have no
+# `installed` concept and always publish, so descoping LOAD only drops
+# LOAD's own signals (see test_enabled_signals_lna_survives_load_descope
+# below).
 OBS_CFG_LOAD_UNINSTALLED = {
     "use_tempctrl": True,
     "corr_ntimes": 240,
@@ -140,6 +142,27 @@ def test_enabled_signals_drops_uninstalled_channel():
     enabled = enabled_signals(OBS_CFG_LOAD_UNINSTALLED)
     assert "tempctrl_load.T_now" not in enabled
     assert "tempctrl_load.drive_level" not in enabled
+
+
+def test_enabled_signals_lna_survives_load_descope():
+    """LNA1/LNA2 have no ``installed`` flag and always publish, so
+    descoping LOAD must not drop their signals — only LOAD's own."""
+    enabled = enabled_signals(OBS_CFG_LOAD_UNINSTALLED)
+    assert "tempctrl_load.T_now" not in enabled
+    assert "tempctrl_lna1.T_now" in enabled
+    assert "tempctrl_lna2.T_now" in enabled
+
+
+def test_enabled_signals_includes_lna_when_tempctrl_on():
+    enabled = enabled_signals(OBS_CFG_TEMPCTRL_ON)
+    assert "tempctrl_lna1.T_now" in enabled
+    assert "tempctrl_lna2.T_now" in enabled
+
+
+def test_enabled_signals_drops_lna_when_tempctrl_off():
+    enabled = enabled_signals(OBS_CFG_TEMPCTRL_OFF)
+    assert "tempctrl_lna1.T_now" not in enabled
+    assert "tempctrl_lna2.T_now" not in enabled
 
 
 def test_default_thresholds_skips_uninstalled_channel():

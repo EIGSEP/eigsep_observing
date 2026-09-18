@@ -818,6 +818,35 @@ function renderTempctrlTiles(meta) {
   appendTileRow(container, "watchdog", tileClass(wdCls), wdText);
 }
 
+// Render the two read-only LNA thermistor channels (tempctrl_lna1 /
+// tempctrl_lna2). No heater, no target/hysteresis/enable/active, no
+// trip latches — just status/age, temperature, voltage and resistance
+// off the same Beta-equation NTC conversion as LOAD. Both channels
+// always publish (no `installed` descope), so "no data" here means the
+// stream hasn't shown up yet rather than an intentional descope.
+function renderTempctrlLnaTiles(meta) {
+  const blocks = [
+    { id: "tempctrl-lna1-block", stream: "tempctrl_lna1", label: "LNA1" },
+    { id: "tempctrl-lna2-block", stream: "tempctrl_lna2", label: "LNA2" },
+  ];
+  for (const { id, stream, label } of blocks) {
+    const container = document.getElementById(id);
+    if (!container) continue;
+    container.replaceChildren();
+    const entry = meta[stream];
+    if (!entry) {
+      container.textContent = `no ${label.toLowerCase()} data`;
+      continue;
+    }
+    const value = entry.value || {};
+    const tClass = (entry.classify || {})[`${stream}.T_now`] || "unknown";
+    container.appendChild(makePaneStatusHeader(label, entry));
+    appendTileRow(container, "now", tileClass(tClass), `${fmt(value.T_now, 2)} C`);
+    appendValueRow(container, "voltage", `${fmt(value.voltage, 3)} V`);
+    appendValueRow(container, "resistance", `${fmt(value.resistance, 0)} ohm`);
+  }
+}
+
 function boolText(v) {
   if (v === true) return "yes";
   if (v === false) return "no";
@@ -1374,6 +1403,7 @@ async function tick() {
     updateHealth(health.data, file.data);
     updateCorr(corr.data);
     renderTempctrlTiles(metadata.data, null);
+    renderTempctrlLnaTiles(metadata.data);
     renderImu(metadata.data);
     renderMotor(metadata.data);
     renderOrientation(metadata.data);

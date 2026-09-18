@@ -1314,6 +1314,20 @@ def test_metadata_end_to_end_round_trip():
                     "timestamp": 1.0 + i,
                 },
             ],
+            "stream:tempctrl_lna1": [
+                {
+                    **tempctrl_post_handler_reading("tempctrl_lna1"),
+                    "T_now": 24.0 + 0.01 * i,
+                    "timestamp": 1.0 + i,
+                },
+            ],
+            "stream:tempctrl_lna2": [
+                {
+                    **tempctrl_post_handler_reading("tempctrl_lna2"),
+                    "T_now": 23.5 + 0.01 * i,
+                    "timestamp": 1.0 + i,
+                },
+            ],
         }
 
     def _rfswitch_payload(name):

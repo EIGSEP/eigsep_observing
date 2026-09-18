@@ -126,3 +126,10 @@ tempctrl_settings:
     enable: true
     target_C: 25.0
     hysteresis_C: 0.5
+  # LNA1/LNA2: two read-only NTC thermistor readouts on two LNAs, on
+  # the same tempctrl pico as LOAD. No heater, no target/hysteresis/
+  # enable, and no `installed` descope flag — nothing to configure, so
+  # they have no section here. They publish their own
+  # tempctrl_lna1 / tempctrl_lna2 streams unconditionally whenever
+  # use_tempctrl is true, and appear in the live-status dashboard and
+  # TempCtrlClient.get_status() the same way tempctrl_load does.

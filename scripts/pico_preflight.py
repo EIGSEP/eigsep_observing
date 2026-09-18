@@ -80,10 +80,11 @@ SUMMARY_FIELDS = _summary_fields()
 # Map device name (from ``APP_NAMES``) to the ordered list of metadata
 # stream names it publishes. Most devices publish exactly one stream
 # named after the device; ``tempctrl`` is the exception (device name
-# ``tempctrl``, stream name ``tempctrl_load``). Keys absent from this
-# map default to ``(device,)`` via ``_streams_for``.
+# ``tempctrl``, stream names ``tempctrl_load`` / ``tempctrl_lna1`` /
+# ``tempctrl_lna2`` — one heartbeat, three fanned-out streams). Keys
+# absent from this map default to ``(device,)`` via ``_streams_for``.
 DEVICE_STREAMS = {
-    "tempctrl": ("tempctrl_load",),
+    "tempctrl": ("tempctrl_load", "tempctrl_lna1", "tempctrl_lna2"),
 }
 
 

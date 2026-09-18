@@ -2713,6 +2713,84 @@ def test_tempctrl_loop_no_warning_on_healthy_status(
         client.stop()
 
 
+@pytest.mark.parametrize("prefix", ["LNA1", "LNA2"])
+def test_tempctrl_loop_warns_on_lna_channel_error(
+    transport, dummy_cfg, caplog, prefix
+):
+    """LNA1/LNA2 are read-only telemetry with no trip latches — a
+    plausibility-check failure only warns that the sensor is unhappy,
+    it doesn't gate/re-arm anything (there's nothing to re-arm)."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        # Sparse fixture — see branch-test rationale above.
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LOAD_status": "update",
+                f"{prefix}_status": "error",
+            }
+        )
+        assert any(
+            f"Tempctrl {prefix} thermistor in error state" in r.getMessage()
+            for r in caplog.records
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_lna_error_does_not_suppress_load_checks(
+    transport, dummy_cfg, caplog
+):
+    """LOAD's sticky-trip checks and an LNA error are independent
+    branches — an LNA fault must not mask a LOAD sticky-trip warning,
+    and vice versa."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LOAD_status": "update",
+                "LOAD_stall_tripped": True,
+                "LNA1_status": "error",
+            }
+        )
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("LOAD_stall_tripped" in m for m in messages)
+        assert any(
+            "Tempctrl LNA1 thermistor in error state" in m for m in messages
+        )
+    finally:
+        client.stop()
+
+
+def test_tempctrl_loop_no_warning_when_lna_status_absent(
+    transport, dummy_cfg, caplog
+):
+    """A status dict with no LNA1_status/LNA2_status keys at all (e.g.
+    older firmware, or a snapshot read before the streams first
+    publish) must not warn — ``.get()`` returns None, not "error"."""
+    cfg = dict(dummy_cfg)
+    cfg["use_tempctrl"] = True
+    client = DummyPandaClient(transport, cfg=cfg)
+    try:
+        caplog.set_level("WARNING")
+        client._tempctrl_health_check(
+            {
+                "watchdog_tripped": False,
+                "LOAD_status": "update",
+            }
+        )
+        assert caplog.records == []
+    finally:
+        client.stop()
+
+
 # ---------------------------------------------------------------------
 # MotionSwitchCoordinator + run_calibration_sequence
 # ---------------------------------------------------------------------
