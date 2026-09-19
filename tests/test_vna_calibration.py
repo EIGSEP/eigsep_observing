@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from cmt_vna.calkit import embed_sparams
+from eigsep_cal.calkit import embed_sparams
 
 from eigsep_observing.vna_calibration import (
     VnaCache,

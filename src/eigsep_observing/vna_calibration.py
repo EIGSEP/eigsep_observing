@@ -2,14 +2,14 @@
 
 The deployed system uses generic SMA open / short / load caps as
 calibration standards, not the metrology-grade S911T calkit that
-:class:`cmt_vna.calkit.S911T` models. We therefore assume **ideal**
+:class:`eigsep_cal.calkit.S911T` models. We therefore assume **ideal**
 reflection coefficients — ``+1`` open, ``-1`` short, ``0`` load — and
 accept the systematic error that introduces. Online displays and
 bring-up artifacts are quick-look outputs; lab post-processing on
 the saved ``.h5`` files re-applies a precise calkit model when
 needed.
 
-Pure numpy / cmt_vna primitives. No Redis, no Flask, no aggregator.
+Pure numpy / eigsep_cal primitives. No Redis, no Flask, no aggregator.
 Callers: the live-status route handler in ``live_status/app.py``,
 the cache in ``live_status/aggregator.py``, and
 ``eigsep_observing.vna.save_vna_manual_h5`` (the local-HDF5 path of
@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
-from cmt_vna.calkit import de_embed_sparams, network_sparams
+from eigsep_cal.calkit import de_embed_sparams, network_sparams
 
 
 @dataclass(frozen=True)
