@@ -11,6 +11,25 @@ from .utils import generate_data  # noqa: F401  (re-exported for tests)
 logger = logging.getLogger(__name__)
 
 
+class DummyTapcpTransport:
+    """
+    Minimal stand-in for ``casperfpga.transport_tapcp.TapcpTransport``.
+
+    Covers only the board-management call ``DummyFpga`` needs to
+    support today: ``get_temp()``, read by
+    ``EigsepFpga._publish_snap_temp``. 45.0 C is a plausible SNAP
+    board temperature under load — realistic enough that a test
+    checking the value lands in a file doesn't have to know the exact
+    number, only that it round-trips.
+    """
+
+    def __init__(self, temp_c=45.0):
+        self.temp_c = temp_c
+
+    def get_temp(self):
+        return self.temp_c
+
+
 class DummyFpga:
     """
     In-memory stand-in for ``casperfpga.CasperFpga``.
@@ -27,11 +46,18 @@ class DummyFpga:
     The constructor accepts the production calling convention
     (``CasperFpga(snap_ip, transport=...)``) so it can slot into
     ``EigsepFpga._make_fpga`` overrides without signature juggling.
+    ``transport`` defaults to a :class:`DummyTapcpTransport` (rather
+    than staying ``None``) so ``_publish_snap_temp``'s
+    ``self.fpga.transport.get_temp()`` call works out of the box —
+    tests that want the failure path can
+    ``patch.object(fpga.fpga.transport, "get_temp", side_effect=...)``.
     """
 
     def __init__(self, snap_ip=None, transport=None, **kwargs):
         self.snap_ip = snap_ip
-        self.transport = transport
+        self.transport = (
+            transport if transport is not None else DummyTapcpTransport()
+        )
         self.sync_time = time.time()
         self.cnt_period = kwargs.pop("cnt_period", 2**28 / (500 * 1e6))
         # version_version encodes (major << 16) | minor. Default 0x20004

@@ -234,6 +234,24 @@ def _adc_stats_post_publish_reading():
     return json.loads(raw.decode("utf-8"))
 
 
+def _fpga_temp_post_publish_reading():
+    """Return an fpga_temp reading after EigsepFpga._publish_snap_temp.
+
+    Like adc_stats, fpga_temp isn't a picohost emulator — it's
+    produced by ``EigsepFpga._publish_snap_temp``, which reads
+    ``self.fpga.transport.get_temp()`` (TAPCP board-management temp,
+    not the gateware sysmon block) and republishes it. ``DummyFpga``'s
+    default ``transport`` is a ``DummyTapcpTransport`` with a working
+    ``get_temp()``, so this exercises the real method end-to-end and
+    reads the payload back off the transport hash, mirroring
+    ``_adc_stats_post_publish_reading``.
+    """
+    fpga = DummyEigsepFpga(program=False)
+    fpga._publish_snap_temp()
+    raw = fpga.transport.r.hget("metadata", "fpga_temp")
+    return json.loads(raw.decode("utf-8"))
+
+
 def _imu_post_handler_reading(name, app_id):
     """Return an IMU reading after PicoIMU._imu_redis_handler.
 
@@ -277,6 +295,7 @@ SENSOR_EMULATORS = {
     "potmon": _potmon_post_handler_reading,
     "motor": _motor_post_handler_reading,
     "adc_stats": _adc_stats_post_publish_reading,
+    "fpga_temp": _fpga_temp_post_publish_reading,
     "system_current": lambda: _lidar_post_handler_readings()[1],
 }
 

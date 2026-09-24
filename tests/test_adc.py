@@ -1,6 +1,8 @@
 """Tests for the ADC diagnostic path: AdcSnapshot writer/reader
-round-trip, adc_stats schema reduction through ``avg_metadata``, and
-the snapshot-tick publish hooks in ``EigsepFpga``.
+round-trip, adc_stats schema reduction through ``avg_metadata``, the
+snapshot-tick publish hooks in ``EigsepFpga``, and the independent
+fpga_temp (SNAP board temperature over TAPCP) publisher that shares
+the same snapshot-tick throttle.
 
 The FPGA-level tests patch ``Input.get_adc_snapshot`` (the one
 FPGA-touching call) with scoped ``patch.object`` rather than replacing
@@ -286,6 +288,93 @@ class TestPublishAdcStats:
         assert len(warnings) == 1
 
 
+class TestPublishSnapTemp:
+    """``_publish_snap_temp`` reads the SNAP board temperature over
+    TAPCP (``fpga.transport.get_temp()`` — board management, not the
+    gateware sysmon block) and republishes it as ``fpga_temp``. No ADC
+    frames involved, so it's independent of the snapshot-grab
+    machinery the rest of this file exercises."""
+
+    def test_publish_writes_temp(self, fpga):
+        fpga._publish_snap_temp()
+        raw = fpga.transport.r.hget("metadata", "fpga_temp")
+        assert raw is not None
+        payload = json.loads(raw)
+        assert payload["sensor_name"] == "fpga_temp"
+        assert payload["status"] == "update"
+        # DummyTapcpTransport's default reading (see testing/fpga.py).
+        assert payload["temp_c"] == pytest.approx(45.0)
+
+    def test_payload_validates_against_sensor_schema(self, fpga):
+        fpga._publish_snap_temp()
+        payload = json.loads(fpga.transport.r.hget("metadata", "fpga_temp"))
+        violations = io._validate_metadata(
+            payload, io.SENSOR_SCHEMAS["fpga_temp"]
+        )
+        assert violations == []
+
+    def test_publish_acquires_fpga_lock(self, fpga):
+        """``_FpgaLockProxy.__getattr__`` only locks calls made
+        directly on ``self.fpga`` — a non-callable attribute like
+        ``.transport`` is returned unlocked, so a nested
+        ``self.fpga.transport.get_temp()`` call would otherwise race
+        the corr read loop and the snapshot publishers on the same
+        TAPCP connection. ``_publish_snap_temp`` must acquire
+        ``self._fpga_lock`` itself to close that gap."""
+        real_lock = fpga._fpga_lock
+        calls = []
+
+        class _SpyLock:
+            def __enter__(self):
+                calls.append("enter")
+                return real_lock.__enter__()
+
+            def __exit__(self, *exc_info):
+                calls.append("exit")
+                return real_lock.__exit__(*exc_info)
+
+        fpga._fpga_lock = _SpyLock()
+        fpga._publish_snap_temp()
+        assert calls == ["enter", "exit"]
+
+    def test_publish_failure_disables_publisher_with_warning(
+        self, fpga, caplog
+    ):
+        caplog.set_level(logging.WARNING)
+        with patch.object(
+            fpga.fpga.transport,
+            "get_temp",
+            side_effect=RuntimeError("tapcp timeout"),
+        ):
+            # Must not raise — corr data is sacred.
+            fpga._publish_snap_temp()
+        assert fpga._fpga_temp_enabled is False
+        assert "Disabling fpga_temp publisher" in caplog.text
+        assert "tapcp timeout" in caplog.text
+
+    def test_publish_after_disable_is_no_op(self, fpga, caplog):
+        caplog.set_level(logging.WARNING)
+        with patch.object(
+            fpga.fpga.transport,
+            "get_temp",
+            side_effect=RuntimeError("tapcp timeout"),
+        ) as get_temp:
+            fpga._publish_snap_temp()  # fails, disables
+            assert get_temp.call_count == 1
+            assert fpga._fpga_temp_enabled is False
+            # Subsequent calls must not touch the transport again.
+            fpga._publish_snap_temp()
+            fpga._publish_snap_temp()
+            assert get_temp.call_count == 1
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "fpga_temp" in r.getMessage()
+        ]
+        assert len(warnings) == 1
+
+
 class TestPublishAdcSnapshot:
     def test_publish_snapshot_writes_frame_with_sidecar(self, fpga):
         frames = _make_frames()
@@ -386,9 +475,9 @@ class TestObserveSnapshotThread:
         calls = self._run_observe_with_mocked_threads(fpga)
         targets = [kwargs.get("target") for _, kwargs in calls]
         assert fpga._publish_snapshots_loop not in targets
-        # The skip message must name both casualties — adc_stats rides
-        # the snapshot tick now.
-        assert "adc_stats publishers disabled" in caplog.text
+        # The skip message must name all three casualties — adc_stats
+        # and fpga_temp both ride the snapshot tick now.
+        assert "adc_stats + fpga_temp publishers disabled" in caplog.text
 
     def test_snapshot_thread_skipped_when_period_zero(self, fpga, caplog):
         fpga.cfg["adc_snapshot_period_s"] = 0
@@ -399,8 +488,10 @@ class TestObserveSnapshotThread:
 
 
 class TestPublishSnapshotsLoop:
-    """One grab per tick feeds both publishers; the loop exits once
-    both are latched off and skips ticks pre-sync."""
+    """One grab per tick feeds the two frame-derived publishers;
+    fpga_temp ticks independently every iteration (no frames needed).
+    The loop exits once all three are latched off and skips ticks
+    pre-sync."""
 
     def _run_loop_briefly(self, fpga, period=0.02, runtime=0.1):
         t = Thread(
@@ -454,13 +545,15 @@ class TestPublishSnapshotsLoop:
         fpga.event.set()
         fpga._publish_snapshots_loop(0.01)  # returns cleanly
 
-    def test_loop_exits_when_both_publishers_disabled(self, fpga):
-        """Once both latches flip off the loop must return rather
-        than keep grabbing frames nobody will publish."""
+    def test_loop_exits_when_all_three_publishers_disabled(self, fpga):
+        """Once all three latches (snapshot, stats, fpga_temp) flip
+        off the loop must return rather than keep waking for a
+        no-op."""
         fpga.event = Event()
         fpga.is_synchronized = True
         fpga._adc_snapshot_enabled = False
         fpga._adc_stats_enabled = False
+        fpga._fpga_temp_enabled = False
         t = Thread(
             target=fpga._publish_snapshots_loop,
             args=(0.01,),
@@ -469,6 +562,37 @@ class TestPublishSnapshotsLoop:
         t.start()
         t.join(timeout=1)
         assert not t.is_alive()
+
+    def test_loop_keeps_running_when_only_fpga_temp_enabled(self, fpga):
+        """fpga_temp needs no ADC frames, so it alone keeps the loop
+        alive even with both frame-derived publishers disabled — but
+        the FPGA grab itself is skipped since nothing would consume
+        it."""
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        fpga._adc_snapshot_enabled = False
+        fpga._adc_stats_enabled = False
+        with (
+            patch.object(fpga, "_publish_snap_temp") as temp,
+            patch.object(fpga, "_grab_adc_frames") as grab,
+        ):
+            self._run_loop_briefly(fpga)
+        assert temp.call_count >= 1
+        grab.assert_not_called()
+
+    def test_snap_temp_ticks_every_iteration_regardless_of_grab(
+        self, fpga
+    ):
+        """fpga_temp is independent of the ADC frame grab — it must
+        still publish on a tick where the grab fails (returns None)."""
+        fpga.event = Event()
+        fpga.is_synchronized = True
+        with (
+            patch.object(fpga, "_publish_snap_temp") as temp,
+            patch.object(fpga, "_grab_adc_frames", return_value=None),
+        ):
+            self._run_loop_briefly(fpga)
+        assert temp.call_count >= 1
 
     def test_loop_keeps_grabbing_when_only_snapshot_disabled(self, fpga):
         """adc_stats alone still justifies the FPGA grab."""

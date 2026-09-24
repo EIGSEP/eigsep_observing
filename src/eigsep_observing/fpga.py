@@ -272,6 +272,11 @@ class EigsepFpga:
         self._adc_stats_enabled = True
         self._adc_snapshot_enabled = True
         self._corr_health_enabled = True
+        # fpga_temp shares the same best-effort/latch-off contract but
+        # is independent of the snapshot grab (it's a board-management
+        # TAPCP read, not derived from ADC frames) — see
+        # ``_publish_snap_temp``.
+        self._fpga_temp_enabled = True
 
         # Corr-loop health diagnostics. Both are mutated in the hot
         # read loop (``_read_integrations``) via cheap, lock-free
@@ -1326,9 +1331,10 @@ class EigsepFpga:
         corr_health only snapshots in-memory counters — no FPGA
         register access, no lock-proxy contention with the hot corr
         read loop — so a 1 s cadence is free. adc_stats used to ride
-        this loop but is snapshot-derived now and publishes on the
-        (much slower) snapshot tick in ``_publish_snapshots_loop``,
-        keeping all TAPCP-touching diagnostics on one throttle."""
+        this loop but is snapshot-derived now and publishes (along
+        with fpga_temp) on the (much slower) snapshot tick in
+        ``_publish_snapshots_loop``, keeping all TAPCP-touching
+        diagnostics on one throttle."""
         while not self.event.wait(period):
             if not self.is_synchronized:
                 continue
@@ -1380,22 +1386,81 @@ class EigsepFpga:
                 e,
             )
 
+    def _publish_snap_temp(self):
+        """
+        Read the SNAP board temperature over TAPCP and publish it on
+        the metadata bus as the ``fpga_temp`` stream.
+
+        Uses ``self.fpga.transport.get_temp()`` —
+        ``casperfpga.transport_tapcp.TapcpTransport``'s board-
+        management read over the TAPCP ``/temp`` endpoint. This is
+        *not* the Xilinx System Monitor hard macro (``fpga.sensors``,
+        a ``casperfpga.sysmon.Sysmon`` only auto-attached when the
+        loaded .fpg's device dict declares a ``sysmon`` block —
+        neither shipped .fpg does, so that path is unavailable).
+        ``get_temp()`` reads a platform-level sensor independent of
+        the loaded bitstream, so it works regardless.
+
+        Bypasses ``_FpgaLockProxy``'s auto-wrapping: the proxy only
+        locks calls made directly on ``self.fpga`` (``__getattr__``
+        returns non-callable attributes, like ``.transport``, without
+        locking — see the proxy's docstring), so a nested call through
+        ``self.fpga.transport`` would otherwise race the corr read
+        loop and the snapshot publishers on the same TAPCP connection.
+        Acquires ``self._fpga_lock`` explicitly instead.
+
+        First failure flips ``_fpga_temp_enabled`` off and emits a
+        single WARNING; subsequent calls no-op until restart. Corr
+        data is sacred: an FPGA temperature reading is strictly
+        diagnostic.
+        """
+        if not self._fpga_temp_enabled:
+            return
+        try:
+            with self._fpga_lock:
+                temp_c = self.fpga.transport.get_temp()
+            self.adc_metadata_writer.add(
+                "fpga_temp",
+                {
+                    "sensor_name": "fpga_temp",
+                    "status": "update",
+                    "temp_c": float(temp_c),
+                },
+            )
+        except Exception as e:
+            self._fpga_temp_enabled = False
+            self.logger.warning(
+                "Disabling fpga_temp publisher for this run after "
+                "failure: %s. Restart eigsep-observe to retry.",
+                e,
+            )
+
     def _publish_snapshots_loop(self, period):
         """Background thread: every ``period`` seconds until
         ``self.event`` is set, grab one set of ADC snapshot frames and
         feed both diagnostic surfaces — the raw frame stream
         (``_publish_adc_snapshot``) and the per-core stats on the
-        metadata bus (``_publish_adc_stats``). One grab per tick; the
-        FPGA is touched exactly once regardless of how many surfaces
-        consume the frames. Gated on ``is_synchronized`` so pre-sync
-        noise doesn't fill the streams. Exits early once both
-        publishers latch off so a broken bitstream doesn't keep waking
-        the thread for a no-op."""
+        metadata bus (``_publish_adc_stats``) — plus the independent
+        board-temperature read (``_publish_snap_temp``). One frame
+        grab per tick; the FPGA is touched exactly once regardless of
+        how many frame-derived surfaces consume it. ``fpga_temp``
+        doesn't need the ADC frames, so it publishes even on a tick
+        where the snapshot grab fails, and shares this loop's
+        cadence — rather than getting its own thread — purely to keep
+        every TAPCP-touching diagnostic on one throttle (see
+        ``_publish_diagnostics_loop``'s docstring). Gated on
+        ``is_synchronized`` so pre-sync noise doesn't fill the
+        streams. Exits early once all three publishers latch off so a
+        broken bitstream/connection doesn't keep waking the thread for
+        a no-op."""
         while not self.event.wait(period):
             if not self.is_synchronized:
                 continue
+            self._publish_snap_temp()
             if not (self._adc_snapshot_enabled or self._adc_stats_enabled):
-                return
+                if not self._fpga_temp_enabled:
+                    return
+                continue
             data = self._grab_adc_frames()
             if data is None:
                 continue
@@ -1559,13 +1624,13 @@ class EigsepFpga:
             )
             snapshot_thd.start()
             self.logger.info(
-                "ADC snapshot + adc_stats publishers started "
-                f"(period={snapshot_period}s)."
+                "ADC snapshot + adc_stats + fpga_temp publishers "
+                f"started (period={snapshot_period}s)."
             )
         else:
             self.logger.info(
-                "ADC snapshot + adc_stats publishers disabled "
-                "(adc_snapshot_period_s is unset or 0)."
+                "ADC snapshot + adc_stats + fpga_temp publishers "
+                "disabled (adc_snapshot_period_s is unset or 0)."
             )
 
         # Throttled corr_health K/V (FPGA-free counter snapshot for

@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 PLOT_WINDOW_S = 60.0
 
-# adc_stats is published on the SNAP transport; the panda transport this
-# script connects to never carries adc_stats readings.  Exclude it from the
-# default stream list so --help stays clean.
-_PANDA_STREAMS = [s for s in SENSOR_SCHEMAS if s != "adc_stats"]
+# adc_stats and fpga_temp are published on the SNAP transport (see
+# EigsepFpga.adc_metadata_writer); the panda transport this script connects
+# to never carries their readings.  Exclude them from the default stream
+# list so --help stays clean.
+_SNAP_ONLY_STREAMS = frozenset({"adc_stats", "fpga_temp"})
+_PANDA_STREAMS = [s for s in SENSOR_SCHEMAS if s not in _SNAP_ONLY_STREAMS]
 
 # Curated float fields to trace per stream in the rolling plot.  Keeps
 # tempctrl panels readable (3 key fields instead of 11) and potmon focused on

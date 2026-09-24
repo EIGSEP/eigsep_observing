@@ -1080,6 +1080,22 @@ SENSOR_SCHEMAS = {
             for stat in ("mean", "power", "rms")
         },
     },
+    # fpga_temp: SNAP board temperature, read via
+    # `casperfpga.transport_tapcp.TapcpTransport.get_temp()` — a
+    # board-management sensor served over the TAPCP `/temp` endpoint.
+    # NOT the Xilinx System Monitor hard macro (`casperfpga.sysmon
+    # .Sysmon`, exposed as `fpga.sensors` only when the loaded .fpg's
+    # device dict declares a `sysmon` block): neither shipped .fpg
+    # (v2_3/v2_4) declares one, so `fpga.sensors` stays unavailable.
+    # `get_temp()` is a platform-level read independent of the loaded
+    # bitstream and works regardless. Published by
+    # `EigsepFpga._publish_snap_temp`, same envelope convention as
+    # `adc_stats` (no `app_id` — not a picohost app).
+    "fpga_temp": {
+        "sensor_name": str,
+        "status": str,
+        "temp_c": float,
+    },
 }
 
 
