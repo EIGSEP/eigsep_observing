@@ -1,0 +1,201 @@
+# Bench receiver-calibration config: automated RF switching + periodic
+# VNA on the lab hot-load / spare-port setup. Implements the switching,
+# VNA and logging parts of notes/receiver_calibration_lab_protocol.md
+# (§ 3, 4, 5, 6). Derived from obs_config.yaml (field reference) and
+# obs_config_load_only.yaml (hot-load bring-up).
+# Use with: eigsep-panda --cfg_file <path to this file>
+# (eigsep-observe on the ground computer needs no flag.)
+#
+# Picos (three, all owned by pico-manager.service; DIP code = app_id):
+#   tempctrl (app_id 1, DIP 001): hot-load heater FET + LOAD thermistor
+#       -> tempctrl_load; LNA thermistors -> tempctrl_lna1/2
+#   potmon   (app_id 2, DIP 010): SP1 open/short cable switch on GP27
+#       (LOW = SHORT failsafe, HI = OPEN) -> potmon.sp1_term_name
+#   rfswitch (app_id 5, DIP 101): switch matrix + 3 board thermistors
+#       -> rfswitch (state per integration), rfswitch_therm
+# Run scripts/pico_preflight.py first to confirm all three report.
+#
+# WIRING NOTE: the hot load sits on the switch's "Amb/Hot Load" port,
+# i.e. RFAMB / VNAAMB — NOT on RFANT as the protocol's § 2 assumes. The
+# roles of the two load ports are therefore swapped relative to the
+# protocol: RFAMB = hot load (temperature in tempctrl_load.T_now),
+# RFANT = ambient reference (a 50 ohm load on the Feed port). Never
+# leave the Feed port open: RFANT is the boot-time and post-VNA
+# recovery state.
+#
+# TEMPERATURE PROGRAM (§ 5): driven by scripts/hot_load_plateaus.py,
+# run in a second terminal alongside eigsep-panda. tempctrl_loop only
+# pushes tempctrl_settings once at startup, so it does not fight the
+# script — but RESTARTING eigsep-panda re-pushes the settings below
+# (heater off) and silently resets the program; restart the plateau
+# script too if that happens. The LOAD settings below are therefore
+# only the start state; the setpoint actually in force is recorded
+# per integration in tempctrl_load (T_target, enabled, hysteresis),
+# not in this embedded config.
+#   step 0  ambient, heater off, >= 45 min
+#   steps 1-3  plateaus at ~320 / 340 / 360 K (47 / 67 / 87 C targets)
+#   step 4  slow cool-down, heater off; repeat 0-4 if time allows
+# Targets stay <= 88 C: the YSI 44909 thermistors are rated to 90 C
+# continuous (firmware safety trip is 110 C). The heater regulates between
+# target - hysteresis and target, so a plateau's mean sits
+# ~hysteresis/2 below target. Analysis uses the logged T_now.
+
+# IP addresses
+rpi_ip: "10.10.10.10"
+panda_ip: "10.10.10.11"
+
+# corr filewriter
+corr_save_dir: "/home/eigsep/data"
+corr_ntimes: 240
+
+# switches (§ 4). Visited in this order every cycle; 10 s per DUT,
+# so the cycle is 6 x 10 s = 1 min (protocol: 3-5 min, field 13 min).
+# 10 s ~ 37 integrations at corr_acc_len 2**26, minus the ~0.5 s
+# rfswitch transition window flagged after each change. The SP1
+# dwells are shorter than the protocol's >= 1 min; average SP1 over
+# consecutive cycles instead.
+# RFANT is the only mode that releases the switch lock during its
+# dwell, so it is where vna_loop interleaves its sweeps — keep it in
+# the schedule. Here that means VNA sweeps interrupt the ambient
+# reference dwell, never the hot-load dwell.
+use_switches: true
+switch_schedule:  # seconds per measurement
+  RFANT: 10  # Feed port: ambient 50 ohm reference (see WIRING NOTE)
+  RFAMB: 10  # Amb/Hot Load port: HOT LOAD (tempctrl_load.T_now)
+  RFNON: 10  # noise source on (T_NS lives here)
+  RFNOFF: 10  # noise source off (pad temp ~ rfswitch_therm.temp_therm1)
+  RFSP1_SHORT: 10  # Spare 1 cable, SHORT termination (potmon GP27 low)
+  RFSP1_OPEN: 10  # Spare 1 cable, OPEN termination (potmon GP27 high)
+
+# What is physically connected to each rfswitch port right now.
+# Purely descriptive — no code reads it. It rides into every corr and
+# VNA file header via the obs_config embed. Update on every rewire.
+switch_connections:
+  ANT: "50 ohm ambient load on the Feed port (ambient reference); thermistor on tempctrl_lna2"  # operator: record the part
+  AMB: "HOT LOAD: 50 ohm load on FET heater, tempctrl_load thermistor on the load body"  # operator: record cable/adapter + length
+  SP1: "SP1 long coax cable -> termination switch (SHORT when unpowered/default, OPEN when driven from potmon pico GP27); cable thermistor on potmon GP26 (pot_az_voltage)"  # operator: record cable length + thermistor position
+  SP2: null  # unconnected
+  common_LNA: "switch LNA-side common port (plane P) -> LNA 14 (first stage)"  # operator: record cable/adapter type + length (§ 8)
+  common_VNA: "switch VNA-side common port -> VNA, as in the field"
+
+# Bench hardware record (§ 2, § 8). Purely descriptive, embedded in
+# every file header like switch_connections. Fill in the nulls before
+# the run; edit + restart eigsep-panda if anything changes.
+bench_setup:
+  protocol: "data-analysis/notebooks/charlie/receiver_calibration_lab_protocol.md"
+  rf_chain: "plane P -> LNA 14 -> LNA 3 -> LNA 10 -> SNAP C000122 (no filters/attenuators)"
+  # Thermistors: all YSI 44909 (30 kOhm at 25 C, rated to 90 C), wired
+  # 3V3 -[pull-up]- ADC pin -[NTC]- AGND, 100 nF from pin to AGND.
+  # Firmware assumes a 10000 ohm pull-up. Offline, scale each logged
+  # tempctrl `resistance` by pullup_ohm / 10000 (exact), or for potmon
+  # use R = pullup_ohm * V / (3.3 - V), then apply the Steinhart-Hart
+  # fit (LOAD_THERM_SH_* in pico-firmware tempctrl.h).
+  thermistors:
+    tempctrl_load:
+      pico: "tempctrl, GP26"
+      location: "hot load body; thermistor and load encased together in an aluminium block"
+      pullup_ohm: 9980
+    tempctrl_lna1:
+      pico: "tempctrl, GP27"
+      location: "LNA 3 (second stage)"
+      pullup_ohm: 9910
+    tempctrl_lna2:
+      pico: "tempctrl, GP28"
+      location: "ambient 50 ohm load on the Feed port (moved from LNA 10)"
+      pullup_ohm: 9970
+    potmon_pot_az_voltage:
+      pico: "potmon (SP1 control), GP26"
+      location: "SP1 cable coil, between two turns of the coil"
+      pullup_ohm: 9960
+  pullup_measurement:  # how the pullup_ohm values above were measured
+    # Interim: 2-wire handheld DMM, ~0.5-1 % -> ~0.1-0.3 K per channel.
+    # Re-measure 4-wire (or ice-point the thermistors) for the full spec.
+    meter: "2-wire handheld DMM"
+    date_utc: null  # operator: fill in
+    room_temp_C: null
+  switch_board_thermistors:  # rfswitch_therm, thermistor i on GP(26+i)
+    temp_therm0: "GP26: common/crossbar switch"
+    temp_therm1: "GP27: noise diode"
+    temp_therm2: "GP28: internal VNA calibration load"
+  first_lna_is_field_unit: "unknown: no record of which LNAs flew"
+  lna_serials: "LNA 14 / LNA 3 / LNA 10 (lab labels)"
+  switch_board_serial: null  # operator: field switch board serial
+  p_to_lna_connection: null  # operator: cable/adapter type + length (tests the ~8 ns delay)
+  hot_load_connection: null  # operator: cable/adapter type + length, load -> AMB port
+  sp1_cable_length_m: null
+  lna_supply_V: 4.96  # operator: update if changed; supply is NOT auto-logged
+
+# vna (§ 6). vna_loop runs one ant + one rec bundle on startup and then
+# every vna_interval. Each bundle records the internal VNAO/S/L
+# standards plus:
+#   ant mode: VNAANT (ambient ref), VNANOFF ("load"), VNANON ("noise"),
+#             VNAAMB ("amb" = HOT LOAD Gamma_hot), VNASP1 short + open
+#   rec mode: VNARF (Gamma_rec through the switch)
+# 1200 s gives >= 2 Gamma_hot sweeps per plateau, and a restart for
+# each plateau change triggers an immediate sweep. Settings match the
+# field so eigsep_cal.S11 applies unchanged.
+use_vna: true
+vna_interval: 1200  # seconds between VNA measurements
+vna_ip: "127.0.0.1"
+vna_port: 5025
+vna_timeout: 1000  # in seconds
+vna_settings:
+  fstart: 1000000.0  # in Hz
+  fstop: 250000000.0  # in Hz
+  npoints: 1000
+  ifbw: 100.0  # in Hz
+  power_dBm:
+    ant: 0.0
+    rec: -40.0
+
+# motor — not on the bench
+use_motor: false
+motor_interval: 3600
+motor_failure_retry_s: 60
+motor_scan: {}
+motor_client_kwargs: {}
+home_after_scan: false
+motor_homer_kwargs:
+  tol_az_deg: 3.0
+  tol_el_deg: 2.0
+  settle_s: 10.0
+  damping: 0.5
+  max_iters: 6
+  reset_count: true
+
+serialize_motion_and_switching: false
+
+vna_position_sweep:
+  az_grid_deg: [0, 90, 180, 270]
+  el_grid_deg: [0, 90, 180, 270]
+  settle_s: 2.0
+
+# live-status first-order Y-factor (display-only). The dashboard
+# treats RFAMB as its cold reference and reads that load's temperature
+# from t_amb_*; with the hot load on RFAMB, tempctrl_load.T_now is the
+# correct physical temperature for that port, so the display stays
+# self-consistent (it is just a "hot" reference).
+calibration:
+  noise_diode_enr_db: 35.0
+  noise_source_atten_db: 30.0
+  t_ns_stream: rfswitch_therm
+  t_ns_field: temp_therm1  # GP27 = noise-diode thermistor (verified on the bench board)
+  t_amb_stream: tempctrl_load
+  t_amb_field: T_now
+
+# tempctrl — hot load. Start state only: protocol step 0 (ambient,
+# heater off); scripts/hot_load_plateaus.py drives the plateaus.
+# tempctrl_load / tempctrl_lna1 / tempctrl_lna2 publish whenever this
+# is on, heater enabled or not.
+use_tempctrl: true
+tempctrl_interval: 60
+tempctrl_settings:
+  # 0 = disabled, as in obs_config_load_only.yaml: tempctrl_loop pushes
+  # settings only once at startup, so a nonzero watchdog would trip
+  # and gate the heater mid-plateau.
+  watchdog_timeout_ms: 0
+  LOAD:
+    installed: true
+    enable: false  # step 0: ambient
+    target_C: 47.0
+    hysteresis_C: 0.5

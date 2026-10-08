@@ -76,6 +76,13 @@ ACTIVE_DRIVER_SCRIPTS = {
 #     physical state and has no provenance to record. A one-shot config
 #     tool that must coexist with whatever is running, so it must not
 #     claim the refuse-on-conflict tag.
+#   - hot_load_plateaus.py: bench hot-load setpoint sequencer that must
+#     run alongside the autonomous panda_observe (switching + VNA keep
+#     cycling through the temperature program). It drives only the
+#     tempctrl LOAD setpoint/enable, and the setpoint in force is
+#     recorded per integration in the tempctrl_load stream (T_target,
+#     enabled, hysteresis), so files stay self-describing without a
+#     run_tag; claiming would be refused by panda_observe's tag.
 RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
@@ -94,6 +101,7 @@ RUN_TAG_EXEMPT = {
     "clear_run_tag.py",
     "host_health.py",
     "set_motor_limits.py",
+    "hot_load_plateaus.py",
 }
 
 

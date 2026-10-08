@@ -837,7 +837,7 @@ _IMU_EL_SCHEMA = {**_IMU_BASE, "el_deg": float}
 _IMU_AZ_SCHEMA = {**_IMU_BASE, "el_deg": float}
 
 # tempctrl publishes three flat streams: tempctrl_load — a low-side FET
-# heater behind an analog NTC thermistor (30k, Beta=3943, plain 10k
+# heater behind an analog NTC thermistor (YSI 44909 30k, Steinhart-Hart, 10k
 # pull-up to 3V3), under on/off hysteresis control — plus tempctrl_lna1
 # / tempctrl_lna2, two read-only NTC readouts (same part/conversion,
 # no heater) on two LNAs. There used to be a different second channel,
@@ -891,7 +891,7 @@ _LOAD_HEATER_SCHEMA = {
 }
 
 # tempctrl_lna1 / tempctrl_lna2: two plain read-only NTC thermistor
-# readouts on two LNAs (same physical part + Beta-equation conversion as
+# readouts on two LNAs (same physical part + Steinhart-Hart conversion as
 # LOAD; see LnaThermistor in pico-firmware's tempctrl.h). No heater, no
 # target/hysteresis, no enable, no rate-guard/stall/runaway latches, and
 # (unlike LOAD) no `installed` descope flag — the channels always

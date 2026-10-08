@@ -295,7 +295,7 @@ channel descope".
 **`tempctrl_lna1` / `tempctrl_lna2`** (added after the Peltier-era LNA
 channel was removed — same name, unrelated hardware) are two more
 read-only NTC thermistor readouts on two LNAs, on the same tempctrl
-pico as LOAD. Same physical part and Beta-equation conversion as LOAD
+pico as LOAD. Same physical part and Steinhart-Hart conversion as LOAD
 (`LnaThermistor` in pico-firmware's `tempctrl.h`), but no heater, no
 target/hysteresis/enable, no rate-guard/stall/runaway trip latches,
 and — unlike LOAD — no `installed` descope flag: they always publish
