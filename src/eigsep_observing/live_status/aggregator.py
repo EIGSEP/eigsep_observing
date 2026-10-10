@@ -55,11 +55,14 @@ from redis.exceptions import RedisError
 
 from eigsep_redis import ConfigStore
 from eigsep_redis.heartbeat import HeartbeatReader
+from eigsep_redis.keys import METADATA_HASH
 from eigsep_redis.metadata import (
     MetadataSnapshotReader,
     MetadataStreamReader,
 )
 from eigsep_redis.status import StatusReader
+from picohost.buses import PicoConfigStore
+from picohost.manager import APP_NAMES
 
 from ..adc import AdcSnapshotReader
 from ..corr import CorrConfigStore, CorrReader
@@ -91,6 +94,33 @@ STATUS_LOG_MAXLEN = 500
 # full name.
 _ADC_STATS_KEY = "adc_stats"
 _ADC_STATS_STREAM = f"stream:{_ADC_STATS_KEY}"
+
+# Panda-side metadata streams the code still defines, keyed to the pico
+# (``picohost.manager.APP_NAMES`` device name) that produces each one.
+# The panda's Redis keeps every stream and snapshot key ever written, so
+# boards that are no longer attached (or stream names retired from the
+# code, e.g. the Peltier-era ``tempctrl`` / ``tempctrl_lna``) would
+# otherwise be drained, warned about as stale and rendered forever. The
+# dashboard reads only streams listed here whose producer is in the
+# manager's current device list (``pico_config``, rewritten from live
+# discovery each time pico-manager starts). A board that drops out
+# mid-run stays in that list while the manager retries it, so its
+# staleness warnings still fire. ``tests/test_live_status_aggregator.py``
+# keeps this map in step with ``SENSOR_SCHEMAS`` (minus the SNAP-side
+# ``adc_stats`` / ``fpga_temp``).
+_PANDA_STREAM_PRODUCER = {
+    "imu_el": "imu_el",
+    "imu_az": "imu_az",
+    "tempctrl_load": "tempctrl",
+    "tempctrl_lna1": "tempctrl",
+    "tempctrl_lna2": "tempctrl",
+    "potmon": "potmon",
+    "rfswitch": "rfswitch",
+    "rfswitch_therm": "rfswitch",
+    "lidar": "lidar",
+    "system_current": "lidar",
+    "motor": "motor",
+}
 
 # VnaReader.read blocks inside Redis xread for at most this long per
 # call. Longer = lower CPU between sweeps, but stop_event observation
@@ -414,6 +444,10 @@ class LiveStatusAggregator:
         self.heartbeat_reader = HeartbeatReader(transport_panda)
         self.vna_reader = VnaReader(transport_panda)
         self.panda_config_store = ConfigStore(transport_panda)
+        self.pico_config_store = PicoConfigStore(transport_panda)
+        # Last logged set of panda streams being read, so the
+        # ignored-leftovers INFO line fires only when the set changes.
+        self._logged_panda_streams: Optional[tuple[str, ...]] = None
 
         self.state = StateSnapshot()
         self._lock = threading.Lock()
@@ -1053,15 +1087,29 @@ class LiveStatusAggregator:
         errors: list[str] = []
         any_ok = False
 
+        # Which streams to read: only those whose pico is attached now
+        # (see _PANDA_STREAM_PRODUCER).
+        devices, ok = self._read_benign_missing(
+            "pico_config.get", self.pico_config_store.get, errors
+        )
+        any_ok = any_ok or ok
+        streams = self._active_panda_streams(devices)
+
         # Drain pico metadata streams (non-blocking).
         md, ok = self._read_benign_missing(
-            "metadata_stream.drain", self.metadata_stream.drain, errors
+            "metadata_stream.drain",
+            lambda: self.metadata_stream.drain(
+                stream_keys=[f"stream:{name}" for name in streams]
+            ),
+            errors,
         )
         any_ok = any_ok or ok
 
         # Snapshot hash (includes _ts keys for age computation).
         snap, ok = self._read_benign_missing(
-            "metadata_snapshot.get", self.metadata_snapshot.get, errors
+            "metadata_snapshot.get",
+            lambda: self._read_metadata_snapshot(streams),
+            errors,
         )
         any_ok = any_ok or ok
 
@@ -1396,6 +1444,63 @@ class LiveStatusAggregator:
             errors.append(f"{label}: {exc}")
             return None, False
 
+    def _active_panda_streams(self, devices) -> list[str]:
+        """Panda metadata streams to read this tick.
+
+        ``devices`` is ``PicoConfigStore.get()`` output: the manager's
+        current device list, or ``None`` when no list has been
+        published (no manager has run against this Redis, or the test
+        harness's in-process manager). With no list, every stream in
+        :data:`_PANDA_STREAM_PRODUCER` is read; retired stream names
+        are skipped either way.
+        """
+        if devices is None:
+            streams = sorted(_PANDA_STREAM_PRODUCER)
+        else:
+            attached = {
+                APP_NAMES.get(d.get("app_id"))
+                for d in devices
+                if isinstance(d, dict)
+            }
+            streams = sorted(
+                name
+                for name, pico in _PANDA_STREAM_PRODUCER.items()
+                if pico in attached
+            )
+        key = tuple(streams)
+        if key != self._logged_panda_streams:
+            self._logged_panda_streams = key
+            skipped = sorted(set(_PANDA_STREAM_PRODUCER) - set(streams))
+            logger.info(
+                "Reading panda metadata streams %s%s; leftover streams "
+                "from absent picos and retired stream names are ignored%s.",
+                streams,
+                "" if devices is not None else " (no pico_config yet)",
+                f" (absent: {skipped})" if skipped else "",
+            )
+        return streams
+
+    def _read_metadata_snapshot(self, streams: list[str]) -> dict:
+        """Snapshot-hash entries (and their ``_ts`` keys) for ``streams``.
+
+        ``MetadataSnapshotReader.get(keys=[...])`` raises ``KeyError``
+        for an absent key, so request only keys present in the hash;
+        a stream that has never published simply has no tile yet.
+        """
+        present = {
+            k.decode() if isinstance(k, bytes) else k
+            for k in self.transport_panda.r.hkeys(METADATA_HASH)
+        }
+        keys = [
+            k
+            for name in streams
+            for k in (name, f"{name}_ts")
+            if k in present
+        ]
+        if not keys:
+            return {}
+        return self.metadata_snapshot.get(keys=keys)
+
     # -- role-surface introspection (used by the structural test) --
 
     def _role_surface_attrs(self) -> set[str]:
@@ -1424,6 +1529,7 @@ class LiveStatusAggregator:
             "heartbeat_reader",
             "vna_reader",
             "panda_config_store",
+            "pico_config_store",
             "thresholds",
             "state",
         }

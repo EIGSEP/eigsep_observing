@@ -510,6 +510,85 @@ def test_panda_tick_stamps_snapshot_read_unix(agg, seeded):
     assert t0 <= state.metadata_snapshot_read_unix <= t1
 
 
+# The lidar payload matches the existing lidar fixtures above; the LNA
+# thermistor payload carries every _LNA_THERM_SCHEMA field.
+_LIDAR_READING = {
+    "sensor_name": "lidar",
+    "app_id": 4,
+    "status": "update",
+    "distance_m": 1.5,
+}
+_LNA1_READING = {
+    "sensor_name": "tempctrl_lna1",
+    "status": "update",
+    "app_id": 1,
+    "watchdog_tripped": False,
+    "watchdog_timeout_ms": 0,
+    "T_now": 22.5,
+    "voltage": 2.53,
+    "resistance": 32850.0,
+    "timestamp": 1234.0,
+}
+
+
+def test_panda_stream_producer_map_covers_sensor_schemas():
+    """Every panda-side stream the code defines must name its producer
+    pico, or the dashboard would silently stop reading it."""
+    from eigsep_observing.io import SENSOR_SCHEMAS
+    from eigsep_observing.live_status.aggregator import (
+        _PANDA_STREAM_PRODUCER,
+    )
+    from picohost.manager import APP_NAMES
+
+    snap_side = {"adc_stats", "fpga_temp"}
+    assert set(_PANDA_STREAM_PRODUCER) == set(SENSOR_SCHEMAS) - snap_side
+    assert set(_PANDA_STREAM_PRODUCER.values()) <= set(APP_NAMES.values())
+
+
+def test_panda_tick_ignores_streams_from_absent_picos(agg, seeded):
+    """With a pico_config listing only the tempctrl pico, a leftover
+    lidar stream/snapshot key (board no longer attached) is neither
+    drained nor kept in the snapshot, while tempctrl streams are."""
+    from picohost.buses import PicoConfigStore
+
+    _, panda = seeded
+    PicoConfigStore(panda).upload(
+        [{"app_id": 1, "port": "/dev/ttyACM0", "usb_serial": "E66"}]
+    )
+    writer = MetadataWriter(panda)
+    writer.add("lidar", _LIDAR_READING)
+    writer.add("tempctrl_lna1", _LNA1_READING)
+    _rewind_streams(panda, ["stream:lidar", "stream:tempctrl_lna1"])
+
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert "tempctrl_lna1" in state.metadata_latest
+    assert "tempctrl_lna1" in state.metadata_snapshot
+    assert "tempctrl_lna1_ts" in state.metadata_snapshot
+    assert "lidar" not in state.metadata_latest
+    assert "lidar" not in state.metadata_snapshot
+    assert "lidar_ts" not in state.metadata_snapshot
+
+
+def test_panda_tick_ignores_retired_stream_names(agg, seeded):
+    """A stream name the code no longer defines (the Peltier-era
+    ``tempctrl_lna``) is ignored even before any pico_config exists."""
+    _, panda = seeded
+    writer = MetadataWriter(panda)
+    retired = dict(_LNA1_READING, sensor_name="tempctrl_lna")
+    writer.add("tempctrl_lna", retired)
+    writer.add("tempctrl_lna1", _LNA1_READING)
+    _rewind_streams(panda, ["stream:tempctrl_lna", "stream:tempctrl_lna1"])
+
+    agg._panda_tick()
+
+    state = agg.snapshot()
+    assert "tempctrl_lna1" in state.metadata_latest
+    assert "tempctrl_lna" not in state.metadata_latest
+    assert "tempctrl_lna" not in state.metadata_snapshot
+
+
 def test_panda_tick_read_stamp_frozen_when_snapshot_read_fails(
     agg, seeded, monkeypatch
 ):
