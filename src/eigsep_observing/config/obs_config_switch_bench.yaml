@@ -71,7 +71,7 @@ switch_schedule:  # seconds per measurement
 # Purely descriptive — no code reads it. It rides into every corr and
 # VNA file header via the obs_config embed. Update on every rewire.
 switch_connections:
-  ANT: "50 ohm ambient load on the Feed port (ambient reference); thermistor on tempctrl_lna2"  # operator: record the part
+  ANT: "50 ohm ambient load on the Feed port (ambient reference); thermistor on tempctrl_lna1"  # operator: record the part
   AMB: "HOT LOAD: 50 ohm load on FET heater, tempctrl_load thermistor on the load body"  # operator: record cable/adapter + length
   SP1: "SP1 long coax cable -> termination switch (SHORT when unpowered/default, OPEN when driven from potmon pico GP27); cable thermistor on potmon GP26 (pot_az_voltage)"  # operator: record cable length + thermistor position
   SP2: null  # unconnected
@@ -97,12 +97,12 @@ bench_setup:
       pullup_ohm: 9980
     tempctrl_lna1:
       pico: "tempctrl, GP27"
-      location: "LNA 3 (second stage)"
-      pullup_ohm: 9910
-    tempctrl_lna2:
-      pico: "tempctrl, GP28"
       location: "ambient 50 ohm load on the Feed port (moved from LNA 10)"
       pullup_ohm: 9970
+    tempctrl_lna2:
+      pico: "tempctrl, GP28"
+      location: "LNA 3 (second stage)"
+      pullup_ohm: 9910
     potmon_pot_az_voltage:
       pico: "potmon (SP1 control), GP26"
       location: "SP1 cable coil, between two turns of the coil"
