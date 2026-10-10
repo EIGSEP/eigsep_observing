@@ -7,6 +7,13 @@ NETWORK
   Ground computer  ──── LattePanda (10.10.10.11, Redis 6379)
                    ──── RPi + SNAP  (10.10.10.10, Redis 6379)
 
+POWER ORDER (hardware)
+  Power the switch board / SP1 termination switch / heater board
+  BEFORE or WITH the picos; power down together. Never leave a pico
+  running into an unpowered board: its high outputs back-feed the
+  board and destroy the pins (Oct 2026: rfswitch pico GP8/12/14).
+  See pico-firmware README "Power Order".
+
 STARTUP ORDER
   1. SSH into panda:     ssh eigsep@10.10.10.11
   2. Start panda client: eigsep-panda
