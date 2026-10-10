@@ -21,12 +21,22 @@ in the ``tempctrl_load`` stream (``T_target``, ``enabled``,
 but restarting ``eigsep-panda`` re-pushes the yaml (heater off) and
 resets the program; restart this script too if that happens.
 
-Trips are never acked: any ``LOAD_enable=true`` (including the next
-plateau's) would clear a sensor/stall/runaway latch, so on a trip,
-sensor error or watchdog trip the script disarms the heater and exits
-nonzero for the operator to investigate. Assumes the firmware
-watchdog is disabled (``watchdog_timeout_ms: 0``); a nonzero watchdog
-would gate the heater because this script sends no keepalive.
+Firmware watchdog: the tempctrl pico boots with a 30 s communication
+watchdog that latches ``watchdog_tripped`` (gating the heater) when no
+command arrives in time; only a ``LOAD_enable=true`` rising edge clears
+it. The script re-sends its current command every ``KEEPALIVE_S`` (a
+heater-off ``set_enable(LOAD=False)`` or the plateau's
+``set_temperature``, neither of which changes state), so the watchdog
+cannot trip while it runs, whatever timeout is configured. A watchdog
+trip latched *before* the script started (e.g. after a pico reboot) is
+a comms gap, not a hardware fault: it is tolerated while the heater is
+meant to be off and cleared by the first plateau's enable.
+
+Hardware trips are never acked: a sensor/stall/runaway trip or a
+sensor error, at any time, or a watchdog trip while heating, makes the
+script disarm the heater and exit nonzero for the operator to
+investigate. The first plateau's enable is only sent after checking
+that no hardware trip is latched, so it can only clear a watchdog trip.
 
 Example::
 
@@ -57,6 +67,8 @@ logger = logging.getLogger("hot_load_plateaus")
 # it above its rating. The heater never exceeds the target.
 MAX_TARGET_C = 88.0
 _TRIPS = ("LOAD_sensor_tripped", "LOAD_stall_tripped", "LOAD_runaway_tripped")
+# Keepalive cadence; well under the firmware's 30 s default watchdog.
+KEEPALIVE_S = 10.0
 
 
 class HeaterFault(RuntimeError):
@@ -128,41 +140,55 @@ def _setup_logging(path):
     logger.propagate = False
 
 
-def _readout(tc, history):
-    """Log one T_now line; raise :class:`HeaterFault` on any fault."""
-    status = tc.get_status() or {}
+def _check_faults(status, heating):
+    """Raise :class:`HeaterFault` on a hardware trip, a sensor error,
+    or (only while ``heating``) a watchdog trip. Returns whether a
+    watchdog trip is latched."""
+    faults = [flag for flag in _TRIPS if status.get(flag)]
+    if status.get("LOAD_status") == "error":
+        faults.append("LOAD_status=error")
+    watchdog = bool(status.get("watchdog_tripped"))
+    if watchdog and heating:
+        faults.append("watchdog_tripped")
+    if faults:
+        raise HeaterFault(", ".join(faults))
+    return watchdog
+
+
+def _log_readout(status, history):
     t_now = status.get("LOAD_T_now")
     if t_now is not None:
         history.append(t_now)
     p2p = max(history) - min(history) if len(history) > 1 else None
-    p2p_str = f"{p2p:.2f}" if p2p is not None else "--"
     logger.info(
-        "T_now=%s C target=%s enabled=%s active=%s p2p(10 min)=%s C",
+        "T_now=%s C target=%s enabled=%s active=%s p2p(10 min)=%s C%s",
         f"{t_now:.2f}" if t_now is not None else "--",
         status.get("LOAD_T_target"),
         status.get("LOAD_enabled"),
         status.get("LOAD_active"),
-        p2p_str,
+        f"{p2p:.2f}" if p2p is not None else "--",
+        " [watchdog trip latched]" if status.get("watchdog_tripped") else "",
     )
-    faults = [flag for flag in _TRIPS if status.get(flag)]
-    if status.get("LOAD_status") == "error":
-        faults.append("LOAD_status=error")
-    if status.get("watchdog_tripped"):
-        faults.append("watchdog_tripped")
-    if faults:
-        raise HeaterFault(", ".join(faults))
 
 
-def _hold(tc, minutes, readout_s):
-    """Wait ``minutes`` while logging readouts; returns on completion."""
+def _hold(tc, minutes, readout_s, keepalive, heating):
+    """Wait ``minutes``: send ``keepalive()`` and check faults every
+    ``KEEPALIVE_S``, log a readout every ``readout_s``."""
     history = deque(maxlen=max(2, int(600 / readout_s)))
     end = time.monotonic() + minutes * 60.0
+    next_log = time.monotonic()
     while True:
-        _readout(tc, history)
-        remaining = end - time.monotonic()
+        keepalive()
+        status = tc.get_status() or {}
+        _check_faults(status, heating)
+        now = time.monotonic()
+        if now >= next_log:
+            _log_readout(status, history)
+            next_log = now + readout_s
+        remaining = end - now
         if remaining <= 0:
             return
-        time.sleep(min(readout_s, remaining))
+        time.sleep(min(KEEPALIVE_S, remaining))
 
 
 def _heater_off(tc, label):
@@ -172,9 +198,14 @@ def _heater_off(tc, label):
 
 def _plateau(tc, target, hysteresis, label):
     # Setpoint before enable, matching TempCtrlClient.apply_settings's
-    # safe order. The enable rising edge is also the firmware trip ack.
+    # safe order. The enable rising edge is also the firmware trip ack,
+    # so refuse to send it over a latched hardware trip: it may only
+    # clear a (benign) watchdog trip.
+    watchdog = _check_faults(tc.get_status() or {}, heating=False)
     tc.set_temperature(T_LOAD=target, LOAD_hyst=hysteresis)
     tc.set_enable(LOAD=True)
+    if watchdog:
+        logger.info("Watchdog trip cleared by the heater enable.")
     logger.info(
         "ACTION %s: heater ON, target %.2f C (%.2f K), hysteresis %.2f C",
         label,
@@ -195,12 +226,17 @@ def main():
     require_pico(PicoProxy("tempctrl", transport, source="hot_load_plateaus"))
     tc = TempCtrlClient(transport, source="hot_load_plateaus")
     status = tc.get_status() or {}
-    if status.get("watchdog_timeout_ms"):
+    logger.info(
+        "Firmware watchdog timeout %s ms (0 = disabled); keepalive every "
+        "%.0f s.",
+        status.get("watchdog_timeout_ms"),
+        KEEPALIVE_S,
+    )
+    if status.get("watchdog_tripped"):
         logger.warning(
-            "Firmware watchdog is %s ms (nonzero); this script sends no "
-            "keepalive, so the heater will be gated. Set "
-            "watchdog_timeout_ms: 0.",
-            status["watchdog_timeout_ms"],
+            "Watchdog trip already latched (no command reached the pico "
+            "within its timeout, e.g. after a reboot). Tolerated while "
+            "the heater is off; the first plateau's enable clears it."
         )
     logger.info(
         "Program: %d pass(es) of ambient %.0f min -> %s C x %.0f min -> "
@@ -211,16 +247,29 @@ def main():
         args.hold_min,
         args.cooldown_min,
     )
+    def off_keepalive():
+        tc.set_enable(LOAD=False)  # no rising edge: never acks a trip
+
     rc = 0
     try:
         for n in range(1, args.passes + 1):
             _heater_off(tc, f"pass {n} ambient")
-            _hold(tc, args.ambient_min, args.readout_s)
+            _hold(
+                tc, args.ambient_min, args.readout_s, off_keepalive, False
+            )
             for i, target in enumerate(args.targets, start=1):
                 _plateau(tc, target, args.hysteresis, f"pass {n} plateau {i}")
-                _hold(tc, args.hold_min, args.readout_s)
+
+                def on_keepalive(target=target):
+                    tc.set_temperature(
+                        T_LOAD=target, LOAD_hyst=args.hysteresis
+                    )
+
+                _hold(tc, args.hold_min, args.readout_s, on_keepalive, True)
             _heater_off(tc, f"pass {n} cool-down")
-            _hold(tc, args.cooldown_min, args.readout_s)
+            _hold(
+                tc, args.cooldown_min, args.readout_s, off_keepalive, False
+            )
         logger.info("Program complete.")
     except KeyboardInterrupt:
         logger.info("Interrupted by operator.")
