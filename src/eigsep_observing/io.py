@@ -631,6 +631,65 @@ def read_metadata_hdf5(fname):
     return out
 
 
+def _s11_filename_stamp(header):
+    """Return the ``%Y%m%d_%H%M%SZ`` stamp for an auto-generated S11 name.
+
+    Named from ``metadata_snapshot_unix`` — the panda-side wallclock at
+    the moment the bundle was published — not from write time. The two
+    diverge whenever the ground observer drains a VNA backlog: in
+    deployment 5, 36 of 40 files were written inside the same two
+    seconds while the measurements they held spanned eight days, which
+    left the archive unsortable by name.
+
+    Naming is best-effort and must never block a write. A missing or
+    unusable value falls back to write time and logs at WARNING, so a
+    filename that does not line up with its sweep stays explainable.
+    ``0.0`` is treated as unusable because it is this codebase's
+    established "no producer info" sentinel (cf. ``run_started_at_unix``
+    and ``obs_config_owner_uploaded_unix``), not a 1970 measurement.
+
+    Parameters
+    ----------
+    header : dict
+        VNA S11 header, normally carrying ``metadata_snapshot_unix``.
+
+    Returns
+    -------
+    str
+        Timestamp formatted for the filename.
+
+    """
+    snapshot = header.get("metadata_snapshot_unix")
+    usable = (
+        isinstance(snapshot, (int, float, np.integer, np.floating))
+        and not isinstance(snapshot, (bool, np.bool_))
+        and math.isfinite(snapshot)
+        and snapshot > 0
+    )
+    if usable:
+        try:
+            return datetime.datetime.fromtimestamp(
+                snapshot, datetime.timezone.utc
+            ).strftime("%Y%m%d_%H%M%SZ")
+        except (ValueError, OverflowError, OSError) as e:
+            # Out-of-range epoch value: narrow net so a nonsense
+            # timestamp degrades the filename instead of losing the file.
+            logger.warning(
+                f"S11 metadata_snapshot_unix {snapshot!r} is not a valid "
+                f"timestamp ({type(e).__name__}: {e}); naming file from "
+                "write time instead."
+            )
+    else:
+        logger.warning(
+            f"S11 header has no usable metadata_snapshot_unix "
+            f"(got {snapshot!r}); naming file from write time instead. "
+            "The filename will not reflect when the sweep was taken."
+        )
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y%m%d_%H%M%SZ"
+    )
+
+
 def write_s11_file(
     data,
     header,
@@ -658,16 +717,16 @@ def write_s11_file(
         'short', and 'load'.
     fname : Path or str
         Filename where the data will be written. If not provided, a
-        timestamped filename will be generated.
+        timestamped filename is generated from the header's
+        ``metadata_snapshot_unix`` (when the sweep was taken), falling
+        back to write time — see :func:`_s11_filename_stamp`.
     save_dir : Path or str
         Directory where the data will be saved. Must be able to
         instantiate a Path object. Ignored if ``fname'' is an absolute path.
 
     """
     if fname is None:
-        date = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y%m%d_%H%M%SZ"
-        )
+        date = _s11_filename_stamp(header)
         mode = "ant" if "ant" in data else "rec"
         file_path = Path(save_dir) / f"{mode}s11_{date}.h5"
         # Disambiguate same-second collisions on auto-generated

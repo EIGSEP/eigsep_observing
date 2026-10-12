@@ -424,13 +424,13 @@ def test_write_read_s11_file():
     with tempfile.TemporaryDirectory() as tmpdir:
         # no filename, should create one automatically
         io.write_s11_file(data, S11_HEADER, fname=None, save_dir=tmpdir)
-        # check that the file was created
-        now = datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y%m%d_%H%M%SZ"
-        )
-        # might be off by a second, so we use glob to find the file
-        # filename format is {mode}s11_{timestamp}Z.h5, where mode="ant" here
-        assert len(list(Path(tmpdir).glob(f"ants11_{now[:-3]}*Z.h5"))) == 1
+        # The auto-generated name encodes the measurement time from the
+        # header, not the write time, so it is fully deterministic.
+        # Filename format is {mode}s11_{timestamp}Z.h5, mode="ant" here.
+        measured = datetime.datetime.fromtimestamp(
+            S11_HEADER["metadata_snapshot_unix"], datetime.timezone.utc
+        ).strftime("%Y%m%d_%H%M%SZ")
+        assert (Path(tmpdir) / f"ants11_{measured}.h5").exists()
         filename = Path(tmpdir) / "test_s11.h5"
         io.write_s11_file(
             data,
@@ -2543,6 +2543,90 @@ def test_s11_filename_disambiguation_on_same_second_collision():
         assert len(files) == 3, f"expected 3 files, got: {files}"
         names = [Path(p).name for p in files]
         assert len(set(names)) == 3
+
+
+def test_s11_filename_uses_measurement_time_not_write_time():
+    """Auto-generated S11 filenames encode when the sweep was taken.
+
+    ``metadata_snapshot_unix`` is stamped on the panda just before the
+    bundle is published; the ground observer may write it minutes or
+    days later when a Redis backlog drains. Naming from write time made
+    a whole deployment's files unsortable (deployment 5: 36 of 40 files
+    stamped within the same two seconds, measurements spanning 8 days).
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data, _ = generate_s11_data(npoints=S11_HEADER["npoints"], cal=True)
+        # A measurement time deliberately far from "now" — the whole
+        # point is that a stale backlog entry keeps its own timestamp.
+        measured = datetime.datetime(
+            2026, 7, 17, 4, 2, 30, tzinfo=datetime.timezone.utc
+        )
+        header = {**S11_HEADER, "metadata_snapshot_unix": measured.timestamp()}
+
+        io.write_s11_file(data, header, fname=None, save_dir=tmpdir)
+
+        assert [p.name for p in Path(tmpdir).glob("*.h5")] == [
+            "ants11_20260717_040230Z.h5"
+        ]
+
+
+def test_s11_filename_falls_back_to_write_time_without_snapshot(caplog):
+    """A header with no usable measurement time still produces a file.
+
+    Naming is best-effort: an S11 file must never fail to be written
+    because its provenance field is missing. The fallback is loud so a
+    filename that does not line up with the sweep is explainable.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data, _ = generate_s11_data(npoints=S11_HEADER["npoints"], cal=True)
+        header = {k: v for k, v in S11_HEADER.items()}
+        del header["metadata_snapshot_unix"]
+
+        before = datetime.datetime.now(datetime.timezone.utc)
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+            io.write_s11_file(data, header, fname=None, save_dir=tmpdir)
+        after = datetime.datetime.now(datetime.timezone.utc)
+
+        written = list(Path(tmpdir).glob("*.h5"))
+        assert len(written) == 1
+        stamp = datetime.datetime.strptime(
+            written[0].name, "ants11_%Y%m%d_%H%M%SZ.h5"
+        ).replace(tzinfo=datetime.timezone.utc)
+        # Truncated to the second, so compare against a 1 s window.
+        assert before - datetime.timedelta(seconds=1) <= stamp <= after
+        assert "metadata_snapshot_unix" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        0.0,  # the codebase's "unknown" sentinel (cf. run_started_at_unix)
+        -1.0,
+        float("nan"),
+        float("inf"),
+        "1748734379.9",  # producer sent a string
+        None,
+        True,  # bool is an int subclass; not a timestamp
+    ],
+)
+def test_s11_filename_falls_back_on_unusable_snapshot_time(bad, caplog):
+    """Unusable measurement times fall back rather than raising.
+
+    0.0 is the sentinel this codebase already uses for "no producer
+    info" (``run_started_at_unix``, ``obs_config_owner_uploaded_unix``),
+    so it means "unknown", not 1970.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        data, _ = generate_s11_data(npoints=S11_HEADER["npoints"], cal=True)
+        header = {**S11_HEADER, "metadata_snapshot_unix": bad}
+
+        with caplog.at_level(logging.WARNING, logger="eigsep_observing.io"):
+            io.write_s11_file(data, header, fname=None, save_dir=tmpdir)
+
+        written = list(Path(tmpdir).glob("*.h5"))
+        assert len(written) == 1
+        assert not written[0].name.startswith("ants11_1970")
+        assert "metadata_snapshot_unix" in caplog.text
 
 
 def test_close():
