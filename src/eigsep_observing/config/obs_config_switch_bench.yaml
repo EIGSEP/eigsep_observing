@@ -63,7 +63,7 @@ switch_schedule:  # seconds per measurement
   RFANT: 10  # Feed port: ambient 50 ohm reference (see WIRING NOTE)
   RFAMB: 10  # Amb/Hot Load port: HOT LOAD (tempctrl_load.T_now)
   RFNON: 10  # noise source on (T_NS lives here)
-  RFNOFF: 10  # noise source off (pad temp ~ rfswitch_therm.temp_therm1)
+  RFNOFF: 10  # noise source off (pad temp ~ rfswitch_therm.temp_therm2)
   RFSP1_SHORT: 10  # Spare 1 cable, SHORT termination (potmon GP27 low)
   RFSP1_OPEN: 10  # Spare 1 cable, OPEN termination (potmon GP27 high)
 
@@ -113,10 +113,12 @@ bench_setup:
     meter: "2-wire handheld DMM"
     date_utc: null  # operator: fill in
     room_temp_C: null
+  # Bench board: GP26/GP27 are swapped relative to the field board
+  # (field: GP26 switch, GP27 VNA cal load, GP28 noise diode).
   switch_board_thermistors:  # rfswitch_therm, thermistor i on GP(26+i)
-    temp_therm0: "GP26: common/crossbar switch"
-    temp_therm1: "GP27: noise diode"
-    temp_therm2: "GP28: internal VNA calibration load"
+    temp_therm0: "GP26: internal VNA calibration load"
+    temp_therm1: "GP27: common/crossbar switch"
+    temp_therm2: "GP28: noise diode"
   first_lna_is_field_unit: "unknown: no record of which LNAs flew"
   lna_serials: "LNA 14 / LNA 3 / LNA 10 (lab labels)"
   switch_board_serial: null  # operator: field switch board serial
@@ -179,7 +181,7 @@ calibration:
   noise_diode_enr_db: 35.0
   noise_source_atten_db: 30.0
   t_ns_stream: rfswitch_therm
-  t_ns_field: temp_therm1  # GP27 = noise-diode thermistor (verified on the bench board)
+  t_ns_field: temp_therm2  # GP28 = noise-diode thermistor (bench and field boards)
   t_amb_stream: tempctrl_load
   t_amb_field: T_now
 
