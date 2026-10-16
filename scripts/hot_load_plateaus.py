@@ -87,7 +87,7 @@ def _parse_args():
         default=[47.0, 67.0, 87.0],
         help="Plateau setpoints in deg C, in order.",
     )
-    p.add_argument("--hysteresis", type=float, default=0.5)
+    p.add_argument("--hysteresis", type=float, default=0.05)
     p.add_argument(
         "--ambient-min",
         type=float,
