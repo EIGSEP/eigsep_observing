@@ -1,18 +1,19 @@
 """Tests for the seed-state polling helper in ``scripts/tempctrl_manual.py``.
 
-The script previously seeded the operator-facing setpoints with a
+The script previously seeded the operator-facing setpoint with a
 hardcoded 20 deg C fallback whenever the firmware hadn't yet published
 ``T_target``. That left the UI disagreeing with the firmware (firmware
-default 30 deg C) for the brief startup race. The new ``_seed_state``
-polls the snapshot until both ``tempctrl_lna`` and ``tempctrl_load``
-have published ``T_target``, then seeds from those values directly —
-the pico is the single source of truth.
+default 30 deg C) for the brief startup race. ``_seed_state`` polls the
+snapshot until ``tempctrl_load`` (the sole tempctrl channel — the
+LNA/Peltier channel and its PI control were removed) has published
+``T_target``, then seeds from that value directly — the pico is the
+single source of truth.
 """
 
 import importlib.util
+import math
 from pathlib import Path
 
-import pytest
 from eigsep_redis import MetadataSnapshotReader, MetadataWriter
 
 
@@ -27,95 +28,49 @@ def _load(name):
     return mod
 
 
-def _publish(transport, *, lna=None, load=None):
-    """Minimal tempctrl_lna / tempctrl_load entries — only the fields
-    the consumer under test reads: ``_seed_state``'s ``T_target`` /
-    ``enabled`` / ``Kp`` / ``Ki`` in the seed tests, and ``_History``'s
+def _publish(transport, *, load=None):
+    """Minimal ``tempctrl_load`` entry — only the fields the consumer
+    under test reads: ``_seed_state``'s ``T_target`` / ``enabled`` /
+    ``hysteresis`` in the seed tests, and ``_History``'s
     ``PLOT_FIELDS`` (``T_now`` / ``T_target`` / ``drive_level``) in the
-    history/plot tests. The remaining ``_PELTIER_SCHEMA`` fields are
-    absent on purpose: omitting them is safe because neither code path
-    reads them (``_History.record`` NaN-fills anything missing), and it
-    makes the test fail loudly if either helper grows a dependency on a
-    field this fixture doesn't supply."""
+    history/plot tests. The remaining ``_LOAD_HEATER_SCHEMA`` fields
+    are absent on purpose: omitting them is safe because neither code
+    path reads them (``_History.record`` NaN-fills anything missing),
+    and it makes the test fail loudly if either helper grows a
+    dependency on a field this fixture doesn't supply."""
     writer = MetadataWriter(transport)
-    if lna is not None:
-        writer.add("tempctrl_lna", lna)
     if load is not None:
         writer.add("tempctrl_load", load)
 
 
 def test_seed_state_uses_firmware_t_target(transport):
-    """When both streams have published ``T_target``, the seed picks
-    those values up — no hardcoded fallback."""
+    """When the stream has published ``T_target``, the seed picks that
+    value up — no hardcoded fallback."""
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-            "enabled": False,
-            "Kp": 0.25,
-            "Ki": 0.01,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
             "T_target": 28.5,
             "enabled": True,
-            "Kp": 0.18,
-            "Ki": 0.0,
+            "hysteresis": 0.75,
         },
     )
     snapshot = MetadataSnapshotReader(transport)
     state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
-    assert state.lna_setpoint == 30.0
-    assert state.load_setpoint == 28.5
-    assert state.lna_enabled is False
-    assert state.load_enabled is True
-    assert state.lna_Kp == 0.25
-    assert state.lna_Ki == 0.01
-    assert state.load_Kp == 0.18
-    assert state.load_Ki == 0.0
+    assert state.setpoint == 28.5
+    assert state.enabled is True
+    assert state.hysteresis == 0.75
+    assert state.installed is True
 
 
-def test_seed_state_reads_cooling_enabled(transport):
-    """``cooling_enabled`` is seeded from the firmware-published value
-    per channel, so the readout and the bump keys start in sync with
-    what the firmware is enforcing."""
+def test_seed_state_falls_back_to_default_hysteresis_only(transport):
+    """``T_target`` and ``enabled`` come from the pico; a missing
+    ``hysteresis`` falls back to the client-side default."""
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-            "cooling_enabled": False,
-        },
-        load={
-            "sensor_name": "tempctrl_load",
-            "status": "update",
-            "T_target": 30.0,
-            "cooling_enabled": True,
-        },
-    )
-    snapshot = MetadataSnapshotReader(transport)
-    state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
-    assert state.lna_cooling_enabled is False
-    assert state.load_cooling_enabled is True
-
-
-def test_seed_state_cooling_enabled_defaults_true_when_absent(transport):
-    """A firmware that predates ``cooling_enabled`` (field absent)
-    seeds True, matching the firmware default (cooling permitted)."""
-    mod = _load("tempctrl_manual")
-    _publish(
-        transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
@@ -124,91 +79,31 @@ def test_seed_state_cooling_enabled_defaults_true_when_absent(transport):
     )
     snapshot = MetadataSnapshotReader(transport)
     state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
-    assert state.lna_cooling_enabled is True
-    assert state.load_cooling_enabled is True
+    assert state.hysteresis == mod.DEFAULT_HYSTERESIS_C
+    assert state.enabled is False
 
 
-def test_seed_state_falls_back_to_default_gains_only(transport):
-    """``T_target`` and ``enabled`` come from the pico; missing
-    ``Kp`` / ``Ki`` fall back to the firmware-side defaults."""
+def test_seed_state_silent_stream_marks_not_installed(transport):
+    """A stream that stays silent through the seed window is the
+    descoped-channel shape (firmware ``installed=false`` publishes
+    nothing): the UI still comes up, marked not-installed and seeded
+    from firmware defaults so a later re-install (`u`) starts from sane
+    values. This is not an error — inspecting or re-installing a
+    deliberately descoped channel is a supported flow."""
     mod = _load("tempctrl_manual")
-    _publish(
-        transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-        },
-        load={
-            "sensor_name": "tempctrl_load",
-            "status": "update",
-            "T_target": 30.0,
-        },
-    )
-    snapshot = MetadataSnapshotReader(transport)
-    state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
-    assert state.lna_Kp == mod.DEFAULT_KP
-    assert state.lna_Ki == mod.DEFAULT_KI
-    assert state.load_Kp == mod.DEFAULT_KP
-    assert state.load_Ki == mod.DEFAULT_KI
-
-
-def test_seed_state_times_out_when_streams_silent(transport):
-    """If the pico is registered (``require_pico`` already passed) but
-    never publishes a ``T_target`` on either stream, the seed exits
-    with a SystemExit message naming the silent streams — rather than
-    papering over the silence with a hardcoded default."""
-    mod = _load("tempctrl_manual")
-    snapshot = MetadataSnapshotReader(transport)
-    with pytest.raises(SystemExit) as exc:
-        mod._seed_state(snapshot, timeout_s=0.05, poll_interval_s=0.01)
-    msg = str(exc.value)
-    assert "tempctrl_lna" in msg
-    assert "tempctrl_load" in msg
-    assert "T_target" in msg
-
-
-def test_seed_state_one_stream_silent_marks_not_installed(transport):
-    """One silent stream is the descoped-channel shape (its firmware
-    channel is marked not installed, so it publishes nothing — see the
-    per-channel installed flag): the UI comes up on the live channel
-    and marks the silent one not-installed, seeding it from firmware
-    defaults so a later re-install (`u` during a hot swap) starts from
-    sane values."""
-    mod = _load("tempctrl_manual")
-    _publish(
-        transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 28.0,
-            "enabled": True,
-        },
-    )
     snapshot = MetadataSnapshotReader(transport)
     state = mod._seed_state(snapshot, timeout_s=0.05, poll_interval_s=0.01)
-    assert state.lna_installed is True
-    assert state.load_installed is False
-    assert state.lna_setpoint == 28.0
-    assert state.lna_enabled is True
-    # Silent channel seeds firmware defaults.
-    assert state.load_setpoint == mod.DEFAULT_T_TARGET_C
-    assert state.load_enabled is False
-    assert state.load_Kp == mod.DEFAULT_KP
-    assert state.load_Ki == mod.DEFAULT_KI
-    assert state.load_cooling_enabled is True
+    assert state.installed is False
+    assert state.setpoint == mod.DEFAULT_T_TARGET_C
+    assert state.enabled is False
+    assert state.hysteresis == mod.DEFAULT_HYSTERESIS_C
 
 
-def test_seed_state_both_streams_marks_installed(transport):
-    """Both streams publishing → both channels marked installed."""
+def test_seed_state_live_stream_marks_installed(transport):
+    """A publishing stream marks the channel installed."""
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
@@ -217,8 +112,7 @@ def test_seed_state_both_streams_marks_installed(transport):
     )
     snapshot = MetadataSnapshotReader(transport)
     state = mod._seed_state(snapshot, timeout_s=1.0, poll_interval_s=0.01)
-    assert state.lna_installed is True
-    assert state.load_installed is True
+    assert state.installed is True
 
 
 def _record_n(mod, snapshot, n):
@@ -232,28 +126,34 @@ def _record_n(mod, snapshot, n):
 def test_history_records_numeric_and_gaps(transport):
     """Numeric firmware fields are buffered as floats; missing or
     non-numeric ones become NaN gaps rather than crashing or zeroing."""
-    import math
-
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
+        load={
+            "sensor_name": "tempctrl_load",
             "status": "update",
             "T_now": 25.0,
             "T_target": 30.0,
             "drive_level": 0.4,
         },
-        # LOAD intentionally absent → every LOAD field should gap to NaN.
     )
     snapshot = MetadataSnapshotReader(transport)
     history = _record_n(mod, snapshot, 3)
 
     assert len(history) == 3
     assert history.t == [0.0, 1.0, 2.0]  # elapsed seconds from first sample
-    assert history.values["tempctrl_lna"]["T_now"] == [25.0, 25.0, 25.0]
-    assert history.values["tempctrl_lna"]["drive_level"] == [0.4, 0.4, 0.4]
-    assert all(math.isnan(v) for v in history.values["tempctrl_load"]["T_now"])
+    assert history.values["T_now"] == [25.0, 25.0, 25.0]
+    assert history.values["drive_level"] == [0.4, 0.4, 0.4]
+
+
+def test_history_records_gaps_when_stream_absent(transport):
+    """A silent stream buffers as an all-NaN row rather than crashing."""
+    mod = _load("tempctrl_manual")
+    snapshot = MetadataSnapshotReader(transport)
+    history = _record_n(mod, snapshot, 3)
+
+    assert len(history) == 3
+    assert all(math.isnan(v) for v in history.values["T_now"])
 
 
 def test_plot_history_writes_png(transport, tmp_path):
@@ -261,13 +161,6 @@ def test_plot_history_writes_png(transport, tmp_path):
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_now": 25.0,
-            "T_target": 30.0,
-            "drive_level": 0.4,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
@@ -289,19 +182,9 @@ def test_plot_history_writes_png(transport, tmp_path):
 
 
 def test_plot_history_with_gaps_does_not_raise(transport, tmp_path):
-    """A NaN-only channel (sensor dropout) still renders without error."""
+    """An all-NaN history (sensor/stream dropout) still renders without
+    error."""
     mod = _load("tempctrl_manual")
-    _publish(
-        transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_now": 25.0,
-            "T_target": 30.0,
-            "drive_level": 0.4,
-        },
-        # LOAD absent → all-NaN row.
-    )
     snapshot = MetadataSnapshotReader(transport)
     history = _record_n(mod, snapshot, 4)
 
@@ -325,13 +208,6 @@ def test_handle_p_key_plots_and_continues(transport, tmp_path):
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_now": 25.0,
-            "T_target": 30.0,
-            "drive_level": 0.4,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
@@ -370,98 +246,98 @@ class _FakeProxy:
 
 def _make_state(mod):
     return mod._State(
-        lna_setpoint=30.0,
-        load_setpoint=30.0,
-        lna_enabled=False,
-        load_enabled=False,
-        lna_Kp=0.2,
-        lna_Ki=0.0,
-        load_Kp=0.2,
-        load_Ki=0.0,
-        lna_cooling_enabled=True,
-        load_cooling_enabled=True,
+        setpoint=30.0,
+        hysteresis=0.5,
+        enabled=False,
     )
 
 
-def test_clamp_defaults_to_firmware_default(transport):
-    """The client-side clamp starts at the firmware default (0.2), so
-    the first push is relative to what the firmware is enforcing."""
-    mod = _load("tempctrl_manual")
-    state = _make_state(mod)
-    assert mod.CLAMPS[state.clamp_idx] == 0.2
-
-
-def test_clamp_steps_down_without_wraparound(transport):
-    """`C` lowers the clamp directly — the operator never has to pass
-    through higher (higher-current) values to reach a lower one."""
+def test_enable_hotkeys_push_set_enable(transport):
+    """`o`/`O` toggle the LOAD enable flag and push it to the pico."""
     mod = _load("tempctrl_manual")
     proxy = _FakeProxy()
     state = _make_state(mod)
 
-    assert mod._handle_key(ord("C"), proxy, state) is True
-    assert mod.CLAMPS[state.clamp_idx] == 0.1
-    assert proxy.sent == [("set_clamp", {"LNA": 0.1, "LOAD": 0.1})]
+    assert mod._handle_key(ord("o"), proxy, state) is True
+    assert state.enabled is True
+    assert proxy.sent[-1] == ("set_enable", {"LOAD": True})
 
-    # At the bottom of the table, another `C` stays put (no wrap to 1.0).
-    mod._handle_key(ord("C"), proxy, state)
-    assert mod.CLAMPS[state.clamp_idx] == 0.1
-    assert proxy.sent[-1] == ("set_clamp", {"LNA": 0.1, "LOAD": 0.1})
+    mod._handle_key(ord("O"), proxy, state)
+    assert state.enabled is False
+    assert proxy.sent[-1] == ("set_enable", {"LOAD": False})
 
 
-def test_clamp_steps_up_and_saturates_at_max(transport):
-    """`c` raises the clamp one step at a time and saturates at the top
-    of the table instead of wrapping back to the minimum."""
+def test_setpoint_hotkeys_push_set_temperature(transport):
+    """`]`/`[` bump the setpoint and push both setpoint + hysteresis."""
     mod = _load("tempctrl_manual")
     proxy = _FakeProxy()
     state = _make_state(mod)
 
-    mod._handle_key(ord("c"), proxy, state)
-    assert mod.CLAMPS[state.clamp_idx] == 0.3
-    assert proxy.sent[-1] == ("set_clamp", {"LNA": 0.3, "LOAD": 0.3})
+    mod._handle_key(ord("]"), proxy, state)
+    assert state.setpoint == 30.5
+    assert proxy.sent[-1] == (
+        "set_temperature",
+        {"T_LOAD": 30.5, "LOAD_hyst": 0.5},
+    )
 
-    for _ in range(10):
-        mod._handle_key(ord("c"), proxy, state)
-    assert mod.CLAMPS[state.clamp_idx] == 1.0
+    mod._handle_key(ord("["), proxy, state)
+    mod._handle_key(ord("["), proxy, state)
+    assert state.setpoint == 29.5
+    assert proxy.sent[-1] == (
+        "set_temperature",
+        {"T_LOAD": 29.5, "LOAD_hyst": 0.5},
+    )
+
+
+def test_hysteresis_hotkeys_push_set_temperature_and_floor(transport):
+    """`}`/`{` bump hysteresis and floor at ``HYSTERESIS_MIN_C`` instead
+    of going to zero or negative."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+
+    mod._handle_key(ord("}"), proxy, state)
+    assert state.hysteresis == 0.6
+    assert proxy.sent[-1] == (
+        "set_temperature",
+        {"T_LOAD": 30.0, "LOAD_hyst": 0.6},
+    )
+
+    state.hysteresis = mod.HYSTERESIS_MIN_C
+    mod._handle_key(ord("{"), proxy, state)
+    assert state.hysteresis == mod.HYSTERESIS_MIN_C
 
 
 def test_installed_hotkeys_push_set_installed(transport):
-    """`t`/`T` toggle LNA installed, `u`/`U` toggle LOAD installed —
-    the hot-swap keys. Both channels ride each push (matching the
-    enable/cooling/gain push idiom) so the firmware always sees the
-    UI's full installed state."""
+    """`u`/`U` toggle LOAD installed."""
     mod = _load("tempctrl_manual")
     proxy = _FakeProxy()
     state = _make_state(mod)
-    assert state.lna_installed is True
-    assert state.load_installed is True
+    state.installed = True
 
-    assert mod._handle_key(ord("T"), proxy, state) is True
-    assert state.lna_installed is False
-    assert proxy.sent[-1] == (
-        "set_installed",
-        {"LNA": False, "LOAD": True},
-    )
+    assert mod._handle_key(ord("U"), proxy, state) is True
+    assert state.installed is False
+    assert proxy.sent[-1] == ("set_installed", {"LOAD": False})
 
     mod._handle_key(ord("u"), proxy, state)
-    assert state.load_installed is True
-    assert proxy.sent[-1] == (
-        "set_installed",
-        {"LNA": False, "LOAD": True},
-    )
+    assert state.installed is True
+    assert proxy.sent[-1] == ("set_installed", {"LOAD": True})
 
-    mod._handle_key(ord("U"), proxy, state)
-    assert state.load_installed is False
-    assert proxy.sent[-1] == (
-        "set_installed",
-        {"LNA": False, "LOAD": False},
-    )
 
-    mod._handle_key(ord("t"), proxy, state)
-    assert state.lna_installed is True
-    assert proxy.sent[-1] == (
-        "set_installed",
-        {"LNA": True, "LOAD": False},
-    )
+def test_reenable_hotkey_pushes_enable_and_temperature(transport):
+    """`r` re-enables at the last setpoint/hysteresis — the operator's
+    trip-clear ack."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+
+    assert mod._handle_key(ord("r"), proxy, state) is True
+    assert state.enabled is True
+    assert ("set_enable", {"LOAD": True}) in proxy.sent
+    assert (
+        "set_temperature",
+        {"T_LOAD": 30.0, "LOAD_hyst": 0.5},
+    ) in proxy.sent
 
 
 def test_handle_p_key_no_data(transport, tmp_path):
@@ -469,11 +345,6 @@ def test_handle_p_key_no_data(transport, tmp_path):
     mod = _load("tempctrl_manual")
     _publish(
         transport,
-        lna={
-            "sensor_name": "tempctrl_lna",
-            "status": "update",
-            "T_target": 30.0,
-        },
         load={
             "sensor_name": "tempctrl_load",
             "status": "update",
@@ -493,3 +364,12 @@ def test_handle_p_key_no_data(transport, tmp_path):
     assert keep_going is True
     assert state.last_message == "no data to plot yet"
     assert list(tmp_path.glob("*.png")) == []
+
+
+def test_handle_q_key_stops_loop(transport):
+    """`q` (and ESC) return False to end the curses main loop."""
+    mod = _load("tempctrl_manual")
+    proxy = _FakeProxy()
+    state = _make_state(mod)
+    assert mod._handle_key(ord("q"), proxy, state) is False
+    assert mod._handle_key(27, proxy, state) is False

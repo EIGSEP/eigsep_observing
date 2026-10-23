@@ -9,7 +9,7 @@ and runs the classifier.
 Two tiers of bands:
 
 1. **Derived** — ``default_thresholds(obs_cfg, corr_header)`` computes
-   bands that follow from live config (tempctrl setpoints/clamp, corr
+   bands that follow from live config (tempctrl setpoints, corr
    integration time, file duration).
 2. **YAML override** — loaded in ``Thresholds`` from
    ``config/live_status_thresholds.yaml`` (or ``--thresholds PATH``).
@@ -29,7 +29,7 @@ class Signal:
     Attributes
     ----------
     name
-        Dotted signal identifier (e.g. ``tempctrl_lna.T_now``).
+        Dotted signal identifier (e.g. ``tempctrl_load.T_now``).
     description
         Short human-readable label for the tile.
     unit
@@ -82,65 +82,20 @@ SIGNAL_REGISTRY: dict[str, Signal] = {
         unit="s",
         max_age_s=None,
     ),
-    # Tempctrl — derived from target_C / hysteresis_C / clamp. Each
-    # Peltier channel publishes its own Redis stream (tempctrl_lna,
-    # tempctrl_load), so signal names route through the standard
-    # `<domain>.<field>` form per channel.
-    "tempctrl_lna.T_now": Signal(
-        "tempctrl_lna.T_now",
-        "LNA temperature",
-        unit="C",
-        enabled_by="use_tempctrl",
-    ),
+    # Tempctrl — derived from target_C / hysteresis_C. The LOAD channel
+    # (the only surviving tempctrl channel; the LNA/Peltier channel and
+    # its PI control were removed) publishes its own Redis stream
+    # (tempctrl_load), so signal names route through the standard
+    # `<domain>.<field>` form.
     "tempctrl_load.T_now": Signal(
         "tempctrl_load.T_now",
         "LOAD temperature",
         unit="C",
         enabled_by="use_tempctrl",
     ),
-    "tempctrl_lna.drive_level": Signal(
-        "tempctrl_lna.drive_level",
-        "LNA drive level",
-        enabled_by="use_tempctrl",
-    ),
     "tempctrl_load.drive_level": Signal(
         "tempctrl_load.drive_level",
         "LOAD drive level",
-        enabled_by="use_tempctrl",
-    ),
-    # PI controller diagnostics. Threshold-less — Kp/Ki are config and
-    # `integral` is unbounded by design (anti-windup clamps it at the
-    # saturation boundary). Surfaced so the operator can confirm tuned
-    # gains landed and watch the integrator settle after a setpoint
-    # step or a `reset_integral` command.
-    "tempctrl_lna.Kp": Signal(
-        "tempctrl_lna.Kp",
-        "LNA Kp",
-        enabled_by="use_tempctrl",
-    ),
-    "tempctrl_load.Kp": Signal(
-        "tempctrl_load.Kp",
-        "LOAD Kp",
-        enabled_by="use_tempctrl",
-    ),
-    "tempctrl_lna.Ki": Signal(
-        "tempctrl_lna.Ki",
-        "LNA Ki",
-        enabled_by="use_tempctrl",
-    ),
-    "tempctrl_load.Ki": Signal(
-        "tempctrl_load.Ki",
-        "LOAD Ki",
-        enabled_by="use_tempctrl",
-    ),
-    "tempctrl_lna.integral": Signal(
-        "tempctrl_lna.integral",
-        "LNA integral",
-        enabled_by="use_tempctrl",
-    ),
-    "tempctrl_load.integral": Signal(
-        "tempctrl_load.integral",
-        "LOAD integral",
         enabled_by="use_tempctrl",
     ),
     # Whole-system current draw (ACS724 on the lidar Pico, fanned out to
@@ -305,10 +260,10 @@ def enabled_signals(
     dashboard doesn't render tiles for subsystems the observer isn't
     running.
 
-    A tempctrl channel descoped via
-    ``tempctrl_settings.{LNA,LOAD}.installed: false`` is dropped even
-    with ``use_tempctrl: true``: the producer publishes no stream for
-    it (see ``TempCtrlClient.set_installed``), so its tiles would sit
+    The (only surviving) tempctrl channel, LOAD, descoped via
+    ``tempctrl_settings.LOAD.installed: false`` is dropped even with
+    ``use_tempctrl: true``: the producer publishes no stream for it
+    (see ``TempCtrlClient.set_installed``), so its tiles would sit
     permanently empty on the dashboard — the field deployment's only
     alerting surface.
     """
@@ -318,14 +273,10 @@ def enabled_signals(
         if sig.enabled_by is None or obs_cfg.get(sig.enabled_by):
             out[name] = sig
     settings = obs_cfg.get("tempctrl_settings", {}) or {}
-    for channel, stream in (
-        ("LNA", "tempctrl_lna"),
-        ("LOAD", "tempctrl_load"),
-    ):
-        if (settings.get(channel) or {}).get("installed") is False:
-            out = {
-                k: v for k, v in out.items() if not k.startswith(f"{stream}.")
-            }
+    if (settings.get("LOAD") or {}).get("installed") is False:
+        out = {
+            k: v for k, v in out.items() if not k.startswith("tempctrl_load.")
+        }
     return out
 
 
@@ -344,7 +295,7 @@ def default_thresholds(
     ----------
     obs_cfg
         Loaded ``obs_config.yaml``. Read: ``use_tempctrl``,
-        ``tempctrl_settings.{LNA,LOAD}.{target_C, hysteresis_C, clamp}``,
+        ``tempctrl_settings.LOAD.{target_C, hysteresis_C}``,
         ``corr_ntimes``.
     corr_header
         Loaded ``CorrConfigStore.get_header()`` output. Read:
@@ -381,24 +332,18 @@ def default_thresholds(
 
     if obs_cfg.get("use_tempctrl"):
         settings = obs_cfg.get("tempctrl_settings", {}) or {}
-        # YAML config still groups per-channel settings under {LNA, LOAD}
-        # — that's user-facing. Internal signal names follow the split
-        # stream model: tempctrl_lna.T_now etc.
-        for channel, stream in (
-            ("LNA", "tempctrl_lna"),
-            ("LOAD", "tempctrl_load"),
-        ):
-            ch_cfg = settings.get(channel, {}) or {}
-            if ch_cfg.get("installed") is False:
-                # Descoped channel: no stream exists, so staged
-                # setpoints (kept for hot-swap re-install) must not
-                # produce bands with nothing to classify.
-                continue
+        # YAML config still groups settings under LOAD (the only
+        # surviving tempctrl channel) — that's user-facing. Internal
+        # signal names follow the stream model: tempctrl_load.T_now.
+        ch_cfg = settings.get("LOAD", {}) or {}
+        if ch_cfg.get("installed") is not False:
+            # A descoped channel (installed: false) publishes no
+            # stream, so its setpoints must not produce bands with
+            # nothing to classify.
             target = ch_cfg.get("target_C")
             hyst = ch_cfg.get("hysteresis_C")
-            clamp = ch_cfg.get("clamp")
             if target is not None and hyst is not None:
-                out[f"{stream}.T_now"] = {
+                out["tempctrl_load.T_now"] = {
                     "healthy": [target - 2 * hyst, target + 2 * hyst],
                     # danger band filled in by Thresholds using
                     # tempctrl.danger_k_C from the YAML override
@@ -406,10 +351,9 @@ def default_thresholds(
                     "danger": None,
                     "_target_C": target,
                 }
-            if clamp is not None:
-                out[f"{stream}.drive_level"] = {
-                    "healthy": [0.0, float(clamp)],
-                    "danger": None,
-                }
+            # drive_level is a plain 0.0/1.0 on/off flag (LOAD is
+            # hysteresis-controlled, not PI-controlled), so there is
+            # no config-derived band for it — left to the YAML
+            # override layer if an operator wants one.
 
     return out

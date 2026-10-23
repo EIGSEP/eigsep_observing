@@ -124,10 +124,11 @@ refuse-on-conflict enforces this (see `scripts/CLAUDE.md`). Stopping
   cycling (`switch_loop` — the switch *freezes* in its last state, no
   reset to RFANT), periodic VNA / motor scans (`vna_loop` / `motor_loop`),
   and the `panda:hb*` heartbeat (so `panda_connected` reads `False`).
-- **Keeps running**: Peltier temperature control — the PI loop lives in
-  pico firmware and the connection/replay is owned by the always-on
-  `pico-manager.service`, not `panda_observe`. It only trips off (via
-  the firmware watchdog) if the pico loses its connection entirely.
+- **Keeps running**: tempctrl LOAD temperature control — the on/off
+  hysteresis control loop lives in pico firmware and the
+  connection/replay is owned by the always-on `pico-manager.service`,
+  not `panda_observe`. It only trips off (via the firmware watchdog)
+  if the pico loses its connection entirely.
 - **Keeps recording**: corr (ground PC, independent) and, now, its
   sensor-metadata sidecar. The picos keep publishing metadata via
   `pico-manager` even with `panda_observe` stopped, so
@@ -281,15 +282,14 @@ normal operation.
   forward-window flagging that fires on consecutive-sample switch state
   changes.
 
-`tempctrl_lna` and `tempctrl_load` are ordinary streams handled by the
-generic `_avg_sensor_values` path — picohost publishes them as
-separate per-channel streams, so the consumer no longer needs a custom
-splitter. (The standalone `temp_mon` Pico app was retired in picohost
-1.0.0.) A channel descoped via
-`tempctrl_settings.{LNA,LOAD}.installed: false` (firmware `installed`
-flag, picohost 4.2) publishes no stream at all — consumers see clean
-absence, never a sentinel or error stream; see OPERATIONS.md
-"Tempctrl channel descope and hot-swap".
+`tempctrl_load` is an ordinary stream handled by the generic
+`_avg_sensor_values` path. (The standalone `temp_mon` Pico app was
+retired in picohost 1.0.0; the LNA/Peltier tempctrl channel and its PI
+control were later removed entirely, leaving LOAD as the sole tempctrl
+channel.) A descope via `tempctrl_settings.LOAD.installed: false`
+(firmware `installed` flag, picohost 4.2) publishes no stream at
+all — consumers see clean absence, never a sentinel or error stream;
+see OPERATIONS.md "Tempctrl channel descope".
 
 **IMU mode (picohost 1.0.0+).** The two IMU picos (`imu_el` panda elevation,
 app_id 3; `imu_az` antenna azimuth, app_id 6) emit BNO085 UART RVC payloads:

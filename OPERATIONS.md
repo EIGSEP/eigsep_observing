@@ -325,63 +325,29 @@ LattePanda:       10.10.10.11 (Redis port 6379)
 VNA:              127.0.0.1:5025 (local to panda)
 ```
 
-## Tempctrl channel descope and hot-swap
+## Tempctrl channel descope
 
-The tempctrl Pico's two Peltier channels are independent config knobs:
-`tempctrl_settings.{LNA,LOAD}.installed` in `obs_config.yaml`. A channel
-marked `installed: false` is descoped: firmware never samples its
-thermistor (no ADC-mux switch to the dead divider, so it cannot
-crosstalk into the live channel) or drives its Peltier, and it publishes
-**no Redis stream** — its corr-file columns, dashboard tiles, threshold
+The tempctrl Pico's one channel, LOAD (thermistor + low-side FET
+heater under on/off hysteresis control), is gated by an independent
+config knob: `tempctrl_settings.LOAD.installed` in `obs_config.yaml`.
+Marking it `installed: false` descopes the channel: firmware never
+samples its thermistor or drives its heater, and it publishes **no
+Redis stream** — its corr-file columns, dashboard tiles, threshold
 bands, and health checks all disappear cleanly rather than streaming
 `status="error"` forever. `installed: false` must be paired with
 `enable: false` (rejected at init otherwise). Flip back to `true` when
-the module returns.
+the module is (re)connected.
 
-**Hot-swap (LOAD connector fails in the field → move the LOAD module to
-the LNA connector):**
-
-1. Stop `panda_observe`. Peltier control replay stays owned by
-   `pico-manager.service`, so the LOAD side stays controlled until you
-   push new state.
-2. In `tempctrl_manual`: disable LOAD (`O`), mark it uninstalled (`U`).
-   Physically move the Peltier+thermistor module to the LNA connector.
-   Mark LNA installed (`t`) and confirm the `tempctrl_lna` row comes
-   alive with a sane `T_now` within a tick.
-3. Edit `obs_config.yaml`:
-   - `LOAD: {installed: false, enable: false}`
-   - `LNA: {installed: true, enable: true}` plus a copy of the LOAD
-     block's `target_C` / `hysteresis_C` / `clamp` / `cooling_enabled` /
-     `Kp` / `Ki` — the physical module is the same, only the channel
-     (pins + stream name) changed.
-   - `calibration.t_amb_stream: tempctrl_lna` — the Y-factor
-     calibration's ambient-load temperature reference now rides the
-     LNA-connector stream.
-4. One-time Redis cleanup so the retired `tempctrl_load` stream doesn't
-   emit throttled staleness warnings on the ground side: delete its
-   stream key (`stream:tempctrl_load`), its `metadata` hash fields
-   (`tempctrl_load`, `tempctrl_load_ts`), and its `metadata_streams`
-   set entry.
-5. Restart `panda_observe`. The live-status dashboard follows on its
-   own: signal gating, tempctrl bands, and the display calibration's
-   `t_ns_*`/`t_amb_*` reference routing prefer the panda's Redis
-   config upload over the dashboard host's local file, so the
-   restarted `panda_observe`'s
-   upload re-gates the dashboard within a tick — no dashboard-side
-   config edit or restart. During the swap window itself the dashboard
-   still renders the *last* upload's tiles (empty for the retired
-   channel); they self-heal at this step. Still sync the dashboard
-   host's `obs_config.yaml` when convenient — it remains the fallback
-   when no upload has ever landed on the panda Redis.
-6. Verify with `pico_preflight` (the retired row reads "no stream
-   (channel uninstalled or producer fault)") and the dashboard cal
-   panel.
+Use `tempctrl_manual` to drive the installed/enable flags interactively
+during bring-up, and `pico_preflight` to confirm the resulting stream
+state (a descoped channel reads "no stream (channel uninstalled or
+producer fault)").
 
 Note: after any tempctrl Pico reboot, firmware defaults to
 `installed: true` for a few 200 ms ticks until `pico-manager` replays
-the cached flags — a brief `status="error"` burst on the retired stream
-is expected and harmless (schema-valid rows, at most one spurious
-health-check warning).
+the cached flag — a brief `status="error"` burst is expected and
+harmless (schema-valid rows, at most one spurious health-check
+warning) if the channel is actually meant to stay descoped.
 
 ## SP1 failsafe termination
 

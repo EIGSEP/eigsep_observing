@@ -43,10 +43,8 @@ def client(transport, dummy_cfg):
 # (one entry per registered DummyPico*). Used both as the fixture-readiness
 # wait condition and as the assertion target in test_sensor_metadata_in_redis.
 _EXPECTED_SENSORS = (
-    # tempctrl publishes two streams (one per Peltier channel); the
-    # picohost producer fans the firmware's combined tick into
-    # tempctrl_lna and tempctrl_load.
-    "tempctrl_lna",
+    # tempctrl publishes one stream (LOAD — the sole tempctrl channel;
+    # the LNA/Peltier channel and its PI control were removed).
     "tempctrl_load",
     "potmon",
     "imu_el",
@@ -108,30 +106,36 @@ def test_sensor_metadata_in_redis(client, transport):
 
 def test_uninstalled_channel_stream_stops(client, transport):
     """Descope end-to-end through the embedded PicoManager:
-    ``set_installed(LNA=False)`` stops ``tempctrl_lna`` publishing
-    entirely (its snapshot timestamp freezes) while ``tempctrl_load``
-    keeps advancing — the clean-absence contract the consumer relies
-    on (no corr-file column, no staleness warnings)."""
-    _wait_for_sensors(transport, sensors=("tempctrl_lna", "tempctrl_load"))
+    ``set_installed(LOAD=False)`` stops ``tempctrl_load`` (the sole
+    tempctrl channel — the LNA/Peltier channel and its PI control were
+    removed) publishing entirely — its snapshot timestamp freezes even
+    while an unrelated stream (lidar) keeps advancing, proving the
+    freeze isn't just "we didn't wait long enough." This is the
+    clean-absence contract the consumer relies on (no corr-file
+    column, no staleness warnings); the lower-level unit-test analog
+    is ``test_uninstalled_tempctrl_channel_publishes_nothing`` in
+    ``contract_tests/test_producer_contracts.py``."""
+    _wait_for_sensors(transport, sensors=("tempctrl_load", "lidar"))
     proxy = PicoProxy("tempctrl", transport, source="test_integration")
-    assert proxy.send_command("set_installed", LNA=False) is not None
+    assert proxy.send_command("set_installed", LOAD=False) is not None
 
     def _ts(stream):
         return transport.r.hget(METADATA_HASH, f"{stream}_ts")
 
     # The command dispatches through the manager's async cmd loop; poll
-    # until one publish gap shows LNA frozen while LOAD advanced.
+    # until one publish gap shows tempctrl_load frozen while lidar
+    # advanced.
     deadline = time.monotonic() + 5.0
     while True:
-        lna0, load0 = _ts("tempctrl_lna"), _ts("tempctrl_load")
+        load0, lidar0 = _ts("tempctrl_load"), _ts("lidar")
         time.sleep(0.5)
-        lna1, load1 = _ts("tempctrl_lna"), _ts("tempctrl_load")
-        if load1 != load0 and lna1 == lna0:
+        load1, lidar1 = _ts("tempctrl_load"), _ts("lidar")
+        if lidar1 != lidar0 and load1 == load0:
             break
         if time.monotonic() >= deadline:
             raise AssertionError(
-                f"tempctrl_lna did not stop publishing: "
-                f"lna {lna0!r}->{lna1!r}, load {load0!r}->{load1!r}"
+                f"tempctrl_load did not stop publishing: "
+                f"load {load0!r}->{load1!r}, lidar {lidar0!r}->{lidar1!r}"
             )
 
 
@@ -139,16 +143,15 @@ def test_metadata_has_expected_fields(client, transport):
     """Verify that metadata values contain the expected sensor fields."""
     metadata = _wait_for_sensors(transport)
 
-    # Each Peltier channel has its own stream with flat per-channel
+    # LOAD (the sole tempctrl channel) has its own stream with flat
     # fields, a top-level status, and the device-wide watchdog fields
     # duplicated in by the picohost handler.
-    for stream in ("tempctrl_lna", "tempctrl_load"):
-        entry = metadata.get(stream, {})
-        assert entry.get("sensor_name") == stream
-        assert "status" in entry
-        assert "T_now" in entry
-        assert "drive_level" in entry
-        assert "watchdog_timeout_ms" in entry
+    entry = metadata.get("tempctrl_load", {})
+    assert entry.get("sensor_name") == "tempctrl_load"
+    assert "status" in entry
+    assert "T_now" in entry
+    assert "drive_level" in entry
+    assert "watchdog_timeout_ms" in entry
 
     # Check IMU (BNO085 RVC mode)
     imu = metadata.get("imu_el", {})

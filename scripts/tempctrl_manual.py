@@ -1,74 +1,58 @@
-"""Interactive tempctrl (peltier) bring-up tool.
+"""Interactive tempctrl (LOAD heater) bring-up tool.
 
-Curses UI showing live per-channel readouts for the two tempctrl
-streams (``tempctrl_lna`` and ``tempctrl_load``) and single-key
-commands that exercise every panda-side setter on
-:class:`picohost.base.PicoPeltier`. Operator confirms that the cold
-side temperature actually moves when the setpoint changes and that
-the clamp limits drive saturation as expected.
+Curses UI showing a live readout for the ``tempctrl_load`` stream (the
+sole tempctrl channel — the LNA/Peltier channel and its PI control were
+removed) and single-key commands that exercise every panda-side setter
+on :class:`picohost.base.PicoTempCtrl`. Operator confirms that the
+temperature actually moves toward the setpoint and that the on/off
+hysteresis control cycles the FET heater as expected.
 
 Controls:
-  l / L    enable LNA on / off
   o / O    enable LOAD on / off
-  n / N    LNA cooling (negative drive) allow / forbid
-  m / M    LOAD cooling (negative drive) allow / forbid
-  + / -    LNA setpoint +/- 0.5 deg C
   ] / [    LOAD setpoint +/- 0.5 deg C
-  c / C    clamp one step up / down through (0.1, 0.2, 0.3, 0.5, 1.0)
-           on both channels (no wraparound, so the clamp can be lowered
-           without passing through the higher values first)
-  g / G    LNA Kp +/- 0.05
-  h / H    LOAD Kp +/- 0.05
-  i / I    LNA Ki +/- 0.005
-  k / K    LOAD Ki +/- 0.005
-  z / Z    reset LNA / LOAD PI integrator
-  t / T    LNA installed yes / no (hardware descope, see below)
-  u / U    LOAD installed yes / no
-  r        re-enable both channels at their last setpoint
+  } / {    LOAD hysteresis +/- 0.1 deg C
+  u / U    LOAD installed yes / no (hardware descope, see below)
+  r        re-enable at the last setpoint/hysteresis
   p        write a temperature-vs-time PNG of the session so far
   q        quit
 
 Every loop tick records the firmware ``T_now`` / ``T_target`` /
-``drive_level`` for both channels into an in-memory history. Pressing
-``p`` renders that history to ``tempctrl_<timestamp>.png`` in the
-current directory — one row per channel, ``T_now`` and ``T_target`` on
-the left axis and ``drive_level`` on a twin right axis. The plot uses
-the Agg backend so it works headless / over SSH to the panda; the
-written path is reported in the footer rather than printed (curses owns
-the screen). ``p`` may be pressed repeatedly; each press writes a fresh
-timestamped file.
+``drive_level`` into an in-memory history. Pressing ``p`` renders that
+history to ``tempctrl_<timestamp>.png`` in the current directory —
+``T_now`` and ``T_target`` on the left axis and ``drive_level`` on a
+twin right axis. The plot uses the Agg backend so it works headless /
+over SSH to the panda; the written path is reported in the footer
+rather than printed (curses owns the screen). ``p`` may be pressed
+repeatedly; each press writes a fresh timestamped file.
 
 Every command goes through :class:`picohost.proxy.PicoProxy` so
-behavior mirrors the production tempctrl_loop path. Setpoints and
-clamp values are tracked client-side so the +/- keys can bump them
-without round-tripping the firmware to read back the current value.
+behavior mirrors the production tempctrl loop path. Setpoint and
+hysteresis values are tracked client-side so the bump keys can step
+them without round-tripping the firmware to read back the current
+value.
 
 Trip clearing (picohost >= 3.4.0): ``enabled`` is host intent only —
 firmware never mutates it. Drive engages iff ``enabled &&
 !sensor_tripped && !stall_tripped && !runaway_tripped &&
 !watchdog_tripped`` (shown as the ``armed`` column in the readout).
-All sticky trips are cleared by an explicit ``*_enable=true`` rising
-edge from the host. From this UI that means ``l`` (LNA on), ``o``
-(LOAD on), or ``r`` (re-enable both) double as the operator's
-trip-clear ack — bare keepalives refresh the watchdog timer but no
-longer clear the trip flags.
+All sticky trips are cleared by an explicit ``LOAD_enable=true`` rising
+edge from the host. From this UI that means ``o`` (LOAD on) or ``r``
+(re-enable) double as the operator's trip-clear ack — bare keepalives
+refresh the watchdog timer but no longer clear the trip flags.
 
-Since the tempctrl status redesign, per-channel ``status`` reports
-data validity only: a channel can read ``armed=False`` with
-``status='update'``, meaning the sensor data is fine but a sticky trip
-is gating drive — check the ``trips`` column for which one. ``T_now``
-reads ``--`` (null) exactly when the current sample is untrustworthy;
-``voltage`` stays live then (≈3.3 V says open thermistor, ≈0 V short).
+Since the tempctrl status redesign, ``status`` reports data validity
+only: the channel can read ``armed=False`` with ``status='update'``,
+meaning the sensor data is fine but a sticky trip is gating drive —
+check the ``trips`` column for which one. ``T_now`` reads ``--``
+(null) exactly when the current sample is untrustworthy; ``voltage``
+stays live then (approx 3.3 V says open thermistor, approx 0 V short).
 
-Hardware descope / hot-swap (per-channel ``installed`` flag): a
-channel marked not installed is never sampled or driven and publishes
-no Redis stream — its readout row shows all ``--``. On startup, a
-stream that stays silent through the seed window is taken as a
-descoped channel and the UI comes up on the live one (both silent is
-still a hard error). ``t``/``u`` re-install a channel — the hot-swap
-ack after physically moving the LOAD module onto the LNA connector
-(procedure in OPERATIONS.md); expect its stream to start publishing
-within a tick. ``T``/``U`` descope it again.
+Hardware descope (``installed`` flag): a channel marked not installed
+is never sampled or driven and publishes no Redis stream — its readout
+row shows all ``--``. On startup, a stream that stays silent through
+the seed window is taken as a descoped channel; the UI still comes up,
+seeded from firmware defaults. ``u`` re-installs the channel; expect
+its stream to start publishing within a tick. ``U`` descopes it again.
 """
 
 from argparse import ArgumentParser
@@ -97,13 +81,12 @@ from eigsep_observing.utils import configure_eig_logger
 configure_eig_logger(level=logging.INFO, console=False)
 logger = logging.getLogger(__name__)
 
-CLAMPS = (0.1, 0.2, 0.3, 0.5, 1.0)
 SETPOINT_STEP_C = 0.5
-KP_STEP = 0.05
-KI_STEP = 0.005  # smaller — integral accumulates over many ticks
-DEFAULT_KP = 0.2  # firmware default, matches TempCtrlEmulator
-DEFAULT_KI = 0.0  # firmware default — opt-in via this script or yaml
-DEFAULT_T_TARGET_C = 30.0  # firmware default T_target (init_single_tempctrl)
+HYSTERESIS_STEP_C = 0.1
+HYSTERESIS_MIN_C = 0.05  # floor so the bump key can't zero out hysteresis
+DEFAULT_T_TARGET_C = 30.0  # firmware default T_target (load_heater_init)
+DEFAULT_HYSTERESIS_C = 0.5  # picohost PicoTempCtrl.set_temperature default
+STREAM = "tempctrl_load"
 # picohost STATUS_CADENCE_MS = 200; poll at the same cadence so we
 # wake on the next publish without busy-spinning.
 PICO_PUBLISH_INTERVAL_S = 0.2
@@ -112,8 +95,6 @@ PICO_PUBLISH_INTERVAL_S = 0.2
 # masking a stuck producer.
 SEED_TIMEOUT_S = 5.0
 
-# Streams plotted by the `p` hotkey, in render order (one row each).
-PLOT_CHANNELS = ("tempctrl_lna", "tempctrl_load")
 # Firmware fields buffered every loop tick for the history plot.
 PLOT_FIELDS = ("T_now", "T_target", "drive_level")
 
@@ -122,49 +103,27 @@ class _State:
     """Operator-facing state the script tracks locally.
 
     Firmware is the source of truth for ``T_now`` / ``drive_level`` /
-    ``watchdog_tripped`` (read from snapshot). The local copies of
-    setpoints, enable flags, gains, and the clamp index are only used
-    so the bump keys can step them — they're seeded from the snapshot
-    on startup if available, and re-pushed on every change so a missed
-    command can't leave the firmware and the UI disagreeing.
+    ``watchdog_tripped`` (read from snapshot). The local copies of the
+    setpoint, hysteresis, enable flag, and installed flag are only
+    used so the bump keys can step them — they're seeded from the
+    snapshot on startup if available, and re-pushed on every change so
+    a missed command can't leave the firmware and the UI disagreeing.
     """
 
     def __init__(
         self,
-        lna_setpoint,
-        load_setpoint,
-        lna_enabled,
-        load_enabled,
-        lna_Kp,
-        lna_Ki,
-        load_Kp,
-        load_Ki,
-        lna_cooling_enabled,
-        load_cooling_enabled,
-        lna_installed=True,
-        load_installed=True,
+        setpoint,
+        hysteresis,
+        enabled,
+        installed=True,
     ):
-        self.lna_setpoint = lna_setpoint
-        self.load_setpoint = load_setpoint
-        self.lna_enabled = lna_enabled
-        self.load_enabled = load_enabled
-        self.lna_Kp = lna_Kp
-        self.lna_Ki = lna_Ki
-        self.load_Kp = load_Kp
-        self.load_Ki = load_Ki
-        # Asymmetric-clamp safety setting per channel: False forbids
-        # negative (cooling) drive, clamping it to [0, +clamp]. Seeded
-        # from the firmware-published value (default True) so the UI
-        # never disagrees with what the firmware is enforcing.
-        self.lna_cooling_enabled = lna_cooling_enabled
-        self.load_cooling_enabled = load_cooling_enabled
-        # Hardware-descope flag per channel (see module docstring): an
-        # uninstalled channel publishes no stream, so it's seeded from
-        # stream presence at startup and toggled by t/T (LNA), u/U
-        # (LOAD) during a hot swap.
-        self.lna_installed = lna_installed
-        self.load_installed = load_installed
-        self.clamp_idx = CLAMPS.index(0.2)  # firmware default clamp
+        self.setpoint = setpoint
+        self.hysteresis = hysteresis
+        self.enabled = enabled
+        # Hardware-descope flag (see module docstring): an uninstalled
+        # channel publishes no stream, so it's seeded from stream
+        # presence at startup and toggled by u/U.
+        self.installed = installed
         self.last_message = ""
 
 
@@ -172,21 +131,19 @@ class _History:
     """Append-only buffer of firmware readings for the `p` plot.
 
     One sample per loop tick: the elapsed seconds since the buffer was
-    created, plus each :data:`PLOT_CHANNELS` channel's
-    :data:`PLOT_FIELDS` values. A field that is missing or non-numeric
-    in the snapshot is stored as ``float("nan")`` so a sensor dropout
-    becomes a gap in the line rather than a spurious zero or a crash.
+    created, plus each :data:`PLOT_FIELDS` value. A field that is
+    missing or non-numeric in the snapshot is stored as
+    ``float("nan")`` so a sensor dropout becomes a gap in the line
+    rather than a spurious zero or a crash.
 
     Memory is unbounded by design — a multi-hour bring-up at the ~5 Hz
-    refresh is still only ~100k floats — so there is no ring buffer.
+    refresh is still only ~tens of thousands of floats — so there is
+    no ring buffer.
     """
 
     def __init__(self):
         self.t = []
-        # {channel: {field: [values]}}
-        self.values = {
-            ch: {field: [] for field in PLOT_FIELDS} for ch in PLOT_CHANNELS
-        }
+        self.values = {field: [] for field in PLOT_FIELDS}
 
     def record(self, snapshot, *, now):
         """Append one sample read from ``snapshot`` at monotonic ``now``.
@@ -198,13 +155,11 @@ class _History:
         if not self.t:
             self._t0 = now
         self.t.append(now - self._t0)
-        snap = snapshot.get()
-        for ch in PLOT_CHANNELS:
-            data = snap.get(ch) or {}
-            for field in PLOT_FIELDS:
-                v = data.get(field)
-                ok = isinstance(v, (int, float)) and not isinstance(v, bool)
-                self.values[ch][field].append(float(v) if ok else float("nan"))
+        data = snapshot.get().get(STREAM) or {}
+        for field in PLOT_FIELDS:
+            v = data.get(field)
+            ok = isinstance(v, (int, float)) and not isinstance(v, bool)
+            self.values[field].append(float(v) if ok else float("nan"))
 
     def __len__(self):
         return len(self.t)
@@ -213,10 +168,10 @@ class _History:
 def _plot_history(history, *, outdir=".", timestamp=None):
     """Render ``history`` to ``tempctrl_<timestamp>.png`` under ``outdir``.
 
-    One row per channel: ``T_now`` (solid) and ``T_target`` (dashed) on
-    the left axis, ``drive_level`` on a twin right axis. Returns the
-    written path, or ``None`` if there is nothing to plot yet (so the
-    caller can report "no data" instead of writing an empty figure).
+    ``T_now`` (solid) and ``T_target`` (dashed) on the left axis,
+    ``drive_level`` on a twin right axis. Returns the written path, or
+    ``None`` if there is nothing to plot yet (so the caller can report
+    "no data" instead of writing an empty figure).
 
     ``timestamp`` is injectable for tests; production passes ``None`` and
     gets a wall-clock ``%Y%m%d_%H%M%S`` stamp so repeated presses don't
@@ -228,30 +183,25 @@ def _plot_history(history, *, outdir=".", timestamp=None):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
     path = Path(outdir) / f"tempctrl_{timestamp}.png"
 
-    fig, axes = plt.subplots(
-        len(PLOT_CHANNELS), 1, sharex=True, figsize=(10, 7)
-    )
+    fig, ax = plt.subplots(figsize=(10, 4))
     t = history.t
-    for ax, ch in zip(axes, PLOT_CHANNELS):
-        vals = history.values[ch]
-        ax.plot(t, vals["T_now"], color="C0", label="T_now")
-        ax.plot(
-            t, vals["T_target"], color="C1", linestyle="--", label="T_target"
-        )
-        ax.set_ylabel("temperature (deg C)")
-        ax.set_title(ch)
-        ax.grid(True, alpha=0.3)
+    vals = history.values
+    ax.plot(t, vals["T_now"], color="C0", label="T_now")
+    ax.plot(t, vals["T_target"], color="C1", linestyle="--", label="T_target")
+    ax.set_ylabel("temperature (deg C)")
+    ax.set_title(STREAM)
+    ax.grid(True, alpha=0.3)
 
-        drive_ax = ax.twinx()
-        drive_ax.plot(
-            t, vals["drive_level"], color="C3", alpha=0.7, label="drive_level"
-        )
-        drive_ax.set_ylabel("drive_level")
+    drive_ax = ax.twinx()
+    drive_ax.plot(
+        t, vals["drive_level"], color="C3", alpha=0.7, label="drive_level"
+    )
+    drive_ax.set_ylabel("drive_level")
 
-        lines = ax.get_lines() + drive_ax.get_lines()
-        ax.legend(lines, [ln.get_label() for ln in lines], loc="best")
+    lines = ax.get_lines() + drive_ax.get_lines()
+    ax.legend(lines, [ln.get_label() for ln in lines], loc="best")
+    ax.set_xlabel("elapsed time (s)")
 
-    axes[-1].set_xlabel("elapsed time (s)")
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -268,51 +218,38 @@ def _seed_state(
     timeout_s=SEED_TIMEOUT_S,
     poll_interval_s=PICO_PUBLISH_INTERVAL_S,
 ):
-    """Block until firmware has published ``T_target`` on both
-    ``tempctrl_lna`` and ``tempctrl_load`` (or the seed window closes
-    with at least one live), then build a starting :class:`_State`.
+    """Block until firmware has published ``T_target`` on
+    ``tempctrl_load`` (or the seed window closes), then build a
+    starting :class:`_State`.
 
     No hardcoded setpoint fallback for a live channel — the pico's own
     ``T_target`` (firmware default 30 deg C until reconfigured) is the
     single source of truth, so the UI can never disagree with what the
     firmware is actually driving. ``enabled`` likewise comes from the
-    pico; missing ``Kp`` / ``Ki`` fall back to the firmware-side
-    defaults (``DEFAULT_KP`` / ``DEFAULT_KI``).
+    pico; a missing ``hysteresis`` falls back to
+    :data:`DEFAULT_HYSTERESIS_C`.
 
     A stream still silent when the window closes is taken as a
     descoped channel (firmware ``installed=false`` publishes nothing)
     and marked not-installed, seeded from firmware defaults so a later
-    re-install (``t``/``u`` during a hot swap) starts from sane
-    values. A fully-fitted rig therefore pays no wait, a descoped one
-    pays one ``timeout_s`` at startup.
-
-    Raises
-    ------
-    SystemExit
-        Neither stream published ``T_target`` within ``timeout_s``.
-        ``require_pico`` passed first, so the proxy heartbeat is live —
-        that means the pico is registered but the firmware tempctrl
-        publisher hasn't pushed a status frame yet. Usually a
-        misflashed pico or a stuck producer thread. (Both channels
-        descoped at once is not a supported shape — that's "unplug the
-        pico".)
+    re-install (``u``) starts from sane values. This does not raise:
+    starting the UI against a deliberately descoped channel (to
+    inspect it, or to re-install it with ``u``) is a supported flow,
+    not an error. ``require_pico`` already confirmed the device
+    heartbeat is live before this is called, so a silent stream here
+    most likely reflects ``installed: false`` rather than a stuck
+    producer — if it's the latter (a misflashed pico or a hung
+    publisher thread), the readout row will keep showing all ``--``
+    even after ``u``, which is the operator's cue to check
+    pico-manager logs.
     """
     deadline = time.monotonic() + timeout_s
     while True:
-        lna = _snap(snapshot, "tempctrl_lna") or {}
-        load = _snap(snapshot, "tempctrl_load") or {}
-        lna_live = lna.get("T_target") is not None
-        load_live = load.get("T_target") is not None
-        if lna_live and load_live:
+        load = _snap(snapshot, STREAM) or {}
+        live = load.get("T_target") is not None
+        if live:
             break
         if time.monotonic() >= deadline:
-            if not lna_live and not load_live:
-                raise SystemExit(
-                    f"ERROR: tempctrl pico is registered but did not "
-                    f"publish T_target on ['tempctrl_lna', "
-                    f"'tempctrl_load'] within {timeout_s:.1f}s. "
-                    f"Check pico-manager logs."
-                )
             break
         time.sleep(poll_interval_s)
 
@@ -324,29 +261,11 @@ def _seed_state(
             else default
         )
 
-    def _b(d, k, default):
-        v = d.get(k)
-        return v if isinstance(v, bool) else default
-
     return _State(
-        lna_setpoint=(
-            float(lna["T_target"]) if lna_live else DEFAULT_T_TARGET_C
-        ),
-        load_setpoint=(
-            float(load["T_target"]) if load_live else DEFAULT_T_TARGET_C
-        ),
-        lna_enabled=bool(lna.get("enabled") or False),
-        load_enabled=bool(load.get("enabled") or False),
-        lna_Kp=_f(lna, "Kp", DEFAULT_KP),
-        lna_Ki=_f(lna, "Ki", DEFAULT_KI),
-        load_Kp=_f(load, "Kp", DEFAULT_KP),
-        load_Ki=_f(load, "Ki", DEFAULT_KI),
-        # Firmware default is True (cooling permitted); a missing field
-        # means the firmware predates the setting, so default True too.
-        lna_cooling_enabled=_b(lna, "cooling_enabled", True),
-        load_cooling_enabled=_b(load, "cooling_enabled", True),
-        lna_installed=lna_live,
-        load_installed=load_live,
+        setpoint=(float(load["T_target"]) if live else DEFAULT_T_TARGET_C),
+        hysteresis=_f(load, "hysteresis", DEFAULT_HYSTERESIS_C),
+        enabled=bool(load.get("enabled") or False),
+        installed=live,
     )
 
 
@@ -366,80 +285,29 @@ def _send(proxy, action, **kwargs):
     return f"ok {action} {kwargs}"
 
 
-def _push_enables(proxy, state):
-    state.last_message = _send(
-        proxy,
-        "set_enable",
-        LNA=state.lna_enabled,
-        LOAD=state.load_enabled,
-    )
+def _push_enable(proxy, state):
+    state.last_message = _send(proxy, "set_enable", LOAD=state.enabled)
 
 
-def _push_temperatures(proxy, state):
+def _push_temperature(proxy, state):
     state.last_message = _send(
         proxy,
         "set_temperature",
-        T_LNA=state.lna_setpoint,
-        T_LOAD=state.load_setpoint,
-    )
-
-
-def _push_clamp(proxy, state):
-    value = CLAMPS[state.clamp_idx]
-    state.last_message = _send(proxy, "set_clamp", LNA=value, LOAD=value)
-
-
-def _push_cooling(proxy, state):
-    """Push the per-channel cooling-enable (asymmetric-clamp) flag.
-
-    Both channels are pushed together to match the enable/gain pushes —
-    one round-trip per keypress, and the readout shows the
-    firmware-reported value back so the operator confirms it took. With
-    ``cooling_enabled=False`` the firmware forbids negative drive, the
-    guard against a Peltier that heats (rather than cools) when it can't
-    dissipate its hot-side load.
-    """
-    state.last_message = _send(
-        proxy,
-        "set_cooling_enabled",
-        LNA=state.lna_cooling_enabled,
-        LOAD=state.load_cooling_enabled,
+        T_LOAD=state.setpoint,
+        LOAD_hyst=state.hysteresis,
     )
 
 
 def _push_installed(proxy, state):
-    """Push the per-channel installed (hardware-descope) flags.
+    """Push the ``installed`` (hardware-descope) flag.
 
-    Both channels ride each push to match the enable/cooling/gain
-    idiom — one round-trip per keypress, and the firmware always sees
-    the UI's full installed state. Re-installing (``t``/``u``) is the
-    hot-swap ack: firmware resumes sampling the channel and its stream
-    starts publishing within a tick. Descoping (``T``/``U``) stops
-    sampling, forces drive off, and the stream disappears; sticky trip
-    latches survive (clear them with the enable ack as usual).
+    Re-installing (``u``) tells the firmware to resume sampling the
+    channel; its stream starts publishing within a tick. Descoping
+    (``U``) stops sampling, forces drive off, and the stream
+    disappears; sticky trip latches survive (clear them with the
+    enable ack as usual).
     """
-    state.last_message = _send(
-        proxy,
-        "set_installed",
-        LNA=state.lna_installed,
-        LOAD=state.load_installed,
-    )
-
-
-def _push_gains(proxy, state):
-    """Push all four gains. Mirrors `apply_settings`' partial-kwarg
-    pattern: the LNA/LOAD knobs are independent, but bundling the push
-    means one round-trip per keypress and matches what the operator
-    sees in the readout.
-    """
-    state.last_message = _send(
-        proxy,
-        "set_gains",
-        LNA_Kp=state.lna_Kp,
-        LNA_Ki=state.lna_Ki,
-        LOAD_Kp=state.load_Kp,
-        LOAD_Ki=state.load_Ki,
-    )
+    state.last_message = _send(proxy, "set_installed", LOAD=state.installed)
 
 
 def _fmt(value, fmt):
@@ -452,14 +320,14 @@ _TRIP_FLAGS = ("sensor_tripped", "stall_tripped", "runaway_tripped")
 
 
 def _armed(channel):
-    """Derive whether firmware drive is engaged for ``channel``.
+    """Derive whether firmware drive is engaged.
 
-    Mirrors the firmware gate (tempctrl_drive_allowed): drive engages iff
-    ``enabled && !sensor_tripped && !stall_tripped && !runaway_tripped
-    && !watchdog_tripped``. Since ``enabled`` is host intent only
-    (firmware never clears it on trip), this derived flag is what the
-    operator actually wants to read off the panel to confirm the channel
-    is driving.
+    Mirrors the firmware gate (load_heater_drive_allowed): drive
+    engages iff ``enabled && !sensor_tripped && !stall_tripped &&
+    !runaway_tripped && !watchdog_tripped``. Since ``enabled`` is host
+    intent only (firmware never clears it on trip), this derived flag
+    is what the operator actually wants to read off the panel to
+    confirm the channel is driving.
     """
     if not channel:
         return None
@@ -490,197 +358,80 @@ def _trips(channel):
 
 
 def _render(screen, snapshot, state):
-    lna = _snap(snapshot, "tempctrl_lna") or {}
-    load = _snap(snapshot, "tempctrl_load") or {}
+    load = _snap(snapshot, STREAM) or {}
     screen.clear()
-    screen.addstr(0, 0, "=== tempctrl manual ===")
+    screen.addstr(0, 0, "=== tempctrl manual (LOAD) ===")
     screen.addstr(
         1,
         0,
-        "channel  T_now    T_target  drive   clamp   cooling  "
-        "enabled  armed  status",
+        "channel  T_now    T_target  drive   hyst    enabled  armed  status",
     )
     screen.addstr(
         2,
-        0,
-        "LNA      "
-        f"{_fmt(lna.get('T_now'), '6.2f')}  "
-        f"{_fmt(lna.get('T_target'), '6.2f')}    "
-        f"{_fmt(lna.get('drive_level'), '6.2f')}  "
-        f"{_fmt(lna.get('clamp'), '6.2f')}  "
-        f"{str(lna.get('cooling_enabled')):>7}  "
-        f"{str(lna.get('enabled')):>7}  "
-        f"{str(_armed(lna)):>5}  {lna.get('status')!r}",
-    )
-    screen.addstr(
-        3,
         0,
         "LOAD     "
         f"{_fmt(load.get('T_now'), '6.2f')}  "
         f"{_fmt(load.get('T_target'), '6.2f')}    "
         f"{_fmt(load.get('drive_level'), '6.2f')}  "
-        f"{_fmt(load.get('clamp'), '6.2f')}  "
-        f"{str(load.get('cooling_enabled')):>7}  "
+        f"{_fmt(load.get('hysteresis'), '6.2f')}  "
         f"{str(load.get('enabled')):>7}  "
         f"{str(_armed(load)):>5}  {load.get('status')!r}",
     )
-    # PI controller readout — Kp/Ki are config-set (last-write-wins
-    # cached in PicoPeltier._last_gains), `integral` is the firmware
-    # accumulator. Trips are per-channel and sticky; clear them with an
-    # `l on` / `o on` (or `r`) rising-edge ack.
-    screen.addstr(5, 0, "channel   Kp     Ki      integral  trips")
+    screen.addstr(4, 0, f"trips: {_trips(load)}")
+    screen.addstr(
+        5, 0, f"watchdog_tripped: {bool(load.get('watchdog_tripped'))}"
+    )
     screen.addstr(
         6,
         0,
-        "LNA      "
-        f"{_fmt(lna.get('Kp'), '6.3f')}  "
-        f"{_fmt(lna.get('Ki'), '6.3f')}  "
-        f"{_fmt(lna.get('integral'), '8.3f')}  "
-        f"{_trips(lna)}",
+        f"client setpoint: {state.setpoint:.2f}  "
+        f"hysteresis: {state.hysteresis:.2f}",
     )
-    screen.addstr(
-        7,
-        0,
-        "LOAD     "
-        f"{_fmt(load.get('Kp'), '6.3f')}  "
-        f"{_fmt(load.get('Ki'), '6.3f')}  "
-        f"{_fmt(load.get('integral'), '8.3f')}  "
-        f"{_trips(load)}",
-    )
-    # watchdog_tripped is duplicated across both streams (see
-    # _PELTIER_SCHEMA) — read from either; LNA is fine.
-    screen.addstr(
-        9, 0, f"watchdog_tripped: {bool(lna.get('watchdog_tripped'))}"
-    )
-    screen.addstr(
-        10,
-        0,
-        f"client setpoints: LNA={state.lna_setpoint:.2f} "
-        f"LOAD={state.load_setpoint:.2f}  "
-        f"clamp={CLAMPS[state.clamp_idx]:.2f}",
-    )
-    screen.addstr(
-        11,
-        0,
-        f"client gains: LNA(Kp={state.lna_Kp:.3f}, Ki={state.lna_Ki:.3f})  "
-        f"LOAD(Kp={state.load_Kp:.3f}, Ki={state.load_Ki:.3f})",
-    )
-    # An uninstalled channel publishes no stream, so its readout rows
-    # above show all `--`; this line says whether that's a descope
+    # An uninstalled channel publishes no stream, so its readout row
+    # above shows all `--`; this line says whether that's a descope
     # (installed=False) or a fault.
-    screen.addstr(
-        12,
-        0,
-        f"client installed: LNA={state.lna_installed} "
-        f"LOAD={state.load_installed}",
-    )
-    screen.addstr(13, 0, "l/L enable LNA on/off       o/O enable LOAD on/off")
-    screen.addstr(14, 0, "n/N LNA cooling on/off      m/M LOAD cooling on/off")
-    screen.addstr(
-        15, 0, "+/- LNA setpoint  ][ LOAD setpoint  c/C clamp up/down"
-    )
-    screen.addstr(16, 0, "g/G LNA Kp  h/H LOAD Kp  i/I LNA Ki  k/K LOAD Ki")
-    screen.addstr(
-        17,
-        0,
-        "z/Z reset LNA/LOAD integral  t/T LNA installed  u/U LOAD installed",
-    )
-    screen.addstr(18, 0, "r re-enable both   p plot PNG   q quit")
+    screen.addstr(7, 0, f"client installed: {state.installed}")
+    screen.addstr(9, 0, "o/O enable LOAD on/off      ][ LOAD setpoint +/-")
+    screen.addstr(10, 0, "}{ LOAD hysteresis +/-      u/U LOAD installed")
+    screen.addstr(11, 0, "r re-enable   p plot PNG   q quit")
     if state.last_message:
-        screen.addstr(20, 0, f"> {state.last_message}"[: curses.COLS - 1])
+        screen.addstr(13, 0, f"> {state.last_message}"[: curses.COLS - 1])
     screen.refresh()
 
 
 def _handle_key(ch, proxy, state, history=None, outdir="."):
     if ch in (ord("q"), 27):  # q or ESC
         return False
-    if ch == ord("l"):
-        state.lna_enabled = True
-        _push_enables(proxy, state)
-    elif ch == ord("L"):
-        state.lna_enabled = False
-        _push_enables(proxy, state)
-    elif ch == ord("o"):
-        state.load_enabled = True
-        _push_enables(proxy, state)
+    if ch == ord("o"):
+        state.enabled = True
+        _push_enable(proxy, state)
     elif ch == ord("O"):
-        state.load_enabled = False
-        _push_enables(proxy, state)
-    elif ch == ord("n"):
-        state.lna_cooling_enabled = True
-        _push_cooling(proxy, state)
-    elif ch == ord("N"):
-        state.lna_cooling_enabled = False
-        _push_cooling(proxy, state)
-    elif ch == ord("m"):
-        state.load_cooling_enabled = True
-        _push_cooling(proxy, state)
-    elif ch == ord("M"):
-        state.load_cooling_enabled = False
-        _push_cooling(proxy, state)
-    elif ch in (ord("+"), ord("=")):
-        state.lna_setpoint += SETPOINT_STEP_C
-        _push_temperatures(proxy, state)
-    elif ch == ord("-"):
-        state.lna_setpoint -= SETPOINT_STEP_C
-        _push_temperatures(proxy, state)
+        state.enabled = False
+        _push_enable(proxy, state)
     elif ch == ord("]"):
-        state.load_setpoint += SETPOINT_STEP_C
-        _push_temperatures(proxy, state)
+        state.setpoint += SETPOINT_STEP_C
+        _push_temperature(proxy, state)
     elif ch == ord("["):
-        state.load_setpoint -= SETPOINT_STEP_C
-        _push_temperatures(proxy, state)
-    elif ch == ord("c"):
-        state.clamp_idx = min(state.clamp_idx + 1, len(CLAMPS) - 1)
-        _push_clamp(proxy, state)
-    elif ch == ord("C"):
-        state.clamp_idx = max(state.clamp_idx - 1, 0)
-        _push_clamp(proxy, state)
-    elif ch == ord("g"):
-        state.lna_Kp = max(0.0, state.lna_Kp + KP_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("G"):
-        state.lna_Kp = max(0.0, state.lna_Kp - KP_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("h"):
-        state.load_Kp = max(0.0, state.load_Kp + KP_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("H"):
-        state.load_Kp = max(0.0, state.load_Kp - KP_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("i"):
-        state.lna_Ki = max(0.0, state.lna_Ki + KI_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("I"):
-        state.lna_Ki = max(0.0, state.lna_Ki - KI_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("k"):
-        state.load_Ki = max(0.0, state.load_Ki + KI_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("K"):
-        state.load_Ki = max(0.0, state.load_Ki - KI_STEP)
-        _push_gains(proxy, state)
-    elif ch == ord("z"):
-        state.last_message = _send(proxy, "reset_integral", LNA=True)
-    elif ch == ord("Z"):
-        state.last_message = _send(proxy, "reset_integral", LOAD=True)
-    elif ch == ord("t"):
-        state.lna_installed = True
-        _push_installed(proxy, state)
-    elif ch == ord("T"):
-        state.lna_installed = False
-        _push_installed(proxy, state)
+        state.setpoint -= SETPOINT_STEP_C
+        _push_temperature(proxy, state)
+    elif ch == ord("}"):
+        state.hysteresis += HYSTERESIS_STEP_C
+        _push_temperature(proxy, state)
+    elif ch == ord("{"):
+        state.hysteresis = max(
+            HYSTERESIS_MIN_C, state.hysteresis - HYSTERESIS_STEP_C
+        )
+        _push_temperature(proxy, state)
     elif ch == ord("u"):
-        state.load_installed = True
+        state.installed = True
         _push_installed(proxy, state)
     elif ch == ord("U"):
-        state.load_installed = False
+        state.installed = False
         _push_installed(proxy, state)
     elif ch == ord("r"):
-        state.lna_enabled = True
-        state.load_enabled = True
-        _push_enables(proxy, state)
-        _push_temperatures(proxy, state)
+        state.enabled = True
+        _push_enable(proxy, state)
+        _push_temperature(proxy, state)
     elif ch == ord("p"):
         path = _plot_history(history, outdir=outdir) if history else None
         state.last_message = f"wrote {path}" if path else "no data to plot yet"
@@ -710,8 +461,8 @@ def _curses_main(screen, transport, args):
 
 def _parse_args():
     parser = ArgumentParser(
-        description="Interactive tempctrl bring-up: drive setpoints and "
-        "tune the PI loop."
+        description="Interactive tempctrl bring-up: drive the LOAD "
+        "heater's setpoint and hysteresis."
     )
     parser.add_argument(
         "--dummy",
