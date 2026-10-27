@@ -57,6 +57,8 @@ ACTIVE_DRIVER_SCRIPTS = {
 #   - record_metadata.py: test-bench metadata recorder that runs
 #     alongside the active driver(s); it only reads/relays metadata and
 #     drives no hardware, so it coexists like the dashboards.
+#     record_simple_therm.py is the same shape for the simple_therm
+#     thermistor-logger pico (passive drain, writes only its own npz).
 #   - observe.py: ground-PC eigsep-observe writer, a consumer of the
 #     panda transport (it reads obs_config but never publishes run_tag).
 #   - SNAP-side scripts (republish_header.py, adc_snapshot*.py,
@@ -87,6 +89,7 @@ RUN_TAG_EXEMPT = {
     "live_status.py",
     "live_plotter.py",
     "record_metadata.py",
+    "record_simple_therm.py",
     "observe.py",
     "republish_header.py",
     "adc_snapshot.py",
